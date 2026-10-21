@@ -279,12 +279,14 @@ function writeU2(base, name, repo, upstreamDir, spec, { edit = null, comparison 
   cond.signature = conditionsSignature(cond);
   writeFileSync(join(out, "conditions.json"), JSON.stringify(cond, null, 1));
   for (const id of ids) {
-    const { kind, suite = "good" } = spec[id], pid = id.split("-")[0], dir = join(out, id), bundle = join(dir, "bundle");
+    const { kind, suite = "good", badObserves = false } = spec[id], pid = id.split("-")[0], dir = join(out, id), bundle = join(dir, "bundle");
     if (kind === "absent") continue;
     mkdirSync(bundle, { recursive: true });
     writeFileSync(join(dir, "plan-file.json"), envelopeOf(pid));
     if (kind === "none") continue;
     const cp = checkpointOf(pid, "t2-b1", suite, kind === "table" ? { table: sha256("other-table") } : {});
+    // 形の不正な文脈（観測する性質が文字列でない）。出力ダイジェストは中身に合わせる
+    if (badObserves) cp.test_spec = { ...cp.test_spec, observes: cp.test_spec.observes.map((o, i) => (i === 0 ? { ...o, observes: 17 } : o)) };
     const passed = kind !== "stopped";
     if (passed) writeFileSync(join(bundle, "stage-checkpoint-t2-b1.json"), JSON.stringify(kind === "digest" ? { ...cp, judge_advice: { edited: true } } : cp, null, 2));
     writeFileSync(join(bundle, "stage-run.json"), JSON.stringify({
@@ -522,19 +524,51 @@ test("#686 --make-reference：採用した本の受理済みの宣言を写し�
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
+/** 段だけの対の比較の記録（群 before／after・対の写し・比較の記録）。edit({ pairsValue, rec, conds }) で書き換えて、比較の記録の署名だけを中身から計算し直す */
+function writeCompare(w, name, { editPairs = null, editRecord = null, editGroup = null } = {}) {
+  const cmp = join(w.base, name);
+  mkdirSync(cmp);
+  const pairsValue = { schema: STAGE_PAIRS_SCHEMA, frozen_sha256: sha256("plan-set"), groups: ["before", "after"], runs: 2, stage: { start: "test-spec", end: "test-spec", stage_from_sha256: sha256("x") }, pairs: [{ pid: "P1", r: 1, first: "before" }, { pid: "P1", r: 2, first: "after" }, { pid: "P2", r: 1, first: "before" }, { pid: "P2", r: 2, first: "after" }, { pid: "P3", r: 1, first: "before" }] };
+  const groupPairsSha = sha256(Buffer.from(JSON.stringify(pairsValue)));
+  if (editPairs !== null) editPairs(pairsValue);
+  const pairsBytes = Buffer.from(JSON.stringify(pairsValue));
+  writeFileSync(join(cmp, "pairs.json"), pairsBytes);
+  // 群の条件は元の対の SHA で書く（対の写しだけを書き換えた記録との食い違いを作れる）
+  const comparisonOf = (g) => ({ group: g, role: g === "before" ? "baseline" : "candidate", pairs_sha256: groupPairsSha });
+  const editOf = (g, extra) => (c) => { extra?.(c); editGroup?.(g, c); };
+  writeU2(cmp, "before", w.repo, w.upstream, { "P1-r1": { kind: "pass", suite: "weak" }, "P1-r2": { kind: "stopped" }, "P2-r1": { kind: "pass", suite: "bad" }, "P2-r2": { kind: "pass" }, "P3-r1": { kind: "pass" }, "P3-r2": { kind: "absent" } }, { comparison: comparisonOf("before"), edit: editOf("before", (c) => { c.factory.fingerprint = sha256("before-checkout"); }) });
+  writeU2(cmp, "after", w.repo, w.upstream, { "P1-r1": { kind: "pass", suite: "strong" }, "P1-r2": { kind: "pass" }, "P2-r1": { kind: "pass" }, "P2-r2": { kind: "digest" }, "P3-r1": { kind: "pass" }, "P3-r2": { kind: "absent" } }, { comparison: comparisonOf("after"), edit: editOf("after") });
+  const signatureOf = (g) => readJson(join(cmp, g, "conditions.json")).signature;
+  const rec = { schema: STAGE_COMPARISON_SCHEMA, pairs: { sha256: sha256(pairsBytes), count: pairsValue.pairs.length }, groups: { before: { role: "baseline", conditions_signature: signatureOf("before") }, after: { role: "candidate", conditions_signature: signatureOf("after") } } };
+  if (editRecord !== null) editRecord(rec);
+  writeFileSync(join(cmp, "comparison.json"), JSON.stringify({ ...rec, signature: sha256(JSON.stringify(rec)) }));
+  return cmp;
+}
+
+test("#686 --compare の照合（F1）：対の写しを減らした記録・群と役割の食い違い・記録の conditions_signature の不一致・予定と合わない対は、何も書かず exit 3・固定の符号（対を黙って消さない）", () => {
+  const w = world();
+  try {
+    const cases = [
+      ["pairs-reduced", { editPairs: (p) => { p.pairs = p.pairs.slice(0, 1); } }],
+      ["role", { editGroup: (g, c) => { if (g === "after") c.comparison.role = "baseline"; } }],
+      ["group", { editGroup: (g, c) => { if (g === "before") c.comparison.group = "after"; } }],
+      ["signature", { editRecord: (rec) => { rec.groups.after.conditions_signature = sha256("another-signature"); } }],
+      ["planned", { editGroup: (g, c) => { const pairsSha = c.comparison.pairs_sha256; c.child_args = c.child_args.filter((x) => x.id !== "P3-r1"); c.params.stage_inputs = c.params.stage_inputs.filter((x) => x.id !== "P3-r1"); c.comparison.pairs_sha256 = pairsSha; } }],
+    ];
+    for (const [label, opts] of cases) {
+      const cmp = writeCompare(w, `cmp-${label}`, opts), outDir = join(w.base, `never-${label}`);
+      const r = runNode([w.repo, cmp, w.reference, outDir, "--compare"]);
+      assert.equal(r.status, 3, `${label}: ${r.stderr}`);
+      assert.equal(r.stderr.trim(), "断りました: [stage-tests:compare-group]", label);
+      assert.equal(existsSync(outDir), false, `${label}: 出力先を作った`);
+    }
+  } finally { w.cleanup(); }
+});
+
 test("#686 --compare：同じ P・同じ回の本を対にした主の検出率と落とせない試験の率の差（after − before）と P のまとまり、片側が評価できない対は理由ごとに除く", async () => {
   const w = world();
   try {
-    const cmp = join(w.base, "cmp");
-    mkdirSync(cmp);
-    const pairsValue = { schema: STAGE_PAIRS_SCHEMA, frozen_sha256: sha256("plan-set"), groups: ["before", "after"], runs: 2, stage: { start: "test-spec", end: "test-spec", stage_from_sha256: sha256("x") }, pairs: [{ pid: "P1", r: 1, first: "before" }, { pid: "P1", r: 2, first: "after" }, { pid: "P2", r: 1, first: "before" }, { pid: "P2", r: 2, first: "after" }] };
-    const pairsBytes = Buffer.from(JSON.stringify(pairsValue));
-    writeFileSync(join(cmp, "pairs.json"), pairsBytes);
-    const comparisonOf = (g) => ({ group: g, role: g === "before" ? "baseline" : "candidate", pairs_sha256: sha256(pairsBytes) });
-    writeU2(cmp, "before", w.repo, w.upstream, { "P1-r1": { kind: "pass", suite: "weak" }, "P1-r2": { kind: "stopped" }, "P2-r1": { kind: "pass", suite: "bad" }, "P2-r2": { kind: "pass" }, "P3-r1": { kind: "pass" }, "P3-r2": { kind: "absent" } }, { comparison: comparisonOf("before"), edit: (c) => { c.factory.fingerprint = sha256("before-checkout"); } });
-    writeU2(cmp, "after", w.repo, w.upstream, { "P1-r1": { kind: "pass", suite: "strong" }, "P1-r2": { kind: "pass" }, "P2-r1": { kind: "pass" }, "P2-r2": { kind: "digest" }, "P3-r1": { kind: "pass" }, "P3-r2": { kind: "absent" } }, { comparison: comparisonOf("after") });
-    const rec = { schema: STAGE_COMPARISON_SCHEMA, pairs: { sha256: sha256(pairsBytes), count: 4 }, groups: { before: {}, after: {} } };
-    writeFileSync(join(cmp, "comparison.json"), JSON.stringify({ ...rec, signature: sha256(JSON.stringify(rec)) }));
+    const cmp = writeCompare(w, "cmp");
     const outDir = join(w.base, "out-cmp");
     const r = runNode([w.repo, cmp, w.reference, outDir, "--compare", "--anonymous"]);
     assert.equal(r.status, 0, r.stderr);
@@ -545,7 +579,7 @@ test("#686 --compare：同じ P・同じ回の本を対にした主の検出率�
     const d = out.pairs.primary;
     assert.equal(d.n, 1);
     assert.equal(d.rows.find((x) => x.run === "P1-r1").diff, Math.round((rateOf(ha.primary) - rateOf(hb.primary)) * 1e6) / 1e6);
-    assert.deepEqual(d.excluded, { unlaunched: 0, missing: 0, mismatch: 1, "stage-failed": 1, "no-reference": 0, "not-aligned": 1, "no-eligible": 0 });
+    assert.deepEqual(d.excluded, { unlaunched: 0, missing: 0, mismatch: 1, "stage-failed": 1, "no-reference": 1, "not-aligned": 1, "no-eligible": 0 });
     assert.equal(d.clusters.m, 1);
     assert.equal(out.pairs.uncatchable.excluded.mismatch, 1);
     assert.deepEqual(Object.keys(out.groups), ["before", "after"]);
@@ -580,6 +614,42 @@ test("#686 --anonymous（単独）：件数・率・区間・演算子の ID だ
     assert.equal(JSON.parse(text).group.runs.planned, 6);
     assert.match(r.stdout, /予定 6・入力なし 1/);
   } finally { w.cleanup(); }
+});
+
+test("#686 文脈の形の不正（F2）：その本だけ mismatch・context として予定に残り、他の本の評価は続く（計測全体を断らない）", async () => {
+  const w = world();
+  try {
+    const spec = { ...BASE_SPEC, "P1-r1": { kind: "pass", badObserves: true }, "P1-r2": { kind: "pass" } };
+    const u2 = writeU2(w.base, "u2-ctx", w.repo, w.upstream, spec);
+    const outDir = join(w.base, "out-ctx");
+    const out = await scoreStageTests({ repo: w.repo, measureDir: u2, referenceDir: w.reference, outDir });
+    const row = (id) => out.rows.find((r) => r.run === id);
+    assert.deepEqual([row("P1-r1").state, row("P1-r1").reason, row("P1-r1").candidate], ["mismatch", "context", null]);
+    assert.equal(row("P1-r2").state, "evaluated");
+    assert.equal(row("P1-r2").candidate.status, "aligned");
+    assert.equal(out.group.runs.planned, 6);
+    assert.equal(out.group.runs.mismatch_reasons.context, 1);
+    assert.ok(!existsSync(join(outDir, "contexts", "P1-r1.json")), "不正な文脈を手 5b に渡さない");
+    const r = runNode([w.repo, u2, w.reference, join(w.base, "out-ctx-cli")]);
+    assert.equal(r.status, 0, r.stderr);
+  } finally { w.cleanup(); }
+});
+
+test("#686 --make-reference（F3）：写す宣言が 0 件（全部 missing）でも出力先を作り、理由つきの組を保存する（exit 0・標準エラーなし）", () => {
+  const base = mkdtempSync(join(tmpdir(), "score-stage-tests-ref0-"));
+  try {
+    const refOut = writeReferenceMeasurement(base, "ref", { P1: { run: "P1-r2", table: TSHA("P1"), declaration: null } });
+    const upstream = writeUpstream(base, "upstream", refOut, [{ pid: "P1", run: "P1-r2" }], ["P2"]);
+    const dest = join(base, "new", "reference");
+    const r = runNode(["--make-reference", refOut, upstream, dest, "--id", "ref-set-0", "--version", "1"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, "");
+    const set = readJson(join(dest, REFERENCE_SET_FILE));
+    assert.deepEqual(set.declarations, []);
+    assert.deepEqual(set.missing, [{ pattern: "P1", reason: "no-declaration" }, { pattern: "P2", reason: "upstream-missing" }]);
+    assert.equal(set.signature, referenceSignature(set));
+    assert.equal(loadReferenceSet(dest).status, "ok");
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
 test("#686 静的な走査：道具が工場の package を import しない・通信と LLM と判定の口が無い。工場の側はこの道具を参照しない", () => {

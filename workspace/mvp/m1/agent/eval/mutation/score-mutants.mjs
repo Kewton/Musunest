@@ -159,7 +159,8 @@ function checkInventory(inv) {
 }
 
 const strList = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
-function checkContext(ctx) {
+/** 文脈の形と食い違いを検査する（不正なら invalid_context・context_inconsistent で断る）。U2 の道具が本ごとの文脈を渡す前にも当てる（#686） */
+export function checkContext(ctx) {
   const ok = isObj(ctx) && ctx.schema === CONTEXT_SCHEMA
     && isObj(ctx.table) && Array.isArray(ctx.table.rows) && Array.isArray(ctx.table.ownership)
     && isObj(ctx.list) && Array.isArray(ctx.list.requirements)

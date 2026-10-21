@@ -14,11 +14,11 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CONTEXT_SCHEMA, INVENTORY_SCHEMA, makeRate, scoreMutants, toAnonymous as anonymousMutation } from "./score-mutants.mjs";
+import { CONTEXT_SCHEMA, INVENTORY_SCHEMA, checkContext, makeRate, scoreMutants, toAnonymous as anonymousMutation } from "./score-mutants.mjs";
 import { classifyMutations } from "./classify.mjs";
 import { MutationToolError } from "./mutate.mjs";
 import { SOURCE_PATHS, patternInterval } from "../table/score-table.mjs";
-import { COMPARE_PAIRS_COPY, COMPARISON_FILE, CONDITIONS_V8, STAGE_COMPARE_GROUPS, STAGE_COMPARISON_SCHEMA, STAGE_FROM_SET_KIND, STAGE_PAIRS_SCHEMA, STAGE_RUN_MODE, V12_PIPELINE, clusterStats, conditionsSignature, fingerprintDir, loadConditions, loadEvalSet, pairsShapeProblem } from "../agent-accept/score-agent.mjs";
+import { COMPARE_PAIRS_COPY, COMPARISON_FILE, CONDITIONS_V8, STAGE_COMPARE_GROUPS, STAGE_COMPARE_ROLES, STAGE_COMPARISON_SCHEMA, STAGE_FROM_SET_KIND, STAGE_PAIRS_SCHEMA, STAGE_RUN_MODE, V12_PIPELINE, clusterStats, conditionsSignature, fingerprintDir, loadConditions, loadEvalSet, pairsShapeProblem } from "../agent-accept/score-agent.mjs";
 import { loadFrozenStageSet } from "../agent-accept/freeze-stage-input.mjs";
 import { checkEnvelope, loadPlanFileChecks, refusalLine } from "../agent-accept/freeze-plan-set.mjs";
 
@@ -269,7 +269,8 @@ async function prepareRuns(dir, { cond, evalSet }, ref, dist) {
     const decl = ref.byPattern.get(pid);
     if (decl !== undefined && cp.name_table.table_sha256 !== decl.entry.table_sha256) { mismatch("table"); continue; }
     if (decl === undefined) { row.state = "no-reference"; continue; }
-    try { row.context = contextOf(dist, cp, plan.plan); } catch { mismatch("context"); continue; }
+    // 文脈の形を手 5b と同じ検査で先に確かめる（不正ならこの本だけ mismatch・context。計測全体を断らない）
+    try { row.context = contextOf(dist, cp, plan.plan); checkContext(row.context); } catch { row.context = null; mismatch("context"); continue; }
     row.state = "evaluated";
   }
   return runs;
@@ -434,7 +435,23 @@ function loadComparison(dir) {
   const pairs = readJsonOr(join(dir, COMPARE_PAIRS_COPY), null);
   if (sha256(bytes) !== rec.pairs.sha256 || pairsShapeProblem(pairs, { schema: STAGE_PAIRS_SCHEMA, groups: STAGE_COMPARE_GROUPS }) !== null) refuse("stage-tests:compare-record");
   for (const g of STAGE_COMPARE_GROUPS) if (!existsSync(join(dir, g))) refuse("stage-tests:compare-record");
-  return { pairs: pairs.pairs };
+  return { pairs: pairs.pairs, sha256: rec.pairs.sha256, groups: rec.groups };
+}
+
+/**
+ * 比較の記録と各群の条件を結ぶ（書き込みの前）：群の条件の対の SHA が比較の記録の対の写しと同じ・群と役割・記録の conditions_signature が群の条件の署名と同じ・
+ * 対の本が群の予定のうち入力のある本とちょうど一致（対を黙って消さない）。合わなければ断る
+ */
+function checkComparisonGroups(comparison, measured) {
+  const keys = comparison.pairs.map((p) => `${p.pid}-r${p.r}`);
+  for (const g of STAGE_COMPARE_GROUPS) {
+    const { cond } = measured.get(g), c = cond.comparison, recorded = comparison.groups[g];
+    if (!isObj(c) || c.pairs_sha256 !== comparison.sha256 || c.group !== g || c.role !== STAGE_COMPARE_ROLES[g]) refuse("stage-tests:compare-group");
+    if (!isObj(recorded) || recorded.conditions_signature !== cond.signature) refuse("stage-tests:compare-group");
+    const absent = new Set(cond.params.stage_inputs.filter((x) => isObj(x) && x.absent === true).map((x) => x.id));
+    const launched = cond.child_args.map((x) => x.id).filter((id) => !absent.has(id));
+    if (launched.length !== keys.length || !launched.every((id) => keys.includes(id))) refuse("stage-tests:compare-group");
+  }
 }
 
 /**
@@ -450,6 +467,7 @@ export async function scoreStageTests({ repo, measureDir, referenceDir, outDir, 
   const groups = compare ? STAGE_COMPARE_GROUPS : [null];
   const comparison = compare ? loadComparison(measureDir) : null;
   const measured = new Map(groups.map((g) => [g, checkMeasurement(g === null ? measureDir : join(measureDir, g), ref, repo, { distCheck: g === null || g === STAGE_COMPARE_GROUPS[1] })]));
+  if (compare) checkComparisonGroups(comparison, measured);
   const dist = await loadStageDist(repo);
   if (dist === null) refuse("stage-tests:dist-unreadable");
   const created = !existsSync(outDir);
@@ -524,6 +542,8 @@ if (isEntry()) {
     if (used) refuseExit("make-reference:out-not-empty");
     const r = makeReferenceSet({ referenceOut: resolve(referenceOut), upstreamDir: resolve(upstreamDir), id: opt("--id"), version: versionText !== undefined && /^\d+$/.test(versionText) ? Number(versionText) : NaN });
     if (r.code !== undefined) refuseExit(r.code);
+    // 写す宣言が 0 件（全部 missing）でも、出力先を作って理由つきの組を保存する
+    mkdirSync(dest, { recursive: true });
     for (const c of r.copies) { mkdirSync(dirname(join(dest, c.rel)), { recursive: true }); writeFileSync(join(dest, c.rel), c.bytes); }
     const bytes = referenceBytes(r.set);
     writeFileSync(join(dest, REFERENCE_SET_FILE), bytes);
