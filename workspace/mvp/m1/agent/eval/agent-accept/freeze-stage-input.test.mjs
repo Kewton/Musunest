@@ -376,7 +376,7 @@ test("#640 README：§10.8 の下の末尾の小節 §10.8.1 に定義の語が�
   const text = readFileSync(join(here, "../README.md"), "utf8");
   const at = text.indexOf("\n#### 10.8.1 ");
   assert.ok(at > text.indexOf("\n### 10.8 ") && text.indexOf("\n### 10.8 ") > 0, "§10.8.1 は §10.8 の後ろ");
-  assert.equal(text.slice(at).indexOf("\n#", 1), -1, "§10.8.1 が末尾");
+  assert.ok(!/\n#{2,3} /.test(text.slice(at)), "§10.8.1 の後ろは #### の小節だけ（## と ### は無い。#686 で改めた）");
   const sec = text.slice(at);
   for (const w of ["best-scored-complete", "分母 0", "採否", "review", "版 1", "版 2", "リポジトリの外", "節目", "frozen-stage-input-set", "stage-from:set-review", "human-excluded", "no-checkpoint", "verify-failed", "no-scored-candidate", "freeze:score-mismatch"]) assert.ok(sec.includes(w), w);
   assert.equal(sha256(text.slice(0, text.indexOf("## 7. 表の採点（正解の表との照合）") - 1)), "662d41ded93107ecd130dfa090b09df1280ec78277509d131bf21b253e82cba4");
