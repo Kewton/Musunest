@@ -147,6 +147,7 @@ import {
   type StageTestSpecCounts,
   type TableRoundRecord,
   type TableRoundRewrite,
+  STAGE_VERIFICATION_NOT_RUN_STATIC_CHECK,
   V12_SEARCH_REPAIR_ARTIFACT_NAME,
 } from "./bundle-v11a.js";
 import {
@@ -1088,7 +1089,12 @@ async function runV11a(
   let testSpecCounts: StageTestSpecCounts | undefined;
   const stageOutcome = async (
     stopped: FailureAttribution | null,
-    extra: { readonly judgeVerdict?: StageRunOutcome["judgeVerdict"]; readonly finalCarryOver?: StageRunOutcome["finalCarryOver"] } = {},
+    extra: {
+      readonly judgeVerdict?: StageRunOutcome["judgeVerdict"];
+      readonly finalCarryOver?: StageRunOutcome["finalCarryOver"];
+      readonly declaration?: StageRunOutcome["declaration"];
+      readonly verification?: StageRunOutcome["verification"];
+    } = {},
   ): Promise<CoreResult> => {
     // 断った候補は、一気通貫の診断と同じ形・同じ順で結果に足す（候補が無ければ欄を持たない。Issue #683）
     const rejectedRows = await rejectedCandidateRows();
@@ -1115,6 +1121,9 @@ async function runV11a(
           const rounds = tableRoundRows(stopped !== null);
           return rounds.length === 0 ? {} : { tableRounds: rounds };
         })(),
+        // ⑦ まで流したときだけ、判定した宣言と検証の数（入口が記録とファイルに書く。Issue #687）
+        ...(extra.declaration === undefined ? {} : { declaration: extra.declaration }),
+        ...(extra.verification === undefined ? {} : { verification: extra.verification }),
       },
     };
   };
@@ -1702,6 +1711,8 @@ async function runV11a(
 
     let limitReached = false;
     let stopReason: StopReason = "completed";
+    /** 往復（B5）の数（段の走りの検証の数に写す。Issue #687） */
+    let roundTrips = 0;
     let stagnant = false;
     /** 最終の版（⑦ の材料・納品物の宣言） */
     let final: VersionState;
@@ -1737,6 +1748,7 @@ async function runV11a(
           break;
         }
         rounds += 1;
+        roundTrips = rounds;
         const context = contextNow();
         const step = await runStageOk("repair", () =>
           runRepairStep({
@@ -1947,6 +1959,7 @@ async function runV11a(
           break;
         }
         rounds += 1;
+        roundTrips = rounds;
         const context = contextNow();
         /** 主張を B5' へ渡し、棄却なら B6（今までどおり）。確定した仕様と食い違えば Plan に戻して止める（真を返す） */
         const arbitrate = async (stepDisputes: readonly Dispute[], declaration: Declaration): Promise<boolean> => {
@@ -2106,8 +2119,42 @@ async function runV11a(
       carriedOver: { reverseCheck: [], testSuite: carriedIds },
     };
     const outcome = await runStage("judge", async () => decideOutcome(toStageResults(materials)));
-    // 段の走り：⑦ の判定を別の名前で返し、納品物（⑧）を組まない
-    if (stageControl !== undefined) return stageOutcome(null, { judgeVerdict: outcome.verdict, finalCarryOver: carry.entries });
+    /** B3' の件数（枯渇・形・拒否）。一気通貫の検証の記録と段の走りの検証の数が同じ数え方 */
+    const declCheckCounts = () => ({
+      exhausted: declExhausted,
+      malformed: stages.filter((record) => record.stage === "decl-check").reduce((sum, record) => sum + record.retries.shape, 0),
+      rejected: declVersions.reduce(
+        (sum, version) => sum + version.judgments.filter((judgment) => judgment.verdict === "reject").length,
+        0,
+      ),
+    });
+    // 段の走り：⑦ の判定を別の名前で返し、納品物（⑧）を組まない。判定した宣言（最終版）と検証の数を足す（B3・C7・未解決は最終版の
+    // 実測。最終版が静的チェックに落ちて流していなければ null と理由で、⑦ の材料の代替の 1 を写さない。Issue #687）
+    if (stageControl !== undefined) {
+      const ran = final.report.testRun !== null && final.report.correspondence !== null;
+      return stageOutcome(null, {
+        judgeVerdict: outcome.verdict,
+        finalCarryOver: carry.entries,
+        declaration: {
+          source: final.report.declaration.source,
+          sha256: final.report.declarationSha256,
+          staticCheckPassed: final.report.staticCheck.passed,
+        },
+        verification: {
+          table_sha256: await nameTableSha256(table),
+          test_suite_sha256: testSpec.sha256,
+          declaration_sha256: final.report.declarationSha256,
+          checked_declaration_sha256s: checkedDeclarationSha256s.slice(),
+          decl_check: declCheckCounts(),
+          b3_misses: ran ? materials.correspondenceMisses : null,
+          c7_mismatches: ran ? materials.testMismatches : null,
+          unresolved: ran ? materials.testUnresolved : null,
+          not_run: ran ? null : STAGE_VERIFICATION_NOT_RUN_STATIC_CHECK,
+          stop_reason: stopReason,
+          round_trips: roundTrips,
+        },
+      });
+    }
     const failure: FailureAttribution | null =
       outcome.result === "failed"
         ? final.report.staticCheck.passed
@@ -2116,7 +2163,6 @@ async function runV11a(
         : null;
 
     // ⑧ v1.1α の記録を組む（段 `bundle`）。記録と要約を組んでから、納品物に埋め込む
-    const declStageRecords = stages.filter((record) => record.stage === "decl-check");
     const extraArtifacts = await runStage("bundle", async () =>
       buildV11aArtifacts({
         nameTable: { table, sha256: tableSha256 },
@@ -2148,14 +2194,7 @@ async function runV11a(
           testSuiteSha256: testSpec.sha256,
           declarationSha256: final.report.declarationSha256,
           checkedDeclarationSha256s,
-          declCheck: {
-            exhausted: declExhausted,
-            malformed: declStageRecords.reduce((sum, record) => sum + record.retries.shape, 0),
-            rejected: declVersions.reduce(
-              (sum, version) => sum + version.judgments.filter((judgment) => judgment.verdict === "reject").length,
-              0,
-            ),
-          },
+          declCheck: declCheckCounts(),
         },
         ...(searchRecord === undefined ? {} : { searchRepair: searchRecord }),
       }).map((artifact) =>

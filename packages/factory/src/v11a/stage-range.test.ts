@@ -14,6 +14,7 @@ import {
   buildStageRunRecord,
   buildTableRoundsFile,
   resolveStageRange,
+  stageCheckpointFile,
   stageJsonText,
   boundaryBefore,
   stagesInRange,
@@ -25,8 +26,11 @@ import {
   stagePassOf,
   verifyStageInput,
   STAGE_CHECKPOINT_SCHEMA,
+  STAGE_DECLARATION_FILE,
+  STAGE_RUN_RECORD_FILE,
   STAGE_RUN_RECORD_SCHEMA,
   STAGE_START_ALIASES_V12,
+  STAGE_VERIFICATION_NOT_RUN_STATIC_CHECK,
   type BoundaryMaterials,
   type StageRunOutcome,
   type TableRoundRecord,
@@ -422,6 +426,36 @@ describe("v1.2 の段の走りの別名と記録の欄（Issue #637）", () => {
     expect(Object.keys(outside)).toEqual([...plainKeys, "v12_calls"]);
     const idsOff = recordOf(outcomeOf(), { start: "name-table", end: "semantic-check" }, { testSpecInRange: false });
     expect(Object.keys(idsOff)).toEqual(plainKeys);
+  });
+
+  it("⑦ を流した結果の宣言と検証の数は、v12 を渡す記録だけ末尾に declaration（固定の名前・SHA-256・静的チェックの合否）と verification を足す。v1.1a の記録はバイト列で同じ（Issue #687）", () => {
+    const declaration = { source: "app: {}\n", sha256: "c".repeat(64), staticCheckPassed: false };
+    const verification = {
+      table_sha256: "d".repeat(64),
+      test_suite_sha256: "e".repeat(64),
+      declaration_sha256: "c".repeat(64),
+      checked_declaration_sha256s: ["c".repeat(64)],
+      decl_check: { exhausted: 0, malformed: 0, rejected: 0 },
+      b3_misses: null,
+      c7_mismatches: null,
+      unresolved: null,
+      not_run: STAGE_VERIFICATION_NOT_RUN_STATIC_CHECK,
+      stop_reason: "stagnation",
+      round_trips: 1,
+    } as const;
+    const range = { start: "write", end: "judge" } as const;
+    const judged = outcomeOf({ judgeVerdict: "none", declaration, verification });
+    expect(stageJsonText(recordOf(judged, range))).toBe(stageJsonText(recordOf(outcomeOf({ judgeVerdict: "none" }), range)));
+    const v12 = recordOf(judged, range, { testSpecInRange: false });
+    expect(Object.keys(v12).slice(-2)).toEqual(["declaration", "verification"]);
+    expect(v12["declaration"]).toEqual({ file: STAGE_DECLARATION_FILE, sha256: "c".repeat(64), static_check_passed: false });
+    expect(v12["verification"]).toEqual(verification);
+    // 原文は記録に載せない（ファイルに書く）。名前は --out の直下で、納品物の成果物の置き場所（artifacts/）と重ならない
+    expect(JSON.stringify(v12)).not.toContain("app: {}");
+    expect(STAGE_DECLARATION_FILE).not.toContain("/");
+    expect([STAGE_RUN_RECORD_FILE, stageCheckpointFile("t1-t2"), stageCheckpointFile("t2-b1"), DIAGNOSTICS_TABLE_ROUNDS_FILE]).not.toContain(STAGE_DECLARATION_FILE);
+    // ⑦ を流していない結果（欄が無い）は v12 を渡しても足さない
+    expect(Object.keys(recordOf(outcomeOf(), range, { testSpecInRange: false }))).not.toContain("declaration");
   });
 });
 
