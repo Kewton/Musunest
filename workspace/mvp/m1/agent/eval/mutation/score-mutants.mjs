@@ -2,6 +2,7 @@
 // 工場の B3（名前の照合）・B4（試験の評価）と同じ評価口と、工場が使ったのと同じ有効な評価の文脈で掛け、条件付きの検出率と落とせない試験の率を出す。
 // 計測の道具であって工場の門ではない：工場・門・合否を変えず、工場の package を import せず、工場の段からも呼ばれない。
 // API・LLM・判定・通信・時計を使わない（費用 0）。B3'・判定は呼ばない。
+// 文脈の台帳の旗（ledger.on）が真なら、評価口を作る引数に目録の工場の dist の台帳の見方を渡す（工場の回す部分と同じ渡し方。off は今のまま。#686）。
 //
 // 入力は目録（凍結した候補・有効な評価の文脈・版）だけ。道具は目録に載ったファイル（と自分のコード）だけを読み、読む前に SHA-256 を全部照らす。
 // 1 つでも合わなければ何も数えずに断る（終了コード 3・固定の符号。fail-closed）。工場と spec-engine は build 済みの dist を目録の場所から動的に読む。
@@ -73,6 +74,7 @@ export const MESSAGES = {
   origin_unreadable: "手 5a が使えるとした原本を spec-engine が読めない",
   mutant_unreadable: "手 5a が静的チェックを通ったとした変異を spec-engine が読めない",
   invalid_input: "使い方: node score-mutants.mjs <目録の JSON のファイル> --out <出力の JSON のファイル> [--anonymous]",
+  ledger_unavailable: "文脈の台帳の旗が on なのに、目録の工場の dist が台帳の見方（ledgerViewOf）を公開していない",
   output_check_failed: "出力の検算（変異の結果の件数の和）が通らない",
 };
 const refuse = (code) => {
@@ -157,7 +159,8 @@ function checkInventory(inv) {
 }
 
 const strList = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
-function checkContext(ctx) {
+/** 文脈の形と食い違いを検査する（不正なら invalid_context・context_inconsistent で断る）。U2 の道具が本ごとの文脈を渡す前にも当てる（#686） */
+export function checkContext(ctx) {
   const ok = isObj(ctx) && ctx.schema === CONTEXT_SCHEMA
     && isObj(ctx.table) && Array.isArray(ctx.table.rows) && Array.isArray(ctx.table.ownership)
     && isObj(ctx.list) && Array.isArray(ctx.list.requirements)
@@ -321,6 +324,16 @@ export function forbiddenApisIn(text) {
 const isCode = (p) => /\.(?:m|c)?js$/.test(p);
 
 const importDist = (d, base) => import(pathToFileURL(resolve(base, d.entry)).href);
+/**
+ * 評価口を作る引数に足す台帳の見方（#686）。文脈の ledger.on が真なら、目録の工場の dist が公開する台帳の正本から導いた見方（ledgerViewOf）を、
+ * 工場の回す部分と同じ渡し方（on のときだけ欄を足す）で渡す。道具に台帳を写さない。off は欄を足さない（off の評価は今のまま）
+ */
+const ledgerArgOf = (factory, on) => {
+  if (!on) return {};
+  const view = typeof factory.ledgerViewOf === "function" ? factory.ledgerViewOf({ ledger: true }) : undefined;
+  if (view === undefined || view === null) refuse("ledger_unavailable");
+  return { ledger: view };
+};
 
 // ── 読み込みの hook（実際の読み込みで止める。#571 の再レビューの指摘）
 // 静的な閉包は指定子の書き方（注釈を挟む import など）で取りこぼし得るので、前段の早い断りにとどめる。正は Node の読み込みそのもの：
@@ -515,7 +528,7 @@ export async function scoreMutants({ inventory, baseDir = process.cwd(), readFil
     const factory = await importDist(v.factory_dist, baseDir), engine = await importDist(v.spec_engine_dist, baseDir);
     const candidates = [];
     for (const { c, rec, mutants, ctx, originSource } of prepared) {
-      const evaluator = factory.createV11aEvaluator({ table: ctx.table, excludedRowIds: ctx.excluded_row_ids, observes: new Map(Object.entries(ctx.observes)) });
+      const evaluator = factory.createV11aEvaluator({ table: ctx.table, excludedRowIds: ctx.excluded_row_ids, observes: new Map(Object.entries(ctx.observes)), ...ledgerArgOf(factory, ctx.ledger.on) });
       const context = { list: ctx.list, suite: ctx.suite, correspondences: ctx.correspondences ?? [], ownership: ctx.ownership };
       const evaluate = async (source, unreadable) => {
         const n = await engine.normalizeSpec(source);

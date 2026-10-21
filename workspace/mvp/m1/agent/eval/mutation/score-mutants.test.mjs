@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MARKS_SCHEMA, classifyMutations } from "./classify.mjs";
@@ -739,6 +739,76 @@ test("匿名の口：P の番号・候補の ID・宣言の名前・パス・SHA
     assert.ok(Object.keys(anon.by_operator).every((k) => ["remove-field", "flip-comparison", "remove-when", "reorder-options", "change-default", "remove-validation", "swap-aggregate"].includes(k)));
     assert.deepEqual(Object.keys(anon.by_operator), Object.keys(full.by_operator));
   } finally { w.cleanup(); }
+});
+
+// ── #686：文脈の台帳の旗が on なら、評価口を作る引数に目録の工場の dist の台帳の見方を渡す（off は渡さない）
+/** 工場の dist の入口を包み、評価口を作る引数を記録する偽物の入口（over は入口に足す欄の原文） */
+function recordingWorld(ledgerOn, { over = "" } = {}) {
+  const ctx = contextOf();
+  ctx.ledger = { on: ledgerOn };
+  const w = world({ candidates: ["a"], replace: { "context-a.json": JSON.stringify(ctx) } });
+  const key = `seen${Math.random().toString(16).slice(2)}`, wrap = join(w.dir, `wrap-${key}.mjs`), url = JSON.stringify(pathToFileURL(factoryEntry).href);
+  writeFileSync(wrap, `import * as real from ${url};\nexport * from ${url};\nexport function createV11aEvaluator(input) { (globalThis.${key} ??= []).push(input); return real.createV11aEvaluator(input); }\n${over}`);
+  const inv = structuredClone(w.inventory);
+  inv.version.factory_dist = { entry: wrap, files: [...factoryFiles, fileRef(wrap)] };
+  return { w, inv, seen: () => globalThis[key] ?? [] };
+}
+
+test("#686 手 5b の台帳：文脈の ledger.on が真なら、評価口を作る引数に目録の工場の dist の台帳の見方（ledgerViewOf の値）が渡る。off は欄が無い", async () => {
+  const on = recordingWorld(true);
+  try {
+    const out = await scoreMutants({ inventory: on.inv });
+    assert.ok(on.seen().length >= 1);
+    for (const input of on.seen()) {
+      assert.ok("ledger" in input, "台帳の見方が渡らない");
+      assert.equal(input.ledger, factory.ledgerViewOf({ ledger: true }), "工場の dist の台帳の正本から導いた見方そのもの（道具に写さない）");
+      assert.equal(input.ledger, factory.PROPERTY_LEDGER_VIEW);
+    }
+    assert.equal(out.candidates[0].context.ledger_on, true);
+  } finally { on.w.cleanup(); }
+  const off = recordingWorld(false);
+  try {
+    const out = await scoreMutants({ inventory: off.inv });
+    assert.ok(off.seen().length >= 1);
+    for (const input of off.seen()) assert.deepEqual(Object.keys(input).sort(), ["excludedRowIds", "observes", "table"], "off は今の引数のまま");
+    assert.equal(out.candidates[0].context.ledger_on, false);
+  } finally { off.w.cleanup(); }
+  // 台帳の見方を公開しない dist で on の文脈は、何も数えずに断る（黙って off にしない）
+  const none = recordingWorld(true, { over: "export const ledgerViewOf = undefined;\n" });
+  try { await refused(scoreMutants({ inventory: none.inv }), "ledger_unavailable"); } finally { none.w.cleanup(); }
+});
+
+/** 直す前の commit（#686 の base）。浅い clone（CI の checkout の既定）には無いので、無いときだけ下の試験を skip で明示して飛ばす */
+const BEFORE_686 = "f95432d";
+/** その commit が git の履歴にあるか（git cat-file -e <rev>^{commit} の終了コード） */
+export function commitAvailable(rev, cwd = root) {
+  return spawnSync("git", ["cat-file", "-e", `${rev}^{commit}`], { cwd, stdio: "ignore" }).status === 0;
+}
+const SKIP_BEFORE_686 = commitAvailable(BEFORE_686) ? false : `浅い clone で直す前の commit が無い（${BEFORE_686}）`;
+
+test("#686 手 5b の台帳 off の出力は、直す前の道具（base の commit の score-mutants.mjs）の出力と、道具自身の指紋 fingerprints.tool を除いて深く等しい", { skip: SKIP_BEFORE_686 }, async () => {
+  // 直す前の道具は git から読み、同じディレクトリに今の手 5a（この Issue では変えない）を並べて動かす。旧い指紋は固定しない（指紋の欄だけを除いて比べる）
+  const rel = relative(root, join(here, "score-mutants.mjs"));
+  const before = execFileSync("git", ["show", `${BEFORE_686}:${rel}`], { cwd: root, encoding: "utf8" });
+  const dir = mkdtempSync(join(tmpdir(), "score-mutants-before-"));
+  const w = world({ candidates: ["a", "b", "c"] });
+  try {
+    writeFileSync(join(dir, "score-mutants.mjs"), before);
+    for (const n of ["classify.mjs", "mutate.mjs"]) writeFileSync(join(dir, n), readFileSync(join(here, n)));
+    const old = await import(pathToFileURL(join(dir, "score-mutants.mjs")).href);
+    const [a, b] = [await old.scoreMutants({ inventory: w.inventory }), await scoreMutants({ inventory: w.inventory })];
+    assert.ok(a.candidates.every((c) => c.context.ledger_on === false));
+    assert.notEqual(a.fingerprints.tool, b.fingerprints.tool, "道具の指紋は変わる（明示した差）");
+    const drop = (o) => ({ ...o, fingerprints: { ...o.fingerprints, tool: null } });
+    assert.deepEqual(drop(b), drop(a));
+    assert.deepEqual(toAnonymous(b), old.toAnonymous(a), "匿名の口も同じ");
+    assert.deepEqual(summaryLines(b), old.summaryLines(a));
+    // 断りの符号も同じ（off の経路）
+    const bad = structuredClone(w.inventory);
+    bad.candidates[0].subject.sha256 = "0".repeat(64);
+    await refused(scoreMutants({ inventory: bad }), "hash_mismatch");
+    await assert.rejects(old.scoreMutants({ inventory: bad }), (e) => e.code === "hash_mismatch");
+  } finally { w.cleanup(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("rowsOfPlace：場所を表の行に当てる（除く行・検査は当たらない）", () => {
