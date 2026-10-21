@@ -54,6 +54,8 @@ import {
   withAggregates,
   fixtureDefaultValueList,
   fixtureDefaultValueTable,
+  casesResponseOf,
+  requestListedIds,
   codeIdRenameOf,
   idsResponseList,
   idsResponsesOf,
@@ -73,12 +75,15 @@ import {
   withoutEmptyAggregate,
   withoutWhenAndNonRequirement,
   fixtureGeneratedTable,
+  REQUIRED_VALIDATIONS_BLOCK,
+  withoutRequiredValidations,
 } from "./__tests__/fixtures.js";
 import {
   STAGE_RUN_RECORD_SCHEMA,
   V11A_ARTIFACT_NAMES,
   V12_SEARCH_REPAIR_ARTIFACT_NAME,
   buildStageCheckpoint,
+  buildStageRunRecord,
   stageJsonText,
   stageOutputDigest,
   stagesInRange,
@@ -101,9 +106,12 @@ import { DECL_CHECK_SCHEMA_NAME } from "./stages/decl-check.js";
 import { NAME_TABLE_PREVIOUS_DATA_NAMES, NAME_TABLE_SCHEMA_NAME } from "./stages/name-table.js";
 import * as semanticCheckStage from "./stages/semantic-check.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
-import { TEST_SPEC_DATA_NAMES, TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
+import { TEST_SPEC_DATA_NAMES, TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf, testSpecSchemaOf, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
 import {
   WRITE_V11A_DATA_NAMES,
+  WRITE_V11A_IDS_R07_DEFINITION,
+  WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME,
+  WRITE_V11A_RULE_DEFINITIONS,
   WRITE_V11A_REWRITE_DATA_NAME,
   WRITE_V11A_REWRITE_RULE_DEFINITIONS,
   WRITE_V11A_SCHEMA_NAME,
@@ -264,7 +272,11 @@ const rawOfFixed = (test: FixedTest, observes: string): Record<string, unknown> 
   inputContract: test.inputContract,
   referenceData: test.referenceData.map((row) => ({ ...row, values: JSON.stringify(row.values) })),
   expected: test.expected.kind === "ok" ? ok(JSON.stringify(test.expected.value)) : { kind: "error", value: null, code: test.expected.code },
-  assertion: null,
+  // 構造の検査（手 3d・#624 からコードが作る）は strict の形の assertion に戻す（欄は null で埋める）
+  assertion:
+    test.assertion === undefined
+      ? null
+      : { check: test.assertion.check, expected: test.assertion.expected ?? null, refEntity: test.assertion.refEntity ?? null, role: test.assertion.role ?? null },
   observes,
 });
 
@@ -408,11 +420,19 @@ const MAPPED_IDS: NameTable = withCheckTargets(TABLE_IDS);
 /** 値の中の題材の表の ID を、コードの形の ID に振り直す（T2 の応答など） */
 const renamed = <T,>(value: T): T => renameIds(value, CODE_RENAME);
 
+/**
+ * 旗 v12.ids の走りの T2 の応答（手 3d・Issue #624：構造の要件 R2 は要求の一覧に無く、構造の検査と画面の試験はコードが作るので、
+ * R2 の試験と分類を書かない）
+ */
+const idsT2Response = (tests: readonly Record<string, unknown>[] = [...r1Tests(), ...r3Tests(), ...r4Tests()], only: readonly string[] = IDS) =>
+  // 手 3e（#625）：応答は同じ内容の場合の形（骨組みはコードが組む）
+  casesResponseOf(t2Response(tests, only.filter((id) => id !== "R2")));
+
 /** 旗 v12.ids（と台帳 on）の走りの C1 の 3 束・C2・T1''・T2・B1 の記録（既定は完走の道。Issue #593） */
 const idsHead = (options: { readonly t2?: unknown; readonly yaml?: string; readonly table?: NameTable } = {}): RecordedCall[] => [
   ...idsResponseList(idsResponsesOf(LIST, options.table ?? TABLE_IDS, PROPERTY_LEDGER_VIEW)).map((output) => structured(output)),
   structured(acceptAll()),
-  structured(renamed(options.t2 ?? t2Response())),
+  structured(renamed(options.t2 ?? idsT2Response())),
   structured({ declaration: options.yaml ?? RUN_YAML }),
 ];
 
@@ -659,12 +679,12 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const rows = dataBlockOf(t2?.input ?? "", TEST_SPEC_DATA_NAMES[2]) as readonly Record<string, unknown>[];
     expect(rows).toHaveLength(TABLE_IDS.rows.length);
     expect(rows.every((row) => row["source"] === null && !("name" in row))).toBe(true);
-    // T2 に見せる確かめ方の構造の検査に、C2 が書いた対象の ID が載る（Issue #594）
+    // 構造で確かめる要件は、手 3d（#624）から T2 の確かめ方に無い（C2 が書いた対象の ID からコードが構造の検査を作る）
     const verification = dataBlockOf(t2?.input ?? "", TEST_SPEC_DATA_NAMES[3]) as readonly Record<string, unknown>[];
     const structural = MAPPED_IDS.verification.filter((entry) => entry.kind === "structural");
     expect(structural.length).toBeGreaterThan(0);
     for (const entry of structural) {
-      expect(verification.find((item) => item["requirementId"] === entry.requirementId)?.["checkTargets"], entry.requirementId).toEqual(entry.targets);
+      expect(verification.some((item) => item["requirementId"] === entry.requirementId), entry.requirementId).toBe(false);
     }
     // 写しの欄（copy）と出典の引用の欄（requestQuote）が C1・C2 の要求に無い
     const tableRequests = recording.structured.filter((request) => request.schemaName.startsWith("vocabulary-") || request.schemaName === "mapping");
@@ -904,7 +924,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         structured(good().mapping),
         structured(rejectR3),
         structured(missing),
-        structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+        structured(renamed(idsT2Response([...r1Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
         structured({ declaration: RUN_YAML }),
         structured(acceptAll(["R1", "R2", "R4"])),
       ],
@@ -958,7 +978,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
           structured(good().mapping),
           structured(judgments(IDS, { R3: ["unnecessary-ownership", "締められる"] })),
           structured(missingFirst),
-          structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+          structured(renamed(idsT2Response([...r1Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
           structured({ declaration: RUN_YAML }),
           structured(acceptAll(["R1", "R2", "R4"])),
         ],
@@ -977,34 +997,50 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
    * 規則 R-map-03 の文に「当たる種類が無い要件を structural にしない」を足したため（#682 は R-map-03 の文と C2 の schema の変更の
    * ため）。C2 を呼ばない (4) C1 の束 2 が 2 回落ちて止まる台本は取り直していない。記録・要約・終了コード・納品物の SHA-256 は
    * 直す前の値のまま照らす。Issue #661 で (3) の要求の SHA-256 だけを取り直した（base 8557109 に #661 の変更を重ねた作業木で
-   * 測った値）。理由：C3 の拒否のあとの C2 の 2 回目の要求を、拒否された要件だけの書き直し（部分専用の規則・「書き直す要件」）にしたため
+   * 測った値）。理由：C3 の拒否のあとの C2 の 2 回目の要求を、拒否された要件だけの書き直し（部分専用の規則・「書き直す要件」）にしたため。
+   *
+   * **T2 に届く (1)(2)(3)(5) の要約・要求・納品物の SHA-256 は、#650 の T2 の手（手 3d〜3i・4c〜4e。統合 v12-h3e で main b018140 に
+   * 合流）で取り直した**（v12-h3e の作業木で上の台本を流して測った値。旧の値は各行の注に残す）。理由：旗 ids の T2 の応答が場合の形に
+   * なり（台本 (3) の T2 も構造の要件 R2 の試験を書かない場合の形に替えた）、要約に v12_calls.test_spec（束の要約）が足され、T2 と
+   * B1 の要求・T2 由来の納品物が変わるため。main b018140 の作業木で同じ台本を流した出力と突き合わせ、要約の差は v12_calls.test_spec
+   * だけ、要求の差は T2 と B1 の 2 本だけ（C1・C2・C3 の要求は同じ）、納品物の差は T2 由来のファイルと manifest だけであることを
+   * 確かめた。記録・終了コードの SHA-256 と、T2 に届かない (4) の 2 台本は直す前の値のまま照らす
    */
   const BEFORE_DIGESTS: Readonly<Record<string, readonly string[]>> = {
     "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": [
       "865511262ad4b1eec243d96a87d5716fa5dac5794bcc0967769bd9fda0974edc",
-      "e43bf01d37bdb469dae6dd6190e30e489618ada887c17db2fe2c1eab98c9f680",
+      // 要約の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 e43bf01d37bdb469dae6dd6190e30e489618ada887c17db2fe2c1eab98c9f680）
+      "5c064c0fca66daff785b9cddf84e051ee45ea3a7bb7471bcd953e8b16bfbb927",
       // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 752a0c66bd0921ddef70aae2a4b6a1c70b012d6003a14dccbd94bd006493e24e、#682 の前 a0093fffd46e0316db7a39788e7bc23cdbd879e9440dc900394944b4634643e3）
-      "aa61d49da041316d61a2363ad590036a1486361eba20d106a56b7a821b1e83b5",
+      // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 aa61d49da041316d61a2363ad590036a1486361eba20d106a56b7a821b1e83b5）
+      "7672dc5e7cc5bb29c6e9add669a90c45a22da87b4de55a9169aafbfefc45c9fb",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
-      "d3d46bd0bae1ed1bce66a419612e4d05b1d6d0cefa9b95072d2af39c8137d700",
+      // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d3d46bd0bae1ed1bce66a419612e4d05b1d6d0cefa9b95072d2af39c8137d700）
+      "ef2dc4cd77f101896bc8c4c377efeabe8f621d092497fdef0ee93b69490e031f",
     ],
     "(2) C2 の試行 1 が形で落ちて試行 2 で通る": [
       "771d2acf15b3903ea4b81cd6e6fb4cd6d4600944a807484c985dacbb6128e7e6",
-      "b00502771c9776d7ca5699650d826e5e619f6d2f9688d728ba3adcec07d2d536",
+      // 要約の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 b00502771c9776d7ca5699650d826e5e619f6d2f9688d728ba3adcec07d2d536）
+      "e2cfd686f2296c3ff2a5f91bb45409dbb6efbc02feb54b7e246af97eaf762089",
       // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 8921cc36209615b5948b4830e79f7b8ed1cab4c38fe1751b1825b28ff2d149e1、#682 の前 6c3f9e9cf8c384b59958beb5300a3fc50847416fbfd411fb63f2c876e239a18d）
-      "2c75ec3f7e097736f78a181425c7360fab93d01e3571468dbcb793f2b8c60e0a",
+      // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 2c75ec3f7e097736f78a181425c7360fab93d01e3571468dbcb793f2b8c60e0a）
+      "5bccc6c03cf22bcd5bd9ce8ee9ddb7ecdc5987f4fa4d3a7d744db156fb7488fc",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
-      "c479ec4fc3ac733a9b470499f5d8fc631583a94ca9e4169834ae571ea7499645",
+      // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 c479ec4fc3ac733a9b470499f5d8fc631583a94ca9e4169834ae571ea7499645）
+      "a3848402cdf1bbedbdbb51431bd971ccc94a351d6bfb88ae7a9f56054cdec635",
     ],
     "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": [
       "c2a1c208a549dd9320f05ca078149cff2c691f163c9de1ef9a53da25426de89c",
-      "dfc45b40f4d4f5e04af357295a853c5d69847dc2aa260f2af52e0b08713eab11",
+      // 要約の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 dfc45b40f4d4f5e04af357295a853c5d69847dc2aa260f2af52e0b08713eab11）
+      "d4cbdb12c8d1cc33003d93b358776fb2a658517f595324bc13dd076faac0f01f",
       // 要求の SHA-256 は Issue #682・#690・#661 で取り直した（旧 #690 cc1e636756802ca79ef535edbff41302442ab15d70561042106c644d88cf75ce、
       // 旧 #682 f2f3aa9dc28f4b4fc536c18ea4dfae4e38cda3bfdf07d26524b8526c91674c2d、#682 の前 6af97b9e827e24b9d14505ee677d3b15af2f3e3615d6f448b90f818b8d8e061b）。
       // #661 は C2 の 2 回目の要求（部分専用の規則と「書き直す要件」）だけが変わる。それを外した要求は直す前と同じ（下の試験）
-      "7aa71911309b5ef91f9c680ac454d31ca2a49fe63156cbbb6f1314476b3b94bd",
+      // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 7aa71911309b5ef91f9c680ac454d31ca2a49fe63156cbbb6f1314476b3b94bd）
+      "dd5f9cf02049d7f833e5a99599915ce35b0b4296b5d512535c641e5d0d71e984",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
-      "2f032bbaf50ff8e7c6c0fbe9708107eb043cca23ae2bc5b6b25680e7c2f4151a",
+      // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 2f032bbaf50ff8e7c6c0fbe9708107eb043cca23ae2bc5b6b25680e7c2f4151a）
+      "f039481b055d8d893ee5535d5b56acc5182d6e5b392c8c4f3a21c4632403f859",
     ],
     "(4) C2 が 2 回落ちて止まる": [
       "14927cf4ff8e5b827eb9f11391b5c422f6b789ccb1ff6878608c6cc351fa25c1",
@@ -1023,11 +1059,14 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     ],
     "(5) 形で 1 度も落ちない": [
       "8a7be5d0b40243e22114d434e400f45dc55ff41add9d357888593eaa4d460aea",
-      "88b91fbfc4f9030c40c8d0052d630afe65b86255f8242dbae174a000086e0e56",
+      // 要約の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 88b91fbfc4f9030c40c8d0052d630afe65b86255f8242dbae174a000086e0e56）
+      "14b868bfb4d6b944e2419cae0411c22b0f983c23a5ef1c7e47fc4424d7e6a298",
       // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 46f31a920a94f54c37b32fedb8e771028ecfa6e6a6b7789133d3c11101c04deb、#682 の前 5b4777c8abe5dcdfa274689e1ff8083e1c610a80180c54792f668d1dda010e1c）
-      "b05e55ebd15b607f7c856b6fa50c7ff31d54ae87005478ad294c825c14bab561",
+      // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 b05e55ebd15b607f7c856b6fa50c7ff31d54ae87005478ad294c825c14bab561）
+      "9d0407679405956fb7d3d5ba4707f720cde73e174fa2a6c4f9a966c2929c8560",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
-      "d762715a3037b44cbc202848f40b5fa2cd1551bba549bd418f56fefc0e9def0e",
+      // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d762715a3037b44cbc202848f40b5fa2cd1551bba549bd418f56fefc0e9def0e）
+      "4a2626d7964d9f231142488d8151d75f3c36d8ef216d65f06c6fb63bc8a102ab",
     ],
   };
 
@@ -1039,7 +1078,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
    * 直す前の値：(3) の台本の要求から C2 の 2 回目の要求（6 本目の構造化の要求）を外した残りの SHA-256（base 8557109 の mapping.ts・
    * run.ts に戻した作業木で測った値。新しいコードの出力から作っていない。Issue #661）
    */
-  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING = "cc800c696c72a5ba2708099d2be1125c0238c95dce8fc9d2255975e9c2960f1c";
+  // #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（T2 と B1 の要求が変わるため。v12-h3e の作業木で測った値。旧 cc800c696c72a5ba2708099d2be1125c0238c95dce8fc9d2255975e9c2960f1c）
+  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING = "865603b1b7822c4a8a1e5f9ce348fa1d2ae57f6a29a00270b3893f7740d5cb95";
 
   const BEFORE_MATERIALS_DIGESTS: Readonly<Record<string, string>> = {
     "(4) C2 が 2 回落ちて止まる": "a1c6f1158b66a23deb3a2fefe0b0ea6a0c315529a826a9d67b5fad4d8960cf27",
@@ -1130,9 +1170,12 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
    */
   const BEFORE_REWRITE_DIGESTS: readonly string[] = [
     "2862685c26b5b71ffd5533075aee76793425d77d087328074b8945164dc2a7d0",
-    "8b69576c9c7358369a3f1bd6ce933a18b4f230b0730878cdc589f8bf70169348",
+    // 要約・納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（v12_calls.test_spec と T2 由来の納品物が
+    // 変わるため。v12-h3e の作業木で rewriteScript(true) を流して測った値。記録・終了コード・結果は直す前の値のまま。旧 8b69576c9c7358369a3f1bd6ce933a18b4f230b0730878cdc589f8bf70169348）
+    "04d39e4a16f4bfb6627abda726327d068383492ec1e3cb17eae89f93df542559",
     "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
-    "893727d4e8b6b1b2351e49a99c42749cb03247362021e1360e877c7a6723b68e",
+    // 旧 893727d4e8b6b1b2351e49a99c42749cb03247362021e1360e877c7a6723b68e
+    "25a4fb3cec100c9e400f6ec9ebe30f6d91ae7141a5eb5a311be67a208355494b",
     "739efece53a3ac3e8c4a54200572be386785198297fac5d4e3375bd44aad9b8b",
   ];
 
@@ -1239,7 +1282,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         // 2 回目の応答は拒否された R3 だけの書き直し（Issue #661）
         structured({ requirements: (good.mapping["requirements"] as readonly Record<string, unknown>[]).filter((entry) => entry["requirementId"] === "R3") }),
         structured(rejectR3),
-        structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+        structured(renamed(idsT2Response([...r1Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
         structured({ declaration: RUN_YAML }),
         structured(acceptAll(["R1", "R2", "R4"])),
       ],
@@ -1280,7 +1323,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         structured(good.mapping),
         structured(rejectR3),
         structured(missing),
-        structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+        structured(renamed(idsT2Response([...r1Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
         structured({ declaration: RUN_YAML }),
         structured(acceptAll(["R1", "R2", "R4"])),
       ],
@@ -1317,7 +1360,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
   const vocabularyCalls = () => [structured(good().entities), structured(good().fields), structured(good().behaviors)];
   /** 残る要件だけの T2・B1・B3' の応答 */
   const tailFor = (remaining: readonly string[]) => [
-    structured(renamed(t2Response([...(remaining.includes("R1") ? r1Tests() : []), ...(remaining.includes("R2") ? r2Tests() : []), ...(remaining.includes("R3") ? r3Tests() : []), ...(remaining.includes("R4") ? r4Tests() : [])], remaining))),
+    structured(renamed(idsT2Response([...(remaining.includes("R1") ? r1Tests() : []), ...(remaining.includes("R3") ? r3Tests() : []), ...(remaining.includes("R4") ? r4Tests() : [])], remaining))),
     structured({ declaration: RUN_YAML }),
     structured(acceptAll(remaining)),
   ];
@@ -1439,9 +1482,12 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
    */
   const BEFORE_REJECTED_REWRITE_DIGESTS: readonly string[] = [
     "713f28ac68a1035a0d2607c26174c258e4a6b55141b54a7edcfa7910522ef3ca",
-    "c8b6c68bc512ffd4c88d2217851d5840e169f44057aa59dce9502e6174c18bbd",
+    // 要約・納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（v12_calls.test_spec と T2 由来の納品物が
+    // 変わるため。v12-h3e の作業木で rejectedRewriteScript(true) を流して測った値。記録・終了コード・結果は直す前の値のまま。旧 c8b6c68bc512ffd4c88d2217851d5840e169f44057aa59dce9502e6174c18bbd）
+    "94c7718732facc7cef9f646bf0084b63c0a3d566e8177a53461674ce50dbdc05",
     "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
-    "5c49f248dff4909035db2744ec4ff9f3e2411c2b9212d5dafe0dd5e2aa3bf9fd",
+    // 旧 5c49f248dff4909035db2744ec4ff9f3e2411c2b9212d5dafe0dd5e2aa3bf9fd
+    "69aa0349e676c5135e8707abb9d60f831d5c672a71adf496d48abdbe64284553",
     "739efece53a3ac3e8c4a54200572be386785198297fac5d4e3375bd44aad9b8b",
   ];
   /** C3 が R3 を拒否した走りの 2 回目：`rewritten` なら R3 だけ（書き直し）、そうでなければ全要件（直す前の全体の作り直しの台本） */
@@ -1552,7 +1598,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         structured(good().mapping),
         structured(judgments(IDS, { R3: REJECT_R3_R4.R3 })),
         structured(missing),
-        structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+        structured(renamed(idsT2Response([...r1Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
         structured({ declaration: RUN_YAML }),
         structured(acceptAll(["R1", "R2", "R4"])),
       ],
@@ -3411,7 +3457,7 @@ describe("範囲の無い走りの境界の材料（collectBoundaries。`--pipel
     const atTable = await runScenario([structured(broken), structured(broken)], { flags: IDS_FLAGS, collectBoundaries: true });
     expect(atTable.result.stopped).toMatchObject({ stage: "vocabulary" });
     expect(atTable.result.boundaries).toEqual([]);
-    const badT2 = idsHead({ t2: t2Response([], []) }).slice(0, 6);
+    const badT2 = idsHead({ t2: idsT2Response([], []) }).slice(0, 6);
     const atT2 = await runScenario([...badT2, badT2[5]!], { flags: IDS_FLAGS, collectBoundaries: true });
     expect(atT2.result.stopped).toMatchObject({ stage: "test-spec" });
     expect(atT2.result.bundle).toBeNull();
@@ -4672,7 +4718,8 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     // 組・B1 の要求をそろえる（off は予約の接頭辞を見ない）
     const made = generateTests({ table: MAPPED_IDS, ledger: PROPERTY_LEDGER_VIEW, list: LIST });
     expect(made.tests.length).toBeGreaterThan(0);
-    const offT2 = renamed(t2Response());
+    // 手 3d（#624）：R2 の構造の検査もコードが作るので、off の応答の R2 の試験は作った試験だけにする（分類は off の一覧にあるので書く）
+    const offT2 = renamed(t2Response([...r1Tests(), ...r3Tests(), ...r4Tests()]));
     const offCalls = [
       structured(t1Of(LIST, offTable)),
       structured(acceptAll()),
@@ -4682,6 +4729,7 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     ];
     const off = await runScenario(offCalls, { flags: { ledger: true, searchRepair: true }, recordV12Flags: true });
     const on = await runScenario([...idsHead(), structured(acceptAll())], { flags: { ledger: true, searchRepair: true, ids: true }, recordV12Flags: true });
+    expect(off.result.stopped, JSON.stringify(off.result.stopped)).toBeNull();
     expect(off.result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(on.result.outcome).toEqual(off.result.outcome);
     expect(on.result.summary.exit_code).toBe(off.result.summary.exit_code);
@@ -4698,9 +4746,13 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     // ids on の C3・T2 の確かめ方は構造の検査の対象の欄を持つ（C3 は表の targets、T2 は checkTargets。Issue #594）。その欄を除いて比べる
     const withoutTargets = (text: string) => text.replace(/,\\n *\\"(?:targets|checkTargets)\\": \[[^\]]*\]/g, "");
     const offLater = later(off.recording.structured);
-    const onLater = later(on.recording.structured);
+    // 手 4d（#666）：ids on の B1 は「要る検査の骨組み」の塊と R-w11-07 の旗 ids の文を持つ（ids の走りだけ）。その分を戻して比べる
+    expect(later(on.recording.structured).filter((request) => REQUIRED_VALIDATIONS_BLOCK.test(request.input)).map((request) => request.schemaName)).toEqual([WRITE_V11A_SCHEMA_NAME]);
+    const onLater = later(on.recording.structured).map(withoutRequiredValidations);
     expect(onLater.map((request) => request.schemaName)).toEqual(["semantic-check", "test-spec", "declaration-v11a", "decl-check"]);
-    expect(onLater.slice(0, 2).every((request) => /\\"(?:targets|checkTargets)\\": \[/.test(JSON.stringify(request)))).toBe(true);
+    // 手 3d（#624）から構造の要件は T2 の要求に無いので、検査の対象の欄を持つのは C3 だけ
+    expect(/\\"targets\\": \[/.test(JSON.stringify(onLater[0]))).toBe(true);
+    expect(/\\"checkTargets\\": \[/.test(JSON.stringify(onLater[1]))).toBe(false);
     // ids on の T2 の R-tsp-16 は台帳の旗 ids の文（Issue #595）。その 1 文を ids off の文に戻して比べる
     const idsRules = ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true));
     const offRules = ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW));
@@ -4711,7 +4763,25 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     expect(onLater.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)?.rules).not.toEqual(
       offLater.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)?.rules,
     );
-    expect(onLater.map((request) => withoutTargets(JSON.stringify(withOffRules(request))))).toEqual(offLater.map((request) => withoutSource(JSON.stringify(request))));
+    // T2 の要求は、手 3d（#624）で要件の一覧・確かめ方・所属から構造の要件 R2 を除き、schema の operation・assertion を封じたので、
+    // T2 を除いた C3・B1・B3' を比べる（T2 の差は下で名指しで照らす）
+    const notT2 = (requests: readonly LlmStructuredRequest[]) => requests.filter((request) => request.schemaName !== TEST_SPEC_SCHEMA_NAME);
+    // B1 の固定した試験の分類には、T2 が分類しない構造の要件 R2 が無い（手 3d・#624。手 3c の除いた要件と同じ扱い）。off の R2 の 1 件を除いて比べる
+    const withoutR2Nature = (text: string) => text.replace('{\\n      \\"requirementId\\": \\"R2\\",\\n      \\"nature\\": \\"existence-only\\"\\n    },\\n    ', "");
+    expect(notT2(offLater).some((request) => withoutR2Nature(JSON.stringify(request)) !== JSON.stringify(request))).toBe(true);
+    // 手 3e（#625）：ids on の LLM の試験は場合から展開するので、試験 ID（case: と連番）と時計（定数）はコードが振る。B1 の「固定した試験」の
+    // 試験 ID と時計を両側から除いて比べる（ほかの欄は同じ）
+    const withoutIdClock = (text: string) =>
+      text.replace(/\\"id\\": \\"[^\\]*\\",(\\n *)\\"target\\"/g, '\\"id\\": \\"-\\",$1\\"target\\"').replace(/\\"clock\\": \\"[^\\]*\\"/g, '\\"clock\\": \\"-\\"');
+    expect(notT2(onLater).map((request) => withoutIdClock(withoutTargets(JSON.stringify(withOffRules(request)))))).toEqual(
+      notT2(offLater).map((request) => withoutIdClock(withoutR2Nature(withoutSource(JSON.stringify(request))))),
+    );
+    const t2Of = (requests: readonly LlmStructuredRequest[]) => requests.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
+    const listedIds = (request: LlmStructuredRequest) => (dataBlockOf(request.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] }).requirements.map((entry) => entry.id);
+    expect(listedIds(t2Of(onLater))).toEqual(IDS.filter((id) => id !== "R2"));
+    expect(listedIds(t2Of(offLater))).toEqual([...IDS]);
+    expect(t2Of(onLater).schema).toEqual(testSpecSchemaOf(PROPERTY_LEDGER_VIEW, true));
+    expect(t2Of(offLater).schema).toEqual(testSpecSchemaOf(PROPERTY_LEDGER_VIEW));
     // 出典の欄の差だけがある（T2 の行に出典がある・無い）
     expect(offLater.map((request) => JSON.stringify(request))).not.toEqual(onLater.map((request) => JSON.stringify(request)));
     // 納品物の宣言・試験の結果が同じ
@@ -4786,7 +4856,7 @@ describe("旗 v12.ids：既定値・選択肢の集合・空の集計の要件�
   /** 区分の項目に default を足した宣言 */
   const G_YAML = replaced(RUN_YAML, "          beta: ベータ\n", "          beta: ベータ\n        default: alpha\n");
   /** T2 の応答（R6・R7 の試験も、R4 のアプリ全体・見出しごと × 選択肢の空の試験も書かない＝値の要る試験だけ） */
-  const gT2 = () => renameIds(t2Response(), G_RENAME);
+  const gT2 = () => renameIds(idsT2Response(), G_RENAME);
   const gHead = (yaml: string): RecordedCall[] => [
     ...idsResponseList(idsResponsesOf(G_LIST, G_MAPPED, PROPERTY_LEDGER_VIEW)).map((output) => structured(output)),
     structured(acceptAll(G_IDS)),
@@ -4827,15 +4897,25 @@ describe("旗 v12.ids：既定値・選択肢の集合・空の集計の要件�
     }
     const spec = artifactOf(result.bundle, "artifacts/test-spec.json") as { readonly suite: TestSuite; readonly observes: Record<string, string> };
     const generatedIds = generatedOf(result) ?? [];
-    expect(generatedIds.length).toBe(6);
+    // 手 3d（#624）：R2 の構造の検査と R4 の画面の構造の確認もコードが作る
+    expect(generatedIds.length).toBe(8);
     expect(generatedIds.every((id) => id.startsWith(GENERATED_TEST_ID_PREFIX))).toBe(true);
     expect(spec.suite.tests.map((test) => test.id).slice(-generatedIds.length)).toEqual(generatedIds);
     expect(spec.suite.tests.filter((test) => isGeneratedTestId(test.id)).map((test) => test.id)).toEqual(generatedIds);
-    expect(generatedIds.map((id) => spec.observes[id])).toEqual(["empty-aggregate", "empty-aggregate", "empty-aggregate", "empty-aggregate", "default-value", "enum-membership"]);
-    // T2 の要求の一覧に R6・R7 が無い。B1 には作った試験が渡る
+    expect(generatedIds.map((id) => spec.observes[id])).toEqual([
+      "view-structure",
+      "view-structure",
+      "empty-aggregate",
+      "empty-aggregate",
+      "empty-aggregate",
+      "empty-aggregate",
+      "default-value",
+      "enum-membership",
+    ]);
+    // T2 の要求の一覧に R6・R7（と手 3d から構造の要件 R2）が無い。B1 には作った試験が渡る
     const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
     const listed = dataBlockOf(t2.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] };
-    expect(listed.requirements.map((requirement) => requirement.id)).toEqual([...IDS]);
+    expect(listed.requirements.map((requirement) => requirement.id)).toEqual(IDS.filter((id) => id !== "R2"));
     const write = recording.structured.find((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME)!;
     const shown = dataBlockOf(write.input, WRITE_V11A_DATA_NAMES[2]) as { tests: { id: string }[] };
     expect(shown.tests.map((test) => test.id).slice(-generatedIds.length)).toEqual(generatedIds);
@@ -4862,5 +4942,823 @@ describe("旗 v12.ids：既定値・選択肢の集合・空の集計の要件�
     const missed = reports[0]!.mismatches.filter((entry) => generatedIds.has(entry.testId) && spec.observes[entry.testId] === observes);
     expect(missed.length).toBeGreaterThan(0);
     if (detail !== undefined) expect(missed.map((entry) => entry.detail)).toContain(detail);
+  });
+});
+
+// ── 旗 v12.ids：構造の検査・画面と在ることの構造の確認をコードが作る走り（手 3d。Issue #624）──────────────────────────────
+
+describe("旗 v12.ids：構造・画面・在ることの要件を含む走りは、コードが作った試験で照らし、宣言が表どおりなら full・違えば full が出ない（Issue #624）", () => {
+  const flags: Partial<GenerationInputV11a> = { flags: { ledger: true, ids: true } };
+  const R6_TEXT = "札を持てる。";
+  const R7_TEXT = "項目の題名は文字列で、項目を登録できる。";
+  const D_LIST_BASE: RequirementList = {
+    ...BASE_LIST,
+    requirements: [
+      ...BASE_LIST.requirements,
+      { id: "R6", text: R6_TEXT, quote: R6_TEXT, position: { start: 0, end: R6_TEXT.length } },
+      { id: "R7", text: R7_TEXT, quote: R7_TEXT, position: { start: 0, end: R7_TEXT.length } },
+    ],
+  };
+  const D_PLAN = planOf(D_LIST_BASE);
+  const D_LIST = requirementsFromPlan(D_PLAN);
+  const D_SOURCE = D_LIST_BASE.requirements.map((requirement) => requirement.text).join("");
+  const D_IDS = [...IDS, "R6", "R7"] as const;
+  const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
+  /** 札の entity（e.tag）と項目（f.tag.label）。R6 だけが所属させる（画面の行は無い） */
+  const tagRow = (id: string, kind: "entity" | "field", entity: string | null, name: string, type: NameTable["rows"][number]["type"]) => ({
+    id,
+    kind,
+    entity,
+    name,
+    role: "要件 R6 が使う対象",
+    source: { requirementId: "R6", quote: "札" },
+    type,
+    options: null,
+    groupBy: null,
+    refEntity: null,
+  });
+  /** R6：画面が無く entity（札）を持つ在ることの要件。R7：checks 2 つ（field-type・action-kind）の構造の要件 */
+  const D_TABLE_ON: NameTable = {
+    ...TABLE_ON,
+    rows: [...TABLE_ON.rows, tagRow("e.tag", "entity", null, "tag", null), tagRow("f.tag.label", "field", "e.tag", "label", "string")],
+    ownership: [...TABLE_ON.ownership, { requirementId: "R6", roles: ["e.tag", "f.tag.label"].map(stated) }, { requirementId: "R7", roles: ["f.item.title", "o.addItem"].map(stated) }],
+    verification: [
+      ...TABLE_ON.verification,
+      { requirementId: "R6", kind: "fixed-test" },
+      { requirementId: "R7", kind: "structural", reason: "宣言の構造だけを求める", checks: ["field-type", "action-kind"] },
+    ],
+    classification: [...TABLE_ON.classification, { requirementId: "R6", nature: "existence-only" }, { requirementId: "R7", nature: "existence-only" }],
+  };
+  const D_RENAME = codeIdRenameOf(D_TABLE_ON);
+  const D_MAPPED: NameTable = withCheckTargets(withCodeIds(D_TABLE_ON));
+  /** T2 の応答（R2・R7 は要求に無い。R6 は entity だけなので試験は書かず分類だけ） */
+  const dT2 = () =>
+    renameIds(
+      // 手 3e（#625）：応答は同じ内容の場合の形
+      casesResponseOf({
+        classifications: [...NATURES.filter((entry) => entry.requirementId !== "R2"), { requirementId: "R6", nature: "existence-only" }],
+        tests: [...r1Tests(), ...r3Tests(), ...r4Tests()],
+      }),
+      D_RENAME,
+    );
+  /** 札の entity を足した宣言（`shown` なら札の表の画面も足す＝一覧がある） */
+  const withTag = (yaml: string, shown: boolean) =>
+    replaced(
+      shown ? replaced(yaml, "actions:\n", "  - name: tags\n    type: table\n    entity: tag\n    show: [label]\nactions:\n") : yaml,
+      "  - name: item\n    fields:\n",
+      "  - name: tag\n    fields:\n      label:\n        type: string\n  - name: item\n    fields:\n",
+    );
+  const D_YAML = withTag(RUN_YAML, true);
+  const dHead = (yaml: string): RecordedCall[] => [
+    ...idsResponseList(idsResponsesOf(D_LIST, D_MAPPED, PROPERTY_LEDGER_VIEW)).map((output) => structured(output)),
+    structured(acceptAll(D_IDS)),
+    structured(dT2()),
+    structured({ declaration: yaml }),
+  ];
+  const runD = (calls: readonly RecordedCall[]) => runScenario(calls, { plan: D_PLAN, source: D_SOURCE, ...flags });
+  function spyReports() {
+    const reports: { readonly mismatches: readonly { readonly testId: string; readonly detail: string }[]; readonly unresolved: readonly { readonly testId: string }[] }[] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      const evaluator = original(input);
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          const report = evaluator.runTests(app, context, correspondence);
+          reports.push(report);
+          return report;
+        },
+      };
+    });
+    return reports;
+  }
+  const generatedOf = (result: Awaited<ReturnType<typeof runD>>["result"]) =>
+    (artifactOf(result.bundle, "artifacts/test-spec.json") as { readonly generated_test_ids?: readonly string[] }).generated_test_ids ?? [];
+
+  it("正例：宣言が表どおりなら不一致 0・今までの門で full。T2 の成果物のコードが作った試験 ID の並びに構造の検査（R2・R7）と画面（R4）・在ること（R6）がある", async () => {
+    const reports = spyReports();
+    const { result, recording } = await runD([...dHead(D_YAML), structured(acceptAll(D_IDS))]);
+    expect(result.stopped, JSON.stringify(result.stopped)).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(reports.length).toBeGreaterThan(0);
+    for (const report of reports) {
+      expect(report.mismatches).toEqual([]);
+      expect(report.unresolved).toEqual([]);
+    }
+    const spec = artifactOf(result.bundle, "artifacts/test-spec.json") as { readonly suite: TestSuite; readonly observes: Record<string, string> };
+    const generatedIds = generatedOf(result);
+    expect(spec.suite.tests.map((test) => test.id).slice(-generatedIds.length)).toEqual(generatedIds);
+    expect(
+      spec.suite.tests.filter((test) => generatedIds.includes(test.id)).map((test) => [test.target.requirementId, test.operation, spec.observes[test.id]]),
+    ).toEqual([
+      ["R2", "structure", "view-structure"],
+      ["R4", "screen", "view-structure"],
+      ["R4", "aggregate", "empty-aggregate"],
+      ["R4", "aggregate", "empty-aggregate"],
+      ["R6", "screen", "existence"],
+      ["R7", "structure", "existence"],
+      ["R7", "structure", "existence"],
+    ]);
+    const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
+    const listed = dataBlockOf(t2.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] };
+    expect(listed.requirements.map((requirement) => requirement.id)).toEqual(["R1", "R3", "R4", "R6"]);
+    expectNoAcceptanceMaterial(recording.structured.map((request) => JSON.stringify(request)));
+  });
+
+  const negatives: readonly { readonly name: string; readonly yaml: string; readonly requirementId: string; readonly operation: string }[] = [
+    {
+      name: "宣言の項目の型が表と違う（題名を数にした）",
+      yaml: replaced(D_YAML, "  - name: item\n    fields:\n      title:\n        type: string\n", "  - name: item\n    fields:\n      title:\n        type: number\n"),
+      requirementId: "R7",
+      operation: "structure",
+    },
+    {
+      name: "画面が項目を見せない（担当者の表から名前を外した）",
+      yaml: replaced(D_YAML, "    show: [title, itemCount]", "    show: [itemCount]"),
+      requirementId: "R2",
+      operation: "structure",
+    },
+    {
+      name: "entity に create も一覧も無い（札の表を外した）",
+      yaml: withTag(RUN_YAML, false),
+      requirementId: "R6",
+      operation: "screen",
+    },
+  ];
+
+  it.each(negatives)("負例：$name 宣言は、コードが作った試験で不一致になり full が出ない（作り手で甘くならない）", async ({ yaml, requirementId, operation }) => {
+    const reports = spyReports();
+    const { result } = await runD([...dHead(yaml), repairDone(yaml)]);
+    console.log("NEG", JSON.stringify({ stopped: result.stopped, stages: stageIds(result), reports }).slice(0, 1500));
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.summary.verdict).not.toBe("full");
+    expect(reports.length).toBeGreaterThan(0);
+    if (result.bundle === null) throw new Error(JSON.stringify({ stopped: result.stopped, stages: stageIds(result) }));
+    const generatedIds = new Set(generatedOf(result));
+    const spec = artifactOf(result.bundle, "artifacts/test-spec.json") as { readonly suite: TestSuite };
+    const generatedTests = spec.suite.tests.filter((test) => generatedIds.has(test.id) && test.target.requirementId === requirementId && test.operation === operation);
+    expect(generatedTests.length).toBeGreaterThan(0);
+    const missed = reports[0]!.mismatches.filter((entry) => generatedTests.some((test) => test.id === entry.testId));
+    expect(missed.length, JSON.stringify(reports[0])).toBeGreaterThan(0);
+  });
+});
+
+// ── 旗 v12.ids：T2 は場合の形で書き、コードが展開する（手 3e。Issue #625）──────────────────────────────
+
+describe("旗 v12.ids：値の要る要件を含む走りは、場合から展開した試験で照らし、宣言が表どおりなら full・違えば full が出ない（Issue #625）", () => {
+  const IDS_FLAGS = { ledger: true, searchRepair: true, ids: true };
+  /** B4 の結果を記録する（評価口はそのまま） */
+  function spyMismatches() {
+    const reports: (readonly string[])[] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      const evaluator = original(input);
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          const report = evaluator.runTests(app, context, correspondence);
+          reports.push(report.mismatches.map((entry) => entry.testId));
+          return report;
+        },
+      };
+    });
+    return reports;
+  }
+
+  it("正例：宣言が表どおりなら不一致 0・今までの門で full。T2 の成果物の組は展開した試験（case: の連番）で、LLM が書いた場合の数と応答の文字数の欄がある", async () => {
+    const reports = spyMismatches();
+    const { result } = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS });
+    vi.restoreAllMocks();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(reports.every((mismatches) => mismatches.length === 0)).toBe(true);
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const spec = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.testSpec) as {
+      readonly suite: { readonly tests: readonly { readonly id: string }[] };
+      readonly llm_case_count?: number;
+      readonly llm_response_chars?: number;
+    };
+    const response = renamed(idsT2Response());
+    expect(spec.llm_case_count).toBe(response.cases.length);
+    expect(spec.llm_response_chars).toBe(JSON.stringify(response).length);
+    expect(spec.suite.tests.slice(0, response.cases.length).map((test) => test.id)).toEqual(response.cases.map((_, index) => `case:${String(index + 1)}`));
+  });
+
+  it("ids off（前の手の旗だけ on）の T2 の成果物には場合の数と応答の文字数の欄が無い", async () => {
+    const { result } = await runScenario(
+      [structured(t1Of(LIST, TABLE_ON)), structured(acceptAll()), structured(t2Response()), structured({ declaration: RUN_YAML }), structured(acceptAll())],
+      { flags: { ledger: true, searchRepair: true } },
+    );
+    if (result.bundle === null) throw new Error(JSON.stringify(result.stopped));
+    const spec = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.testSpec);
+    expect(spec).not.toHaveProperty("llm_case_count");
+    expect(spec).not.toHaveProperty("llm_response_chars");
+    // 手 3i（#653）：必要な試験の枠の要約の欄も無い
+    expect(spec).not.toHaveProperty("frame_remaining_total");
+    expect(spec).not.toHaveProperty("frame_generated_count");
+  });
+
+  it("手 3i（#653）：ids on で段を回した走りの T2 の成果物に必要な試験の枠の要約の欄があり、値が組と一致する（コードの試験の数・要求の一覧の要件ごとの 16 − コードの試験の数の合計）", async () => {
+    const { result, recording } = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS });
+    if (result.bundle === null) throw new Error(JSON.stringify(result.stopped));
+    const spec = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.testSpec) as {
+      readonly suite: { readonly tests: readonly { readonly id: string; readonly target: { readonly requirementId: string } }[] };
+      readonly generated_test_ids: readonly string[];
+      readonly frame_remaining_total?: number;
+      readonly frame_generated_count?: number;
+    };
+    const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME);
+    if (t2 === undefined) throw new Error("T2 の要求が無い");
+    const requested = requestListedIds(t2);
+    const generated = spec.suite.tests.filter((test) => spec.generated_test_ids.includes(test.id));
+    expect(spec.frame_generated_count).toBe(generated.length);
+    expect(spec.frame_remaining_total).toBe(requested.reduce((sum, id) => sum + 16 - generated.filter((test) => test.target.requirementId === id).length, 0));
+    expect(Object.keys(spec).slice(-2)).toEqual(["frame_remaining_total", "frame_generated_count"]);
+  });
+
+  const negatives = [
+    { name: "検査のしきい値が違う", yaml: replaced(RUN_YAML, "    expression: amount > 0", "    expression: amount > 3"), requirementId: "R1" },
+    { name: "操作の条件が違う", yaml: replaced(RUN_YAML, "    when: amount > 0", "    when: amount > 5"), requirementId: "R3" },
+    { name: "計算の式が違う", yaml: replaced(RUN_YAML, "    expression: base * 2", "    expression: base * 3"), requirementId: "R4" },
+  ];
+  it.each(negatives)("負例：$name 宣言は、場合から展開した試験で不一致になり full が出ない（展開で甘くならない）", async ({ yaml, requirementId }) => {
+    const reports = spyMismatches();
+    // 直す段は道具の直し（旗 search-repair を外す）。直した版も同じ宣言なので不一致が残る
+    const { result } = await runScenario([...idsHead({ yaml }), structured(acceptAll()), repairDone(yaml), structured(acceptAll())], { flags: { ledger: true, ids: true } });
+    vi.restoreAllMocks();
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.summary.verdict).not.toBe("full");
+    if (result.bundle === null) throw new Error(JSON.stringify({ stopped: result.stopped, stages: stageIds(result) }));
+    const spec = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.testSpec) as { readonly suite: { readonly tests: readonly { readonly id: string; readonly target: { readonly requirementId: string } }[] } };
+    const caseTests = new Set(spec.suite.tests.filter((test) => test.id.startsWith("case:") && test.target.requirementId === requirementId).map((test) => test.id));
+    expect(reports[0]?.some((testId) => caseTests.has(testId))).toBe(true);
+  });
+});
+
+// ── 旗 v12.ids：直す段の上限の停止を識別できる記録と、上限の塊（手 4c。Issue #665）──────────────────────────────
+
+describe("旗 v12.ids：直す段の上限の停止に上限の名前と数を残し、直す段の入力に上限の塊を足す（Issue #665）", () => {
+  // 直す段に入る宣言（R4 の計算の式が違う）。8 応答が全部道具の束（各 1 個）で、段内の上限に当たる
+  const WRONG_YAML = replaced(RUN_YAML, "    expression: base * 2", "    expression: base * 3");
+  const repairBundles = (): RecordedCall[] =>
+    Array.from({ length: 8 }, (_, index) => repairToolCall(`rt${String(index)}`, "static-check", WRONG_YAML));
+  const idsStop = () =>
+    runScenario([...idsHead({ yaml: WRONG_YAML }), structured(acceptAll()), ...repairBundles()], { flags: { ledger: true, ids: true } });
+  const LIMIT = { name: "repairStepTurns", max: 8, actual: 9 };
+
+  it("ids on：失敗の帰属に limit があり、要約の v12_calls.repair に段ごとの数と合計がある。終了コード・stop_reason・診断の形は今のまま", async () => {
+    const { result, recording } = await idsStop();
+    expect(result.stopped).toEqual({ stage: "repair", kind: "call-limit", limit: LIMIT });
+    expect(result.record.failure).toEqual({ stage: "repair", kind: "call-limit", limit: LIMIT });
+    expect(result.summary.failure).toEqual({ stage: "repair", kind: "call-limit", limit: LIMIT });
+    expect(result.summary.exit_code).toBe(1);
+    expect(result.summary.stop_reason).toBe("call-limit");
+    expect(result.summary.stop_class).toBe("call-limit");
+    expect(result.outcome).toEqual({ result: "failed", verdict: "none" });
+    expect(result.bundle).toBeNull();
+    // 診断の一覧の止めた段と分類は段と種類だけ（形は今のまま）
+    expect(diagnosticOf(result.diagnostics, DIAGNOSTICS_LISTING_FILE)["stopped"]).toEqual({ stage: "repair", kind: "call-limit" });
+    const calls = (result.summary as unknown as Record<string, Record<string, unknown>>)["v12_calls"];
+    if (calls === undefined) throw new Error("v12_calls が無い");
+    // 既存の鍵はそのままの順で、repair は末尾に足すだけ
+    expect(Object.keys(calls)).toEqual(["real_attempts", "judge_branch", "test_spec", "repair"]);
+    expect(calls["real_attempts"]).toEqual({ limit: 144, used: recording.structured.length + recording.tools.length });
+    expect(calls["judge_branch"]).toEqual({ limit: 80, used: 0 });
+    expect(calls["repair"]).toEqual({
+      steps: [
+        {
+          responses: 8,
+          tool_bundles: 8,
+          tools_executed: 8,
+          tool_calls_at_start: 0,
+          tool_calls_at_end: 8,
+          shape_retries: 0,
+          limit: LIMIT,
+          end: "call-limit",
+        },
+      ],
+      total: { responses: 8, tools_executed: 8 },
+    });
+    // 直す段の要求：上限の塊が入力の末尾にあり、値は上限の表の定数と段の始めの累計。全往復で同じ
+    expect(recording.tools).toHaveLength(8);
+    for (const request of recording.tools) {
+      expect(dataBlockOf(request.input, repairStage.REPAIR_STEP_LIMITS_DATA_NAME)).toEqual({
+        repairStepTurns: { max: 8, received: 0 },
+        toolCalls: { max: 24, usedAtStart: 0 },
+      });
+      expect(request.input).toBe(recording.tools[0]?.input);
+      expect(request.input.endsWith("</data>")).toBe(true);
+      // 手 4d（#666）：ids on の直す段は、上限の塊の後ろの末尾に「要る検査の骨組み」の塊を足す。それを外すと上限の塊が末尾
+      expect(REQUIRED_VALIDATIONS_BLOCK.test(request.input)).toBe(true);
+      expect(request.input.lastIndexOf("<data name=")).toBe(request.input.indexOf(`<data name="${repairStage.REPAIR_REQUIRED_VALIDATIONS_DATA_NAME}">`));
+      const withoutSkeleton = withoutRequiredValidations(request).input;
+      expect(withoutSkeleton.endsWith("</data>")).toBe(true);
+      expect(withoutSkeleton.lastIndexOf("<data name=")).toBe(withoutSkeleton.indexOf(`<data name="${repairStage.REPAIR_STEP_LIMITS_DATA_NAME}">`));
+    }
+    expectNoAcceptanceMaterial(recording.tools.map((request) => request.input));
+  });
+
+  it("ids on：記録と要約のどこにも会話・道具の引数・宣言の本文が無く、同じ台本で 2 回同じ値", async () => {
+    const first = await idsStop();
+    const second = await idsStop();
+    for (const value of [first.result.record, first.result.summary]) {
+      const text = JSON.stringify(value);
+      expect(text).not.toContain("base * 3");
+      expect(text).not.toContain("rt0");
+      expect(text).not.toContain("toolCalls\":[");
+      expect(text).not.toContain("entities:");
+    }
+    expect(second.result.record).toEqual(first.result.record);
+    expect(second.result.summary).toEqual(first.result.summary);
+    expect(second.result.diagnostics).toEqual(first.result.diagnostics);
+  });
+
+  it("ids off（旗を省いた走り・ledger だけ on）：同じ台本で段内の上限に当たっても、limit の欄・repair の欄・上限の塊が無い", async () => {
+    const offRuns = [
+      await runScenario([...head({ yaml: WRONG_YAML }), structured(acceptAll()), ...repairBundles()]),
+      await runScenario([...head({ yaml: WRONG_YAML, table: TABLE_ON }), structured(acceptAll()), ...repairBundles()], { flags: { ledger: true } }),
+    ];
+    for (const { result, recording } of offRuns) {
+      expect(result.stopped).toEqual({ stage: "repair", kind: "call-limit" });
+      expect(result.record.failure).toEqual({ stage: "repair", kind: "call-limit" });
+      expect(result.summary.exit_code).toBe(1);
+      expect(result.summary).not.toHaveProperty("v12_calls");
+      expect(recording.tools.length).toBeGreaterThan(0);
+      for (const request of recording.tools) expect(request.input).not.toContain(repairStage.REPAIR_STEP_LIMITS_DATA_NAME);
+    }
+  });
+
+  it("ids on で直す段の上限に触れない走り（初回で通る）には repair の欄が無い（直す段を呼んだ走りだけ）", async () => {
+    const { result } = await runScenario([...idsHead(), structured(acceptAll())], { flags: { ledger: true, ids: true } });
+    const calls = (result.summary as unknown as Record<string, Record<string, unknown>>)["v12_calls"];
+    expect(calls).toBeDefined();
+    expect(calls).not.toHaveProperty("repair");
+  });
+});
+
+// ── 窓口の条件（Issue #665 の申告 ④ の了承の条件 (i)(ii) と、ids off の search-repair の走り）──────────────────────────────
+//
+// 比較元のダイジェストは、**この Issue の直す前のコード**（統合の branch `integration/v12-h3d` の ed1ecd0）で同じ台本を流して取った値である。
+// 直したあとも ids off の走り（旗を省いた v1.1α・ledger だけ on・ledger と search-repair が on）の記録・要約・診断・要求・
+// stage-run.json と checkpoint はバイト列で同じであること（足すのは ids on の欄だけ）を固定する。
+
+/** 要求から締切の合図を外す（値の比較に入れない） */
+const requestBytes = (requests: readonly (LlmStructuredRequest | LlmToolRequest)[]): string =>
+  JSON.stringify(requests.map(({ signal: _signal, ...rest }) => rest));
+
+/** 段の走りの条件（固定の値。鍵は書かない） */
+const STAGE_CONDITIONS = {
+  model: "m",
+  effort: "high",
+  documents: [],
+  judge: { primary: "llm", fallback: null },
+  prompt_version: "v1.1a",
+  vocabulary_version: "v1",
+  contract_version: "v0.2",
+  factory_version: "0.0.0",
+  spec_engine_version: "0.0.0",
+  budget_usd: 0.3,
+  deadline_ms: 600_000,
+  timeout_ms: null,
+} as const;
+const STAGE_VERSIONS = { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0" } as const;
+
+/** 段の走りの結果から、checkpoint の JSON の文字列と stage-run.json の文字列を組む（cli と同じ関数） */
+async function stageRunFiles(outcome: Awaited<ReturnType<typeof runStageRangeV11a>>, range: { start: "name-table"; end: "judge" }) {
+  const checkpoints = outcome.boundaries.map((materials) =>
+    buildStageCheckpoint({ materials, versions: STAGE_VERSIONS, planSha256: "a".repeat(64), sourceSha256: "b".repeat(64) }),
+  );
+  const listed = await Promise.all(
+    checkpoints.map(async (checkpoint, index) => ({
+      boundary: outcome.boundaries[index]!.boundary,
+      path: `cp-${String(index)}.json`,
+      output_digest: await stageOutputDigest(checkpoint),
+    })),
+  );
+  const record = buildStageRunRecord({
+    range,
+    input: null,
+    planSha256: "a".repeat(64),
+    sourceSha256: "b".repeat(64),
+    checkpoints: listed,
+    conditions: STAGE_CONDITIONS,
+    outcome,
+    exitCode: outcome.stopped === null ? 0 : 1,
+  });
+  return { checkpointTexts: checkpoints.map(stageJsonText), listed, recordText: stageJsonText(record), record };
+}
+
+describe("窓口の条件（Issue #665）：ids off の要約・診断・stage-run.json はバイト列で不変、再開の照合と checkpoint は limit を読まない・書かない", () => {
+  const WRONG_YAML = replaced(RUN_YAML, "    expression: base * 2", "    expression: base * 3");
+  const repairBundles = (): RecordedCall[] =>
+    Array.from({ length: 8 }, (_, index) => repairToolCall(`rt${String(index)}`, "static-check", WRONG_YAML));
+  const RANGE = { start: "name-table", end: "judge" } as const;
+
+  /** 比較元（ed1ecd0）で同じ台本を流して取ったダイジェスト */
+  const BEFORE = {
+    v11aStop: "5cd420e515ce58a7c2e3345fec20a70350e653cd946085bedb19c6a003fcfdea",
+    ledgerStop: "fa1933e340a873a9e19eed42eb7166e705296cac3533062ef89387f47da5f9fb",
+    searchRepairDone: "6d90268e43a278eb6d0f46a278dc3a989850d6b45c85724efc07f2dadeafacb2",
+    searchRepairStop: "9f7878877188b7147c613c5235c07e8d9131ff4a96d866643e3af313e33de8ca",
+    stageRunOff: "8b653f6dd51a142b9753c3cc3d6a02770c939258c400a0eadacaa0199cc4e849",
+  } as const;
+
+  const digestOf = async (scenario: Awaited<ReturnType<typeof runScenario>>): Promise<string> =>
+    sha256Hex(
+      JSON.stringify({
+        result: scenario.result,
+        structured: requestBytes(scenario.recording.structured),
+        tools: requestBytes(scenario.recording.tools),
+      }),
+    );
+
+  it("(i) 旗を省いた v1.1α の走り：直す段の上限で止まる台本の結果（記録・要約・診断）と要求が直す前とバイト列で同じ", async () => {
+    const run = await runScenario([...head({ yaml: WRONG_YAML }), structured(acceptAll()), ...repairBundles()]);
+    expect(run.result.stopped).toEqual({ stage: "repair", kind: "call-limit" });
+    expect(await digestOf(run)).toBe(BEFORE.v11aStop);
+  });
+
+  it("(i) ids off（ledger だけ on）の走り：同じ台本の結果と要求が直す前とバイト列で同じ", async () => {
+    const run = await runScenario([...head({ yaml: WRONG_YAML, table: TABLE_ON }), structured(acceptAll()), ...repairBundles()], {
+      flags: { ledger: true },
+      recordV12Flags: true,
+    });
+    expect(run.result.stopped).toEqual({ stage: "repair", kind: "call-limit" });
+    expect(await digestOf(run)).toBe(BEFORE.ledgerStop);
+  });
+
+  it("ids off で search-repair だけ on（と ledger）の走り：道具付きの直す段を通って完走する台本と、止まる台本の結果と要求が直す前とバイト列で同じ", async () => {
+    const done = await runScenario(
+      [...searchHead({ yaml: MIS2 }), structured(acceptAll()), repairDone(MIS1), structured(acceptAll()), repairDone(SEARCH_YAML), structured(acceptAll())],
+      { flags: { searchRepair: true }, recordV12Flags: true },
+    );
+    expect(done.result.outcome.verdict).toBe("full");
+    expect(done.recording.tools.length).toBeGreaterThan(0);
+    expect(await digestOf(done)).toBe(BEFORE.searchRepairDone);
+    const stop = await runScenario([...head({ yaml: WRONG_YAML, table: TABLE_ON }), structured(acceptAll()), ...repairBundles()], {
+      flags: { ledger: true, searchRepair: true },
+      recordV12Flags: true,
+    });
+    expect(stop.result.stopped).not.toBeNull();
+    expect(await digestOf(stop)).toBe(BEFORE.searchRepairStop);
+  });
+
+  it("(i) 旗を省いた段の走り（T1 → ⑦）：直す段の上限で止まる台本の stage-run.json と checkpoint の文字列が直す前とバイト列で同じ", async () => {
+    const recording = createCheckedRecordingClient([...head({ yaml: WRONG_YAML }), structured(acceptAll()), ...repairBundles()]);
+    const outcome = await runStageRangeV11a({ ...inputOf(recording.client), range: RANGE });
+    expect(outcome.stopped).toEqual({ stage: "repair", kind: "call-limit" });
+    const files = await stageRunFiles(outcome, RANGE);
+    const digest = await sha256Hex(JSON.stringify({ record: files.recordText, checkpoints: files.checkpointTexts }));
+    expect(digest).toBe(BEFORE.stageRunOff);
+    expect((files.record as Record<string, unknown>)["stopped"]).toEqual({ stage: "repair", kind: "call-limit" });
+  });
+
+  it("(ii) ids on の段の走り：stopped にだけ limit が足され、checkpoint は直す段の結果に依らず同じで limit を持たず、再開の照合は limit を読まない（stopped を差し替えても同じ結果）", async () => {
+    const flags = { flags: { ledger: true, ids: true } } as const;
+    const stopRecording = createCheckedRecordingClient([...idsHead({ yaml: WRONG_YAML }), structured(acceptAll()), ...repairBundles()]);
+    const stopped = await runStageRangeV11a({ ...inputOf(stopRecording.client, flags), range: RANGE });
+    expect(stopped.stopped).toEqual({ stage: "repair", kind: "call-limit", limit: { name: "repairStepTurns", max: 8, actual: 9 } });
+    // 対照：同じ境界までの台本で、直す段が done を返して最後まで流れる走り
+    const doneRecording = createCheckedRecordingClient([...idsHead({ yaml: WRONG_YAML }), structured(acceptAll()), repairDone(WRONG_YAML), structured(acceptAll())]);
+    const passed = await runStageRangeV11a({ ...inputOf(doneRecording.client, flags), range: RANGE });
+    expect(passed.stopped).toBeNull();
+
+    const stopFiles = await stageRunFiles(stopped, RANGE);
+    const doneFiles = await stageRunFiles(passed, RANGE);
+    // checkpoint：境界は T1''／T2・T2／B1 の 2 つで、直す段の止まり方に依らずバイト列で同じ。limit も上限の名前も書かない
+    expect(stopFiles.checkpointTexts).toHaveLength(2);
+    expect(stopFiles.checkpointTexts).toEqual(doneFiles.checkpointTexts);
+    for (const text of stopFiles.checkpointTexts) {
+      expect(text).not.toContain('"limit":');
+      expect(text).not.toContain("repairStepTurns");
+    }
+    // stage-run.json：ids on の stopped にだけ limit が載る
+    expect((stopFiles.record as Record<string, unknown>)["stopped"]).toEqual(stopped.stopped);
+
+    // 再開の照合：stopped の limit を外した記録・stopped を null にした記録と、照合の結果が同じ（limit を読まない）
+    const strippedRecord = { ...stopFiles.record, stopped: { stage: "repair", kind: "call-limit" } };
+    const nullRecord = { ...stopFiles.record, stopped: null };
+    const boundaryIndex = stopped.boundaries.findIndex((entry) => entry.boundary === "t1-t2");
+    const verifyWith = (recordText: string) =>
+      verifyStageInput({
+        start: "test-spec",
+        checkpointText: stopFiles.checkpointTexts[boundaryIndex] ?? null,
+        checkpointFile: `cp-${String(boundaryIndex)}.json`,
+        recordText,
+        plan: PLAN,
+        planSha256: "a".repeat(64),
+        sourceSha256: "b".repeat(64),
+        vocabularyVersion: "v1",
+        contractVersion: "v0.2",
+      });
+    const withLimit = await verifyWith(stopFiles.recordText);
+    if (!withLimit.ok) throw new Error(`通るはず：${withLimit.code}`);
+    expect(await verifyWith(stageJsonText(strippedRecord))).toEqual(withLimit);
+    expect(await verifyWith(stageJsonText(nullRecord))).toEqual(withLimit);
+    // 再開の材料にも limit が無い
+    expect(JSON.stringify(withLimit)).not.toContain('"limit":');
+    expect(JSON.stringify(withLimit)).not.toContain("repairStepTurns");
+  });
+});
+
+// ── 旗 v12.ids：B1 と直す段に要る検査の骨組みを渡す（手 4d。Issue #666）──────────────────────────────
+
+describe("旗 v12.ids：B1（初回・作り直し）と直す段に、その時点の有効な組から導いた要る検査の骨組みを渡す（Issue #666）", () => {
+  const IDS_ONLY = { ledger: true, ids: true };
+  /** 検査の名前だけを表の項目の名前と別にした宣言（同じ式。結び付けは名前で結ぶので結ばない） */
+  const RENAMED_YAML = replaced(RUN_YAML, "  - name: amount\n    entity: item", "  - name: positive\n    entity: item");
+  const R07 = WRITE_V11A_RULE_DEFINITIONS.find((definition) => definition.id === "R-w11-07");
+  const writeOf = (requests: readonly LlmStructuredRequest[]) => requests.filter((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME);
+  type Entry = { readonly entity: string | null; readonly name: string; readonly rowId: string; readonly rowKind: string; readonly testIds: readonly string[]; readonly conflict: boolean };
+  /** 納品物の試験の組（T2 で固定した組）の validate の試験 */
+  /** B4 の結果（不一致・未解決の試験 ID）を版ごとに記録する（評価口はそのまま） */
+  function spyRunTests() {
+    const reports: { readonly mismatches: readonly string[]; readonly unresolved: readonly string[] }[] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      const evaluator = original(input);
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          const report = evaluator.runTests(app, context, correspondence);
+          reports.push({ mismatches: report.mismatches.map((entry) => entry.testId), unresolved: report.unresolved.map((entry) => entry.testId) });
+          return report;
+        },
+      };
+    });
+    return reports;
+  }
+  const validateTestsOf = (bundle: AssembledBundle | null) =>
+    (artifactOf(bundle, V11A_ARTIFACT_NAMES.testSpec) as { readonly suite: { readonly tests: readonly FixedTest[] } }).suite.tests.filter(
+      (test) => test.operation === "validate",
+    );
+
+  it("書く台本：B1 の要求の「固定した試験」の後に骨組みがあり（項目 amount の validate 試験だけ・競合なし）、R-w11-07 は旗 ids の文。B1 が骨組みどおりの検査を書けば初版の B4 の validate は結び付き、不一致 0・今までの門で full", async () => {
+    const reports = spyRunTests();
+    const { result, recording } = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_ONLY });
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const [write] = writeOf(recording.structured);
+    if (write === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+    const names = [...write.input.matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
+    expect(names).toEqual([...WRITE_V11A_DATA_NAMES, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME]);
+    const skeleton = dataBlockOf(write.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME) as readonly Entry[];
+    const amountRow = MAPPED_IDS.rows.find((row) => row.kind === "field" && row.name === "amount");
+    const validated = validateTestsOf(result.bundle).filter((test) => test.target.roleId === amountRow?.id);
+    expect(validated.length).toBeGreaterThan(0);
+    expect(skeleton).toEqual([{ entity: "item", name: "amount", rowId: amountRow?.id, rowKind: "field", testIds: validated.map((test) => test.id), conflict: false }]);
+    expect(write.rules).toContain(WRITE_V11A_IDS_R07_DEFINITION.text);
+    expect(write.rules).not.toContain(R07?.text);
+    // 初版の B4：validate の試験は不一致・未解決に無い
+    expect(reports[0]?.mismatches.filter((id) => skeleton[0]?.testIds.includes(id))).toEqual([]);
+    expect(reports[0]?.unresolved.filter((id) => skeleton[0]?.testIds.includes(id))).toEqual([]);
+    expectNoAcceptanceMaterial([write.input, ...(write.rules ?? [])]);
+  });
+
+  it("書かない台本（検査の名前だけ別）：初版は今までどおり不一致になり（結び直さない）、直す段の入力の末尾に B1 と同じ骨組みが載る。直した版が骨組みどおりなら full", async () => {
+    const reports = spyRunTests();
+    const { result, recording } = await runScenario([...idsHead({ yaml: RENAMED_YAML }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())], {
+      flags: IDS_ONLY,
+    });
+    const [write] = writeOf(recording.structured);
+    if (write === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+    const skeleton = dataBlockOf(write.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME) as readonly Entry[];
+    const testIds = skeleton.flatMap((entry) => entry.testIds);
+    expect(testIds.length).toBeGreaterThan(0);
+    expect(reports[0]?.mismatches).toEqual(expect.arrayContaining(testIds));
+    expect(recording.tools.length).toBeGreaterThan(0);
+    for (const request of recording.tools) {
+      expect(dataBlockOf(request.input, repairStage.REPAIR_REQUIRED_VALIDATIONS_DATA_NAME)).toEqual(skeleton);
+      expect(request.input.lastIndexOf("<data name=")).toBe(request.input.indexOf(`<data name="${repairStage.REPAIR_REQUIRED_VALIDATIONS_DATA_NAME}">`));
+      expect(request.rules).toEqual(repairStage.REPAIR_RULES);
+    }
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+
+  it("書かない台本のまま直しても名前が別なら不一致が残り、full は出ない（骨組みを渡しても結び付かない版は今までどおり不一致）", async () => {
+    const { result } = await runScenario([...idsHead({ yaml: RENAMED_YAML }), structured(acceptAll()), repairDone(RENAMED_YAML), structured(acceptAll())], { flags: IDS_ONLY });
+    expect(result.outcome.verdict).not.toBe("full");
+  });
+
+  it("off（旗を省いた走り・ledger だけ on）：同じ台本で B1・直す段に骨組みの塊が無く、R-w11-07 は元の文", async () => {
+    const offRuns = [
+      await runScenario([...head({ yaml: RENAMED_YAML }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())]),
+      await runScenario([...head({ yaml: RENAMED_YAML, table: TABLE_ON }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())], { flags: { ledger: true } }),
+    ];
+    for (const { recording } of offRuns) {
+      const writes = writeOf(recording.structured);
+      expect(writes.length).toBeGreaterThan(0);
+      for (const request of writes) {
+        expect(request.input).not.toContain(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME);
+        expect(request.rules).toContain(R07?.text);
+        expect(request.rules).not.toContain(WRITE_V11A_IDS_R07_DEFINITION.text);
+      }
+      expect(recording.tools.length).toBeGreaterThan(0);
+      for (const request of recording.tools) expect(request.input).not.toContain(repairStage.REPAIR_REQUIRED_VALIDATIONS_DATA_NAME);
+    }
+  });
+
+  it("作り直し（旗 search-repair と ids）：作り直しの B1 の要求も「固定した試験」の後に同じ骨組みを持ち、R-w11-07 は旗 ids の文", async () => {
+    const { result, recording } = await runScenario(
+      [
+        ...idsHead({ yaml: RENAMED_YAML }),
+        structured(acceptAll()),
+        // 手 4e（#667）：要求する検査（item.amount）が宣言に無く entity が在るので、往復は追加の場所への欄だけの直しになる。
+        // 何も返さない直し（同じ版）を 2 回で停滞させ、作り直しへ進める
+        structured({ replacements: [], disputes: [] }),
+        structured(acceptAll()),
+        structured({ replacements: [], disputes: [] }),
+        structured(acceptAll()),
+        structured({ declaration: RUN_YAML }),
+        structured(acceptAll()),
+      ],
+      { flags: { ledger: true, searchRepair: true, ids: true } },
+    );
+    const writes = writeOf(recording.structured);
+    expect(writes).toHaveLength(2);
+    const [first, rewrite] = writes;
+    if (first === undefined || rewrite === undefined) throw new Error("前提が壊れた");
+    const names = [...rewrite.input.matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
+    expect(names).toEqual([...WRITE_V11A_DATA_NAMES, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, WRITE_V11A_REWRITE_DATA_NAME]);
+    expect(dataBlockOf(rewrite.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME)).toEqual(dataBlockOf(first.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME));
+    expect(rewrite.rules).toContain(WRITE_V11A_IDS_R07_DEFINITION.text);
+    expect(rewrite.rules).not.toContain(R07?.text);
+    // 手 4e（#667）：往復は追加の場所への欄だけの直し（道具付きの直す段を呼ばない）。欄だけの直しの入力に骨組みの塊は載せない
+    // （失敗の一覧の追加の場所が同じ事実を持つ）。道具付きの直す段に骨組みが載ることは「書かない台本」の試験が固定する
+    expect(recording.tools).toEqual([]);
+    const fields = recording.structured.filter((request) => request.schemaName === FIELD_REPAIR_SCHEMA_NAME);
+    expect(fields).toHaveLength(2);
+    for (const request of fields) expect(request.input).not.toContain(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME);
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+
+  it("同じ台本で 2 回同じ要求（骨組みは決定的）。段の記録・要約・納品物は骨組みの塊の有無で変わらない（記録を足さない）", async () => {
+    const first = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_ONLY });
+    const second = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_ONLY });
+    expect(JSON.stringify(second.recording.structured.map(({ signal: _signal, ...rest }) => rest))).toBe(
+      JSON.stringify(first.recording.structured.map(({ signal: _signal, ...rest }) => rest)),
+    );
+    for (const value of [first.result.record, first.result.summary]) expect(JSON.stringify(value)).not.toContain(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME);
+    expect(first.result.bundle?.artifacts.some((artifact) => artifact.text.includes(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME))).toBe(false);
+  });
+});
+
+// ── 旗 v12.ids：要求する検査が無い失敗を追加の場所として欄だけの直しに渡す（手 4e。Issue #667）──────────────────────────────
+//
+// 原因 2 の台本の合成：初版は検査 0（`validations: []`）で、名前の異なる 2 項目（R1 の金額と題名）の validate の試験が結び付かない
+// （金額は正常・異常・境界の 3 件＝T2 の門が ruled の要件に境界を要るので 3 件、題名は正常 1 件の、計 4 件）。
+// 旗 ids の走りは、要る検査の場所（結び付けと同じ関数）が宣言に無く entity が在るので追加の場所 2 つに写し、欄だけの直し（構造化
+// 出力）1 回で本文を受け、コードが validations の末尾に挿し込み、静的チェック・B3・B3'・B4 を全部掛け直す。
+
+describe("旗 v12.ids：要求する検査が宣言に無い失敗を追加の場所に写し、欄だけの直しの本文をコードが挿し込んで門を全部掛け直す（Issue #667）", () => {
+  const IDS_SEARCH = { flags: { ledger: true, searchRepair: true, ids: true } };
+  /** 初版：検査 0 */
+  const NOVAL_YAML = replaced(RUN_YAML, "validations:\n  - name: amount\n    entity: item\n    expression: amount > 0\n", "validations: []\n");
+  /** 正しい版：金額と題名の検査 */
+  const FIXED_YAML = replaced(RUN_YAML, "    expression: amount > 0\n", "    expression: amount > 0\n  - name: title\n    entity: item\n    expression: title != \"\"\n");
+  const AMOUNT = "validation:item.amount";
+  const TITLE = "validation:item.title";
+  const body = (name: string, expression: string): string => [`- name: ${name}`, "  entity: item", `  expression: ${expression}`].join("\n");
+  const add = (amount: string, title: string | null = "title != \"\""): RecordedCall =>
+    structured({
+      replacements: [{ location: AMOUNT, element: body("amount", amount) }, ...(title === null ? [] : [{ location: TITLE, element: body("title", title) }])],
+      disputes: [],
+    });
+  /** R1 の validate の試験 4 件（金額の正常・異常・境界と、題名の正常） */
+  const titleTest = () =>
+    rawTest({
+      id: "r1-title",
+      requirementId: "R1",
+      targetKind: "field",
+      roleId: "f.item.title",
+      operation: "validate",
+      observes: "validation",
+      input: { "f.item.title": "a" },
+      expected: ok("true"),
+    });
+  const r1Four = () => [...r1Tests(), titleTest()];
+  const idsT2 = () => idsT2Response([...r1Four(), ...r3Tests(), ...r4Tests()]);
+  const head667 = (yaml: string = NOVAL_YAML) => idsHead({ yaml, t2: idsT2() });
+
+  it("二点測定（後）：追加の場所 2 → 欄だけの直し 1 回 → 挿し込み → B4 で結び付き不一致 0 で採って full。全文の直しの段は呼ばれない（往復 1・段の呼び出し 1・道具 0）", async () => {
+    const { result, recording } = await runScenario([...head667(), structured(acceptAll()), add("amount > 0"), structured(acceptAll())], IDS_SEARCH);
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(recording.tools).toEqual([]);
+    const fields = fieldRequests(recording.structured);
+    expect(fields).toHaveLength(1);
+    const [request] = fields;
+    if (request === undefined) throw new Error("前提が壊れた");
+    expect(locationEnumOf(request)).toEqual([AMOUNT, TITLE]);
+    expect(countStage(result, "repair")).toBe(1);
+    // 欄だけの直しは 1 往復に論理 1（形のやり直しなし）
+    expect(result.record.stages.filter((stage) => stage.stage === "repair").map((stage) => stage.calls)).toEqual([1]);
+    expect(totalsOf(result.bundle)).toEqual([
+      ["write", 4, true],
+      ["repair", 0, true],
+    ]);
+    expect(declarationOf(result.bundle)).toBe(FIXED_YAML);
+    expect(roundsOf(result.bundle)).toEqual([{ hand: "field-repair", locations: 2, unlocated: 0, refused: null, additions: 2 }]);
+    expect(request.input).not.toContain(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME);
+    expectNoAcceptanceMaterial([request.input, ...(request.rules ?? [])]);
+  });
+
+  it("二点測定（前）：ids off（search-repair だけ on）の同じ初版は場所なし 4 で全文の直しの段（道具付き）へ流れる。記録に追加の欄が無い", async () => {
+    const { result, recording } = await runScenario(
+      [...head({ yaml: NOVAL_YAML, t2: t2Response([...r1Four(), ...r2Tests(), ...r3Tests(), ...r4Tests()]) }), structured(acceptAll()), repairDone(FIXED_YAML), structured(acceptAll())],
+      SEARCH,
+    );
+    expect(recording.tools).toHaveLength(1);
+    expect(fieldRequests(recording.structured)).toEqual([]);
+    const rounds = roundsOf(result.bundle);
+    expect(rounds).toEqual([{ hand: "repair", locations: 0, unlocated: 4, refused: null }]);
+    for (const round of rounds) expect("additions" in round).toBe(false);
+    expect(result.outcome.verdict).toBe("full");
+  });
+
+  it("負例 (a)：追加した検査の式が正常／異常を逆にし、題名の式も誤れば B4 の不一致が減らず採らない（門）。次の往復の入力は一番良い版のまま", async () => {
+    const { result, recording } = await runScenario(
+      [...head667(), structured(acceptAll()), add("amount < 0", "title == \"\""), structured(acceptAll()), add("amount > 0"), structured(acceptAll())],
+      IDS_SEARCH,
+    );
+    expect(fieldDeclarations(recording.structured)).toEqual([NOVAL_YAML, NOVAL_YAML]);
+    expect(totalsOf(result.bundle)).toEqual([
+      ["write", 4, true],
+      ["repair", 4, false],
+      ["repair", 0, true],
+    ]);
+    expect(result.outcome.verdict).toBe("full");
+    expect(recording.tools).toEqual([]);
+  });
+
+  it("負例 (b)：2 回目の往復で同じ（entity・名前）は既に在るので置換の場所になり、追加が重複しない。記録に往復ごとの追加の場所の数", async () => {
+    const { result, recording } = await runScenario(
+      [
+        ...head667(),
+        structured(acceptAll()),
+        add("amount > 0", "title == \"\""),
+        structured(acceptAll()),
+        structured({ replacements: [{ location: TITLE, element: body("title", "title != \"\"") }], disputes: [] }),
+        structured(acceptAll()),
+      ],
+      IDS_SEARCH,
+    );
+    const fields = fieldRequests(recording.structured);
+    expect(fields.map(locationEnumOf)).toEqual([[AMOUNT, TITLE], [TITLE]]);
+    expect(roundsOf(result.bundle)).toEqual([
+      { hand: "field-repair", locations: 2, unlocated: 0, refused: null, additions: 2 },
+      { hand: "field-repair", locations: 1, unlocated: 0, refused: null, additions: 0 },
+    ]);
+    expect(totalsOf(result.bundle)).toEqual([
+      ["write", 4, true],
+      ["repair", 1, true],
+      ["repair", 0, true],
+    ]);
+    expect(declarationOf(result.bundle)).toBe(FIXED_YAML);
+    expect(result.outcome.verdict).toBe("full");
+  });
+
+  it("負例 (d)：存在しない entity の名前を書いた追加は形で落ち、1 回だけ直させる（続けば malformed で段が止まる）", async () => {
+    const wrong = structured({ replacements: [{ location: AMOUNT, element: body("amount", "amount > 0").replace("entity: item", "entity: nowhere") }], disputes: [] });
+    const { result } = await runScenario([...head667(), structured(acceptAll()), wrong, add("amount > 0"), structured(acceptAll())], IDS_SEARCH);
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    // 1 往復に論理 1（形 1 を含めて応答 2）のまま
+    expect(result.record.stages.filter((stage) => stage.stage === "repair").map((stage) => [stage.calls, stage.retries.shape])).toEqual([[2, 1]]);
+    const stopped = await runScenario([...head667(), structured(acceptAll()), wrong, wrong], IDS_SEARCH);
+    expect(stopped.result.outcome.verdict).not.toBe("full");
+    expect(stopped.recording.tools).toEqual([]);
+  });
+
+  it("中身のある流れの書き方の検査の節（validations: [ … ]）の初版は追加の場所を作らず、K3 の前（ids off）と同じ経路をとる（欄だけの直しを呼ばず、道具付きの直す段へ流れる。止まり方も off と同じ）", async () => {
+    // spec-engine の読み取りは `{ }` の写像を読めないので、読める中身のある流れの書き方は名前だけの並びで、静的チェックに落ちる。
+    // 静的チェックに落ちた版は追加の場所を作らない（場所の純粋な試験は locate.test.ts）。挿し込みを断って往復を消費する経路は無い
+    const flow = replaced(NOVAL_YAML, "validations: []\n", "validations: [amount]\n");
+    const on = await runScenario([...head667(flow), structured(acceptAll()), repairDone(FIXED_YAML), structured(acceptAll())], IDS_SEARCH);
+    const off = await runScenario(
+      [...head({ yaml: flow, t2: t2Response([...r1Four(), ...r2Tests(), ...r3Tests(), ...r4Tests()]) }), structured(acceptAll()), repairDone(FIXED_YAML), structured(acceptAll())],
+      SEARCH,
+    );
+    for (const run of [on, off]) {
+      expect(fieldRequests(run.recording.structured)).toEqual([]);
+      expect(run.recording.tools).toHaveLength(1);
+    }
+    expect(on.result.outcome).toEqual(off.result.outcome);
+    expect(on.result.stopped).toEqual(off.result.stopped);
+    expect(stageIds(on.result).slice(-2)).toEqual(stageIds(off.result).slice(-2));
+  });
+
+  it("同じ台本で 2 回同じ値（要求・記録・納品物）", async () => {
+    const script = () => [
+      ...head667(),
+      structured(acceptAll()),
+      add("amount > 0", "title == \"\""),
+      structured(acceptAll()),
+      structured({ replacements: [{ location: TITLE, element: body("title", "title != \"\"") }], disputes: [] }),
+      structured(acceptAll()),
+    ];
+    const first = await runScenario(script(), IDS_SEARCH);
+    const second = await runScenario(script(), IDS_SEARCH);
+    expect(JSON.stringify(second.recording.structured.map(({ signal: _signal, ...rest }) => rest))).toBe(
+      JSON.stringify(first.recording.structured.map(({ signal: _signal, ...rest }) => rest)),
+    );
+    expect(roundsOf(second.result.bundle)).toEqual(roundsOf(first.result.bundle));
+    expect(second.result.bundle?.artifacts).toEqual(first.result.bundle?.artifacts);
   });
 });

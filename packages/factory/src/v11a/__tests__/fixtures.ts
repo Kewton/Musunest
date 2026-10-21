@@ -9,7 +9,7 @@
 // 受入の題材の言葉は使わない。
 import type { ConfirmedPlan, NormalizedAppSpec } from "@musunest/appspec-schema";
 import { normalizeSpec } from "@musunest/spec-engine";
-import type { LlmClient, LlmStructuredRequest, LlmToolRequest } from "../../llm.js";
+import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest } from "../../llm.js";
 import { createFakeLlmClient, uncheckedBecause, type RecordedCall, type RecordedStructuredCall } from "../../llm-fake.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
 import type { PromptDocument, RuleDefinition } from "../../stages/prompt.js";
@@ -27,8 +27,13 @@ import { STRUCTURAL_ASSERTIONS, STRUCTURAL_TARGET_KINDS, type StructuralAssertio
 import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
 import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
-import { TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
-import { WRITE_V11A_SCHEMA_NAME } from "../stages/write.js";
+import { TEST_SPEC_RETAINED_DATA_NAME, TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
+import {
+  WRITE_V11A_IDS_R07_DEFINITION,
+  WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME,
+  WRITE_V11A_RULE_DEFINITIONS,
+  WRITE_V11A_SCHEMA_NAME,
+} from "../stages/write.js";
 
 const requirement = (id: string, text: string): Requirement => ({
   id,
@@ -498,6 +503,19 @@ export const LEDGER_ROWS_2C: readonly PropertyRow[] = PROPERTY_LEDGER.filter((en
       : entry,
 );
 
+// ── 手 3h の前の台帳（Issue #652）──────────────────────────────────
+
+/**
+ * 手 3h（#652）の前の台帳の行＝今の台帳の view-structure の試験の型から代わりの対象の種類（項目）を外したもの（#651 までの台帳。
+ * 所属が項目の行だけの要件にコードが試験を作らない）。二点測定の「前」の側に使う
+ */
+export const LEDGER_ROWS_3G: readonly PropertyRow[] = PROPERTY_LEDGER.map(
+  (entry): PropertyRow => (entry.t2 === null || entry.t2.fallback === null ? entry : { ...entry, t2: { ...entry.t2, fallback: null } }),
+);
+
+/** #651 までの台帳の導出（Issue #652 の二点測定の「前」） */
+export const LEDGER_VIEW_3G: LedgerView = deriveLedgerView(LEDGER_ROWS_3G);
+
 // ── 旗 on の要求の差の範囲（Issue #548）──────────────────────────────
 
 const ENUM_MEMBERSHIP_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
@@ -525,6 +543,24 @@ export function withoutEnumMembership(value: unknown): unknown {
     return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, withoutEnumMembership(entry)]));
   }
   return value;
+}
+
+/** 入力の塊「要る検査の骨組み」（B1・直す段で同じ名前。旗 ids の走りだけ。Issue #666） */
+export const REQUIRED_VALIDATIONS_BLOCK = new RegExp(`\\n<data name="${WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME}">\\n[\\s\\S]*?\\n</data>`);
+
+/**
+ * 旗 ids の要求から、要る検査の骨組みの分（Issue #666）を除く：入力の塊「要る検査の骨組み」を外し、B1 の R-w11-07 を旗 ids の文から
+ * 元の文に戻す。ほかの欄は触らない（B1・直す段のどちらの要求にも使える）
+ */
+export function withoutRequiredValidations<T extends { readonly input: string; readonly rules?: readonly string[] }>(request: T): T {
+  const original = WRITE_V11A_RULE_DEFINITIONS.find((definition) => definition.id === WRITE_V11A_IDS_R07_DEFINITION.id)?.text ?? "";
+  return {
+    ...request,
+    input: request.input.replace(REQUIRED_VALIDATIONS_BLOCK, ""),
+    ...(request.rules === undefined
+      ? {}
+      : { rules: request.rules.map((text) => (text === WRITE_V11A_IDS_R07_DEFINITION.text ? original : text)) }),
+  };
 }
 
 /** 2 つの JSON の値の違う場所（葉の位置。並びの長さが違えばその並びの位置）を、見つけた順に返す */
@@ -1105,4 +1141,168 @@ export function renameIds<T>(value: T, rename: ReadonlyMap<string, string>): T {
     return item;
   };
   return walk(value) as T;
+}
+
+// ── 旗 v12.ids の T2 の場合の形の応答（Issue #625）──────────────────────────
+
+/**
+ * v1 の形の T2 の応答（分類と raw の試験の並び）を、同じ内容の場合の形（旗 `v12.ids` の T2 の応答）に書き換える。試験 ID・操作・
+ * 対象の種類・時計・assertion・参照データの対象の要件 ID と種類・期待の null の欄を落とし、値の欄（JSON の文字列）はそのまま写す。
+ * 構造の検査（operation が structure）は場合で書けないので例外にする（試験の材料の誤り）。observes は計算の行（target.kind が
+ * computation）の場合だけ写し、ほかは null にする（項目・entity・操作の行の性質はコードが台帳から埋める。#653）
+ */
+export function casesResponseOf(output: { readonly classifications?: readonly unknown[]; readonly tests: readonly unknown[] }): {
+  readonly classifications: readonly unknown[];
+  readonly cases: readonly Record<string, unknown>[];
+} {
+  const cases = output.tests.map((raw) => {
+    const test = raw as {
+      readonly target: { readonly requirementId: string; readonly kind?: string; readonly roleId: string };
+      readonly kind: string;
+      readonly operation: string;
+      readonly observes: string;
+      readonly input: string;
+      readonly inputContract: { readonly rowId: string; readonly targetRowId: string | null; readonly emptyEntities: readonly string[] };
+      readonly referenceData: readonly { readonly rowId: string; readonly target: { readonly roleId: string }; readonly values: string }[];
+      readonly expected: { readonly kind: "ok" | "error"; readonly value: string | null; readonly code: string | null };
+    };
+    if (test.operation === "structure") throw new Error("構造の検査は場合の形で書けない（試験の材料の誤り）");
+    return {
+      requirementId: test.target.requirementId,
+      targetId: test.target.roleId,
+      kind: test.kind,
+      observes: test.target.kind === "computation" ? test.observes : null,
+      input: { rowId: test.inputContract.rowId, values: test.input },
+      targetRowId: test.inputContract.targetRowId,
+      rows: test.referenceData.map((row) => ({ rowId: row.rowId, entityId: row.target.roleId, values: row.values })),
+      expected: test.expected.kind === "ok" ? { kind: "ok", value: test.expected.value } : { kind: "error", code: test.expected.code },
+      emptyEntities: test.inputContract.emptyEntities,
+    };
+  });
+  return { classifications: output.classifications ?? [], cases };
+}
+
+/**
+ * 手 3e（#625）の場合の形（observes を全部の行の場合に写した旧形）。#653 で項目・entity・操作の行の場合の observes は null に
+ * なったので、旧形の負例（計算でない行に性質を書いた場合）を組むときだけ使う
+ */
+export function legacyCasesResponseOf(output: { readonly classifications?: readonly unknown[]; readonly tests: readonly unknown[] }): {
+  readonly classifications: readonly unknown[];
+  readonly cases: readonly Record<string, unknown>[];
+} {
+  const converted = casesResponseOf(output);
+  return {
+    classifications: converted.classifications,
+    cases: converted.cases.map((entry, index) => ({ ...entry, observes: (output.tests[index] as { readonly observes: string }).observes })),
+  };
+}
+
+/** 展開した試験から、試験 ID と時計を除く（二点測定で v1 の形の応答の組と比べる。#625） */
+export function withoutIdAndClock<T extends { readonly id: string; readonly clock: string }>(test: T): Omit<T, "id" | "clock"> {
+  const { id: _id, clock: _clock, ...rest } = test;
+  return rest;
+}
+
+/** 要求のデータの塊「要件の一覧」の要件 ID（無ければ空） */
+export function requestListedIds(request: LlmStructuredRequest): readonly string[] {
+  const block = request.input.split('<data name="要件の一覧">\n')[1]?.split("\n</data>")[0];
+  if (block === undefined) return [];
+  return ((JSON.parse(block) as { readonly requirements?: readonly { readonly id: string }[] }).requirements ?? []).map((requirement) => requirement.id);
+}
+
+/** 要求の「書き直さない要件」の塊の要件 ID（無ければ空。旗 `v12.ids` の T2 の中身のやり直し。Issue #651） */
+export function requestRetainedIds(request: LlmStructuredRequest): readonly string[] {
+  const block = request.input.split(`<data name="${TEST_SPEC_RETAINED_DATA_NAME}">\n`)[1]?.split("\n</data>")[0];
+  return block === undefined ? [] : (JSON.parse(block) as readonly string[]);
+}
+
+/**
+ * 旗 `v12.ids` の T2 の中身のやり直し（Issue #651）で、要求の「書き直さない要件」に従う偽物の口。台本の応答から、その塊の要件 ID
+ * の分類と場合だけを除いて返す（ほかは変えない。塊の無い要求・場合の形でない応答はそのまま）。T2 でない要求は `inner` へそのまま渡す
+ */
+export function retainingT2Client(inner: LlmClient): LlmClient {
+  return {
+    async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+      const response = await inner.callStructured<T>(request);
+      const retained = request.schemaName === TEST_SPEC_SCHEMA_NAME ? new Set(requestRetainedIds(request)) : new Set<string>();
+      const output = response.output as unknown;
+      if (retained.size === 0 || typeof output !== "object" || output === null || !Array.isArray((output as { cases?: unknown }).cases)) {
+        return response;
+      }
+      const keep = (item: unknown): boolean => {
+        const id = typeof item === "object" && item !== null ? (item as { requirementId?: unknown }).requirementId : undefined;
+        return typeof id !== "string" || !retained.has(id);
+      };
+      const raw = output as { readonly classifications?: unknown; readonly cases: readonly unknown[] };
+      return {
+        ...response,
+        output: {
+          ...raw,
+          classifications: Array.isArray(raw.classifications) ? raw.classifications.filter(keep) : raw.classifications,
+          cases: raw.cases.filter(keep),
+        } as T,
+      };
+    },
+    callWithTools: (request: LlmToolRequest) => inner.callWithTools(request),
+  };
+}
+
+/**
+ * 旗 `v12.ids` の T2 の束（Issue #626）の偽物の口。記録した T2 の応答（全要件を書いた 1 本）を「回の台本」として持ち、束の要求
+ * （「要件の一覧」の要件 ID の組で見分ける）ごとに独立の位置で読み、その束の要件の分類と場合だけに絞って返す（**順序に依らない**）。
+ * 記録は束の位置の最大まで順に読む（同時の束が同じ記録を二重に読まない）。どの束の要件でもない分類・場合（持ち越しの要件など）は
+ * 捨てる。ただし `home` に挙げた要件 ID の分類・場合は、その要件の前の要件を持つ束（無ければ最初の束）へ残す——`home` は
+ * `[要件 ID, 残す束の先頭の要件 ID]` の組。場合の形でない応答（負例・ids off の応答）は絞らずにそのまま返す。T2 でない要求は
+ * `inner` へそのまま渡す。中身のやり直し（Issue #651）の要求の一覧は束の書き直す要件だけなので、位置は要件 ID の組が交わる前の
+ * 要求と同じ束として数える（束は互いに交わらない）
+ */
+export function bundledT2Client(inner: LlmClient, home: readonly (readonly [string, string])[] = []): LlmClient {
+  const script: { readonly output: unknown; readonly usage: LlmStructuredResponse<unknown>["usage"] }[] = [];
+  const cursors: { readonly head: string; readonly ids: Set<string>; at: number }[] = [];
+  let pulling: Promise<void> = Promise.resolve();
+  return {
+    async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+      if (request.schemaName !== TEST_SPEC_SCHEMA_NAME) return inner.callStructured<T>(request);
+      const ids = requestListedIds(request);
+      const cursor =
+        cursors.find((entry) => (ids.length === 0 ? entry.ids.size === 0 : ids.some((id) => entry.ids.has(id)))) ??
+        (() => {
+          const made = { head: ids[0] ?? "", ids: new Set<string>(), at: 0 };
+          cursors.push(made);
+          return made;
+        })();
+      for (const id of ids) cursor.ids.add(id);
+      const at = cursor.at;
+      cursor.at += 1;
+      const ready = pulling.then(async () => {
+        while (script.length <= at) {
+          const response = await inner.callStructured<unknown>(request);
+          script.push({ output: response.output, usage: response.usage });
+        }
+      });
+      pulling = ready.catch(() => undefined);
+      await ready;
+      const entry = script[at];
+      if (entry === undefined) throw new Error("前提が壊れた：T2 の台本の位置");
+      const output = entry.output;
+      if (typeof output !== "object" || output === null || !Array.isArray((output as { cases?: unknown }).cases)) {
+        return { output: output as T, usage: entry.usage };
+      }
+      const homed = new Set(home.filter(([, head]) => cursor.head === head).map(([id]) => id));
+      const keep = (item: unknown): boolean => {
+        const id = typeof item === "object" && item !== null ? (item as { requirementId?: unknown }).requirementId : undefined;
+        return typeof id === "string" && (ids.includes(id) || homed.has(id));
+      };
+      const raw = output as { readonly classifications?: unknown; readonly cases: readonly unknown[] };
+      return {
+        output: {
+          ...raw,
+          classifications: Array.isArray(raw.classifications) ? raw.classifications.filter(keep) : raw.classifications,
+          cases: raw.cases.filter(keep),
+        } as T,
+        usage: entry.usage,
+      };
+    },
+    callWithTools: (request: LlmToolRequest) => inner.callWithTools(request),
+  };
 }

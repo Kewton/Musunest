@@ -5,7 +5,7 @@ import { BUILD_CLI_RECORD_SCHEMA } from "../cli-plan.js";
 import { ARTIFACTS_DIR } from "../bundle.js";
 import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { requirementsFromPlan } from "../pipeline.js";
-import { fixtureNonRequirementList, fixtureNonRequirementTable, fixtureTable } from "./__tests__/fixtures.js";
+import { fixtureList, fixtureNonRequirementList, fixtureNonRequirementTable, fixtureTable } from "./__tests__/fixtures.js";
 import {
   buildSearchRepairArtifact,
   buildStageCheckpoint,
@@ -454,5 +454,77 @@ describe("T2 の成果物の generated_test_ids（旗 v12.ids の走りだけ。
     // 空の並びも書く（ids on で作った試験が 0 の走り）
     const empty = JSON.parse(specText(buildV11aArtifacts({ ...base, testSpec: { ...base.testSpec, generatedTestIds: [] } }))) as Record<string, unknown>;
     expect(empty["generated_test_ids"]).toEqual([]);
+  });
+});
+
+describe("T2 の成果物の llm_case_count・llm_response_chars（旗 v12.ids の走りだけ。Issue #625）", () => {
+  it("渡さなければ欄を書かない（今の記録とバイト列で同じ）。渡せば末尾に場合の数と応答の文字数を書き、既存の欄（suite の形を含む）・ほかの記録は今のまま", () => {
+    const specText = (artifacts: ReturnType<typeof buildV11aArtifacts>) => artifacts.find((artifact) => artifact.path === V11A_ARTIFACT_NAMES.testSpec)!.text;
+    const base = input();
+    const plain = buildV11aArtifacts(base);
+    const plainKeys = Object.keys(JSON.parse(specText(plain)) as object);
+    expect(plainKeys).not.toContain("llm_case_count");
+    expect(plainKeys).not.toContain("llm_response_chars");
+    const withIds = buildV11aArtifacts({ ...base, testSpec: { ...base.testSpec, generatedTestIds: [], cases: { count: 12, responseChars: 3456 } } });
+    const parsed = JSON.parse(specText(withIds)) as Record<string, unknown>;
+    expect(Object.keys(parsed)).toEqual([...plainKeys, "generated_test_ids", "llm_case_count", "llm_response_chars"]);
+    expect(parsed["llm_case_count"]).toBe(12);
+    expect(parsed["llm_response_chars"]).toBe(3456);
+    const { generated_test_ids: _ids, llm_case_count: _count, llm_response_chars: _chars, ...rest } = parsed;
+    expect(rest).toEqual(JSON.parse(specText(plain)));
+    expect(withIds.filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.testSpec)).toEqual(
+      plain.filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.testSpec),
+    );
+  });
+});
+
+describe("T2 の成果物の frame_remaining_total・frame_generated_count（旗 v12.ids の段を回した走りだけ。Issue #653）", () => {
+  const specText = (artifacts: ReturnType<typeof buildV11aArtifacts>) => artifacts.find((artifact) => artifact.path === V11A_ARTIFACT_NAMES.testSpec)!.text;
+
+  it("渡さなければ欄を書かない（今の記録とバイト列で同じ）。渡せば場合の数の欄の後ろに枠の要約を書き、既存の欄・ほかの記録は今のまま", () => {
+    const base = input();
+    const plain = buildV11aArtifacts(base);
+    const withCases = buildV11aArtifacts({ ...base, testSpec: { ...base.testSpec, generatedTestIds: [], cases: { count: 12, responseChars: 3456 } } });
+    const withFrames = buildV11aArtifacts({
+      ...base,
+      testSpec: { ...base.testSpec, generatedTestIds: [], cases: { count: 12, responseChars: 3456 }, frames: { remaining: 70, generated: 10 } },
+    });
+    expect(Object.keys(JSON.parse(specText(plain)) as object)).not.toContain("frame_remaining_total");
+    expect(Object.keys(JSON.parse(specText(withCases)) as object)).not.toContain("frame_remaining_total");
+    const parsed = JSON.parse(specText(withFrames)) as Record<string, unknown>;
+    expect(Object.keys(parsed)).toEqual([...Object.keys(JSON.parse(specText(withCases)) as object), "frame_remaining_total", "frame_generated_count"]);
+    expect(parsed["frame_remaining_total"]).toBe(70);
+    expect(parsed["frame_generated_count"]).toBe(10);
+    const { frame_remaining_total: _remaining, frame_generated_count: _generated, ...rest } = parsed;
+    expect(rest).toEqual(JSON.parse(specText(withCases)));
+    expect(withFrames.filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.testSpec)).toEqual(
+      plain.filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.testSpec),
+    );
+  });
+
+  it("checkpoint には載せない（場合の数と同じ。再開した組には無い）", async () => {
+    const table = fixtureTable();
+    const tableSha256 = await nameTableSha256(table);
+    const list = fixtureList();
+    const judgments = ["R1", "R2", "R3", "R4"].map((requirementId) => ({ requirementId, verdict: "accept" as const }));
+    const carryOver = await deriveCarryOver({ list, table, semanticCheck: { tableSha256, judgments } });
+    const spec = input().testSpec;
+    const materials = {
+      boundary: "t2-b1" as const,
+      table,
+      tableSha256,
+      semanticCheck: { tableSha256, targets: judgments.map((judgment) => judgment.requirementId), judgments },
+      judgeAdvice: undeterminedJudgeAdvice(list, table),
+      carryOver,
+    };
+    const frozen = { suite: spec.suite, sha256: spec.sha256, observes: new Map(), coverage: spec.coverage, natures: new Map() };
+    const options = { versions: { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0" }, planSha256: "a".repeat(64), sourceSha256: "b".repeat(64) };
+    const without = buildStageCheckpoint({ materials: { ...materials, testSpec: frozen }, ...options });
+    const withFrames = buildStageCheckpoint({
+      materials: { ...materials, testSpec: { ...frozen, cases: { count: 1, responseChars: 2 }, frames: { remaining: 3, generated: 4 } } },
+      ...options,
+    });
+    expect(stageJsonText(withFrames)).toBe(stageJsonText(without));
+    expect(stageJsonText(withFrames)).not.toContain("frame");
   });
 });

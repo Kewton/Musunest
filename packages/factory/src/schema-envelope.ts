@@ -179,6 +179,7 @@ export const ENVELOPE_SCHEMA_NAME_V12 = "stage-envelope-v12";
  * ほかの段は v1.1α と同じ枝。後の手の段は、その旗が on のときここで足す：旗 `v12.ids` が on なら、末尾に C1 の 3 束
  * （`vocabulary-*`）と C2（`mapping`）の枝を足す（schema は段が渡すものと同じ導出。Issue #593。C2 は検査の種類ごとの欄。Issue #682）。
  * `ids` を省けば off。
+ * T2 の枝は旗 `ids` からも導く（on なら operation の enum に structure が無く assertion は null だけ。段が渡すものと同じ導出。#624）。
  */
 export function stageEnvelopeEntriesV12Of(flags: Pick<V12Flags, "ledger"> & Partial<Pick<V12Flags, "ids">>): readonly StageEnvelopeEntry[] {
   const ledger = ledgerViewOf(flags);
@@ -189,7 +190,7 @@ export function stageEnvelopeEntriesV12Of(flags: Pick<V12Flags, "ledger"> & Part
           entry.stage === NAME_TABLE_SCHEMA_NAME
             ? { stage: entry.stage, schema: nameTableSchemaOf(ledger) }
             : entry.stage === TEST_SPEC_SCHEMA_NAME
-              ? { stage: entry.stage, schema: testSpecSchemaOf(ledger) }
+              ? { stage: entry.stage, schema: testSpecSchemaOf(ledger, flags.ids === true) }
               : entry,
         );
   if (flags.ids !== true) return base;
@@ -208,10 +209,15 @@ const PIPELINE_V12_FLAGS = fromPublicV12Flags(V12_PIPELINE_FLAGS);
  *
  * Issue #682 で C2 の段の schema を検査の種類ごとの欄に替えたが、この一覧の C2 の枝は**旧の schema（`legacyMappingSchemaOf`）の
  * まま**にする——旗 ids off の v1.2 の走りが送る封筒のバイト列を変えないためだけに残す（旧の枝は段の要求には使わない）。ids on の
- * 走りは識別子 `v1.2-ids` の一覧（`STAGE_ENVELOPE_ENTRIES_V12_IDS`）を送る。
+ * 走りは識別子 `v1.2-ids` の一覧（`STAGE_ENVELOPE_ENTRIES_V12_IDS`）を送る。T2 の枝も同じ理由で ids off の導出
+ * （`testSpecSchemaOf(ledger, false)`）のままにする（ids on の場合の形は識別子 `v1.2-ids` の一覧だけに載る。#624・#625）。
  */
 export const STAGE_ENVELOPE_ENTRIES_V12: readonly StageEnvelopeEntry[] = stageEnvelopeEntriesV12Of(PIPELINE_V12_FLAGS).map((entry) =>
-  entry.stage === MAPPING_SCHEMA_NAME ? { stage: entry.stage, schema: legacyMappingSchemaOf(ledgerViewOf(PIPELINE_V12_FLAGS)) } : entry,
+  entry.stage === MAPPING_SCHEMA_NAME
+    ? { stage: entry.stage, schema: legacyMappingSchemaOf(ledgerViewOf(PIPELINE_V12_FLAGS)) }
+    : entry.stage === TEST_SPEC_SCHEMA_NAME
+      ? { stage: entry.stage, schema: testSpecSchemaOf(ledgerViewOf(PIPELINE_V12_FLAGS), false) }
+      : entry,
 );
 
 /** 識別子 `v1.2` の全段で送る封筒の schema（起動時に 1 度だけ組む。全段で**同じ実体**を使う） */
@@ -219,7 +225,7 @@ export const ENVELOPE_SCHEMA_V12: Record<string, unknown> = buildEnvelopeSchema(
 
 /**
  * 識別子 `v1.2-ids` の封筒に入れる段の一覧（旗 ids が on の v1.2 の走り。`V12_PIPELINE_FLAGS` から導き、C2 の枝は段が渡すものと
- * 同じ導出＝検査の種類ごとの欄。Issue #682）。一覧・段の順は識別子 `v1.2` と同じで、違う枝は C2 だけ
+ * 同じ導出＝検査の種類ごとの欄。Issue #682）。一覧・段の順は識別子 `v1.2` と同じで、違う枝は T2（場合の形。#624・#625）と C2 だけ
  */
 export const STAGE_ENVELOPE_ENTRIES_V12_IDS: readonly StageEnvelopeEntry[] = stageEnvelopeEntriesV12Of(PIPELINE_V12_FLAGS);
 

@@ -13,6 +13,9 @@
 //      だけ（観測する性質は増えない・確かめ方の種類が 1 つ増える）。台帳の点検が受理で除く確かめ方の形を見ること
 //   9. 手 3c（#595）：期待の値の書き手が default-value・enum-membership で code、empty-aggregate はコードが作る範囲（アプリ全体と
 //      見出しごと × 選択肢）つき。旗 ids の T2 の文はコードが作る範囲だけを「作らない」に差し替え、ほかの行の文は今のまま
+//  10. 手 3d（#624）：view-structure・existence の行に C4 の試験の型（screen × screen・entity × screen・normal だけ・期待は ok の
+//      定数・入力は空の写像・参照データは空・書き手 code）があり、写しの行もそれを写す。旗 ids の T2 の文は構造の検査と screen 操作を
+//      「作らない」とし、off の文（t2 の並び）は変えない
 //
 // LLM を呼ばない。外部の API を呼ばない。受入の題材の言葉は使わない。
 import { describe, expect, it } from "vitest";
@@ -815,7 +818,14 @@ describe("期待の値の書き手：default-value・enum-membership は code、
       expect(row.t2?.referenceTargets, row.id).toEqual([]);
     }
     // 旗 ids の文があるのはコードが作る行だけ。ほかの行は null（今の文をそのまま使う）
-    expect(PROPERTY_LEDGER.filter((row) => row.rules.t2Ids !== null).map((row) => row.id)).toEqual(["default-value", "enum-membership", "empty-aggregate"]);
+    // 手 3d（#624）で、所属の行だけで決まる view-structure・existence の行にも旗 ids の文を足した
+    expect(PROPERTY_LEDGER.filter((row) => row.rules.t2Ids !== null).map((row) => row.id)).toEqual([
+      "view-structure",
+      "existence",
+      "default-value",
+      "enum-membership",
+      "empty-aggregate",
+    ]);
   });
 
   it("旗 ids の T2 の文：既定値・選択肢の集合は作らない文、空の集計はアプリ全体と見出しごと × 選択肢の境界・異常を作らない文の後ろに今の文（行ごと・月の見出しごとに使う）をそのまま続ける。題材の言葉は無い", () => {
@@ -826,19 +836,26 @@ describe("期待の値の書き手：default-value・enum-membership は code、
     expect(ids).toContain("アプリ全体（type の scope が app）");
     expect(ids).toContain("選択肢の見出しごと（groupBy の kind が enum）");
     expect(ids).toContain("行ごと（type の scope が row）の集計と月の見出しごと（groupBy の kind が month）");
-    expect(ids.endsWith(EMPTY_AGGREGATE.rules.t2 ?? "（無い）")).toBe(true);
+    // 手 3e（#625）：行ごと・月の見出しごとに使う文は、今の文の欄の名前を場合の形（rows・targetId・emptyEntities）にしたもの。
+    // 今の文（off）はそのまま
+    expect(ids.includes(EMPTY_AGGREGATE.rules.t2 ?? "（無い）")).toBe(false);
+    expect(ids).toContain("emptyEntities にその行の type.aggregate.entity の id を入れ、参照の行（rows）にその entity の行を置かない");
+    expect(ids).toContain("どちらも対象（targetId）はその計算の行、observes は empty-aggregate、期待の kind は ok にする。");
+    for (const field of ["referenceData", "inputContract", "operation", "code を null"]) expect(ids, field).not.toContain(field);
     const text = JSON.stringify(PROPERTY_LEDGER.map((row) => row.rules.t2Ids));
     for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text).not.toContain(word);
   });
 
-  it("導出：旗 ids の T2 の文の並びは、台帳の T2 の文の並びの各行を旗 ids の文に差し替えたもの（行の数・順は同じ）。旗 ids の文を持たない台帳では同じ", () => {
+  it("導出：旗 ids の T2 の文の並びは、台帳の T2 の文の並びの各行を旗 ids の文に差し替え、T2 の文の無い行の旗 ids の文（view-structure・existence。#624）を台帳の順に足したもの。旗 ids の文を持たない台帳では同じ", () => {
     const view = PROPERTY_LEDGER_VIEW;
-    expect(view.t2IdsFormTexts).toHaveLength(view.t2FormTexts.length);
-    const evaluableWithText = PROPERTY_LEDGER.filter((row) => row.state !== "registered-unsupported" && row.rules.t2 !== null);
-    expect(view.t2IdsFormTexts).toEqual(evaluableWithText.map((row) => row.rules.t2Ids ?? row.rules.t2));
+    const evaluable = PROPERTY_LEDGER.filter((row) => row.state !== "registered-unsupported");
+    const evaluableWithText = evaluable.filter((row) => row.rules.t2 !== null);
+    expect(view.t2IdsFormTexts).toEqual(evaluable.flatMap((row) => { const text = row.rules.t2Ids ?? row.rules.t2; return text === null ? [] : [text]; }));
+    // T2 の文の無い行の旗 ids の文は view-structure・existence の 2 つだけ（off の並びは変えない）
+    expect(view.t2IdsFormTexts).toHaveLength(view.t2FormTexts.length + 2);
     expect(view.t2FormTexts).toEqual(evaluableWithText.map((row) => row.rules.t2));
     const withoutIds = deriveLedgerView(PROPERTY_LEDGER.map((row) => ({ ...row, rules: { ...row.rules, t2Ids: null } })).map((row) =>
-      row.t2 === null ? row : { ...row, t2: { ...row.t2, expectedWriter: "llm-written-code-checked" as const } },
+      row.t2 === null ? row : row.t1 === null ? { ...row, t2: null } : { ...row, t2: { ...row.t2, expectedWriter: "llm-written-code-checked" as const } },
     ).map((row) => (row.t2Aggregate === null ? row : { ...row, t2Aggregate: { ...row.t2Aggregate, codeRanges: [] } })));
     expect(withoutIds.t2IdsFormTexts).toEqual(withoutIds.t2FormTexts);
   });
@@ -875,6 +892,155 @@ describe("期待の値の書き手：default-value・enum-membership は code、
     const reverted = COPY_TEXT.replace("| code（アプリ全体・見出しごと × 選択肢）／llm-written-code-checked（行ごと・見出しごと × 月） |", "| llm-written-code-checked |");
     expect(reverted).not.toBe(COPY_TEXT);
     expect(copyDefects(reverted, PROPERTY_LEDGER)).toEqual(["写しの empty-aggregate の行がコードと違う"]);
+  });
+});
+
+// ── 10. 手 3d：view-structure・existence の C4 の試験の型（Issue #624）──────────────────
+
+describe("view-structure・existence の行：C4 の試験の型（screen × screen・entity × screen・normal だけ・期待は ok の定数・書き手 code。Issue #624）", () => {
+  const VIEW = PROPERTY_LEDGER.find((row) => row.id === "view-structure");
+  const EXISTENCE = PROPERTY_LEDGER.find((row) => row.id === "existence");
+  if (VIEW?.t2 == null || EXISTENCE?.t2 == null) throw new Error("前提が壊れた：view-structure・existence の試験の型が無い");
+
+  it("行の欄：view-structure は screen × screen（組ごとの対象の種類の列は screen）、existence は entity × screen。どちらも必須の kind は normal だけ・期待は ok の定数・入力は空の写像・参照データは空・1 本以上・書き手 code", () => {
+    expect([VIEW.t2?.targetKind, VIEW.t2?.targetKinds, VIEW.t2?.operation]).toEqual(["screen", ["screen"], "screen"]);
+    expect([EXISTENCE.t2?.targetKind, EXISTENCE.t2?.targetKinds, EXISTENCE.t2?.operation]).toEqual(["entity", ["entity"], "screen"]);
+    for (const row of [VIEW, EXISTENCE]) {
+      expect(row.t2?.requiredKinds, row.id).toEqual(["normal"]);
+      expect(row.t2?.expected, row.id).toEqual({ kind: "ok", valueType: "json-boolean", equals: "constant" });
+      expect(row.t2?.input, row.id).toBe("empty-record");
+      expect(row.t2?.referenceTargets, row.id).toEqual([]);
+      expect(row.t2?.minTests, row.id).toBe(1);
+      expect(row.t2?.expectedWriter, row.id).toBe("code");
+      // 確かめ方の種類には結び付かない（T1 の確かめ方・観測する性質・評価の方法の表の組は今のまま）
+      expect(row.t1, row.id).toBeNull();
+      expect(row.evaluation, row.id).toBe("v1-run-tests");
+      expect(row.rules.t2, row.id).toBeNull();
+    }
+    // 導出：所属の行だけで決まる行は台帳の順に view-structure・existence。確かめ方の種類と免除の種類は増えない
+    expect(PROPERTY_LEDGER_VIEW.ownershipRows.map((row) => row.id)).toEqual(["view-structure", "existence"]);
+    expect(PROPERTY_LEDGER_VIEW.t2ExemptKinds).toEqual(["default-value", "enum-membership"]);
+    expect(PROPERTY_LEDGER_VIEW.rowByVerificationKind.has("view-structure")).toBe(false);
+  });
+
+  it("旗 ids の T2 の文：view-structure は構造の検査と screen 操作だけを「作らない（コードが作る）」とし、existence は entity × screen を作らないとする。off の文（t2）は null のまま。題材の言葉は無い", () => {
+    // 手 3e（#625）：欄の名前は場合の形（operation・assertion を書かせない。対象は targetId）
+    expect(VIEW.rules.t2Ids).toContain("構造の検査と画面の試験（画面・項目 × screen の view-structure）は作らない（コードが作る");
+    expect(VIEW.rules.t2Ids).toContain("場合の対象（targetId）に画面の行を書かない");
+    expect(EXISTENCE.rules.t2Ids).toContain("entity が在ることの試験（observes は existence）は作らない（コードが作る）");
+    for (const field of ["operation", "assertion"]) expect(`${VIEW.rules.t2Ids ?? ""}${EXISTENCE.rules.t2Ids ?? ""}`, field).not.toContain(field);
+    for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(`${VIEW.rules.t2Ids ?? ""}${EXISTENCE.rules.t2Ids ?? ""}`).not.toContain(word);
+  });
+
+  it("二点測定：組ごとの対象の種類が空・組に無い、必須の kind に abnormal を足す、書き手を llm にする、期待を定数でなくすと不備になる（今の台帳は通る）", () => {
+    const patched = (patch: (t2: NonNullable<PropertyRow["t2"]>) => NonNullable<PropertyRow["t2"]>) =>
+      ledgerRowDefects(PROPERTY_LEDGER.map((row) => (row.id === "existence" && row.t2 !== null ? { ...row, t2: patch(row.t2) } : row)));
+    expect(ledgerRowDefects(PROPERTY_LEDGER)).toEqual([]);
+    expect(patched((t2) => ({ ...t2, targetKinds: [] }))).toEqual([
+      "性質 existence の試験の型の組ごとの対象の種類が、空か重なっているか対象の種類を含まない",
+    ]);
+    expect(patched((t2) => ({ ...t2, targetKinds: ["entity", "field"] }))).toEqual(["性質 existence の試験の型の組が、評価の方法の表の組に無い"]);
+    const notNormalOnly = "性質 existence は確かめ方に結び付かない試験の型なのに、normal だけ・書き手 code・期待 ok の定数でない";
+    expect(patched((t2) => ({ ...t2, requiredKinds: ["normal", "abnormal"] }))).toEqual([notNormalOnly]);
+    expect(patched((t2) => ({ ...t2, expectedWriter: "llm-written-code-checked" }))).toEqual([notNormalOnly]);
+    expect(patched((t2) => ({ ...t2, expected: { ...t2.expected, equals: "target-options" } }))).toEqual([
+      "性質 existence の期待の型と値の型が食い違う（定数は真偽）",
+      notNormalOnly,
+    ]);
+  });
+
+  it("写し：view-structure・existence の行の T2 の形と書き手の列（screen × screen・entity × screen・code）。写しの行を戻すと落ちる", () => {
+    const cellsOf = (row: PropertyRow) => propertyCopyCells(row);
+    expect(cellsOf(VIEW)[PROPERTY_COPY_HEADER.indexOf("T2 の形")]).toBe(
+      "screen × screen・normal・期待 ok の json-boolean（定数 true）・入力 empty-record・参照データ 空・1 本以上",
+    );
+    expect(cellsOf(EXISTENCE)[PROPERTY_COPY_HEADER.indexOf("T2 の形")]).toBe(
+      "entity × screen・normal・期待 ok の json-boolean（定数 true）・入力 empty-record・参照データ 空・1 本以上",
+    );
+    expect(cellsOf(VIEW)[PROPERTY_COPY_HEADER.indexOf("期待の値の書き手")]).toBe("code");
+    expect(cellsOf(EXISTENCE)[PROPERTY_COPY_HEADER.indexOf("期待の値の書き手")]).toBe("code");
+    expect(copyDefects(COPY_TEXT, PROPERTY_LEDGER)).toEqual([]);
+    const reverted = COPY_TEXT.replace(
+      "| entity × screen・normal・期待 ok の json-boolean（定数 true）・入力 empty-record・参照データ 空・1 本以上 | — | code |",
+      "| 未定義（組：entity × screen） | — | — |",
+    );
+    expect(reverted).not.toBe(COPY_TEXT);
+    expect(copyDefects(reverted, PROPERTY_LEDGER)).toEqual(["写しの existence の行がコードと違う"]);
+    // 期待の値の書き手の節に、構造の検査（確かめ方 structural）の書き手の 1 行がある
+    expect(COPY_TEXT).toContain("構造の検査（確かめ方 structural）は性質の行ではなく確かめ方の種類に結び付く");
+  });
+});
+
+// ── 11. 手 3h：view-structure の試験の型の代わりの対象の種類（Issue #652）──────────────────
+
+describe("view-structure の行：代わりの対象の種類（fallback。項目）。所属に画面・entity の行が無いときだけ項目の行で作る（Issue #652）", () => {
+  const VIEW = PROPERTY_LEDGER.find((row) => row.id === "view-structure");
+  if (VIEW?.t2 == null) throw new Error("前提が壊れた：view-structure の試験の型が無い");
+  const FALLBACK = VIEW.t2.fallback;
+  if (FALLBACK === null) throw new Error("前提が壊れた：view-structure に代わりの対象の種類が無い");
+
+  it("行の欄：代わりの対象の種類は項目だけ（why・since つき）。組ごとの対象の種類（免除に使う種類）は画面のまま。ほかの行は持たない", () => {
+    expect(FALLBACK.targetKinds).toEqual(["field"]);
+    expect(FALLBACK.since).toBe("Issue #652");
+    expect(FALLBACK.why.trim()).not.toBe("");
+    expect(VIEW.t2?.targetKinds).toEqual(["screen"]);
+    // 評価の方法の表のこの行の組（項目 × screen）にある
+    expect(VIEW.combinations).toContainEqual({ targetKind: "field", operation: "screen" });
+    for (const row of PROPERTY_LEDGER) if (row.id !== "view-structure") expect(row.t2?.fallback ?? null, row.id).toBeNull();
+    // 導出：所属の行だけで決まる行・免除の種類は変わらない
+    expect(PROPERTY_LEDGER_VIEW.ownershipRows.map((row) => row.id)).toEqual(["view-structure", "existence"]);
+    expect(PROPERTY_LEDGER_VIEW.t2ExemptKinds).toEqual(["default-value", "enum-membership"]);
+    // 固定文：対象の文に項目の行の分がある
+    expect(VIEW.t2?.messages.target).toContain("項目（field）の行");
+    for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(`${FALLBACK.why}${VIEW.t2?.messages.target ?? ""}`).not.toContain(word);
+  });
+
+  it("二点測定：代わりの対象の種類が空・重なる・評価の方法の表の組に無い・組ごとの対象の種類と重なる・why か since が無い・確かめ方に結び付く行にある、と不備になる（今の台帳は通る）", () => {
+    const patched = (id: string, fallback: NonNullable<PropertyRow["t2"]>["fallback"]) =>
+      ledgerRowDefects(PROPERTY_LEDGER.map((row) => (row.id === id && row.t2 !== null ? { ...row, t2: { ...row.t2, fallback } } : row)));
+    expect(ledgerRowDefects(PROPERTY_LEDGER)).toEqual([]);
+    expect(patched("view-structure", { ...FALLBACK, targetKinds: [] })).toEqual(["性質 view-structure の試験の型の代わりの対象の種類が、空か重なっている"]);
+    expect(patched("view-structure", { ...FALLBACK, targetKinds: ["field", "field"] })).toEqual(["性質 view-structure の試験の型の代わりの対象の種類が、空か重なっている"]);
+    expect(patched("view-structure", { ...FALLBACK, targetKinds: ["entity"] })).toEqual(["性質 view-structure の試験の型の代わりの対象の種類の組が、評価の方法の表の組に無い"]);
+    expect(patched("view-structure", { ...FALLBACK, targetKinds: ["screen"] })).toEqual(["性質 view-structure の試験の型の代わりの対象の種類が、組ごとの対象の種類と重なっている"]);
+    expect(patched("view-structure", { ...FALLBACK, why: " " })).toEqual(["性質 view-structure の試験の型の代わりの対象の種類に、why か since が無い"]);
+    expect(patched("view-structure", { ...FALLBACK, since: "" })).toEqual(["性質 view-structure の試験の型の代わりの対象の種類に、why か since が無い"]);
+    expect(patched("default-value", FALLBACK)).toEqual([
+      "性質 default-value は確かめ方に結び付く試験の型なのに、代わりの対象の種類がある",
+      "性質 default-value の試験の型の代わりの対象の種類が、組ごとの対象の種類と重なっている",
+    ]);
+  });
+
+  it("写し：view-structure の行に fallback の列（項目 × screen・使う条件・since・why）があり、ほかの行は「—」。写しの欄を消すと落ち、コードの欄を外しても落ちる", () => {
+    const at = PROPERTY_COPY_HEADER.indexOf("fallback の対象");
+    expect(at).toBe(PROPERTY_COPY_HEADER.indexOf("T2 の形") + 1);
+    const cell = propertyCopyCells(VIEW)[at] ?? "";
+    expect(cell.startsWith("field × screen（")).toBe(true);
+    expect(cell).toContain("Issue #652");
+    expect(cell).toContain(FALLBACK.why);
+    for (const row of PROPERTY_LEDGER) if (row.id !== "view-structure") expect(propertyCopyCells(row)[at], row.id).toBe("—");
+    expect(copyDefects(COPY_TEXT, PROPERTY_LEDGER)).toEqual([]);
+    const removed = COPY_TEXT.replace(`| ${cell} |`, "| — |");
+    expect(removed).not.toBe(COPY_TEXT);
+    expect(copyDefects(removed, PROPERTY_LEDGER)).toEqual(["写しの view-structure の行がコードと違う"]);
+    const withoutCode = PROPERTY_LEDGER.map((row) => (row.id === "view-structure" && row.t2 !== null ? { ...row, t2: { ...row.t2, fallback: null } } : row));
+    expect(copyDefects(COPY_TEXT, withoutCode)).toEqual(["写しの view-structure の行がコードと違う"]);
+  });
+});
+
+describe("empty-aggregate の行：旗 ids の文に、やり直しの必要な試験の枠に不足として挙がった行の境界・異常は書く例外（Issue #653）", () => {
+  it("旗 ids の文だけに例外の 1 文があり、挙がっていなければ書かない。off の文・ほかの行の旗 ids の文・行の since・写しは変えない", () => {
+    const ids = EMPTY_AGGREGATE.rules.t2Ids ?? "";
+    const exception =
+      "ただし、中身のやり直しの必要な試験の枠に不足（missing の emptyAggregate）として挙がった行の境界・異常は、その行に書く（期待は集計の種類とデータ状態で決まる値）。挙がっていなければ書かない。";
+    expect(ids).toContain(`の試験は作らない（コードが作る）。${exception}その行には、`);
+    expect(EMPTY_AGGREGATE.rules.t2 ?? "").not.toContain("必要な試験の枠");
+    expect(EMPTY_AGGREGATE.since).toBe("Issue #549");
+    for (const row of PROPERTY_LEDGER.filter((entry) => entry.id !== "empty-aggregate")) {
+      expect(`${row.rules.t2Ids ?? ""}${row.rules.t2 ?? ""}`, row.id).not.toContain("必要な試験の枠");
+    }
+    expect(copyDefects(COPY_TEXT, PROPERTY_LEDGER)).toEqual([]);
+    for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(ids).not.toContain(word);
   });
 });
 

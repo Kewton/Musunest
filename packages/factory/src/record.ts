@@ -21,6 +21,7 @@ import {
   type CallCounts,
   type RetryCounts,
 } from "./call.js";
+import type { LimitName } from "./limits.js";
 import type {
   LlmClient,
   LlmStructuredRequest,
@@ -131,6 +132,18 @@ export interface FailureAttribution {
    * **値の中身は持たない**（宣言の原文・依頼文は記録に残さない。S-8）。
    */
   readonly problems?: readonly FailureProblem[];
+  /**
+   * 当たった呼び出しの数の上限（上限の名前・上限値・実際の値。Issue #665）。旗 `v12.ids` の走りの `call-limit` のときだけ持つ
+   * （ほかの走り・ほかの種類では欄が無い＝形は今のまま）。数と名前だけで、値の中身は持たない（S-8）
+   */
+  readonly limit?: FailureLimit;
+}
+
+/** 失敗の帰属の上限（名前・上限値・実際の値。Issue #665） */
+export interface FailureLimit {
+  readonly name: LimitName;
+  readonly max: number;
+  readonly actual: number;
 }
 
 /**
@@ -449,17 +462,21 @@ export class UsageMeter {
 }
 
 /**
- * 失敗の帰属を、列挙した欄に写す（S-7・S-8・#304）。`code` と `problems` は**あるときだけ**写し、
- * 欄の名前と問題の種類だけを残す（値の中身は残さない）。
+ * 失敗の帰属を、列挙した欄に写す（S-7・S-8・#304）。`code`・`problems`・`limit` は**あるときだけ**写し、
+ * 欄の名前と問題の種類・上限の名前と数だけを残す（値の中身は残さない。`limit` は Issue #665）。
  */
 function pickFailure(failure: FailureAttribution): FailureAttribution {
   const picked: FailureAttribution =
     failure.code === undefined
       ? { stage: failure.stage, kind: failure.kind }
       : { stage: failure.stage, kind: failure.kind, code: failure.code };
-  if (failure.problems === undefined || failure.problems.length === 0) return picked;
+  const limited: FailureAttribution =
+    failure.limit === undefined
+      ? picked
+      : { ...picked, limit: { name: failure.limit.name, max: failure.limit.max, actual: failure.limit.actual } };
+  if (failure.problems === undefined || failure.problems.length === 0) return limited;
   return {
-    ...picked,
+    ...limited,
     problems: failure.problems.map((problem) => ({ field: problem.field, message: problem.message })),
   };
 }

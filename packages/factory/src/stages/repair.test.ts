@@ -40,14 +40,18 @@ import type { TestRunReport } from "./run-tests.js";
 import type { DeclarationEvaluator, EvaluationContext } from "./tools.js";
 import {
   DECLARATION_REJECTIONS_DATA_NAME,
+  REPAIR_REQUIRED_VALIDATIONS_DATA_NAME,
+  REPAIR_STEP_LIMITS_DATA_NAME,
   checkDeclarationVersion,
   checkRepairAnswer,
   failureSignature,
   isStagnant,
   REPAIR_ANSWER_SCHEMA,
   REPAIR_ANSWER_SCHEMA_NAME,
+  REPAIR_RULES,
   runRepairLoop,
   runRepairStep,
+  type RepairStepCounts,
   type RepairStepInput,
   type VersionReport,
 } from "./repair.js";
@@ -1325,5 +1329,431 @@ describe("修復の輪に評価口を渡す（v1.1α・Issue #506）", () => {
     if (outcome.ok) return;
     expect(outcome.failure.kind).toBe("unmet");
     expect(calls).toHaveLength(0);
+  });
+});
+
+// ── 直す段の数の口と上限の塊（旗 `v12.ids`。手 4c・Issue #665）──────────────────────────
+//
+// 直す段は段の終わりに段内の数を任意の口で返し（渡さなければ要求・回数・結果に効かない）、`stepLimitsData` を渡せば
+// 入力の末尾にデータの塊「直す段の上限」を足す（値は段の始めに 1 回決める）。上限の値と照らし方は変えない。**実 API は呼ばない。**
+
+/** データの塊の中身（JSON）と、入力の中の位置 */
+const blockOf = (input: string): { readonly value: unknown; readonly at: number } => {
+  const match = new RegExp(`<data name="${REPAIR_STEP_LIMITS_DATA_NAME}">\\n([\\s\\S]*?)\\n</data>`).exec(input);
+  if (match === null) throw new Error("上限の塊が無い");
+  return { value: JSON.parse(match[1] ?? "null"), at: match.index };
+};
+const limitsBlock = (usedAtStart: number) => ({
+  repairStepTurns: { max: AGENT_LIMITS.repairStepTurns, received: 0 },
+  toolCalls: { max: AGENT_LIMITS.toolCalls, usedAtStart },
+});
+/** 停止の外形（応答の数と終わり方だけ） */
+const outwardShape = (counts: readonly RepairStepCounts[]) => counts.map((entry) => ({ responses: entry.responses, end: entry.end }));
+
+describe("直す段の数の口と上限の塊（旗 v12.ids・Issue #665）", () => {
+  /** 要求を残しつつ、記録した応答を順に返す偽物（段をまたいで会話が切れてよい） */
+  const recordingFlat = (recorded: readonly RecordedCall[]): { readonly client: LlmClient; readonly tools: LlmToolRequest[] } => {
+    const inner = flatClient(recorded);
+    const tools: LlmToolRequest[] = [];
+    return {
+      client: {
+        callStructured: (request) => inner.callStructured(request),
+        callWithTools: (request) => {
+          tools.push(request);
+          return inner.callWithTools(request);
+        },
+      },
+      tools,
+    };
+  };
+  /** 版 V1 を渡して ⑥ を 1 回回し、口の値を集める */
+  const runCounted = async (
+    gateway: CallGateway,
+    extra: Partial<RepairStepInput> = {},
+  ): Promise<{ readonly outcome: Awaited<ReturnType<typeof runRepairStep>>; readonly counts: RepairStepCounts[] }> => {
+    const initial = await version(V1);
+    const counts: RepairStepCounts[] = [];
+    const outcome = await runRepairStep({
+      source: SOURCE,
+      list: LIST,
+      suite: SUITE,
+      current: initial,
+      correspondences: CORRESPONDENCES,
+      documents: SAMPLE_DOCUMENTS,
+      gateway,
+      stepLimitsData: true,
+      onCounts: (value) => counts.push(value),
+      ...extra,
+    });
+    return { outcome, counts };
+  };
+  it("上限の表の値は直す前と同じ（段内の応答 8・道具の累計 24・往復 6・停滞 2・点検 6・testsPerRequirement 16・referenceRowsPerTest 64）", () => {
+    expect(AGENT_LIMITS.repairStepTurns).toBe(8);
+    expect(AGENT_LIMITS.toolCalls).toBe(24);
+    expect(AGENT_LIMITS.repairRoundTrips).toBe(6);
+    expect(AGENT_LIMITS.stagnationRepeats).toBe(2);
+    expect(AGENT_LIMITS.declChecks).toBe(6);
+    expect(AGENT_LIMITS.testsPerRequirement).toBe(16);
+    expect(AGENT_LIMITS.referenceRowsPerTest).toBe(64);
+  });
+
+  it("(1) 8 応答が全て道具の束（各 1 個）→ 9 番目を求める前に段内の上限。口は repairStepTurns・max 8・actual 9・応答 8・道具 8", async () => {
+    const spy = vi.spyOn(repairTools, "executeRepairTool");
+    const recording = createRecordingClient(
+      Array.from({ length: AGENT_LIMITS.repairStepTurns }, (_, i) => toolCalls([staticCheckCall(`c${i}`, V1)])),
+    );
+    const { outcome, counts } = await runCounted(makeGateway(recording.client, { maxAttempts: 1 }));
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure).toEqual({ kind: "callLimit", limit: "repairStepTurns", max: 8, actual: 9 });
+    expect(recording.tools).toHaveLength(8);
+    expect(spy).toHaveBeenCalledTimes(8);
+    expect(counts).toEqual([
+      {
+        responses: 8,
+        toolBundles: 8,
+        toolsExecuted: 8,
+        toolCallsAtStart: 0,
+        toolCallsAtEnd: 8,
+        shapeRetries: 0,
+        limit: { name: "repairStepTurns", max: 8, actual: 9 },
+        end: "callLimit",
+      },
+    ]);
+    // 上限の塊は全往復で同じ値・同じ位置（基底の入力は変わらず、会話〔turns〕だけが増える）
+    const first = recording.tools[0];
+    if (first === undefined) throw new Error("要求が無い");
+    expect(blockOf(first.input).value).toEqual(limitsBlock(0));
+    for (const [index, request] of recording.tools.entries()) {
+      expect(request.input).toBe(first.input);
+      expect(request.turns).toHaveLength(index * 2);
+    }
+  });
+
+  it("(2) 7 応答で累計 17、8 番目の束が 8 個 → 実行する前に toolCalls・max 24・actual 25。道具は 1 つも実行されず（17 のまま）・応答 8", async () => {
+    const spy = vi.spyOn(repairTools, "executeRepairTool");
+    // 7 束で 17 個（3 個 × 3 ＋ 2 個 × 4）
+    const sizes = [3, 3, 3, 2, 2, 2, 2];
+    let offset = 0;
+    const bundles = sizes.map((size) => {
+      const bundle = toolCalls(toolBundle(size, V1, offset));
+      offset += size;
+      return bundle;
+    });
+    const recording = createRecordingClient([...bundles, toolCalls(toolBundle(8, V1, offset))]);
+    const { outcome, counts } = await runCounted(makeGateway(recording.client, { maxAttempts: 1 }));
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure).toEqual({ kind: "callLimit", limit: "toolCalls", max: 24, actual: 25 });
+    expect(spy).toHaveBeenCalledTimes(17);
+    expect(counts).toEqual([
+      {
+        responses: 8,
+        toolBundles: 8,
+        toolsExecuted: 17,
+        toolCallsAtStart: 0,
+        toolCallsAtEnd: 25,
+        shapeRetries: 0,
+        limit: { name: "toolCalls", max: 24, actual: 25 },
+        end: "callLimit",
+      },
+    ]);
+  });
+
+  it("(1) と (2) は同じ外形（応答 8・種類 callLimit）で、上限の名前だけが違う（二点測定）", async () => {
+    const turns = createRecordingClient(
+      Array.from({ length: AGENT_LIMITS.repairStepTurns }, (_, i) => toolCalls([staticCheckCall(`c${i}`, V1)])),
+    );
+    const sizes = [3, 3, 3, 2, 2, 2, 2, 8];
+    let offset = 0;
+    const cumulative = createRecordingClient(
+      sizes.map((size) => {
+        const bundle = toolCalls(toolBundle(size, V1, offset));
+        offset += size;
+        return bundle;
+      }),
+    );
+    const a = await runCounted(makeGateway(turns.client, { maxAttempts: 1 }));
+    const b = await runCounted(makeGateway(cumulative.client, { maxAttempts: 1 }));
+    expect(outwardShape(a.counts)).toEqual(outwardShape(b.counts));
+    expect(a.counts[0]?.limit?.name).toBe("repairStepTurns");
+    expect(b.counts[0]?.limit?.name).toBe("toolCalls");
+  });
+
+  it("(3) 通信の再送：1 回目 timeout・2 回目成功 → 応答 1（共通の口の試行の started 2・responded 1 とは別に数える）", async () => {
+    const initial = await version(V1);
+    let attempt = 0;
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        return Promise.reject(new Error("使わない"));
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        attempt += 1;
+        // 1 回目は打ち切り（100ms）より後に返り、2 回目は打ち切りより前に done を返す
+        const delayMs = attempt === 1 ? 500 : 10;
+        return new Promise((resolve) => {
+          setTimeout(
+            () => resolve({ kind: "done", declaration: { declaration: V2, disputes: [] }, usage: undefined }),
+            delayMs,
+          );
+        });
+      },
+    };
+    const gateway = preloadedGateway(client, 0, { maxAttempts: 2, callTimeoutMs: 100 });
+    const counts: RepairStepCounts[] = [];
+    vi.useFakeTimers();
+    try {
+      const pending = runRepairStep({
+        source: SOURCE,
+        list: LIST,
+        suite: SUITE,
+        current: initial,
+        correspondences: CORRESPONDENCES,
+        documents: SAMPLE_DOCUMENTS,
+        gateway,
+        stepLimitsData: true,
+        onCounts: (value) => counts.push(value),
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      const outcome = await pending;
+      expect(outcome.ok).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(gateway.attempts.started).toBe(2);
+    expect(gateway.attempts.responded).toBe(1);
+    expect(gateway.retryCounts.communication).toBe(1);
+    expect(counts).toEqual([
+      {
+        responses: 1,
+        toolBundles: 0,
+        toolsExecuted: 0,
+        toolCallsAtStart: 0,
+        toolCallsAtEnd: 0,
+        shapeRetries: 0,
+        limit: null,
+        end: "done",
+      },
+    ]);
+  });
+
+  it("(4) 形のやり直し：done が形に落ちて 1 回直す → 応答 2・形のやり直し 1・終わり done。2 回目の入力は基底の入力＋問題のデータで、上限の塊の値と位置は 1 回目と同じ", async () => {
+    const recording = createRecordingClient([doneMalformed, done(V2)]);
+    const { outcome, counts } = await runCounted(makeGateway(recording.client, { maxAttempts: 1 }));
+
+    expect(outcome.ok).toBe(true);
+    expect(counts).toEqual([
+      {
+        responses: 2,
+        toolBundles: 0,
+        toolsExecuted: 0,
+        toolCallsAtStart: 0,
+        toolCallsAtEnd: 0,
+        shapeRetries: 1,
+        limit: null,
+        end: "done",
+      },
+    ]);
+    const [first, second] = recording.tools;
+    if (first === undefined || second === undefined) throw new Error("要求が無い");
+    // 基底の入力（上限の塊を含む）＋問題のデータ（今までどおり追記される）
+    expect(second.input.startsWith(`${first.input}\n<data name="最後の答えの形の誤り">`)).toBe(true);
+    expect(first.input.endsWith("</data>")).toBe(true);
+    expect(blockOf(second.input)).toEqual(blockOf(first.input));
+    expect(blockOf(first.input).value).toEqual(limitsBlock(0));
+    // 上限の塊は基底の入力の末尾（問題のデータより前）
+    expect(first.input.endsWith(`<data name="${REPAIR_STEP_LIMITS_DATA_NAME}">\n${JSON.stringify(limitsBlock(0), null, 2)}\n</data>`)).toBe(true);
+  });
+
+  it("2 回続けて形に落ちれば、終わり malformed・形のやり直し 1・応答 2", async () => {
+    const recording = createRecordingClient([doneMalformed, doneMalformed]);
+    const { outcome, counts } = await runCounted(makeGateway(recording.client, { maxAttempts: 1 }));
+    expect(outcome.ok).toBe(false);
+    expect(counts.map((entry) => ({ responses: entry.responses, shapeRetries: entry.shapeRetries, limit: entry.limit, end: entry.end }))).toEqual([
+      { responses: 2, shapeRetries: 1, limit: null, end: "malformed" },
+    ]);
+  });
+
+  it("(5) 2 つの段で累計を引き継ぐ：1 段目で道具 10 → 2 段目の始めの累計 10 が塊と口に出て、累計 25 になる束の実行前に toolCalls", async () => {
+    const spy = vi.spyOn(repairTools, "executeRepairTool");
+    const recording = recordingFlat([toolCalls(toolBundle(10, V1)), done(V2), toolCalls(toolBundle(15, V1, 10))]);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+
+    const first = await runCounted(gateway);
+    expect(first.outcome.ok).toBe(true);
+    const second = await runCounted(gateway);
+    expect(second.outcome.ok).toBe(false);
+    if (second.outcome.ok) return;
+    expect(second.outcome.failure).toEqual({ kind: "callLimit", limit: "toolCalls", max: 24, actual: 25 });
+    expect(spy).toHaveBeenCalledTimes(10);
+    expect(first.counts).toEqual([
+      {
+        responses: 2,
+        toolBundles: 1,
+        toolsExecuted: 10,
+        toolCallsAtStart: 0,
+        toolCallsAtEnd: 10,
+        shapeRetries: 0,
+        limit: null,
+        end: "done",
+      },
+    ]);
+    expect(second.counts).toEqual([
+      {
+        responses: 1,
+        toolBundles: 1,
+        toolsExecuted: 0,
+        toolCallsAtStart: 10,
+        toolCallsAtEnd: 25,
+        shapeRetries: 0,
+        limit: { name: "toolCalls", max: 24, actual: 25 },
+        end: "callLimit",
+      },
+    ]);
+    const [step1First, step1Second, step2] = recording.tools;
+    if (step1First === undefined || step1Second === undefined || step2 === undefined) throw new Error("要求が無い");
+    expect(blockOf(step1First.input).value).toEqual(limitsBlock(0));
+    // 1 段目の途中で累計が 10 になっても、1 段目の塊は更新しない
+    expect(blockOf(step1Second.input).value).toEqual(limitsBlock(0));
+    expect(blockOf(step2.input).value).toEqual(limitsBlock(10));
+  });
+
+  it("省けば（off）要求はバイト列で同じ。口だけを渡しても要求・結果は同じ。塊を渡すと入力の末尾に 1 つだけ増え、規則・道具・schema は同じ", async () => {
+    const stepRequests = async (extra: Partial<RepairStepInput>) => {
+      const initial = await version(V1);
+      const recording = createRecordingClient([toolCalls([staticCheckCall("c1", V1)]), done(V2)]);
+      const outcome = await runRepairStep({
+        source: SOURCE,
+        list: LIST,
+        suite: SUITE,
+        current: initial,
+        correspondences: CORRESPONDENCES,
+        documents: SAMPLE_DOCUMENTS,
+        gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+        ...extra,
+      });
+      return { outcome, requests: recording.tools };
+    };
+    const plain = await stepRequests({});
+    const portOnly = await stepRequests({ onCounts: () => undefined });
+    const falsy = await stepRequests({ stepLimitsData: false });
+    expect(portOnly.requests.map(bytesOf)).toEqual(plain.requests.map(bytesOf));
+    expect(falsy.requests.map(bytesOf)).toEqual(plain.requests.map(bytesOf));
+    expect(portOnly.outcome).toEqual(plain.outcome);
+    for (const request of plain.requests) expect(request.input).not.toContain(REPAIR_STEP_LIMITS_DATA_NAME);
+
+    const withBlock = await stepRequests({ stepLimitsData: true });
+    expect(withBlock.outcome).toEqual(plain.outcome);
+    for (const [index, request] of withBlock.requests.entries()) {
+      const base = plain.requests[index];
+      if (base === undefined) throw new Error("要求が無い");
+      const block = `<data name="${REPAIR_STEP_LIMITS_DATA_NAME}">\n${JSON.stringify(limitsBlock(0), null, 2)}\n</data>`;
+      expect(request.input).toBe(`${base.input}\n${block}`);
+      expect(request.instructions).toBe(base.instructions);
+      expect(request.rules).toEqual(base.rules);
+      expect(request.documents).toEqual(base.documents);
+      expect(request.tools).toEqual(base.tools);
+      expect(request.schemaName).toBe(base.schemaName);
+      expect(request.schema).toEqual(base.schema);
+      expect(request.turns).toEqual(base.turns);
+      expectNoAcceptanceMaterial([request.input]);
+    }
+  });
+
+  it("拒否の塊と併せたときは、上限の塊が末尾（拒否の塊のあと）に来る", async () => {
+    const initial = await version(V1);
+    const recording = createRecordingClient([done(V2)]);
+    await runRepairStep({
+      source: SOURCE,
+      list: LIST,
+      suite: SUITE,
+      current: initial,
+      correspondences: CORRESPONDENCES,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      declRejections: [{ requirementId: "R-1", kind: "expression", quote: "件数を合計する" }],
+      stepLimitsData: true,
+    });
+    const input = recording.tools[0]?.input ?? "";
+    expect(input.indexOf(DECLARATION_REJECTIONS_DATA_NAME)).toBeGreaterThan(0);
+    expect(input.indexOf(REPAIR_STEP_LIMITS_DATA_NAME)).toBeGreaterThan(input.indexOf(DECLARATION_REJECTIONS_DATA_NAME));
+    expect(input.endsWith("</data>")).toBe(true);
+  });
+
+  it("口の値に会話・引数・本文が無い（数と上限の名前だけ）", async () => {
+    const recording = createRecordingClient(
+      Array.from({ length: AGENT_LIMITS.repairStepTurns }, (_, i) => toolCalls([staticCheckCall(`c${i}`, V1)])),
+    );
+    const { counts } = await runCounted(makeGateway(recording.client, { maxAttempts: 1 }));
+    const text = JSON.stringify(counts);
+    expect(text).not.toContain("entities");
+    expect(text).not.toContain(SOURCE);
+    expect(text).not.toContain("static-check");
+    expect(text).not.toContain("c0");
+  });
+
+  it("この手で直したファイル（段・記録・走らせる部分と、その試験）に受入の題材の言葉が無い（走査）", async () => {
+    const fs = (await import(/* @vite-ignore */ "node:fs")) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const files = ["./repair.ts", "./repair.test.ts", "../record.ts", "../record.test.ts", "../v11a/run.ts", "../v11a/run.test.ts"];
+    expectNoAcceptanceMaterial(files.map((file) => fs.readFileSync(new URL(file, import.meta.url), "utf8")));
+  });
+});
+
+// ── 要る検査の骨組み（旗 v12.ids・Issue #666）──────────────────────────────────────
+
+describe("直す段のデータの末尾に要る検査の骨組みを足す（旗 v12.ids・Issue #666）", () => {
+  /** 骨組み（v1.1α の requiredValidationsOf が導く形。値はそのまま JSON で渡る） */
+  const SKELETON = [{ entity: "item", name: "amount", rowId: "f.item.amount", rowKind: "field", testIds: ["t1", "t2"], conflict: false }] as const;
+  const stepRequests = async (extra: Partial<RepairStepInput>) => {
+    const initial = await version(V1);
+    const recording = createRecordingClient([toolCalls([staticCheckCall("c1", V1)]), done(V2)]);
+    const outcome = await runRepairStep({
+      source: SOURCE,
+      list: LIST,
+      suite: SUITE,
+      current: initial,
+      correspondences: CORRESPONDENCES,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      ...extra,
+    });
+    return { outcome, requests: recording.tools };
+  };
+  const block = `<data name="${REPAIR_REQUIRED_VALIDATIONS_DATA_NAME}">\n${JSON.stringify(SKELETON, null, 2)}\n</data>`;
+
+  it("省けば要求はバイト列で同じ。渡すと入力の末尾に 1 つだけ増え、規則・道具・schema・往復は同じ。結果も同じ", async () => {
+    const plain = await stepRequests({});
+    const withSkeleton = await stepRequests({ requiredValidations: SKELETON });
+    for (const request of plain.requests) expect(request.input).not.toContain(REPAIR_REQUIRED_VALIDATIONS_DATA_NAME);
+    expect(withSkeleton.outcome).toEqual(plain.outcome);
+    expect(withSkeleton.requests).toHaveLength(plain.requests.length);
+    for (const [index, request] of withSkeleton.requests.entries()) {
+      const base = plain.requests[index];
+      if (base === undefined) throw new Error("要求が無い");
+      expect(request.input).toBe(`${base.input}\n${block}`);
+      expect(request.instructions).toBe(base.instructions);
+      expect(request.rules).toEqual(base.rules);
+      expect(request.documents).toEqual(base.documents);
+      expect(request.tools).toEqual(base.tools);
+      expect(request.schemaName).toBe(base.schemaName);
+      expect(request.schema).toEqual(base.schema);
+      expect(request.turns).toEqual(base.turns);
+    }
+    expect(REPAIR_RULES.join("\n")).not.toContain(REPAIR_REQUIRED_VALIDATIONS_DATA_NAME);
+  });
+
+  it("拒否の塊・上限の塊と併せたときは、骨組みの塊が末尾（両方のあと）に来る。上限の塊の値は同じ", async () => {
+    const { requests } = await stepRequests({
+      declRejections: [{ requirementId: "R-1", kind: "expression", quote: "件数を合計する" }],
+      stepLimitsData: true,
+      requiredValidations: SKELETON,
+    });
+    const input = requests[0]?.input ?? "";
+    expect(input.indexOf(REPAIR_STEP_LIMITS_DATA_NAME)).toBeGreaterThan(input.indexOf(DECLARATION_REJECTIONS_DATA_NAME));
+    expect(input.indexOf(REPAIR_REQUIRED_VALIDATIONS_DATA_NAME)).toBeGreaterThan(input.indexOf(REPAIR_STEP_LIMITS_DATA_NAME));
+    expect(input.endsWith(block)).toBe(true);
+    expect(blockOf(input).value).toEqual(limitsBlock(0));
   });
 });

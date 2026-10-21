@@ -62,6 +62,7 @@
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex, type Diagnostic } from "@musunest/spec-engine";
 import { JobBudget } from "../budget.js";
+import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse } from "../llm.js";
 import {
   assembleBundle,
   buildDiagnostics,
@@ -118,11 +119,18 @@ import {
 import { countUnresolvedTests, type GenerationInput, type GenerationResult } from "../run.js";
 import { runArbitration } from "../stages/arbitrate.js";
 import type { Problem, RejectedCandidate, StageFailure, StageOutcome } from "../stages/prompt.js";
-import { failureSignature, isStagnant, runRepairStep, type DeclarationRejection, type VersionReport } from "../stages/repair.js";
+import {
+  failureSignature,
+  isStagnant,
+  runRepairStep,
+  type DeclarationRejection,
+  type RepairStepCounts,
+  type VersionReport,
+} from "../stages/repair.js";
 import { runStaticCheck } from "../stages/static-check.js";
 import type { DroppedNonstructuralTest } from "../stages/test-suite.js";
 import type { EvaluationContext } from "../stages/tools.js";
-import { correspondenceFromTable, extraElementsOf, markRows } from "./bind-by-id.js";
+import { correspondenceFromTable, extraElementsOf, markRows, requiredValidationsOf, type RequiredValidation } from "./bind-by-id.js";
 import {
   buildTableRoundsFile,
   buildV11aArtifacts,
@@ -170,7 +178,7 @@ import {
   type SemanticRejection,
 } from "./stages/name-table.js";
 import { runSemanticCheck, semanticCheckTargets, type SemanticCheckOutput } from "./stages/semantic-check.js";
-import { runTestSpec, type TestSpecValue } from "./stages/test-spec.js";
+import { runTestSpec, type TestSpecRejectedBundle, type TestSpecValue } from "./stages/test-spec.js";
 import { runWriteV11a } from "./stages/write.js";
 import { ledgerViewOf, resolveV12Flags, toPublicV12Flags, type V12Flags } from "../v12/ledger.js";
 import {
@@ -189,7 +197,7 @@ import {
   withSearchRounds,
 } from "../v12/search-repair.js";
 import { canRepairFields, locateFailures } from "../v12/locate.js";
-import { V12_CALL_LIMITS, type V12CallLimits } from "../v12/limits.js";
+import { V12_CALL_LIMITS, V12_T2_BUNDLE, type V12CallLimits } from "../v12/limits.js";
 import { mergeReplacements, runFieldRepair } from "../v12/stages/field-repair.js";
 import { VOCABULARY_BUNDLES, type ReferenceCounts } from "../v12/ids.js";
 import { isGeneratedTestId } from "../v12/generated-tests.js";
@@ -210,6 +218,11 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
    */
   readonly v12CallLimits?: Partial<V12CallLimits>;
   /**
+   * 旗 `v12.ids` の T2 の束を同時に始める数の上限（省けば `V12_T2_BUNDLE.concurrency`。試験が 1 にして順序に依らないことを
+   * 確かめるときだけ渡す。旗 off の走りは見ない。Issue #626）
+   */
+  readonly v12T2Concurrency?: number;
+  /**
    * 真なら、段の範囲が無い走りでも境界（T1''／T2・T2／B1）を通った時点の材料を集め、結果の `boundaries` に返す（`--pipeline v1.2`
    * の走りが checkpoint を書くため。省けば集めず、結果に欄を置かない。Issue #636）
    */
@@ -220,6 +233,90 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
 export interface GenerationResultV11a extends GenerationResult {
   /** 通った境界の材料（通った順。`collectBoundaries` が真の走りだけ。早期停止で境界に届かなければ空） */
   readonly boundaries?: readonly BoundaryMaterials[];
+}
+
+/**
+ * 旗 `v12.ids` の T2 の束の要約（`v12_calls.test_spec`。T2 を呼んだ走りだけ。Issue #626）。束の数・同時に始めた数（上限と束の数の
+ * 小さいほう）と段全体の計。段全体の usage は全体の計量の前後差、試行・再試行・未着手は束別の計の項目ごとの合計から組む（親の口の
+ * 前後差は束の呼び出しで増えないので使わない）
+ */
+export interface TestSpecBundlesSummary {
+  readonly bundles: number;
+  readonly concurrency: number;
+  readonly total: UsageSnapshot & CallCounts;
+}
+
+/**
+ * 旗 `v12.ids` の直す段（道具付き）の 1 回の数（`v12_calls.repair.steps` の 1 行。Issue #665）。数と上限の名前だけ
+ * （会話・引数・本文は持たない）。`end` は `done` か記録の失敗の分類
+ */
+export interface RepairStepSummary {
+  readonly responses: number;
+  readonly tool_bundles: number;
+  readonly tools_executed: number;
+  readonly tool_calls_at_start: number;
+  readonly tool_calls_at_end: number;
+  readonly shape_retries: number;
+  readonly limit: { readonly name: string; readonly max: number; readonly actual: number } | null;
+  readonly end: "done" | FailureKind;
+}
+
+/** 旗 `v12.ids` の直す段の要約（`v12_calls.repair`。直す段を呼んだ走りだけ。欄だけの直しは含めない。Issue #665） */
+export interface RepairStepsSummary {
+  readonly steps: readonly RepairStepSummary[];
+  readonly total: { readonly responses: number; readonly tools_executed: number };
+}
+
+/** 直す段の口の値を、要約の 1 行に写す（列挙した欄だけ。Issue #665） */
+function toRepairStepSummary(counts: RepairStepCounts): RepairStepSummary {
+  return {
+    responses: counts.responses,
+    tool_bundles: counts.toolBundles,
+    tools_executed: counts.toolsExecuted,
+    tool_calls_at_start: counts.toolCallsAtStart,
+    tool_calls_at_end: counts.toolCallsAtEnd,
+    shape_retries: counts.shapeRetries,
+    limit: counts.limit === null ? null : { name: counts.limit.name, max: counts.limit.max, actual: counts.limit.actual },
+    end: counts.end === "done" ? "done" : stageFailureToKind({ kind: counts.end }),
+  };
+}
+
+/** 呼び出しの計の項目ごとの合計（束別の計を段全体へ足す。Issue #626） */
+function sumCallCounts(counts: readonly CallCounts[]): CallCounts {
+  const zero: CallCounts = {
+    attempts: {
+      started: 0,
+      responded: 0,
+      errors: 0,
+      cancelled_deadline: 0,
+      cancelled_timeout: 0,
+      not_started: { deadline: 0, budget: 0, limit: 0, timeout: 0 },
+    },
+    retries: { communication: 0, shape: 0, content: 0 },
+  };
+  return counts.reduce<CallCounts>(
+    (sum, item) => ({
+      attempts: {
+        started: sum.attempts.started + item.attempts.started,
+        responded: sum.attempts.responded + item.attempts.responded,
+        errors: sum.attempts.errors + item.attempts.errors,
+        cancelled_deadline: sum.attempts.cancelled_deadline + item.attempts.cancelled_deadline,
+        cancelled_timeout: sum.attempts.cancelled_timeout + item.attempts.cancelled_timeout,
+        not_started: {
+          deadline: sum.attempts.not_started.deadline + item.attempts.not_started.deadline,
+          budget: sum.attempts.not_started.budget + item.attempts.not_started.budget,
+          limit: sum.attempts.not_started.limit + item.attempts.not_started.limit,
+          timeout: sum.attempts.not_started.timeout + item.attempts.not_started.timeout,
+        },
+      },
+      retries: {
+        communication: sum.retries.communication + item.retries.communication,
+        shape: sum.retries.shape + item.retries.shape,
+        content: sum.retries.content + item.retries.content,
+      },
+    }),
+    zero,
+  );
 }
 
 /** 全件持ち越しの停止の問題（固定文。値を埋めない） */
@@ -252,7 +349,7 @@ class RunStop extends Error {
 }
 
 /** 段の失敗を、記録の失敗の分類に写す（v1 と同じ写し） */
-function stageFailureToKind(failure: StageFailure): FailureKind {
+function stageFailureToKind(failure: { readonly kind: StageFailure["kind"] }): FailureKind {
   switch (failure.kind) {
     case "limit":
       return "limit";
@@ -287,9 +384,15 @@ function stageFailureToKind(failure: StageFailure): FailureKind {
   }
 }
 
-/** 段の失敗を、記録の失敗の帰属に写す（v1 と同じ。値の中身は残さない） */
-function stageFailureAttribution(stage: StageId, failure: StageFailure): FailureAttribution {
+/**
+ * 段の失敗を、記録の失敗の帰属に写す（v1 と同じ。値の中身は残さない）。`withLimit` が真（旗 `v12.ids` の走り）のときだけ、
+ * `callLimit` に上限の名前・上限値・実際の値（`limit`）を足す（偽なら今の形のまま。Issue #665）
+ */
+function stageFailureAttribution(stage: StageId, failure: StageFailure, withLimit = false): FailureAttribution {
   const kind = stageFailureToKind(failure);
+  if (withLimit && failure.kind === "callLimit") {
+    return { stage, kind, limit: { name: failure.limit, max: failure.max, actual: failure.actual } };
+  }
   if (failure.kind === "invalidRequest") return { stage, kind, code: failure.code };
   if ((failure.kind === "malformed" || failure.kind === "unmet") && failure.problems.length > 0) {
     return {
@@ -341,6 +444,11 @@ interface RejectedCandidateSlot {
   readonly operation: StageOperation | null;
   readonly call: number;
   readonly candidate: RejectedCandidate;
+  /**
+   * 旗 `v12.ids` の T2 の束の形の候補だけ：束の添字（0 から）と束の要件の数（Issue #626）、その要求で書き直した要件の数と保持した
+   * 要件の数（Issue #651）。ID の値は持たない
+   */
+  readonly bundle?: TestSpecRejectedBundle;
 }
 
 /** 断った候補に、対象・raw・一覧の SHA-256 と、問題ごとの参照元の SHA-256 を付ける（v1 と同じ形） */
@@ -355,6 +463,14 @@ async function toBundleRejectedCandidate(slot: RejectedCandidateSlot): Promise<B
     round: candidate.round,
     attempt: candidate.attempt,
     kind: candidate.kind,
+    ...(slot.bundle === undefined ? {} : {
+          bundle: {
+            index: slot.bundle.index,
+            requirements: slot.bundle.requirements,
+            rewritten: slot.bundle.rewritten,
+            retained: slot.bundle.retained,
+          },
+        }),
   };
   if (candidate.kind === "shape") {
     // C2 の初回の形のやり直しを落ちた要件だけの書き直しにした回は、書き直した要件と保持した要件の数を足す（ID の値は書かない。Issue #660）
@@ -628,8 +744,32 @@ async function runV11a(
           v12_calls: {
             real_attempts: { limit: callGate.limit, used: callGate.attempts() },
             judge_branch: { limit: callLimits.judgeBranch, used: judgeBudget?.branch?.used ?? 0 },
+            // T2 の束の数・同時数・段全体の計（T2 を呼んだ走りだけ。既存の欄は変えずに足す。Issue #626）
+            ...(testSpecBundles === undefined ? {} : { test_spec: testSpecBundles }),
+            // 直す段（道具付き）の段ごとの数と合計（直す段を呼んだ走りだけ。既存の欄は変えずに足す。Issue #665）
+            ...(repairSteps.length === 0
+              ? {}
+              : {
+                  repair: {
+                    steps: repairSteps,
+                    total: {
+                      responses: repairSteps.reduce((sum, step) => sum + step.responses, 0),
+                      tools_executed: repairSteps.reduce((sum, step) => sum + step.tools_executed, 0),
+                    },
+                  } satisfies RepairStepsSummary,
+                }),
           },
         };
+  // 旗 `v12.ids` の T2 の束の要約（T2 を呼ぶまで無い。Issue #626）
+  let testSpecBundles: TestSpecBundlesSummary | undefined;
+  // 旗 `v12.ids` の直す段の数（呼んだ順。off は積まない。Issue #665）
+  const repairSteps: RepairStepSummary[] = [];
+  /** 直す段に足す、旗 `v12.ids` の上限の塊と数の口（off は空＝今の要求と結果。Issue #665） */
+  const repairStepIds = (): { readonly stepLimitsData?: true; readonly onCounts?: (counts: RepairStepCounts) => void } =>
+    flags.ids ? { stepLimitsData: true, onCounts: (counts) => repairSteps.push(toRepairStepSummary(counts)) } : {};
+  /** 段の失敗を記録の失敗の帰属に写す（旗 `v12.ids` の走りだけ上限の名前と数を足す。Issue #665） */
+  const attributionOf = (stage: StageId, failure: StageFailure): FailureAttribution =>
+    stageFailureAttribution(stage, failure, flags.ids);
   const startedAt = input.now();
   const stages: StageRecord[] = [];
   const upheld: string[] = [];
@@ -668,8 +808,8 @@ async function runV11a(
   const rejectedCandidates: RejectedCandidateSlot[] = [];
   const rejectionSink =
     (stage: RejectedCandidateStage, call: number) =>
-    (candidate: RejectedCandidate): void => {
-      rejectedCandidates.push({ stage, operation: null, call, candidate });
+    (candidate: RejectedCandidate, bundle?: TestSpecRejectedBundle): void => {
+      rejectedCandidates.push({ stage, operation: null, call, candidate, ...(bundle === undefined ? {} : { bundle }) });
     };
   const rejectedCandidateRows = (): Promise<readonly BundleRejectedCandidate[]> =>
     Promise.all(rejectedCandidates.map(toBundleRejectedCandidate));
@@ -840,7 +980,7 @@ async function runV11a(
     let value: T;
     try {
       const outcome = await fn();
-      if (!outcome.ok) throw new RunStop(stageFailureAttribution(stage, outcome.failure));
+      if (!outcome.ok) throw new RunStop(attributionOf(stage, outcome.failure));
       value = outcome.value;
     } catch (error) {
       pushRecord(stage, "failed", before, start, error instanceof RunStop ? error.attribution.kind : null);
@@ -1080,7 +1220,7 @@ async function runV11a(
           throw error;
         }
         if (!outcome.ok) {
-          const attribution = stageFailureAttribution("vocabulary", outcome.failure);
+          const attribution = attributionOf("vocabulary", outcome.failure);
           pushRecord("vocabulary", "failed", before, start, attribution.kind, outcome.references);
           throw new RunStop(attribution);
         }
@@ -1131,7 +1271,7 @@ async function runV11a(
         }
         if (!outcome.ok) {
           tableRound.ok = outcome.failure.kind === "unmet" ? "unmet" : "failed";
-          const attribution = stageFailureAttribution("mapping", outcome.failure);
+          const attribution = attributionOf("mapping", outcome.failure);
           pushRecord("mapping", "failed", before, start, attribution.kind, outcome.references);
           // 2 回目が C2' に落ちても形の再試行は無く、前回の写像のまま拒否の要件を持ち越す（08 §4.1）
           if (retry !== undefined && firstRound !== undefined && outcome.failure.kind === "unmet") {
@@ -1195,7 +1335,7 @@ async function runV11a(
           throw error;
         }
         if (!outcome.ok) {
-          const attribution = stageFailureAttribution("name-table", outcome.failure);
+          const attribution = attributionOf("name-table", outcome.failure);
           pushRecord("name-table", "failed", before, start, attribution.kind);
           // T1' の落ち（中身）は 2 回目へ（前回の候補と作り直しの指示をデータで）。それ以外の失敗は止める
           if (outcome.failure.kind === "unmet" && outcome.response !== undefined && round < NAME_TABLE_ROUNDS) {
@@ -1257,25 +1397,102 @@ async function runV11a(
     if (stageControl?.range.end === "semantic-check") return stageOutcome(null);
 
     // ── T2 試験の仕様（除いた一覧と所属で。宣言も名前も見せない）。開始 B1 は凍結した組から入る ────────
-    const runTestSpecStage = async (): Promise<FrozenTestSpec> => {
-      const value: TestSpecValue = await runStageOk("test-spec", () =>
-        runTestSpec({
-          plan: input.plan,
-          list,
-          table,
-          carryOver: carry,
-          documents: input.documents,
-          gateway,
-          ...(judgeBudget === undefined ? {} : { judge: judgeBudget }),
-          onDropped: (dropped) => {
-            for (const entry of dropped) droppedTests.push(entry);
+    /**
+     * 旗 `v12.ids` の T2（束を同時に呼ぶ。Issue #626）。束ごとに、予算・門・締切・時計・単価・effort・timeout を共有した口と、全体の
+     * 計量の内側に重ねた束の計量を作り、段の記録を束ごとに 1 つ積む（値はその束の口の計・束の計量・束の開始と終了から組む。
+     * 同時に走ると全体の計量と親の口の前後差が混ざるので使わない）
+     */
+    const runTestSpecBundled = async (
+      run: (bundleGateway: (bundle: number) => CallGateway, concurrency: number) => Promise<StageOutcome<TestSpecValue>>,
+    ): Promise<TestSpecValue> => {
+      const concurrency = input.v12T2Concurrency ?? V12_T2_BUNDLE.concurrency;
+      const usageBefore = meter.snapshot;
+      const runs: { readonly gateway: CallGateway; readonly meter: UsageMeter; readonly start: number; readonly end: () => number }[] = [];
+      const bundleGateway = (bundle: number): CallGateway => {
+        const bundleMeter = new UsageMeter();
+        const start = input.now();
+        // 束の終了＝その束の最後の呼び出しが返った時刻（呼ばなければ開始と同じ）
+        let end = start;
+        const metered = bundleMeter.wrap(meter.wrap(input.client));
+        const timed: LlmClient = {
+          callStructured: async <T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> => {
+            try {
+              return await metered.callStructured<T>(request);
+            } finally {
+              end = input.now();
+            }
           },
-          onRejected: rejectionSink("test-spec", 1),
-          ...withLedger,
-          // 旗 `v12.ids`：台帳の型だけで値が決まる試験をコードが作る（off は渡さない＝今のまま。Issue #595）
-          ...(flags.ids ? { ids: true } : {}),
-        }),
-      );
+          callWithTools: async (request: LlmToolRequest): Promise<LlmToolResponse> => {
+            try {
+              return await metered.callWithTools(request);
+            } finally {
+              end = input.now();
+            }
+          },
+        };
+        const bundleGatewayOf = new CallGateway({
+          client: timed,
+          budget,
+          rates: input.rates,
+          now: input.now,
+          deadline: input.deadline,
+          limits,
+          effort: input.effort,
+          ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
+          ...(callGate === undefined ? {} : { gate: callGate }),
+        });
+        runs[bundle] = { gateway: bundleGatewayOf, meter: bundleMeter, start, end: () => end };
+        return bundleGatewayOf;
+      };
+      const settle = (status: StageStatus, failureKind: FailureKind | null): void => {
+        for (const entry of runs) {
+          if (entry === undefined) continue;
+          stages.push(makeStageRecord("test-spec", status, entry.end() - entry.start, entry.meter.snapshot, entry.gateway.counts, failureKind));
+        }
+        const made = runs.filter((entry): entry is (typeof runs)[number] => entry !== undefined);
+        testSpecBundles = {
+          bundles: made.length,
+          concurrency: Math.min(concurrency, made.length),
+          total: { ...usageDelta(usageBefore, meter.snapshot), ...sumCallCounts(made.map((entry) => entry.gateway.counts)) },
+        };
+      };
+      let outcome: StageOutcome<TestSpecValue>;
+      try {
+        outcome = await run(bundleGateway, concurrency);
+      } catch (error) {
+        settle("failed", null);
+        throw error;
+      }
+      if (!outcome.ok) {
+        const attribution = attributionOf("test-spec", outcome.failure);
+        settle("failed", attribution.kind);
+        throw new RunStop(attribution);
+      }
+      settle("ok", null);
+      return outcome.value;
+    };
+    const runTestSpecStage = async (): Promise<FrozenTestSpec> => {
+      const testSpecInput = (): Parameters<typeof runTestSpec>[0] => ({
+        plan: input.plan,
+        list,
+        table,
+        carryOver: carry,
+        documents: input.documents,
+        gateway,
+        ...(judgeBudget === undefined ? {} : { judge: judgeBudget }),
+        onDropped: (dropped) => {
+          for (const entry of dropped) droppedTests.push(entry);
+        },
+        onRejected: rejectionSink("test-spec", 1),
+        ...withLedger,
+        // 旗 `v12.ids`：台帳の型だけで値が決まる試験をコードが作る（off は渡さない＝今のまま。Issue #595）
+        ...(flags.ids ? { ids: true } : {}),
+      });
+      const value: TestSpecValue = flags.ids
+        ? await runTestSpecBundled((bundleGateway, bundleConcurrency) =>
+            runTestSpec({ ...testSpecInput(), bundleGateway, bundleConcurrency }),
+          )
+        : await runStageOk("test-spec", () => runTestSpec(testSpecInput()));
       natureDiscrepancies = toBundleNatureDiscrepancies(value.discrepancies);
       materialStore.testSuite = await acceptSlot(value.suite, lastOkStageIndex("test-spec"));
       testSpecCounts = { tests: value.suite.tests.length, dropped_tests: droppedTests.length, coverage_units: value.coverage.length };
@@ -1295,6 +1512,14 @@ async function runV11a(
       nonRequirementIds.size === 0
         ? list
         : { ...list, requirements: list.requirements.filter((requirement) => !nonRequirementIds.has(requirement.id)) };
+    /**
+     * 旗 `v12.ids` の走りだけ、要る検査の骨組み（その時点の有効な組＝棄却・持ち越しで外した後の組から導く。off は渡さない＝
+     * 今の要求。Issue #666）
+     */
+    const requiredValidationsFor = (suite: TestSuite): { readonly requiredValidations?: readonly RequiredValidation[] } =>
+      flags.ids ? { requiredValidations: requiredValidationsOf(table, suite, testSpec.observes) } : {};
+    // 初回の B1 の時点の有効な組（残る要件の試験。棄却はまだ無い）
+    const remainingNow = new Set(carry.remainingRequirementIds);
     const written = await runStageOk("write", () =>
       runWriteV11a({
         list: writeList,
@@ -1304,6 +1529,7 @@ async function runV11a(
         documents: input.documents,
         gateway,
         ...withLedger,
+        ...requiredValidationsFor({ tests: testSpec.suite.tests.filter((test) => remainingNow.has(test.target.requirementId)) }),
       }),
     );
 
@@ -1525,6 +1751,8 @@ async function runV11a(
             // 道具と版の再検査は、評価口から v1.1α の結び付けと B3 を使う（その時点の文脈で。D11）
             evaluate: evaluator.evaluate,
             ...(current.rejections.length === 0 ? {} : { declRejections: current.rejections }),
+            ...repairStepIds(),
+            ...requiredValidationsFor(context.suite),
           }),
         );
         for (const dispute of step.disputes) disputes.push(dispute);
@@ -1707,6 +1935,7 @@ async function runV11a(
               gateway,
               ...withLedger,
               rewrite: { failures },
+              ...requiredValidationsFor(contextNow().suite),
             }),
           );
           await consider("rewrite", await evaluateVersion({ source: rewrite.declaration }, true));
@@ -1770,7 +1999,13 @@ async function runV11a(
           unmarked: best.unmarked,
           mismatches: best.report.testRun?.mismatches ?? [],
           unresolved: best.report.testRun?.unresolved ?? [],
+          // 旗 `v12.ids` の走りだけ、観測する性質の写像と、この文脈の組から導いた要る検査の骨組み（追加の場所を作る。Issue #667）
+          ...(flags.ids
+            ? { ids: { observes: testSpec.observes, requiredValidations: requiredValidationsOf(table, context.suite, testSpec.observes) } }
+            : {}),
         });
+        /** 往復の記録の追加の場所の数（旗 `v12.ids` の走りだけ欄を持つ。Issue #667） */
+        const additionsField = located.additions === undefined ? {} : { additions: located.additions.length };
         if (canRepairFields(located)) {
           const answer = await runStageOk("repair", () =>
             runFieldRepair({
@@ -1785,12 +2020,13 @@ async function runV11a(
           );
           for (const dispute of answer.disputes) disputes.push(dispute);
           for (const item of answer.rejected) rejected.push(item);
-          const merged = mergeReplacements(best.report.declaration.source, answer.replacements, located.spans);
+          const merged = mergeReplacements(best.report.declaration.source, answer.replacements, located.spans, located.additions);
           roundRecords.push({
             hand: "field-repair",
             locations: located.locations.length,
             unlocated: 0,
             refused: merged.ok ? null : merged.refusal,
+            ...additionsField,
           });
           if (await arbitrate(answer.disputes, merged.ok ? { source: merged.source } : best.report.declaration)) break;
           if (merged.ok) {
@@ -1801,7 +2037,13 @@ async function runV11a(
           }
           continue;
         }
-        roundRecords.push({ hand: "repair", locations: located.locations.length, unlocated: located.unlocated.length, refused: null });
+        roundRecords.push({
+          hand: "repair",
+          locations: located.locations.length,
+          unlocated: located.unlocated.length,
+          refused: null,
+          ...additionsField,
+        });
         // 直す段の入力の宣言・結果・B3' の拒否は一番良い版のもの
         const step = await runStageOk("repair", () =>
           runRepairStep({
@@ -1815,6 +2057,8 @@ async function runV11a(
             gateway,
             evaluate: evaluator.evaluate,
             ...(best.rejections.length === 0 ? {} : { declRejections: best.rejections }),
+            ...repairStepIds(),
+            ...requiredValidationsFor(context.suite),
           }),
         );
         for (const dispute of step.disputes) disputes.push(dispute);
@@ -1887,6 +2131,10 @@ async function runV11a(
           coverageChecks,
           // 旗 `v12.ids` の走りだけ、コードが作った試験 ID（予約の接頭辞の試験。再開した組でも同じに引ける。Issue #595）
           ...(flags.ids ? { generatedTestIds: testSpec.suite.tests.map((test) => test.id).filter(isGeneratedTestId) } : {}),
+          // 旗 `v12.ids` の走りだけ、LLM が書いた場合の数と応答の文字数（段を回した走りだけ。再開した組には無い。#625）
+          ...(flags.ids && testSpec.cases !== undefined ? { cases: testSpec.cases } : {}),
+          // 旗 `v12.ids` の走りだけ、必要な試験の枠の要約（段を回した走りだけ。再開した組には無い。#653）
+          ...(flags.ids && testSpec.frames !== undefined ? { frames: testSpec.frames } : {}),
         },
         declCheck: { limit: limits.declChecks, versions: declVersions },
         carryOver: {

@@ -424,6 +424,42 @@ describe("使用トークンの計（02 §1.5）", () => {
   });
 });
 
+// ── 呼び出しの数の上限の失敗に、上限の名前と数を写す（Issue #665）──
+
+describe("失敗の帰属の上限（limit）は、あるときだけ名前・上限値・実際の値を写す（Issue #665）", () => {
+  const withLimit = (extra: Record<string, unknown> = {}): RunRecord => ({
+    ...record(),
+    failure: {
+      stage: "repair",
+      kind: "call-limit",
+      limit: { name: "repairStepTurns", max: 8, actual: 9, ...extra },
+    } as RunRecord["failure"],
+  });
+
+  it("記録と要約の失敗の欄に、上限の名前・上限値・実際の値が出る（余分な欄は落ちる）", () => {
+    const picked = buildRunRecord(withLimit({ conversation: "会話の本文" }));
+    expect(picked.failure).toEqual({ stage: "repair", kind: "call-limit", limit: { name: "repairStepTurns", max: 8, actual: 9 } });
+    const built = buildSummary(picked, {
+      run_id: "run-1",
+      verdict: "none",
+      assurance: "none",
+      duration_secs: 0,
+      provider_cost_usd: 0,
+      stop_class: "call-limit",
+      exit_code: 1,
+    });
+    expect(built.failure).toEqual({ stage: "repair", kind: "call-limit", limit: { name: "repairStepTurns", max: 8, actual: 9 } });
+    expect(JSON.stringify(built)).not.toContain("会話の本文");
+  });
+
+  it("上限の無い失敗では、limit の欄を持たない（形は今のまま）", () => {
+    const plain = buildRunRecord({ ...record(), failure: { stage: "repair", kind: "call-limit" } });
+    expect(plain.failure).toEqual({ stage: "repair", kind: "call-limit" });
+    expect("limit" in (plain.failure ?? {})).toBe(false);
+    expect(Object.keys(buildRunRecord(record()).failure ?? {})).toEqual(["stage", "kind"]);
+  });
+});
+
 // ── 形・未達の失敗に、欄の名前と種類を写す（02 §3.5・S-8・#304）──
 
 describe("形・未達の失敗の帰属に、欄の名前と種類を写す（02 §3.5・S-8・#304）", () => {
