@@ -96,6 +96,7 @@ import {
   stageVersionsAt,
   verifyStageInput,
   STAGE_BUDGET_SCOPE,
+  STAGE_DECLARATION_FILE,
   STAGE_RUN_RECORD_FILE,
   STAGE_START_ALIASES_V12,
   type BoundaryMaterials,
@@ -1203,6 +1204,11 @@ async function runStageFromPlanFile(
     // v1.2 の段の走りだけ、`v12_calls` と（範囲が T2 を含むとき）`test_spec` を足す（Issue #637）
     ...(flags === undefined ? {} : { v12: { testSpecInRange: stagesInRange(range.start, range.end).includes("test-spec") } }),
   });
+  // `--pipeline v1.2` の段の走りで ⑦ を流したときだけ、判定した宣言の原文を `--out` の直下の固定の名前に書く（記録が名前と SHA-256 で
+  // 宣言する。計測の記録であって成果物ではない：manifest を組まず、門・publish の口へ渡さない。v1.1α の段の走りは書かない。Issue #687）
+  if (pipeline === "v1.2" && outcome.declaration !== undefined) {
+    await deps.writeFile(joinPath(job.outDir, STAGE_DECLARATION_FILE), outcome.declaration.source);
+  }
   await deps.writeFile(joinPath(job.outDir, STAGE_RUN_RECORD_FILE), stageJsonText(record));
   // `--pipeline v1.2` の段の走りだけ、断った候補を一気通貫と同じ関数・同じ名前で `--out` の下の診断の置き場所に書く
   // （候補が無ければ何も書かず、置き場所も作らない。記録・checkpoint・要約・終了コードは変えない。Issue #683）

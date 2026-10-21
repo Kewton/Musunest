@@ -455,7 +455,7 @@ test("#713 README：§10.8.2 の後ろの末尾の小節 §10.8.3 に定義の�
   const at = text.indexOf("\n#### 10.8.3 ");
   assert.ok(at > text.indexOf("\n#### 10.8.2 ") && text.indexOf("\n#### 10.8.2 ") > text.indexOf("\n#### 10.8.1 "), "§10.8.3 は §10.8.2 の後ろ");
   const sec = text.slice(at);
-  assert.equal(sec.indexOf("\n#", 1), -1, "§10.8.3 が末尾");
+  assert.ok(sec.split("\n").slice(1).every((l) => !l.startsWith("#") || l.startsWith("#### ")), "§10.8.3 の後ろは #### の小節だけ（## ・### は無い）");
   for (const w of ["部分の指紋", "t1-t2", "t2-b1", "欄の無い checkpoint", "ledger_upstream", "upstreamLedgerSha256", "stage-input:version", "stage:dist-unreadable", "freeze:dist-unreadable", "両方"]) assert.ok(sec.includes(w), w);
   // 語は符号の列で持つ（この試験のファイル自身に書かない）
   const words = [[0x6301, 0x3061, 0x5bc4, 0x308a], [0x5f53, 0x756a, 0x8868], [0x4f1a, 0x8cbb], [0x51fa, 0x6b20], [0x8cb8, 0x3057, 0x51fa, 0x3057]].map((cs) => String.fromCodePoint(...cs));
