@@ -32,7 +32,7 @@ import { BUILD_CLI_RECORD_SCHEMA } from "../cli-plan.js";
 import type { RequirementNature, TestSuite } from "../fixed-test.js";
 import type { Verdict } from "../outcome.js";
 import { requirementsFromPlan } from "../pipeline.js";
-import type { FailureAttribution, StageId, StageRecord } from "../record.js";
+import type { FailureAttribution, StageId, StageRecord, StopReason } from "../record.js";
 import type { DeclarationElement, DeclarationMark } from "./bind-by-id.js";
 import {
   deriveCarryOver,
@@ -492,6 +492,11 @@ export const STAGE_PREVIOUS_RECORD_SCHEMAS: readonly string[] = [STAGE_RUN_RECOR
 export const STAGE_RUN_RECORD_FILE = "stage-run.json" as const;
 /** 予算と締切の適用の単位（段の走り 1 本） */
 export const STAGE_BUDGET_SCOPE = "stage-run" as const;
+/**
+ * `--pipeline v1.2` の段の走りが ⑦ まで流したとき、判定した宣言（最終版の原文）を書く置き場所（`--out` の直下）。
+ * 計測の記録であって成果物ではない（納品物の `artifacts/` の名前と重ねない。manifest・門・publish に入れない。Issue #687）
+ */
+export const STAGE_DECLARATION_FILE = "stage-declaration.yaml" as const;
 
 /** 境界の checkpoint の置き場所（`--out` の直下。段の走りの記録と同じディレクトリ） */
 export function stageCheckpointFile(boundary: StageBoundary): string {
@@ -726,6 +731,42 @@ export interface StageTestSpecCounts {
   readonly coverage_units: number;
 }
 
+/** ⑦ まで流した段の走りの判定した宣言（最終版の原文・SHA-256・静的チェックの合否。Issue #687） */
+export interface StageJudgedDeclaration {
+  readonly source: string;
+  readonly sha256: string;
+  readonly staticCheckPassed: boolean;
+}
+
+/** 最終版を静的チェックに落として B3・C7 を流していない理由（実施して 0 件とは別。Issue #687） */
+export const STAGE_VERIFICATION_NOT_RUN_STATIC_CHECK = "not-run:static-check" as const;
+
+/**
+ * ⑦ まで流した段の走りの検証の数（段の走りの記録の `verification`。Issue #687）。表・組・宣言・静的チェックに掛けた版の SHA は
+ * 一気通貫の検証の記録（verification-v11a）と同じ値。B3・C7・未解決は最終版の実測で、最終版が静的チェックに落ちて流していなければ
+ * null と理由（⑦ の判定に使う代替の 1 を写さない）
+ */
+export interface StageVerificationCounts {
+  readonly table_sha256: string;
+  readonly test_suite_sha256: string;
+  readonly declaration_sha256: string;
+  readonly checked_declaration_sha256s: readonly string[];
+  /** B3' の件数（枯渇・形・拒否。一気通貫の verification-v11a の `decl_check` と同じ数え方） */
+  readonly decl_check: { readonly exhausted: number; readonly malformed: number; readonly rejected: number };
+  /** 最終版の B3 の落ちの数 */
+  readonly b3_misses: number | null;
+  /** 最終版の C7 の不一致の数 */
+  readonly c7_mismatches: number | null;
+  /** 未解決の数（裁定の未解決と最終版の未解決。停滞で足した分を含む） */
+  readonly unresolved: number | null;
+  /** 上の 3 つが null の理由（流したなら null） */
+  readonly not_run: typeof STAGE_VERIFICATION_NOT_RUN_STATIC_CHECK | null;
+  /** 止まり方（completed・stagnation・limit・unresolved） */
+  readonly stop_reason: StopReason;
+  /** 往復（B5）の数 */
+  readonly round_trips: number;
+}
+
 /** 回す部分が返す、段の走りの結果 */
 export interface StageRunOutcome {
   readonly stages: readonly StageRecord[];
@@ -754,6 +795,12 @@ export interface StageRunOutcome {
    * 段の判定・持ち越し・採用した回の選び方には使わない。Issue #699）
    */
   readonly tableRounds?: readonly TableRoundRecord[];
+  /**
+   * ⑦ まで流したときだけ、判定した宣言と検証の数（範囲の中の ⑦ より前の早期停止は持たない。差し戻しの走りも ⑦ を流したので持つ。
+   * 境界の材料には入れない。記録・ファイルに書くかは呼ぶ側が決める。Issue #687）
+   */
+  readonly declaration?: StageJudgedDeclaration;
+  readonly verification?: StageVerificationCounts;
 }
 
 /** 段の通過：範囲の中に早期停止が無く、終了の段の最後の記録が ok */
@@ -779,6 +826,8 @@ export function buildStageRunRecord(input: {
    */
   readonly v12?: { readonly testSpecInRange: boolean };
 }): Record<string, unknown> {
+  // `--pipeline v1.2` の段の走りで ⑦ を流したときだけ、判定した宣言のファイル（名前・SHA-256・静的チェックの合否）と検証の数を
+  // 末尾に足す（v1.1α の記録は欄を持たない。Issue #687）
   const { outcome } = input;
   const v12 = input.v12;
   return toJsonValue({
@@ -802,6 +851,16 @@ export function buildStageRunRecord(input: {
     exit_code: input.exitCode,
     ...(v12 === undefined || outcome.v12Calls === undefined ? {} : { v12_calls: outcome.v12Calls }),
     ...(v12 === undefined || !v12.testSpecInRange ? {} : { test_spec: outcome.testSpec ?? null }),
+    ...(v12 === undefined || outcome.declaration === undefined
+      ? {}
+      : {
+          declaration: {
+            file: STAGE_DECLARATION_FILE,
+            sha256: outcome.declaration.sha256,
+            static_check_passed: outcome.declaration.staticCheckPassed,
+          },
+        }),
+    ...(v12 === undefined || outcome.verification === undefined ? {} : { verification: outcome.verification }),
   });
 }
 

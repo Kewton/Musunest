@@ -1748,6 +1748,8 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
   // 内外の表と不一致・未解決の試験の分類（#539）。分母は予定した本（facts）
   const agreement = agreementOf(facts), test_findings = testFindingsSummary(facts);
   // 段単位の走り（#545）：段の通過率と範囲の中の漏斗だけを出す。原文系・了承後系の PASS と納品の欄は計算しない（null と理由 stage-run）
+  const stageExternalVerdictOf = async (run, path) => { const def = loadDef(evalSet.byId.get(patternOf(run)).scoringPath); const r = await score(engine, path, def); return finalVerdict(r, scoreClaims({ attempts: [{ unwritable: [] }] }, def, r.structure, r.written)); }; // #687
+  if (mode === STAGE_RUN_MODE) return withStageU3(stageOutputOf({ outRoot, cond, planned, stageAbsent, set, evaluation, completion, fingerprints }), { outRoot, cond, planned, stageAbsent, externalOf: stageExternalVerdictOf }); // #687
   if (mode === STAGE_RUN_MODE) return stageOutputOf({ outRoot, cond, planned, stageAbsent, set, evaluation, completion, fingerprints });
   return { rubric: "v5", aggregation_versions: AGGREGATION_VERSIONS, scoring_systems: SCORING_SYSTEMS, set, metrics, metrics_accepted, metrics_script, fulfillment, completion, fingerprints, bySubject, rows, tables, evaluation, metrics_plan, metrics_build, funnel, pass_k, verdicts, unverified_details, agreement, test_findings,
     // PASS あたりの費用と段ごとの時間・usage（#632。README §9）：既存の欄のあとに足す。分母は予定した本（facts）。判定・門には使わない
@@ -2769,6 +2771,160 @@ function stageOutputOf({ outRoot, cond, planned, stageAbsent, set, evaluation, c
 const stageFromOf = (sf) => (!isObj(sf) ? null : sf.kind === STAGE_FROM_SET_KIND
   ? { conditions_sha256: null, kind: STAGE_FROM_SET_KIND, id: typeof sf.id === "string" ? sf.id : null, version: intOrNull(sf.version), sha256: hashOrNull(sf.sha256) }
   : { conditions_sha256: isHex64(sf.conditions_sha256) ? sf.conditions_sha256 : null });
+// ── #687：U3（C5 → B2 → C6 → C7 → ループ → 判定）の段単位の採点（条件 v8・範囲の終了が ⑦）。README §10.8.4 // #687
+/** 段の走りが ⑦ まで流したときの判定した宣言のファイルの、本のディレクトリからの場所（packages/factory の STAGE_DECLARATION_FILE を --out の下に。工場の dist を import しないので写して持ち、試験で dist と照らす） */ // #687
+export const STAGE_DECLARATION_PATH = "bundle/stage-declaration.yaml"; // #687
+/** 最終版が静的チェックに落ちて B3・C7 を流していない印（packages/factory の STAGE_VERIFICATION_NOT_RUN_STATIC_CHECK の写し。実施して 0 件とは別） */ // #687
+export const STAGE_VERIFICATION_NOT_RUN = "not-run:static-check"; // #687
+/** 段の走りの記録の verification.stop_reason の値（⑦ まで流した走りの止まり方。packages/factory の v1.1α の回す部分が置く値） */ // #687
+export const STAGE_STOP_REASONS = ["completed", "stagnation", "limit", "unresolved"]; // #687
+/** 本ごとの宣言の状態：declared ＝ 記録が宣言したファイルが SHA-256 で合う、undeclared ＝ 宣言なし（⑦ に届かない）、mismatch ＝ 名前・SHA-256 が合わない（読まない。照合は未照合） */ // #687
+export const STAGE_DECLARATION_STATES = ["declared", "undeclared", "mismatch"]; // #687
+/** 1 段先の副指標の ⑦ の欄（停滞率と C7 の不一致）を計算しない理由（範囲が ⑦ を含まない） */ // #687
+export const NEXT_STAGE_JUDGE_NOT_IN_RANGE = "range-excludes-judge"; // #687
+/** 内外の表の行（段の判定 ⑦ の値と知らない値）と列（原文系の判定。宣言ありの本だけ） */ // #687
+const STAGE_JUDGE_ROWS = [...FACTORY_VERDICTS, "unknown"]; // #687
+const STAGE_EXTERNAL_COLUMNS = SOURCE_VERDICTS.filter((k) => k !== "not_run"); // #687
+/** 0 以上の整数か null（記録の数の欄） */ // #687
+const nonNegIntOrNull = (x) => (Number.isInteger(x) && x >= 0 ? x : null); // #687
+/** 観測した本の記録の verification（形が読めるときだけ。⑦ に届かない本・欄の無い本は null） */ // #687
+const stageVerificationRecordOf = (f) => (f.state === "observed" && isObj(f.record.verification) ? f.record.verification : null); // #687
+/** // #687
+ * 本ごとの宣言の状態（観測した本だけ。それ以外は null）。記録の declaration が無ければ undeclared。名前が固定の名前でない・SHA-256 の形でない・ // #687
+ * verification.declaration_sha256 と食い違う・ファイルが読めない・中身の SHA-256 が合わなければ mismatch（読まない）。合えば declared とファイルの場所 // #687
+ */ // #687
+export function stageDeclarationOf(outRoot, f) { // #687
+  if (f.state !== "observed") return null; // #687
+  const d = f.record.declaration; // #687
+  if (d === undefined || d === null) return { state: "undeclared", path: null }; // #687
+  const v = stageVerificationRecordOf(f); // #687
+  if (!isObj(d) || d.file !== basename(STAGE_DECLARATION_PATH) || !isHex64(d.sha256) || (v !== null && v.declaration_sha256 !== d.sha256)) return { state: "mismatch", path: null }; // #687
+  const path = join(outRoot, f.run, STAGE_DECLARATION_PATH), bytes = readBytesOrNull(path); // #687
+  return bytes === null || sha256(bytes) !== d.sha256 ? { state: "mismatch", path: null } : { state: "declared", path }; // #687
+} // #687
+/** 率と Wilson の区間（分母 0 は null） */ // #687
+const rateOf = (k, n) => { const [lo, hi] = wilson(k, n); return { rate: n === 0 ? null : round6(k / n), interval: n === 0 ? null : [round6(lo), round6(hi)], text: n === 0 ? null : fmt(k, n) }; }; // #687
+/** // #687
+ * 外の PASS（段の走りの宣言に v5 の外の採点を当てた PASS。08 §8.9）。予定・入力なし・観測・宣言あり・宣言なし（⑦ に届かない）・SHA の合わない本・PASS の件数。 // #687
+ * 主の率の分母は予定（上流で止まった本・入力なしの本・記録の読めない本を分母から消さない。§8.9 の決まり 2）。⑦ に届いた本・宣言ありの本の中の条件付き率は別に並べる // #687
+ */ // #687
+export function stageExternalOf(facts, decls) { // #687
+  const planned = facts.length, inputAbsent = facts.filter((f) => f.state === "absent").length, observed = facts.filter((f) => f.state === "observed").length; // #687
+  const of = (st) => [...decls.values()].filter((d) => d.state === st); // #687
+  const declared = of("declared"), undeclared = of("undeclared").length, mismatched = of("mismatch").length; // #687
+  const passed = declared.filter((d) => d.verdict === "PASS").length, reached = declared.length + mismatched; // #687
+  const verdicts = zeros(STAGE_EXTERNAL_COLUMNS); // #687
+  for (const d of declared) verdicts[knownOr(STAGE_EXTERNAL_COLUMNS, d.verdict)] += 1; // #687
+  return { // #687
+    label: "外の PASS（段の走りの宣言に v5 の外の採点を当てた PASS。漏斗の納品の段の代わりであって門ではない。宣言は納品物ではない）", // #687
+    planned, input_absent: inputAbsent, observed, declared: declared.length, undeclared, mismatched, passed, verdicts, // #687
+    denominator: planned, denominator_label: `予定 ${planned}（入力なし・⑦ に届かない・記録の読めない本も分母に残す）`, ...rateOf(passed, planned), // #687
+    conditional: { reached: { denominator: reached, ...rateOf(passed, reached) }, declared: { denominator: declared.length, ...rateOf(passed, declared.length) } }, // #687
+  }; // #687
+} // #687
+/** 数の欄の集計（⑦ に届いた本の値。null の本は合計に入れず、未実施（not-run:static-check）の件数を別に出す） */ // #687
+const verificationStat = (vs, key) => ({ not_run: vs.filter((v) => v[key] === null && v.not_run === STAGE_VERIFICATION_NOT_RUN).length, ...stat4(vs.map((v) => nonNegIntOrNull(v[key]))) }); // #687
+/** // #687
+ * 検証の数（段の判定の件数 stage_pass_rate.stage_judge_verdicts の横に置く）：⑦ に届いた本の記録の verification から、B3 の落ち・C7 の不一致・未解決・往復と // #687
+ * B3' の件数（枯渇・形・拒否）の合計と中央値、止まり方の内訳と停滞率（stagnation ÷ 予定。⑦ に届いた本の中の条件付き率は別） // #687
+ */ // #687
+export function stageVerificationOf(facts) { // #687
+  const vs = facts.map(stageVerificationRecordOf).filter((v) => v !== null), planned = facts.length; // #687
+  const stops = zeros([...STAGE_STOP_REASONS, "unknown"]); // #687
+  for (const v of vs) stops[knownOr(STAGE_STOP_REASONS, v.stop_reason)] += 1; // #687
+  const dc = vs.map((v) => (isObj(v.decl_check) ? v.decl_check : {})); // #687
+  return { // #687
+    label: "検証の数（⑦ まで流した段の走りの記録の verification。最終版が静的チェックに落ちた本の B3・C7・未解決は未実施で、0 件と別に数える）", // #687
+    planned, reached: vs.length, not_reached: planned - vs.length, // #687
+    b3_misses: verificationStat(vs, "b3_misses"), c7_mismatches: verificationStat(vs, "c7_mismatches"), unresolved: verificationStat(vs, "unresolved"), // #687
+    round_trips: stat4(vs.map((v) => nonNegIntOrNull(v.round_trips))), // #687
+    decl_check: Object.fromEntries(["exhausted", "malformed", "rejected"].map((k) => [k, stat4(dc.map((x) => nonNegIntOrNull(x[k])))])), // #687
+    stop_reasons: stops, // #687
+    stagnation: { stagnated: stops.stagnation, denominator: planned, denominator_label: `予定 ${planned}（⑦ に届かない本も分母に残す）`, ...rateOf(stops.stagnation, planned), conditional: { denominator: vs.length, ...rateOf(stops.stagnation, vs.length) } }, // #687
+  }; // #687
+} // #687
+/** 内外の表（段の判定 ⑦ × 外の判定。既存の内外の表 agreementOf と同じ形）。表は宣言ありの本、宣言なし・SHA の合わない本・観測していない本は別の行。分母は予定 */ // #687
+export function stageAgreementOf(facts, decls) { // #687
+  const table = Object.fromEntries(STAGE_JUDGE_ROWS.map((r) => [r, zeros(STAGE_EXTERNAL_COLUMNS)])); // #687
+  for (const f of facts) { const d = decls.get(f.run); if (d?.state === "declared") table[knownOr(FACTORY_VERDICTS, f.record.stage_judge_verdict)][knownOr(STAGE_EXTERNAL_COLUMNS, d.verdict)] += 1; } // #687
+  const cells = {}; // #687
+  for (const r of STAGE_JUDGE_ROWS) for (const c of STAGE_EXTERNAL_COLUMNS) if (table[r][c] > 0) cells[`${r}×${c}`] = table[r][c]; // #687
+  const of = (st) => [...decls.values()].filter((d) => d.state === st).length, observed = facts.filter((f) => f.state === "observed").length; // #687
+  return { // #687
+    planned: facts.length, declared: of("declared"), undeclared: of("undeclared"), mismatched: of("mismatch"), not_observed: facts.length - observed, // #687
+    denominator: `分母は予定した本 ${facts.length} 本。表は宣言ありの本 ${of("declared")} 本、宣言なし（⑦ に届かない）${of("undeclared")} 本・SHA の合わない本 ${of("mismatch")} 本・観測していない本 ${facts.length - observed} 本は別の行`, // #687
+    table, cells, // #687
+  }; // #687
+} // #687
+/** // #687
+ * 1 段先の副指標の ⑦ の欄（U2 の同じ出力を ⑦ まで流した走り。範囲が test-spec と ⑦ を含むときだけ）：停滞率（stagnation ÷ 予定。⑦ に届いた本の中の条件付き率は別）と // #687
+ * C7 の不一致（⑦ に届いた本の値。未実施は別）。範囲が含まなければ null と理由。既存の T2' の欄は変えない // #687
+ */ // #687
+export function nextStageJudgeOf(facts, range) { // #687
+  const inRange = stagesInRange(range?.start, range?.end); // #687
+  if (!inRange.includes(NEXT_STAGE)) return { judge_reason: NEXT_STAGE_NOT_IN_RANGE, stagnation: null, c7_mismatches: null }; // #687
+  if (!inRange.includes("judge")) return { judge_reason: NEXT_STAGE_JUDGE_NOT_IN_RANGE, stagnation: null, c7_mismatches: null }; // #687
+  const vs = facts.map(stageVerificationRecordOf).filter((v) => v !== null), stagnated = vs.filter((v) => v.stop_reason === "stagnation").length; // #687
+  return { // #687
+    judge_reason: null, // #687
+    stagnation: { stagnated, reached: vs.length, denominator: facts.length, ...rateOf(stagnated, facts.length), conditional: { denominator: vs.length, ...rateOf(stagnated, vs.length) } }, // #687
+    c7_mismatches: { reached: vs.length, ...verificationStat(vs, "c7_mismatches") }, // #687
+  }; // #687
+} // #687
+/** // #687
+ * 段単位の採点（条件 v8）に U3 の欄を足す：1 段先の副指標の ⑦ の欄（どの範囲でも。含まなければ null と理由）と、範囲の終了が ⑦ のときだけ外の PASS・検証の数・内外の表と // #687
+ * 本ごとの宣言の状態と外の判定。SHA の合わない宣言がある本が 1 本でもあれば照合は未照合。v6（v1.1α の段単位）と一気通貫の出力には何も足さない // #687
+ */ // #687
+async function withStageU3(full, { outRoot, cond, planned, stageAbsent, externalOf }) { // #687
+  if (cond.schema !== CONDITIONS_V8) return full; // #687
+  const range = full.stage_run.range, facts = stageFactsOf(outRoot, planned, stageAbsent, cond); // #687
+  const out = { ...full, next_stage: { ...full.next_stage, ...nextStageJudgeOf(facts, range) } }; // #687
+  if (range.end !== "judge") return out; // #687
+  const decls = new Map(); // #687
+  for (const f of facts) { const d = stageDeclarationOf(outRoot, f); if (d !== null) decls.set(f.run, { ...d, verdict: d.state === "declared" ? knownOr(STAGE_EXTERNAL_COLUMNS, await externalOf(f.run, d.path)) : null }); } // #687
+  out.rows = full.rows.map((r) => ({ ...r, declaration: decls.get(r.run)?.state ?? null, external_verdict: decls.get(r.run)?.verdict ?? null })); // #687
+  const mismatched = [...decls.values()].filter((d) => d.state === "mismatch").length; // #687
+  if (mismatched > 0) out.completion = { ...out.completion, status: "unverified", label: COMPLETION_LABELS.unverified, reasons: [...out.completion.reasons, `段の走りの宣言のファイルが記録の名前・SHA-256 と合わない ${mismatched} 本（読まない）`] }; // #687
+  return { ...out, stage_external: stageExternalOf(facts, decls), stage_verification: stageVerificationOf(facts), stage_agreement: stageAgreementOf(facts, decls) }; // #687
+} // #687
+/** 標準出力の外の PASS・検証の数・内外の表の 3 行 */ // #687
+export function stageU3Text(full) { // #687
+  const x = full.stage_external, v = full.stage_verification, a = full.stage_agreement, st = (s) => (s.observed === 0 ? "-" : `合計 ${s.total}・中央値 ${s.median}`); // #687
+  return [ // #687
+    `外の PASS（段の走りの宣言に外の採点を当てる。門ではない・宣言は納品物ではない）: PASS ${x.passed}／予定 ${x.planned}・入力なし ${x.input_absent}・観測 ${x.observed}・宣言あり ${x.declared}・宣言なし ${x.undeclared}・SHA の合わない ${x.mismatched}・率 ${x.text ?? "-（分母 0）"}（分母は予定）・⑦ に届いた本の中 ${x.conditional.reached.text ?? "-"}・宣言ありの本の中 ${x.conditional.declared.text ?? "-"}`, // #687
+    `検証の数（⑦ に届いた ${v.reached}・届かない ${v.not_reached}）: B3 の落ち ${st(v.b3_misses)}・C7 の不一致 ${st(v.c7_mismatches)}・未解決 ${st(v.unresolved)}（未実施 ${v.c7_mismatches.not_run}）・往復 ${st(v.round_trips)}・止まり方 ${[...STAGE_STOP_REASONS, "unknown"].map((k) => `${k} ${v.stop_reasons[k]}`).join("・")}・停滞率 ${v.stagnation.text ?? "-（分母 0）"}（分母は予定。⑦ に届いた本の中 ${v.stagnation.conditional.text ?? "-"}）`, // #687
+    `段の内外の表（予定 ${a.planned} 本・宣言あり ${a.declared}・宣言なし ${a.undeclared}・SHA の合わない ${a.mismatched}・観測していない ${a.not_observed}。段の判定×外）: ${cellsText(a.cells)}`, // #687
+  ].join("\n"); // #687
+} // #687
+/** 標準出力の 1 段先の ⑦ の欄の 1 行 */ // #687
+export const nextStageJudgeText = (ns) => (ns.judge_reason !== null ? `1 段先の ⑦（停滞率・C7 の不一致）: -（${ns.judge_reason}）` : `1 段先の ⑦（停滞率・C7 の不一致）: 停滞 ${ns.stagnation.stagnated}／予定 ${ns.stagnation.denominator}・率 ${ns.stagnation.text ?? "-（分母 0）"}（⑦ に届いた ${ns.stagnation.reached}）・C7 の不一致 ${ns.c7_mismatches.observed === 0 ? "-" : `合計 ${ns.c7_mismatches.total}・中央値 ${ns.c7_mismatches.median}`}（未実施 ${ns.c7_mismatches.not_run}）`); // #687
+/** 匿名の率（件数・率・区間だけ） */ // #687
+const anonRate = (x) => (!isObj(x) ? null : { denominator: intOrNull(x.denominator), rate: numOrNull(x.rate), interval: numPair(x.interval), text: rateOrNull(x.text) }); // #687
+const anonVerificationStat = (x) => (!isObj(x) ? null : { not_run: intOrNull(x.not_run), ...anonStat(x) }); // #687
+/** 匿名の U3 の欄（件数・率・区間・合計と中央値・既知の値の表だけ。本の ID・P の ID・SHA は出さない） */ // #687
+export function anonymousStageU3(full) { // #687
+  const x = full.stage_external, v = full.stage_verification, a = full.stage_agreement; // #687
+  return { // #687
+    ...(isObj(x) ? { stage_external: { ...intsOf(x, ["planned", "input_absent", "observed", "declared", "undeclared", "mismatched", "passed"]), verdicts: intsOf(x.verdicts, STAGE_EXTERNAL_COLUMNS), ...anonRate(x), conditional: { reached: anonRate(x.conditional?.reached), declared: anonRate(x.conditional?.declared) } } } : {}), // #687
+    ...(isObj(v) ? { stage_verification: { ...intsOf(v, ["planned", "reached", "not_reached"]), b3_misses: anonVerificationStat(v.b3_misses), c7_mismatches: anonVerificationStat(v.c7_mismatches), unresolved: anonVerificationStat(v.unresolved), round_trips: anonStat(v.round_trips), decl_check: Object.fromEntries(["exhausted", "malformed", "rejected"].map((k) => [k, anonStat(v.decl_check?.[k])])), stop_reasons: intsOf(v.stop_reasons, [...STAGE_STOP_REASONS, "unknown"]), stagnation: { stagnated: intOrNull(v.stagnation?.stagnated), ...anonRate(v.stagnation), conditional: anonRate(v.stagnation?.conditional) } } } : {}), // #687
+    ...(isObj(a) ? { stage_agreement: { ...intsOf(a, ["planned", "declared", "undeclared", "mismatched", "not_observed"]), table: Object.fromEntries(STAGE_JUDGE_ROWS.map((r) => [r, intsOf(a.table?.[r], STAGE_EXTERNAL_COLUMNS)])) } } : {}), // #687
+  }; // #687
+} // #687
+/** 匿名の 1 段先の ⑦ の欄 */ // #687
+export const anonymousNextStageJudge = (x) => (!isObj(x) ? {} : { judge_reason: enumOrUnknown([NEXT_STAGE_NOT_IN_RANGE, NEXT_STAGE_JUDGE_NOT_IN_RANGE], x.judge_reason ?? null), stagnation: !isObj(x.stagnation) ? null : { ...intsOf(x.stagnation, ["stagnated", "reached"]), ...anonRate(x.stagnation), conditional: anonRate(x.stagnation.conditional) }, c7_mismatches: !isObj(x.c7_mismatches) ? null : { reached: intOrNull(x.c7_mismatches.reached), ...anonVerificationStat(x.c7_mismatches) } }); // #687
+/** // #687
+ * 段だけの対の比較の外の PASS の対の差（after − before。v8・範囲の終了が ⑦ の群だけ）：対ごとに外の PASS を 0／1 にして差を取る（観測した本の宣言なしは 0、SHA の合わない本は欠測）。 // #687
+ * 件数・n・平均・区間は既存の対の差の関数（pairStats）、P のまとまりは clusterStats。片側が未起動・欠測の対は差 null で n に入れない // #687
+ */ // #687
+export function stageExternalPairsOf(pairs, rowOf) { // #687
+  const valueOf = (row) => (row === null || row.state !== "observed" || row.declaration === "mismatch" || row.declaration === undefined ? null : row.external_verdict === "PASS" ? 1 : 0); // #687
+  const rows = pairs.map((p) => { const id = `${p.pid}-r${p.r}`, v = Object.fromEntries(STAGE_COMPARE_GROUPS.map((g) => [g, valueOf(rowOf(g, id))])); const both = STAGE_COMPARE_GROUPS.every((g) => v[g] !== null); return { pid: p.pid, diff: both ? v.after - v.before : null, reason: both ? null : STAGE_COMPARE_GROUPS.some((g) => !["observed", "missing", "mismatch"].includes(rowOf(g, id)?.state ?? "unlaunched")) ? "unlaunched" : "missing" }; }); // #687
+  const diffs = rows.filter((r) => r.diff !== null).map((r) => r.diff), byPattern = {}; // #687
+  for (const r of rows) (byPattern[r.pid] ??= []).push(r.diff); // #687
+  return { label: "外の PASS の対の差（after − before。外の PASS を 0／1 にした差。門ではない）", planned: rows.length, both: diffs.length, excluded: Object.fromEntries(STAGE_PAIR_NULL_REASONS.map((why) => [why, rows.filter((r) => r.reason === why).length])), ...pairStats(diffs), clusters: { note: CLUSTER_NOTE, ...clusterStats(byPattern) } }; // #687
+} // #687
+/** 匿名の外の PASS の対の差 */ // #687
+export const anonymousExternalPairs = (x) => (!isObj(x) ? null : { ...intsOf(x, ["planned", "both"]), excluded: intsOf(x.excluded, STAGE_PAIR_NULL_REASONS), ...anonPairStats(x), clusters: anonCluster(x.clusters) }); // #687
 /** 匿名の段の通過率：件数・率・区間・既知の値だけ（本の ID・P の ID・上流の SHA は出さない） */
 const anonymousStagePassRate = (s) => (!isObj(s) ? null : {
   range: { start: enumOrUnknown(BUILD_STAGE_IDS, s.range?.start ?? null), end: enumOrUnknown(BUILD_STAGE_IDS, s.range?.end ?? null) },
@@ -2801,6 +2957,7 @@ export function anonymizeStage(full) {
     stage_pass_rate: anonymousStagePassRate(full.stage_pass_rate),
     funnel: anonymousFunnel(full.funnel, BUILD_STAGE_IDS.filter((id) => isObj(full.funnel?.stages?.[id]))),
     ...(v8 ? { next_stage: anonymousNextStage(full.next_stage) } : {}),
+    ...(v8 ? { next_stage: { ...anonymousNextStage(full.next_stage), ...anonymousNextStageJudge(full.next_stage) }, ...anonymousStageU3(full) } : {}), // #687
   };
 }
 /** 段だけの対の比較の対のファイル（--make-pairs と段の旗）：上流の入力のある本（採用した P の順 × 回数）だけを、今の比較と同じ交互の順で並べる */
@@ -2876,6 +3033,7 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
       stage_pass_rate: full.stage_pass_rate, funnel: full.funnel,
       // v1.2 の段の走りの群（v8。#638）：旗の組の照合と 1 段先の副指標
       ...(isObj(full.evaluation?.v12_flags) ? { v12_flags: full.evaluation.v12_flags } : {}), ...(isObj(full.next_stage) ? { next_stage: full.next_stage } : {}),
+      ...(isObj(full.stage_external) ? { stage_external: full.stage_external, stage_verification: full.stage_verification, stage_agreement: full.stage_agreement } : {}), // #687
     }];
   }));
   // 照合：(i) 未照合（群の照合・指紋）＞ (ii) 完了（全対が両方観測・両群が完了・予算の停止の記録なし）＞ (iii) 未完了
@@ -2904,6 +3062,7 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
     },
     clusters: { note: CLUSTER_NOTE, ...clusterStats(byPattern) },
     groups: groupOut, scoring_cost_usd: SCORING_COST_USD,
+    ...(STAGE_COMPARE_GROUPS.every((g) => isObj(groups[g].full.stage_external)) ? { external_pairs: stageExternalPairsOf(pv.pairs, rowOf) } : {}), // #687
   };
 }
 /** 段だけの対の比較の匿名の口：件数・n・平均・区間・p だけ（本の ID・P の ID・上流の SHA は出さない） */
@@ -2928,9 +3087,11 @@ export function anonymizeStageCompare(full) {
         fingerprints: Object.fromEntries(COMPARE_FINGERPRINT_CHECKS.map((k) => [k, boolOrNull(x.fingerprints?.[k])])),
         stage_pass_rate: anonymousStagePassRate(x.stage_pass_rate),
         ...(isObj(x.v12_flags) ? { v12_flags: anonymousV12Flags(x.v12_flags) } : {}), ...(isObj(x.next_stage) ? { next_stage: anonymousNextStage(x.next_stage) } : {}),
+        ...(isObj(x.next_stage) && "judge_reason" in x.next_stage ? { next_stage: { ...anonymousNextStage(x.next_stage), ...anonymousNextStageJudge(x.next_stage) } } : {}), ...anonymousStageU3(x), // #687
       }];
     })),
     scoring_cost_usd: SCORING_COST_USD,
+    ...(isObj(full.external_pairs) ? { external_pairs: anonymousExternalPairs(full.external_pairs) } : {}), // #687
   };
 }
 /** 標準出力の段だけの対の比較の 1 行 */
@@ -3036,6 +3197,8 @@ function printStage(full) {
   // v1.2 の段の走り（v8。#638）：旗の組の照合と 1 段先の副指標の行（既存の行の後ろ）
   if (isObj(evaluation?.v12_flags)) console.log(v12FlagsText(evaluation.v12_flags));
   if (isObj(full.next_stage)) console.log(nextStageText(full.next_stage));
+  if (isObj(full.next_stage) && "judge_reason" in full.next_stage) console.log(nextStageJudgeText(full.next_stage)); // #687
+  if (isObj(full.stage_external)) console.log(stageU3Text(full)); // #687
 }
 
 /** --compare の入口：score-compare[-label].json（匿名なら .anonymous.json だけ）と標準出力。通常の採点と同じく断りは exit 3、記録を読めなければ exit 1 */
@@ -3067,6 +3230,8 @@ async function mainCompare(repo, outRoot, { label, anonymous, setPath }) {
     console.log(stageCompareText(full));
     // v1.2 の段の走りの群（v8。#638）：群ごとの旗の組の照合と 1 段先の副指標（既存の行の後ろ）
     for (const g of STAGE_COMPARE_GROUPS) { if (isObj(stageGroups[g].v12_flags)) console.log(`${g} ${v12FlagsText(stageGroups[g].v12_flags)}`); if (isObj(stageGroups[g].next_stage)) console.log(`${g} ${nextStageText(stageGroups[g].next_stage)}`); }
+    for (const g of STAGE_COMPARE_GROUPS) { if (isObj(stageGroups[g].next_stage) && "judge_reason" in stageGroups[g].next_stage) console.log(`${g} ${nextStageJudgeText(stageGroups[g].next_stage)}`); if (isObj(stageGroups[g].stage_external)) console.log(stageU3Text(stageGroups[g]).split("\n").map((l) => `${g} ${l}`).join("\n")); } // #687
+    if (isObj(full.external_pairs)) { const x = full.external_pairs; console.log(`外の PASS の対の差（after − before。門ではない）: 対 ${x.planned}（両方 ${x.both}・未起動 ${x.excluded.unlaunched}・欠測 ${x.excluded.missing}）・差 ＋1 ${x.counts["+1"]}・0 ${x.counts["0"]}・−1 ${x.counts["-1"]}・平均 ${x.mean ?? "-"}（n ${x.n}）・P のまとまり（m ${x.clusters.m}）p ${fixed3(x.clusters.sign_flip.p)}・bootstrap ${rangeText(x.clusters.bootstrap.interval)}`); } // #687
     return;
   }
   // 既存の JSON の行は #539 の欄を除いて今までの形のまま

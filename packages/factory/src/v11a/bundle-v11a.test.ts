@@ -14,6 +14,7 @@ import {
   stageOutputDigest,
   stageVersionsAt,
   verifyStageInput,
+  STAGE_DECLARATION_FILE,
   STAGE_PREVIOUS_RECORD_SCHEMAS,
   STAGE_RUN_RECORD_SCHEMA,
   V11A_ARTIFACT_NAMES,
@@ -581,5 +582,18 @@ describe("T2 の成果物の generated_test_ids（旗 v12.ids の走りだけ。
     // 空の並びも書く（ids on で作った試験が 0 の走り）
     const empty = JSON.parse(specText(buildV11aArtifacts({ ...base, testSpec: { ...base.testSpec, generatedTestIds: [] } }))) as Record<string, unknown>;
     expect(empty["generated_test_ids"]).toEqual([]);
+  });
+});
+
+describe("段の走りの宣言のファイルの名前（計測の記録であって成果物ではない。Issue #687）", () => {
+  it("--out の直下の固定の名前で、納品物の成果物・v1.1α の記録・探索の記録・納品物の定数の名前と重ならない", () => {
+    expect(STAGE_DECLARATION_FILE).toBe("stage-declaration.yaml");
+    expect(STAGE_DECLARATION_FILE.startsWith(`${ARTIFACTS_DIR}/`)).toBe(false);
+    const artifactNames = buildV11aArtifacts(input()).map((artifact) => artifact.path);
+    const bundleNames = (Object.values(bundleModule) as readonly unknown[]).filter((value): value is string => typeof value === "string");
+    for (const name of [...artifactNames, ...Object.values(V11A_ARTIFACT_NAMES), V12_SEARCH_REPAIR_ARTIFACT_NAME, ...bundleNames]) {
+      expect(name).not.toBe(STAGE_DECLARATION_FILE);
+      expect(name.endsWith(`/${STAGE_DECLARATION_FILE}`)).toBe(false);
+    }
   });
 });

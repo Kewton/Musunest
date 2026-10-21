@@ -76,6 +76,7 @@ import {
 } from "./__tests__/fixtures.js";
 import {
   STAGE_RUN_RECORD_SCHEMA,
+  STAGE_VERIFICATION_NOT_RUN_STATIC_CHECK,
   V11A_ARTIFACT_NAMES,
   V12_SEARCH_REPAIR_ARTIFACT_NAME,
   buildStageCheckpoint,
@@ -3540,6 +3541,148 @@ describe("段単位の走り：範囲の外の段を呼ばず、納品物を組�
     await expect(runStageRangeV11a({ ...inputOf(recording.client), range: { start: "test-spec", end: "judge" } })).rejects.toThrow();
     await expect(runStageRangeV11a({ ...inputOf(recording.client), range: { start: "write", end: "judge" } })).rejects.toThrow();
     expect(recording.structured).toHaveLength(0);
+  });
+});
+
+describe("段の走りの判定した宣言と検証の数（⑦ を流したときだけ。工程ごとの評価 U3 の口。Issue #687）", () => {
+  /** 静的チェックに落ちる宣言（B3・C7 を流さない） */
+  const BROKEN_YAML = `${RUN_YAML}entities: [\n`;
+  /** C7 で r4 の試験が不一致になる宣言 */
+  const R4_BAD_YAML = replaced(RUN_YAML, "expression: base * 2", "expression: base * 3");
+
+  /** 同じ台本を範囲 T1〜⑦ の段の走りと一気通貫に流す */
+  async function both(calls: readonly RecordedCall[]) {
+    const stage = await runStageRangeV11a({ ...inputOf(createCheckedRecordingClient(calls).client), range: { start: "name-table", end: "judge" } });
+    const { result } = await runScenario(calls);
+    return { stage, result };
+  }
+
+  /** 一気通貫の検証の記録（verification-v11a・verification）と要約・記録から、段の走りの検証の数が持つべき値を組む */
+  function expectedOf(result: Awaited<ReturnType<typeof runScenario>>["result"]) {
+    const v11a = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.verification);
+    return {
+      table_sha256: v11a["table_sha256"],
+      test_suite_sha256: v11a["test_suite_sha256"],
+      declaration_sha256: v11a["declaration_sha256"],
+      checked_declaration_sha256s: v11a["checked_declaration_sha256s"],
+      decl_check: v11a["decl_check"],
+      stop_reason: result.summary.stop_reason,
+      round_trips: countStage(result, "repair"),
+    };
+  }
+
+  it("(1) 完走：宣言は最終版の原文と SHA-256・静的チェックの合否で、検証の数は一気通貫の検証の記録と同じ値。B3・C7・未解決は実測の 0 で、⑧ を呼ばない", async () => {
+    const { stage, result } = await both([...head(), structured(acceptAll())]);
+    expect(stage.judgeVerdict).toBe("full");
+    expect(stage.declaration).toEqual({ source: RUN_YAML, sha256: await sha256Hex(RUN_YAML), staticCheckPassed: true });
+    expect(stage.verification).toEqual({
+      ...expectedOf(result),
+      b3_misses: 0,
+      c7_mismatches: 0,
+      unresolved: 0,
+      not_run: null,
+    });
+    expect(stage.verification?.stop_reason).toBe("completed");
+    expect(stage.verification?.round_trips).toBe(0);
+    expect(stage.verification?.decl_check).toEqual({ exhausted: 0, malformed: 0, rejected: 0 });
+    expect(stage.stages.map((record) => record.stage)).not.toContain("bundle");
+    // 宣言は一気通貫の納品物の宣言とバイト列で同じ
+    expect(result.bundle?.artifacts.find((artifact) => artifact.path === DECLARATION_FILE)?.text).toBe(stage.declaration?.source);
+    // 境界の材料には入れない
+    for (const boundary of stage.boundaries) {
+      expect(boundary).not.toHaveProperty("declaration");
+      expect(boundary).not.toHaveProperty("verification");
+    }
+  });
+
+  it("(2) 停滞で止めた走り：stop_reason stagnation で、未解決は停滞で足した不一致を含む（C7 の不一致と同じ数）", async () => {
+    const { stage, result } = await both([...head({ yaml: R4_BAD_YAML }), structured(acceptAll()), repairDone(R4_BAD_YAML), structured(acceptAll())]);
+    expect(result.summary.stop_reason).toBe("stagnation");
+    const verification = stage.verification;
+    expect(verification).toMatchObject({ ...expectedOf(result), b3_misses: 0, not_run: null, stop_reason: "stagnation", round_trips: 1 });
+    expect(verification?.c7_mismatches).toBeGreaterThan(0);
+    // 停滞の前の最後の版の C7 の不一致は、停滞で未解決に足される（版の未解決 0 に、足した分が載る）
+    expect(verification?.unresolved).toBe(verification?.c7_mismatches);
+    expect(artifactOf(result.bundle, VERIFICATION_FILE)["test_mismatches"]).toBe(verification?.c7_mismatches);
+    expect(stage.declaration).toEqual({ source: R4_BAD_YAML, sha256: await sha256Hex(R4_BAD_YAML), staticCheckPassed: true });
+  });
+
+  it("(3) 最終版が静的チェックに落ちて判定 none の走り：宣言は落ちた版で、B3・C7・未解決は null と理由（⑦ の材料の代替の 1 を実測に写さない）", async () => {
+    const { stage, result } = await both([...head({ yaml: BROKEN_YAML }), repairDone(BROKEN_YAML)]);
+    expect(stage.judgeVerdict).toBe("none");
+    expect(result.outcome.verdict).toBe("none");
+    expect(stage.declaration).toEqual({ source: BROKEN_YAML, sha256: await sha256Hex(BROKEN_YAML), staticCheckPassed: false });
+    expect(stage.verification).toEqual({
+      ...expectedOf(result),
+      b3_misses: null,
+      c7_mismatches: null,
+      unresolved: null,
+      not_run: STAGE_VERIFICATION_NOT_RUN_STATIC_CHECK,
+    });
+    expect(stage.verification?.not_run).toBe("not-run:static-check");
+    expect(stage.stages.map((record) => record.stage)).not.toContain("run-tests");
+    expect(stage.stages.map((record) => record.stage)).not.toContain("name-check");
+  });
+
+  it("(4) 点検を使い切った走りは stop_reason limit、Plan へ戻した走り（差し戻し）は unresolved。差し戻しの走りも ⑦ を流したので欄を持つ", async () => {
+    const limitCalls: RecordedCall[] = [...head(), structured(judgments(IDS, REJECT_R3))];
+    for (let index = 1; index < 6; index += 1) {
+      limitCalls.push(repairDone(RUN_YAML), structured(judgments(IDS, index % 2 === 1 ? REJECT_R4 : REJECT_R3)));
+    }
+    const limit = await both(limitCalls);
+    expect(limit.stage.verification).toEqual({ ...expectedOf(limit.result), b3_misses: 0, c7_mismatches: 0, unresolved: 0, not_run: null });
+    expect(limit.stage.verification).toMatchObject({ stop_reason: "limit", round_trips: 5, decl_check: { exhausted: 1, malformed: 0, rejected: 6 } });
+
+    const back = await both([
+      ...head(),
+      structured(judgments(IDS, REJECT_R3)),
+      repairDone(RUN_YAML, [dispute("r4-normal")]),
+      arbitration([{ testId: "r4-normal", verdict: "return-to-plan" }]),
+    ]);
+    expect(back.stage.returnToPlan).toBe(true);
+    expect(back.stage.verification).toMatchObject({ ...expectedOf(back.result), stop_reason: "unresolved", round_trips: 1, not_run: null });
+    expect(back.stage.declaration?.sha256).toBe(await sha256Hex(RUN_YAML));
+  });
+
+  it("(5) ⑦ より前の早期停止（T1・T2・B3'）の走りは欄を持たない", async () => {
+    const t1 = await runStageRangeV11a({
+      ...inputOf(createCheckedRecordingClient([structured(t1Of(LIST, TABLE)), structured({ judgments: ["R1", "R2", "R3"].map((id) => ({ requirementId: id, verdict: "accept", kind: null, quote: null })) }), structured({ judgments: [] })]).client),
+      range: { start: "name-table", end: "judge" },
+    });
+    const missing = acceptAll(["R1", "R2", "R3"]);
+    const b3 = await runStageRangeV11a({
+      ...inputOf(createCheckedRecordingClient([...head(), structured(missing), structured(missing)]).client),
+      range: { start: "name-table", end: "judge" },
+    });
+    expect(b3.stopped?.stage).toBe("decl-check");
+    expect(t1.stopped).not.toBeNull();
+    for (const outcome of [t1, b3]) {
+      expect(outcome.judgeVerdict).toBeNull();
+      expect(outcome).not.toHaveProperty("declaration");
+      expect(outcome).not.toHaveProperty("verification");
+    }
+    // 終了が ⑦ でない範囲も欄を持たない
+    const t2 = await runStageRangeV11a({ ...inputOf(createCheckedRecordingClient(head().slice(0, 3)).client), range: { start: "name-table", end: "test-spec" } });
+    expect(t2.stopped).toBeNull();
+    expect(t2).not.toHaveProperty("declaration");
+    expect(t2).not.toHaveProperty("verification");
+  });
+
+  it("(6) 範囲 test-spec..judge と write..judge（境界の材料から入る）でも、同じ台本の T1〜⑦ の走りと同じ宣言と検証の数", async () => {
+    const calls = [...head({ yaml: R4_BAD_YAML }), structured(acceptAll()), repairDone(R4_BAD_YAML), structured(acceptAll())];
+    const whole = await runStageRangeV11a({ ...inputOf(createCheckedRecordingClient(calls).client), range: { start: "name-table", end: "judge" } });
+    const [t1t2, t2b1] = whole.boundaries;
+    if (t1t2 === undefined || t2b1 === undefined) throw new Error("前提が壊れた：境界が無い");
+    const { boundary: _a, ...fromT2 } = t1t2;
+    const { boundary: _b, ...fromB1 } = t2b1;
+    const t2 = await runStageRangeV11a({ ...inputOf(createCheckedRecordingClient(calls.slice(2)).client), range: { start: "test-spec", end: "judge" }, resume: fromT2 });
+    const b1 = await runStageRangeV11a({ ...inputOf(createCheckedRecordingClient(calls.slice(3)).client), range: { start: "write", end: "judge" }, resume: fromB1 });
+    for (const outcome of [t2, b1]) {
+      expect(outcome.stopped).toBeNull();
+      expect(outcome.declaration).toEqual(whole.declaration);
+      expect(outcome.verification).toEqual(whole.verification);
+    }
+    expect(whole.verification?.stop_reason).toBe("stagnation");
   });
 });
 

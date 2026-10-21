@@ -50,6 +50,7 @@ import {
 import { requirementsFromPlan, type RequirementList } from "./pipeline.js";
 import { captureCliBaseline, type BaselineCliCapture, type BaselineCliScenarios } from "./__tests__/baseline-capture.js";
 import {
+  STAGE_DECLARATION_FILE,
   STAGE_INPUT_CODES,
   STAGE_RUN_RECORD_FILE,
   stageCheckpointFile,
@@ -2263,6 +2264,216 @@ const V11A_STAGE_RUN_DIGESTS: readonly string[] = [
   "50dde03644297779f6259db18fe73422c80f2aaa48439be189ea472bfb93ec33",
   "0d3d1378e80402c9f7e6625191e1e9b4821b1a75a4872b62716bbc0e125eecb2",
 ];
+
+describe("v1.2 の段の走りが ⑦ まで流したとき、判定した宣言を書いて記録で宣言する（工程ごとの評価 U3 の口。Issue #687）", () => {
+  const readJson = async (path: string): Promise<Record<string, any>> => JSON.parse(await fs.readFile(path, "utf8")) as Record<string, any>;
+  /** v1.2 の一気通貫の走り（境界の checkpoint と納品物を書く）。同じ台本の段の走りの入力と比較元 */
+  async function wholeRun(name: string) {
+    const calls = [...v12Head(), structured(v11aJudgments())];
+    const whole = `${directory}/${name}`;
+    await runV11aCli({ dir: whole, calls, pipeline: "v1.2" });
+    return { calls, whole };
+  }
+
+  it("範囲 write..judge の完走：宣言のファイルが判定した宣言とバイト列で同じで、記録の SHA-256 と一致し、検証の数が一気通貫の検証の記録と同じ。manifest・納品物を書かない", async () => {
+    const { calls, whole } = await wholeRun("u3-whole-a");
+    const dir = `${directory}/u3-write-judge`;
+    const run = await runStageCli({ dir, args: ["--stage-start", "write", "--stage-input", `${whole}/${stageCheckpointFile("t2-b1")}`], calls: calls.slice(6), pipeline: "v1.2" });
+    expect(run.errors.filter((line) => line.startsWith("stage-input:"))).toEqual([]);
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.written).toEqual([STAGE_DECLARATION_FILE, STAGE_RUN_RECORD_FILE]);
+    const text = await fs.readFile(`${dir}/${STAGE_DECLARATION_FILE}`, "utf8");
+    expect(text).toBe(V11A_YAML);
+    // 一気通貫の納品物の宣言とバイト列で同じ
+    expect(text).toBe(await fs.readFile(`${whole}/artifacts/app.spec.yaml`, "utf8"));
+    const record = await stageRecordOf(dir);
+    expect(record["stage_judge_verdict"]).toBe("full");
+    expect(record["declaration"]).toEqual({ file: STAGE_DECLARATION_FILE, sha256: await sha256Hex(text), static_check_passed: true });
+    // 既存の欄の並びは今のまま（v1.2 の欄の末尾に宣言と検証の数を足す）
+    expect(Object.keys(record).slice(-3)).toEqual(["v12_calls", "declaration", "verification"]);
+    const verification = record["verification"] as Record<string, unknown>;
+    const v11a = await readJson(`${whole}/${V11A_ARTIFACT_NAMES.verification}`);
+    expect(verification).toEqual({
+      table_sha256: v11a["table_sha256"],
+      test_suite_sha256: v11a["test_suite_sha256"],
+      declaration_sha256: v11a["declaration_sha256"],
+      checked_declaration_sha256s: v11a["checked_declaration_sha256s"],
+      decl_check: v11a["decl_check"],
+      b3_misses: 0,
+      c7_mismatches: 0,
+      unresolved: 0,
+      not_run: null,
+      stop_reason: "completed",
+      round_trips: 0,
+    });
+    expect(verification["declaration_sha256"]).toBe(await sha256Hex(text));
+    // 納品物を書かない（manifest・artifacts の下・Build だけの記録が無い）
+    await expect(fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+    await expect(fs.readFile(`${dir}/artifacts/app.spec.yaml`, "utf8")).rejects.toThrow();
+    expect(run.written.some((path) => path.startsWith("artifacts/"))).toBe(false);
+    // 1 行の要約は直す前と同じ形
+    expect(run.lines.at(-1)).toBe(JSON.stringify({ stage_pass: true, reached_stage: "judge", budget_scope: "stage-run", exit_code: EXIT_OK }));
+    // 一気通貫の manifest は段の走りの宣言のファイルの名前を載せない
+    expect(await fs.readFile(`${whole}/${BUNDLE_MANIFEST_FILE}`, "utf8")).not.toContain(STAGE_DECLARATION_FILE);
+  });
+
+  it("範囲 test-spec..judge でも同じ：宣言のファイルのバイト列と記録の宣言・検証の数が write..judge の走りと同じ", async () => {
+    const { calls, whole } = await wholeRun("u3-whole-b");
+    const fromB1 = `${directory}/u3-b-write`;
+    await runStageCli({ dir: fromB1, args: ["--stage-start", "write", "--stage-input", `${whole}/${stageCheckpointFile("t2-b1")}`], calls: calls.slice(6), pipeline: "v1.2" });
+    const fromT2 = `${directory}/u3-b-test-spec`;
+    const run = await runStageCli({ dir: fromT2, args: ["--stage-start", "test-spec", "--stage-input", `${whole}/${stageCheckpointFile("t1-t2")}`], calls: calls.slice(5), pipeline: "v1.2" });
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.written).toEqual([stageCheckpointFile("t2-b1"), STAGE_DECLARATION_FILE, STAGE_RUN_RECORD_FILE]);
+    expect(await fs.readFile(`${fromT2}/${STAGE_DECLARATION_FILE}`, "utf8")).toBe(await fs.readFile(`${fromB1}/${STAGE_DECLARATION_FILE}`, "utf8"));
+    const [a, b] = [await stageRecordOf(fromB1), await stageRecordOf(fromT2)];
+    expect(b["declaration"]).toEqual(a["declaration"]);
+    expect(b["verification"]).toEqual(a["verification"]);
+  });
+
+  it("⑦ に届かない走り（C2 で止めた走り・終了 T2'）と v1.1a の段の走りは、宣言のファイルを書かず記録に欄が無い", async () => {
+    const c2 = `${directory}/u3-c2-stop`;
+    const stopped = await runStageCli({ dir: c2, args: ["--stage-start", "vocabulary", "--stage-end", "judge"], calls: [...v12TableCalls().slice(0, 3), structured({ requirements: [] }), structured({ requirements: [] })], pipeline: "v1.2" });
+    expect(stopped.code).toBe(EXIT_RUN_FAILED);
+    const t2 = `${directory}/u3-t2-end`;
+    await runStageCli({ dir: t2, args: ["--stage-end", "test-spec"], calls: v12Head().slice(0, 6), pipeline: "v1.2" });
+    const v11a = `${directory}/u3-v11a`;
+    const plain = await runStageCli({ dir: v11a, args: ["--stage-end", "judge"], calls: [...v11aHead(), structured(v11aJudgments())] });
+    expect(plain.code).toBe(EXIT_OK);
+    for (const [dir, written] of [[c2, stopped.written], [v11a, plain.written]] as const) {
+      expect(written).not.toContain(STAGE_DECLARATION_FILE);
+      await expect(fs.readFile(`${dir}/${STAGE_DECLARATION_FILE}`, "utf8")).rejects.toThrow();
+    }
+    for (const dir of [c2, t2, v11a]) {
+      const record = await stageRecordOf(dir);
+      expect(record).not.toHaveProperty("declaration");
+      expect(record).not.toHaveProperty("verification");
+    }
+  });
+
+  /** 要件の文をそのまま根拠に写した B3' の拒否（ids の要件ごと） */
+  const rejecting = (ids: readonly string[]) =>
+    structured(v11aJudgments(Object.fromEntries(ids.map((id) => [id, ["mismatch", V11A_BASE_LIST.requirements.find((requirement) => requirement.id === id)?.text ?? ""] as const]))));
+  /** C7 で r4 の 3 本（normal・abnormal・boundary。どれも同じ参照データで率 6 を期待する）が不一致になる宣言（率の式を変える） */
+  const V11A_YAML_R4_BAD = V11A_YAML.replace("expression: base * 2", "expression: base * 3");
+  /**
+   * 探索の直しの経路（v1.2 の旗の組。B1 から先の台本）。`unresolved` ＝ 記録の verification.unresolved の期待値を台本から手で決めた値
+   * （裁定の未解決 ∪ 最終版の C7 の未解決 ∪ 停滞で足した試験 ＋ 停滞のときの最終版の B3 の落ち）
+   */
+  const SEARCH_STOPS = [
+    {
+      name: "(a) 停滞",
+      // 同じ拒否の版が 2 つ続けて採れず B1 を作り直し、作り直しのあとも 2 つ採れずに止める
+      calls: (): RecordedCall[] => [
+        structured({ declaration: V11A_YAML }), structured(v11aJudgments(V11A_REJECT_R3)),
+        v11aRepairDone(), structured(v11aJudgments(V11A_REJECT_R3)),
+        v11aRepairDone(), structured(v11aJudgments(V11A_REJECT_R3)),
+        structured({ declaration: V11A_YAML }), structured(v11aJudgments(V11A_REJECT_R3)),
+        v11aRepairDone(), structured(v11aJudgments(V11A_REJECT_R3)),
+      ],
+      stopReason: "stagnation",
+      roundTrips: 3,
+      code: EXIT_OK,
+      // 裁定 0（主張なし）＋ 最終版（一番良い版＝最初の版。どの候補も同数で採らない）の C7 の未解決 0 ＋ 停滞で足す試験 0（最終版の C7 の
+      // 不一致の行き先が 0 件）＋ B3 の落ち 0 ＝ 0
+      c7: 0,
+      unresolved: 0,
+    },
+    {
+      name: "(a') 停滞（C7 の不一致が残る版）",
+      // (a) と同じ形で、どの版も r4 の 3 本が C7 で不一致のまま、同じ拒否 R3 で採れずに止める（R3 の拒否は欄だけの直しに写せないので道具の直し）
+      calls: (): RecordedCall[] => [
+        structured({ declaration: V11A_YAML_R4_BAD }), structured(v11aJudgments(V11A_REJECT_R3)),
+        { kind: "tools", response: { kind: "done", declaration: { declaration: V11A_YAML_R4_BAD, disputes: [] }, usage: undefined } },
+        structured(v11aJudgments(V11A_REJECT_R3)),
+        { kind: "tools", response: { kind: "done", declaration: { declaration: V11A_YAML_R4_BAD, disputes: [] }, usage: undefined } },
+        structured(v11aJudgments(V11A_REJECT_R3)),
+        structured({ declaration: V11A_YAML_R4_BAD }), structured(v11aJudgments(V11A_REJECT_R3)),
+        { kind: "tools", response: { kind: "done", declaration: { declaration: V11A_YAML_R4_BAD, disputes: [] }, usage: undefined } },
+        structured(v11aJudgments(V11A_REJECT_R3)),
+      ],
+      stopReason: "stagnation",
+      roundTrips: 3,
+      code: EXIT_OK,
+      // 裁定 0（主張なし）＋ 最終版の C7 の未解決 0 ＋ **停滞で足す試験 3**（最終版の C7 の不一致 r4-normal・r4-abnormal・r4-boundary の行き先）
+      // ＋ B3 の落ち 0 ＝ 3。停滞で足した分を含まなければ 0 になる
+      c7: 3,
+      unresolved: 3,
+    },
+    {
+      name: "(b) 上限",
+      // 拒否の数が 4 → 3 → 2 → 1 と減って採り、同数の 2 版が採れずに点検 6 を使い切る（拒否は直す手 4a に渡る R3 を含む）
+      calls: (): RecordedCall[] => [
+        structured({ declaration: V11A_YAML }), rejecting(["R1", "R2", "R3", "R4"]),
+        v11aRepairDone(), rejecting(["R2", "R3", "R4"]),
+        v11aRepairDone(), rejecting(["R3", "R4"]),
+        v11aRepairDone(), rejecting(["R3"]),
+        v11aRepairDone(), rejecting(["R3"]),
+        v11aRepairDone(), rejecting(["R3"]),
+      ],
+      stopReason: "limit",
+      roundTrips: 5,
+      code: EXIT_OK,
+      // 裁定 0（主張なし）＋ 最終版（拒否 R3 の 1 件の版）の C7 の未解決 0 ＋ 停滞でないので足さない ＝ 0
+      c7: 0,
+      unresolved: 0,
+    },
+    {
+      name: "(c) 差し戻し",
+      // B3' の拒否 → B5 の主張 → B5' が Plan へ戻す
+      calls: (): RecordedCall[] => v11aReturnToPlan().slice(3),
+      stopReason: "unresolved",
+      roundTrips: 1,
+      code: EXIT_RETURN_TO_PLAN,
+      // 裁定の未解決 0（r4-normal は Plan へ戻す判断で、確定した仕様があるので未解決に落とさない）＋ 最終版の C7 の未解決 0 ＋ 停滞でない ＝ 0
+      c7: 0,
+      unresolved: 0,
+    },
+  ] as const;
+
+  it.each(SEARCH_STOPS)("探索の直しの $name で止めた範囲 write..judge の走り：stop_reason・宣言のファイル（判定した宣言とバイト列で同じ・SHA が記録と一致）・記録の欄が同じ台本の一気通貫と同じで、manifest が無く、終了コードは今までどおり", async (scenario) => {
+    const { whole } = await wholeRun(`u3-search-src-${scenario.stopReason}`);
+    const head = [...v12Head(), structured(v11aJudgments())].slice(0, 6);
+    // 同じ台本の一気通貫（比較元の検証の記録・要約・宣言）
+    const reference = `${directory}/u3-search-ref-${scenario.stopReason}`;
+    const full = await runV11aCli({ dir: reference, calls: [...head, ...scenario.calls()], pipeline: "v1.2" });
+    expect(full.summary["stop_reason"], JSON.stringify(full.summary)).toBe(scenario.stopReason);
+    const dir = `${directory}/u3-search-${scenario.stopReason}`;
+    const run = await runStageCli({ dir, args: ["--stage-start", "write", "--stage-input", `${whole}/${stageCheckpointFile("t2-b1")}`], calls: scenario.calls(), pipeline: "v1.2" });
+    expect(run.errors.filter((line) => line.startsWith("stage-input:"))).toEqual([]);
+    expect(run.clientErrors).toEqual([]);
+    expect(run.code).toBe(scenario.code);
+    expect(run.written).toEqual([STAGE_DECLARATION_FILE, STAGE_RUN_RECORD_FILE]);
+    const text = await fs.readFile(`${dir}/${STAGE_DECLARATION_FILE}`, "utf8");
+    // 判定した宣言（一気通貫の納品物の宣言＝一番良い版）とバイト列で同じ
+    expect(text).toBe(await fs.readFile(`${reference}/artifacts/app.spec.yaml`, "utf8"));
+    const record = await stageRecordOf(dir);
+    expect(record["return_to_plan"]).toBe(scenario.stopReason === "unresolved");
+    expect(record["stage_judge_verdict"]).toBe(full.summary["verdict"]);
+    expect(record["declaration"]).toEqual({ file: STAGE_DECLARATION_FILE, sha256: await sha256Hex(text), static_check_passed: true });
+    const verification = record["verification"] as Record<string, unknown>;
+    const v11a = await readJson(`${reference}/${V11A_ARTIFACT_NAMES.verification}`);
+    const repairs = (full.summary["stages"] as readonly { readonly stage: string }[]).filter((entry) => entry.stage === "repair").length;
+    expect(verification).toMatchObject({
+      table_sha256: v11a["table_sha256"],
+      test_suite_sha256: v11a["test_suite_sha256"],
+      declaration_sha256: await sha256Hex(text),
+      checked_declaration_sha256s: v11a["checked_declaration_sha256s"],
+      decl_check: v11a["decl_check"],
+      b3_misses: 0,
+      c7_mismatches: scenario.c7,
+      not_run: null,
+      stop_reason: scenario.stopReason,
+    });
+    expect(v11a["declaration_sha256"]).toBe(verification["declaration_sha256"]);
+    expect(verification["round_trips"]).toBe(repairs);
+    expect(verification["round_trips"]).toBe(scenario.roundTrips);
+    expect(verification["unresolved"]).toBe(scenario.unresolved);
+    // 納品物を書かない
+    await expect(fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+    expect(run.written.some((path) => path.startsWith("artifacts/"))).toBe(false);
+  });
+});
 
 describe("封筒の枝は段が渡した schema と深く等しい（実 adapter・偽物の fetch。Issue #549 の直し）", () => {
   afterEach(() => {
