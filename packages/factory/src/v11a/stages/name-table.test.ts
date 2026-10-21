@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import type { LlmClient, LlmStructuredRequest } from "../../llm.js";
 import type { RequirementList } from "../../pipeline.js";
 import { ruleDefinitionDefects, ruleTexts, type RejectedCandidate } from "../../stages/prompt.js";
-import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
+import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView, type UpstreamLedgerView } from "../../v12/ledger.js";
 import { expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
   createCheckedRecordingClient,
@@ -60,6 +60,7 @@ import {
   nameTableSchemaOf,
   runNameTable,
   type NameTablePrevious,
+  type NameTableInput,
 } from "./name-table.js";
 
 const structured = recordedStructured;
@@ -866,5 +867,27 @@ describe("旗 on：今の台帳の T1 の要求と #549 の台帳の差は non-r
       expect(outcome.failure.problems.map((problem) => problem.field)).toEqual(["requirements[5].verification.kind"]);
       expect(outcome.failure.problems[0]?.message).not.toContain("non-requirement");
     }
+  });
+});
+
+// ── 上流の台帳の見方で受ける（読み漏れの検出。Issue #712）──────────────
+
+/** 2 つの型が互いに代入できる（同じ型）なら true */
+type SameType<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+describe("読み漏れの検出：ids off の T1 は台帳を上流の見方で受ける（Issue #712）", () => {
+  it("規則・schema・段の入力の台帳の型が上流の見方で、一覧の外の欄（T2 系の文・生の行）を読めない", () => {
+    const same: readonly true[] = [
+      true satisfies SameType<NonNullable<Parameters<typeof nameTableRuleDefinitionsOf>[0]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<Parameters<typeof nameTableSchemaOf>[0]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<NameTableInput["ledger"]>, UpstreamLedgerView>,
+    ];
+    const ledger: NonNullable<NameTableInput["ledger"]> = PROPERTY_LEDGER_VIEW;
+    // @ts-expect-error T1 の段の台帳は観測する性質を持たない
+    void ledger.observes;
+    // @ts-expect-error T1 の段の台帳は生の行を持たない
+    void ledger.rows;
+    expect(same).toHaveLength(3);
+    expect(ledger.t1RuleTexts).toEqual(PROPERTY_LEDGER_VIEW.t1RuleTexts);
   });
 });

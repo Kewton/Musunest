@@ -22,10 +22,14 @@
 // 手 3p（#592）で旗 `v12.ids`（内部の鍵・公開の鍵とも `ids`）を足した。手 3 の仕組み（C1・C2 の束・導ける欄）と呼び出しの
 // 枠（`v12/limits.ts`）の旗で、手 3a〜3c は同じ旗の下で足す。
 //
+// 境界 t1-t2 までの段が読むものは上流の見方（`UpstreamLedgerView`）に絞り、その見方から部分の指紋（`upstreamLedgerSha256`）を
+// 導く（#712）。全体の指紋 `propertyLedgerSha256` の値と意味は変えない。
+//
 // 台帳は LLM を呼ばず、評価口を import しない（B4 の照合は名前で持ち、評価口が名前 → 関数の表を持つ）。
 import type { AggregateKind } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { TEST_KINDS, type TestKind, type TestOperation, type TestTargetKind } from "../fixed-test.js";
+import type { StageBoundary } from "../v11a/bundle-v11a.js";
 
 // ── 旗（v1.2 の旗の正本）──────────────────────────────────────────
 
@@ -914,6 +918,74 @@ export const PROPERTY_LEDGER_VIEW: LedgerView = deriveLedgerView(PROPERTY_LEDGER
 /** 旗から、段へ渡す台帳の導出を選ぶ（旗 ledger が off なら undefined＝段は今の定数と関数を使う） */
 export function ledgerViewOf(flags: Pick<V12Flags, "ledger">): LedgerView | undefined {
   return flags.ledger ? PROPERTY_LEDGER_VIEW : undefined;
+}
+
+// ── 上流の台帳の見方（境界 t1-t2 までの段が読むもの。Issue #712）────────────
+
+/**
+ * 境界 t1-t2 までの段（C1・C1'・C2・C2'・C2 の書き直し・C3・持ち越し・確かめ方の変換・ids off の T1・T1'）が台帳から読める
+ * もの（**この一覧が、段の引数の型と部分の指紋の共通の正本**）。全体の見方（`LedgerView`）はそのまま代入でき、段はこの型で
+ * 受けるので一覧の外の欄（T2 系の文・試験の型・生の行）を型検査で読めない。値は全体の見方と同じ導出の値である。
+ */
+export interface UpstreamLedgerView {
+  /** T1 の規則の文（全行の `rules.t1`。台帳の順） */
+  readonly t1RuleTexts: LedgerView["t1RuleTexts"];
+  /** T1'' の受理条件の文（全行の `rules.t1Acceptance`。台帳の順） */
+  readonly t1AcceptanceTexts: LedgerView["t1AcceptanceTexts"];
+  /** 確かめ方の種類（台帳の外の種類＋T1 の記述子の種類。台帳の順） */
+  readonly verificationKinds: LedgerView["verificationKinds"];
+  /** 確かめ方の種類 → T1 の記述子（値は T1 の記述子だけを読める包み） */
+  readonly rowByVerificationKind: ReadonlyMap<string, { readonly t1: PropertyT1 | null }>;
+  /** 受理で除く確かめ方の種類（台帳の順） */
+  readonly excludedWhenAcceptedKinds: LedgerView["excludedWhenAcceptedKinds"];
+  /** 集計の種類（行の状態・集計の試験の型の有無・集計の種類の順から導く。T2 系の欄の名前だけで除かない） */
+  readonly aggregateKinds: LedgerView["aggregateKinds"];
+}
+
+/** 上流の台帳の見方の版（見方の欄・正規化の形を変えたら上げる。部分の指紋の材料） */
+export const UPSTREAM_LEDGER_VIEW_VERSION = 1;
+
+/** 上流の台帳の見方の境界（部分の指紋の材料。境界 t2-b1 は全体の指紋で照らす） */
+export const UPSTREAM_LEDGER_BOUNDARY = "t1-t2" as const satisfies StageBoundary;
+
+/** 全体の見方から上流の見方の値だけを取り出す（引き当ての値は `{ t1 }` に包み直す。値は同じ導出のまま） */
+export function upstreamLedgerViewOf(view: UpstreamLedgerView): UpstreamLedgerView {
+  return {
+    t1RuleTexts: view.t1RuleTexts,
+    t1AcceptanceTexts: view.t1AcceptanceTexts,
+    verificationKinds: view.verificationKinds,
+    rowByVerificationKind: new Map([...view.rowByVerificationKind].map(([kind, entry]) => [kind, { t1: entry.t1 }] as const)),
+    excludedWhenAcceptedKinds: view.excludedWhenAcceptedKinds,
+    aggregateKinds: view.aggregateKinds,
+  };
+}
+
+/** 台帳の行から上流の見方を導く（全体の導出を通すので、不備のある台帳は例外で断る） */
+export function deriveUpstreamLedgerView(rows: readonly PropertyRow[]): UpstreamLedgerView {
+  return upstreamLedgerViewOf(deriveLedgerView(rows));
+}
+
+/**
+ * 境界 t1-t2 までの段が読む台帳の部分の指紋（上流の見方を正規化した JSON と、見方の版・境界の名前の SHA-256。Issue #712）。
+ * 引き当てはキーと値の並び（台帳の順）に直し、キーの順は正規化し、配列の順・null・引き当てのキーの増減は保つ。省けば台帳の
+ * 正本。全体の指紋 `propertyLedgerSha256` とは別の値で、そちらの値と意味は変えない
+ */
+export async function upstreamLedgerSha256(rows: readonly PropertyRow[] = PROPERTY_LEDGER): Promise<string> {
+  const view = deriveUpstreamLedgerView(rows);
+  return sha256Hex(
+    sortedJson({
+      version: UPSTREAM_LEDGER_VIEW_VERSION,
+      boundary: UPSTREAM_LEDGER_BOUNDARY,
+      view: {
+        t1RuleTexts: view.t1RuleTexts,
+        t1AcceptanceTexts: view.t1AcceptanceTexts,
+        verificationKinds: view.verificationKinds,
+        rowByVerificationKind: [...view.rowByVerificationKind].map(([kind, entry]) => ({ kind, t1: entry.t1 })),
+        excludedWhenAcceptedKinds: view.excludedWhenAcceptedKinds,
+        aggregateKinds: view.aggregateKinds,
+      },
+    }),
+  );
 }
 
 /** 試験の型の必須に無い kind の、v1 の網羅の検査の固定文（`${kind} の試験が無い`。外す文） */
