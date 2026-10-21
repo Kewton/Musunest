@@ -12,16 +12,20 @@ import {
   buildV11aArtifacts,
   stageJsonText,
   stageOutputDigest,
+  stageVersionsAt,
   verifyStageInput,
   STAGE_PREVIOUS_RECORD_SCHEMAS,
   STAGE_RUN_RECORD_SCHEMA,
   V11A_ARTIFACT_NAMES,
   V12_SEARCH_REPAIR_ARTIFACT_NAME,
+  type StageV12Versions,
   type V11aRecordsInput,
 } from "./bundle-v11a.js";
 import { deriveCarryOver } from "./carry-over.js";
 import { countViolations, type SearchRepairRecord } from "../v12/search-repair.js";
+import { coverageUnitsOf } from "./coverage.js";
 import { nameTableSha256 } from "./names.js";
+import { testSuiteSha256 } from "./stages/test-spec.js";
 import { undeterminedJudgeAdvice } from "./run.js";
 import { JUDGE_ADVICE_THRESHOLDS } from "./stages/judge-advice.js";
 
@@ -298,13 +302,21 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
   const TABLE = fixtureNonRequirementTable();
   const JUDGMENTS = ["R1", "R2", "R3", "R4", "R6"].map((requirementId) => ({ requirementId, verdict: "accept" as const }));
 
-  async function written(edit: (checkpoint: Record<string, unknown>) => void = () => {}) {
+  /** 試験の無い組（境界 t2-b1 の checkpoint の材料。Issue #713） */
+  async function emptyTestSpec() {
+    const suite = { tests: [] };
+    const observes = new Map();
+    const natures = new Map();
+    return { suite, sha256: await testSuiteSha256(suite, observes), observes, coverage: coverageUnitsOf({ suite, observes, natures }), natures };
+  }
+  async function written(edit: (checkpoint: Record<string, unknown>) => void = () => {}, boundary: "t1-t2" | "t2-b1" = "t1-t2") {
     const tableSha256 = await nameTableSha256(TABLE);
     const planList = requirementsFromPlan(PLAN);
     const carryOver = await deriveCarryOver({ list: planList, table: TABLE, semanticCheck: { tableSha256, judgments: JUDGMENTS } });
     const checkpoint = buildStageCheckpoint({
       materials: {
-        boundary: "t1-t2",
+        boundary,
+        ...(boundary === "t2-b1" ? { testSpec: await emptyTestSpec() } : {}),
         table: TABLE,
         tableSha256,
         semanticCheck: { tableSha256, targets: JUDGMENTS.map((judgment) => judgment.requirementId), judgments: JUDGMENTS },
@@ -317,7 +329,7 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
     });
     const value = JSON.parse(stageJsonText(checkpoint)) as Record<string, unknown>;
     edit(value);
-    const record = { schema_version: STAGE_RUN_RECORD_SCHEMA, checkpoints: [{ boundary: "t1-t2", path: "cp.json", output_digest: await stageOutputDigest(value) }] };
+    const record = { schema_version: STAGE_RUN_RECORD_SCHEMA, checkpoints: [{ boundary, path: "cp.json", output_digest: await stageOutputDigest(value) }] };
     return { checkpoint: value, checkpointText: stageJsonText(value), recordText: JSON.stringify(record) };
   }
   const verify = (texts: { checkpointText: string; recordText: string }) =>
@@ -381,14 +393,22 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
     });
   });
 
-  /** v1.2 の版の欄を足した checkpoint（Issue #637） */
+  /**
+   * v1.2 の版の欄を足した checkpoint（Issue #637）。境界 t1-t2 の checkpoint には上流の台帳の部分の指紋 `ledger_upstream` も
+   * 足す（Issue #713 で t1-t2 の照合が全体の指紋の代わりにこれを照らすようになったため、Issue #637 の照合の試験の checkpoint と
+   * 照合の版に部分の指紋を足した）
+   */
   const V12_VERSIONS = { ledger: "c".repeat(64), flags: { ledger: true, "search-repair": true, ids: true } };
+  const UPSTREAM = "e".repeat(64);
   const withV12Versions = (extra: Record<string, unknown> = {}) => (checkpoint: Record<string, unknown>) => {
-    checkpoint["versions"] = { ...(checkpoint["versions"] as object), ...V12_VERSIONS, call_limits: null, ...extra };
+    checkpoint["versions"] = { ...(checkpoint["versions"] as object), ...V12_VERSIONS, ledger_upstream: UPSTREAM, call_limits: null, ...extra };
   };
-  const verifyV12 = (texts: { checkpointText: string; recordText: string }) =>
+  const verifyV12 = (
+    texts: { checkpointText: string; recordText: string },
+    options: { readonly start?: "test-spec" | "write"; readonly v12?: Record<string, unknown> } = {},
+  ) =>
     verifyStageInput({
-      start: "test-spec",
+      start: options.start ?? "test-spec",
       ...texts,
       checkpointFile: "cp.json",
       plan: PLAN,
@@ -396,7 +416,7 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
       sourceSha256: "b".repeat(64),
       vocabularyVersion: "v1",
       contractVersion: "v0.2",
-      v12: V12_VERSIONS,
+      v12: (options.v12 ?? { ...V12_VERSIONS, ledgerUpstream: UPSTREAM }) as unknown as StageV12Versions,
     });
 
   it("v1.2 の照合（Issue #637）：ledger・flags が今の走りと同じなら通り、v1.1a の照合と同じ再開の材料を返す。call_limits は照合しない", async () => {
@@ -420,7 +440,8 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
 
   it("二点測定：v1.2 の照合は ledger・flags の違い・欄の無い checkpoint を stage-input:version で断る（出力ダイジェストは書き直してある）", async () => {
     const cases: readonly [string, (checkpoint: Record<string, unknown>) => void][] = [
-      ["ledger", withV12Versions({ ledger: "d".repeat(64) })],
+      // 境界 t1-t2 の台帳の照合は部分の指紋（Issue #713。全体の指紋 ledger の違いは下の t2-b1 の試験で断る）
+      ["ledger_upstream", withV12Versions({ ledger_upstream: "d".repeat(64) })],
       ["flags-ids", withV12Versions({ flags: { ledger: true, "search-repair": true, ids: false } })],
       ["flags-extra", withV12Versions({ flags: { ...V12_VERSIONS.flags, other: true } })],
       ["flags-not-object", withV12Versions({ flags: "ids" })],
@@ -429,6 +450,112 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
     for (const [name, edit] of cases) {
       expect(await verifyV12(await written(edit)), name).toEqual({ ok: false, code: "stage-input:version" });
     }
+  });
+
+  // ── 境界ごとの上流の台帳の部分の指紋（Issue #713）──────────────────────────────
+
+  it("版を境界ごとに組む：t1-t2 は ledger_upstream に部分の指紋、t2-b1 は null を ledger の直後に置き、ほかの欄は同じ（Issue #713）", () => {
+    const versions = { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0", ...V12_VERSIONS, call_limits: null };
+    const t1 = stageVersionsAt(versions, "t1-t2", UPSTREAM);
+    const t2 = stageVersionsAt(versions, "t2-b1", UPSTREAM);
+    expect(Object.keys(t1)).toEqual(["vocabulary", "contract", "prompt", "factory", "ledger", "ledger_upstream", "flags", "call_limits"]);
+    expect(Object.keys(t2)).toEqual(Object.keys(t1));
+    expect(t1.ledger_upstream).toBe(UPSTREAM);
+    expect(t2.ledger_upstream).toBeNull();
+    const { ledger_upstream: _t1, ...rest1 } = t1;
+    const { ledger_upstream: _t2, ...rest2 } = t2;
+    expect(rest1).toEqual(versions);
+    expect(rest2).toEqual(versions);
+  });
+
+  it("感度と不感度（Issue #713）：t1-t2 は全体の指紋 ledger が違っても部分の指紋が同じなら通り、部分の指紋が違えば断る", async () => {
+    const texts = await written(withV12Versions());
+    const plain = await verifyV12(texts);
+    expect(plain).toMatchObject({ ok: true });
+    // 全体の指紋だけが違う工場（上流の見方に入らない欄だけを変えた台帳）：通り、再開の材料も同じ
+    expect(await verifyV12(texts, { v12: { ...V12_VERSIONS, ledger: "d".repeat(64), ledgerUpstream: UPSTREAM } })).toEqual(plain);
+    // checkpoint の全体の指紋が欠けていても、t1-t2 の受理は部分の指紋で決まる
+    expect(await verifyV12(await written(withV12Versions({ ledger: undefined })))).toMatchObject({ ok: true });
+    // 部分の指紋が違う工場（上流の見方に入る値を変えた台帳）：断る
+    expect(await verifyV12(texts, { v12: { ...V12_VERSIONS, ledgerUpstream: "d".repeat(64) } })).toEqual({ ok: false, code: "stage-input:version" });
+  });
+
+  it("二点測定（Issue #713）：t1-t2 の ledger_upstream の欠け・null・不正の形・不一致、今の値の欠け・不正の形、両方の欠けを stage-input:version で断る", async () => {
+    const version = { ok: false, code: "stage-input:version" };
+    const checkpointCases: readonly [string, Record<string, unknown>][] = [
+      ["missing", { ledger_upstream: undefined }],
+      ["null", { ledger_upstream: null }],
+      ["upper", { ledger_upstream: "E".repeat(64) }],
+      ["short", { ledger_upstream: "e".repeat(63) }],
+      ["long", { ledger_upstream: "e".repeat(65) }],
+      ["not-hex", { ledger_upstream: "g".repeat(64) }],
+      ["number", { ledger_upstream: 1 }],
+      ["mismatch", { ledger_upstream: "f".repeat(64) }],
+      // 全体の指紋を部分の欄に入れても代わりにしない
+      ["full-instead", { ledger_upstream: V12_VERSIONS.ledger }],
+    ];
+    for (const [name, extra] of checkpointCases) {
+      expect(await verifyV12(await written(withV12Versions(extra))), name).toEqual(version);
+    }
+    const texts = await written(withV12Versions());
+    const inputCases: readonly [string, Record<string, unknown>][] = [
+      ["input-missing", { ...V12_VERSIONS }],
+      ["input-short", { ...V12_VERSIONS, ledgerUpstream: "e".repeat(63) }],
+      ["input-upper", { ...V12_VERSIONS, ledgerUpstream: "E".repeat(64) }],
+      ["input-number", { ...V12_VERSIONS, ledgerUpstream: 1 }],
+      // 全体の指紋を今の部分の値に代えない
+      ["input-full", { ...V12_VERSIONS, ledgerUpstream: V12_VERSIONS.ledger }],
+    ];
+    for (const [name, v12] of inputCases) expect(await verifyV12(texts, { v12 }), name).toEqual(version);
+    // 両方の欠け・両方の同じ不正の形を一致とみなさない
+    const bothMissing = await written(withV12Versions({ ledger_upstream: undefined }));
+    expect(await verifyV12(bothMissing, { v12: { ...V12_VERSIONS } })).toEqual(version);
+    const bothBad = await written(withV12Versions({ ledger_upstream: "x" }));
+    expect(await verifyV12(bothBad, { v12: { ...V12_VERSIONS, ledgerUpstream: "x" } })).toEqual(version);
+    // 旗の違いは今までどおり断る
+    expect(await verifyV12(texts, { v12: { ...V12_VERSIONS, ledgerUpstream: UPSTREAM, flags: { ...V12_VERSIONS.flags, ids: false } } })).toEqual(version);
+  });
+
+  it("t2-b1 は今のまま全体の指紋で照らす（Issue #713）：新しい欄の無い今までの入力・null・どんな値でも、部分の今の値が無くても受け、全体の指紋が違えば新しい欄が一致でも null でも断る", async () => {
+    const write = { start: "write" as const };
+    const withoutUpstream = await written(withV12Versions({ ledger_upstream: undefined }), "t2-b1");
+    const ok = await verifyV12(withoutUpstream, write);
+    expect(ok).toMatchObject({ ok: true });
+    if (!ok.ok) return;
+    expect(ok.resume.testSpec).toBeDefined();
+    for (const [name, extra] of [
+      ["null", { ledger_upstream: null }],
+      ["value", { ledger_upstream: UPSTREAM }],
+      ["other", { ledger_upstream: "f".repeat(64) }],
+      ["bad", { ledger_upstream: "x" }],
+    ] as const) {
+      // 再開の材料は同じ（入力の記録の出力ダイジェストは checkpoint ごとに違う）
+      expect(await verifyV12(await written(withV12Versions(extra), "t2-b1"), write), name).toMatchObject({ ok: true, resume: ok.resume });
+    }
+    // 部分の指紋の今の値を渡さない照合（部分の関数の無い今までの dist）も受ける
+    expect(await verifyV12(withoutUpstream, { ...write, v12: { ...V12_VERSIONS } })).toEqual(ok);
+    // 全体の指紋が違えば、新しい欄が一致でも null でも断る
+    const otherLedger = { ...V12_VERSIONS, ledger: "d".repeat(64), ledgerUpstream: UPSTREAM };
+    for (const extra of [{ ledger_upstream: UPSTREAM }, { ledger_upstream: null }, { ledger_upstream: undefined }]) {
+      expect(await verifyV12(await written(withV12Versions(extra), "t2-b1"), { ...write, v12: otherLedger })).toEqual({ ok: false, code: "stage-input:version" });
+    }
+    // 旗の違い・全体の指紋の欠けも今までどおり断る
+    expect(await verifyV12(await written(withV12Versions({ ledger: undefined, ledger_upstream: null }), "t2-b1"), write)).toEqual({ ok: false, code: "stage-input:version" });
+    expect(
+      await verifyV12(await written(withV12Versions({ ledger_upstream: null }), "t2-b1"), { ...write, v12: { ...V12_VERSIONS, flags: { ...V12_VERSIONS.flags, ids: false } } }),
+    ).toEqual({ ok: false, code: "stage-input:version" });
+    // v1.1a の照合は新しい欄を見ない（今の挙動の保持）
+    const v11a = await verifyStageInput({
+      start: "write",
+      ...(await written(withV12Versions({ ledger_upstream: "x" }), "t2-b1")),
+      checkpointFile: "cp.json",
+      plan: PLAN,
+      planSha256: "a".repeat(64),
+      sourceSha256: "b".repeat(64),
+      vocabularyVersion: "v1",
+      contractVersion: "v0.2",
+    });
+    expect(v11a).toMatchObject({ ok: true });
   });
 });
 

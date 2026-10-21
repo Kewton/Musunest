@@ -2597,3 +2597,174 @@ test("#640 (b) 組の照合：人の採否が未反映（review なし）・署�
     refused("verify", good, "stage-from:stage-input:version", ["P6"]);
   });
 });
+
+// ── #713：境界 t1-t2 の上流の入力は、台帳の全体の指紋でなく上流の台帳の部分の指紋で照らす。README §10.8
+// 偽物の工場の dist：#638 の偽物の照合を、工場の #713 の規則に差し替える（入力の境界が t1-t2 なら checkpoint の版の ledger_upstream と渡した ledgerUpstream が
+// どちらも 64 桁の 16 進で同じこと、t2-b1 なら今のまま ledger が同じこと。旗の組はどちらも同じこと）。入口（cli.js）は v1.2 のとき checkpoint の版に
+// 境界ごとの ledger_upstream（t1-t2 は部分の指紋、t2-b1 は null）を足す。package の入口（index.js）は部分の指紋の関数を出す（出さない・例外・形の違う値も作れる）
+const fakeStageLib713 = fakeStageLib
+  .replace('export const STAGE_BUDGET_SCOPE = "stage-run";', 'export const STAGE_BUDGET_SCOPE = "stage-run";\nexport const STAGE_START_ALIASES_V12 = { "c1-alias": "name-table" };')
+  .replace(
+    "  if (h(JSON.stringify(cp)) !== declared.output_digest)",
+    '  if (process.env.FAKE_VERIFY_V12_LOG) appendFileSync(process.env.FAKE_VERIFY_V12_LOG, JSON.stringify(input.v12 ?? null) + "\\n");\n' +
+      '  const hex = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);\n' +
+      '  if (input.v12 !== undefined) {\n' +
+      '    const ledgerOk = needed === "t1-t2" ? hex(cp.versions?.ledger_upstream) && hex(input.v12.ledgerUpstream) && cp.versions.ledger_upstream === input.v12.ledgerUpstream : cp.versions?.ledger === input.v12.ledger;\n' +
+      '    if (!ledgerOk || JSON.stringify(cp.versions?.flags) !== JSON.stringify(input.v12.flags)) return fail("stage-input:version");\n' +
+      "  }\n" +
+      "  if (h(JSON.stringify(cp)) !== declared.output_digest)",
+  );
+const fakeStageCli713 = fakeStageCli638
+  .replace(
+    "const v12 = idx === null ? null : { ledger: await idx.propertyLedgerSha256(), flags: idx.V12_PIPELINE_FLAGS };",
+    "let upstream; try { upstream = typeof idx?.upstreamLedgerSha256 === \"function\" ? await idx.upstreamLedgerSha256() : undefined; } catch { upstream = undefined; }\nconst v12 = idx === null ? null : { ledger: await idx.propertyLedgerSha256(), upstream, flags: idx.V12_PIPELINE_FLAGS };",
+  )
+  .replace("{ ledger: v12.ledger, flags: v12.flags, call_limits: null }", "{ ledger: v12.ledger, ...(v12.upstream === undefined ? {} : { ledger_upstream: boundary === \"t1-t2\" ? v12.upstream : null }), flags: v12.flags, call_limits: null }");
+assert.ok(fakeStageLib713.includes("ledgerUpstream") && fakeStageCli713.includes("ledger_upstream") && fakeStageCli713.includes("upstreamLedgerSha256"), "偽物の差し替えが当たらない");
+const UP713 = "e".repeat(64);
+/** package の入口：upstream が文字列なら部分の指紋の関数がそれを返し、null なら関数を出さず、"throw" なら例外、{ value } なら任意の値を返す */
+const v12Index713 = ({ flags = FLAGS638, ledger = "ledger-a", upstream = UP713 } = {}) =>
+  v12Index638({ flags, ledger }) +
+  (upstream === null ? "" : upstream === "throw" ? 'export async function upstreamLedgerSha256() { throw new Error("x"); }\n' : `export async function upstreamLedgerSha256() { return ${JSON.stringify(typeof upstream === "object" ? upstream.value : upstream)}; }\n`);
+function makeStageRepo713(base, name = "stage713", index = {}) {
+  const repo = makeStageRepo638(base, name);
+  writeFileSync(join(repo, "packages/factory/dist/v11a/bundle-v11a.js"), fakeStageLib713);
+  writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeStageCli713);
+  writeFileSync(join(repo, "packages/factory/dist/index.js"), v12Index713(index));
+  return repo;
+}
+const setIndex713 = (repo, index) => writeFileSync(join(repo, "packages/factory/dist/index.js"), v12Index713(index));
+const readLog = (p) => readFileSync(p, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+
+test("#713 (a) 開始 T2（境界 t1-t2）：両方の形（上流の計測・凍結した組）で、照合の関数に dist の部分の指紋の今の値を渡し、上流の checkpoint の ledger_upstream で照らす。全体の指紋だけが違う dist は受け、部分の指紋が違う dist は stage-from:stage-input:version。上流の checkpoint は t1-t2 に部分の指紋、t2-b1 に null を持つ", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo713(base), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream638(repo, join(base, "up"), fz, log);
+    const upCp = (b) => readJson(join(up, "P6-r1", "bundle", `stage-checkpoint-${b}.json`));
+    assert.equal(upCp("t1-t2").versions.ledger_upstream, UP713);
+    assert.equal(upCp("t2-b1").versions.ledger_upstream, null);
+    const setDir = makeStageSet640(join(base, "set"), up, fz, { boundary: "t1-t2" });
+    for (const [form, from, verifies] of [["up", up, 15], ["set", setDir, 4]]) {
+      const vlog = join(base, `v12-${form}.log`), n0 = spawnCount(log);
+      const r = runAgent(repo, join(base, `t2-${form}`), stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", from]), { FAKE_SPAWN_LOG: log, FAKE_VERIFY_V12_LOG: vlog });
+      assert.equal(r.status, 0, `${form}: ${r.stderr}`);
+      assert.ok(spawnCount(log) > n0, form);
+      const seen = readLog(vlog);
+      assert.equal(seen.length, verifies, form);
+      for (const v of seen) assert.deepEqual(v, { ledger: "ledger-a", ledgerUpstream: UP713, flags: FLAGS638 }, `${form}: dist の公開の値を渡す`);
+      // 全体の指紋だけが違う dist（T2 から後ろだけを変えた台帳）：受ける
+      setIndex713(repo, { ledger: "ledger-b" });
+      const rb = runAgent(repo, join(base, `t2-${form}-ledger-b`), stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", from]), { FAKE_SPAWN_LOG: log });
+      assert.equal(rb.status, 0, `${form}: ${rb.stderr}`);
+      // 部分の指紋が違う dist：断る（子 0 本・何も書かない）
+      setIndex713(repo, { upstream: "f".repeat(64) });
+      const n1 = spawnCount(log), o = join(base, `t2-${form}-up-f`);
+      assertStageRefused(runAgent(repo, o, stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", from]), { FAKE_SPAWN_LOG: log }), "stage-from:stage-input:version", [form === "up" ? IDS545[15] : "P6"], log, n1, o, `${form}-mismatch`);
+      setIndex713(repo, {});
+    }
+  });
+});
+
+test("#713 (b) 開始 T2：部分の指紋の関数が無い・例外・返りの値の形の異常（64 桁の 16 進でない）の dist は、両方の形・比較元の群でも stage:dist-unreadable（exit 3・子 0 本・何も書かない）。上流の checkpoint の ledger_upstream の欠け・null・形の違いは stage-from:stage-input:version", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo713(base), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream638(repo, join(base, "up"), fz, log);
+    const setDir = makeStageSet640(join(base, "set"), up, fz, { boundary: "t1-t2" });
+    const n0 = spawnCount(log);
+    for (const [label, upstream] of [["absent", null], ["throw", "throw"], ["upper", UP713.toUpperCase()], ["short", "e".repeat(63)], ["number", { value: 1 }], ["null", { value: null }]]) {
+      setIndex713(repo, { upstream });
+      for (const [form, from] of [["up", up], ["set", setDir]]) {
+        const o = join(base, `out-${label}-${form}`);
+        const r = runAgent(repo, o, stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", from]), { FAKE_SPAWN_LOG: log });
+        assertRefused(r, "stage:dist-unreadable", log, n0, `${label}-${form}`);
+        oneLine(r, `${label}-${form}`);
+        assertNothingWritten(o, `${label}-${form}`);
+      }
+    }
+    setIndex713(repo, {});
+    // 比較元の群の dist に部分の関数が無い：子を起こす前に断る
+    const baseline = makeStageRepo713(base, "base-old", { upstream: null });
+    const pairsPath = join(base, "pairs.json");
+    const mp = runAgent(repo, join(base, "unused"), ["--make-pairs", pairsPath, "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "test-spec", "--stage-from", up, "--runs", "3"]);
+    assert.equal(mp.status, 0, mp.stderr);
+    const cmp = join(base, "cmp");
+    const rc = runAgent(repo, cmp, ["--compare", "--baseline", baseline, "--pairs", pairsPath, "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "test-spec", "--stage-from", up, "--budget-usd", "10", "--concurrency", "4"], { FAKE_SPAWN_LOG: log });
+    assertRefused(rc, "stage:dist-unreadable", log, n0, "baseline");
+    assertNothingWritten(cmp, "baseline");
+    // 両群に部分の関数があれば同じ比較は通る
+    const both = makeStageRepo713(base, "base-new");
+    const ok = runAgent(repo, join(base, "cmp-ok"), ["--compare", "--baseline", both, "--pairs", pairsPath, "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "test-spec", "--stage-from", up, "--budget-usd", "10", "--concurrency", "4"], { FAKE_SPAWN_LOG: log });
+    assert.equal(ok.status, 0, ok.stderr);
+    // 上流の checkpoint の新しい欄の欠け・null・形の違い（出力ダイジェストは書き直す）：両方の形で断る
+    const n1 = spawnCount(log);
+    for (const [label, edit] of [["missing", (v) => { delete v.ledger_upstream; }], ["null", (v) => { v.ledger_upstream = null; }], ["upper", (v) => { v.ledger_upstream = UP713.toUpperCase(); }]]) {
+      const bad = tamperUpstream(up, join(base, `up-${label}`), IDS545[15], (dir) => {
+        const p = join(dir, "stage-checkpoint-t1-t2.json"), cp = readJson(p);
+        edit(cp.versions);
+        writeFileSync(p, JSON.stringify(cp, null, 2) + "\n");
+        const rp = join(dir, "stage-run.json"), rec = readJson(rp);
+        rec.checkpoints.find((c) => c.boundary === "t1-t2").output_digest = sha256(JSON.stringify(cp));
+        writeFileSync(rp, JSON.stringify(rec, null, 2) + "\n");
+      });
+      const o = join(base, `out-cp-${label}`);
+      assertStageRefused(runAgent(repo, o, stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", bad]), { FAKE_SPAWN_LOG: log }), "stage-from:stage-input:version", [IDS545[15]], log, n1, o, label);
+      const s = makeStageSet640(join(base, `set-${label}`), bad, fz, { boundary: "t1-t2", pick: (pid) => (pid === "P6" ? IDS545[15] : `${pid}-r2`) });
+      const os = join(base, `out-set-${label}`);
+      assertStageRefused(runAgent(repo, os, stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", s]), { FAKE_SPAWN_LOG: log }), "stage-from:stage-input:version", ["P6"], log, n1, os, `set-${label}`);
+    }
+  });
+});
+
+test("#713 (c) 開始 B1（境界 t2-b1）は今のまま：部分の指紋の関数を取らず・呼ばない（無い・例外の dist も受ける）、照合の関数に部分の値を渡さない。新しい欄の無い今までの上流の入力も受け、全体の指紋の違う dist は新しい欄が null でも stage-from:stage-input:version", async () => {
+  await withRepo(async (base) => {
+    // 今までの上流の入力（新しい欄の無い t2-b1。#638 の偽物の入口が書いたもの）
+    const old = makeStageRepo638(base, "old"), fzOld = frozen545(base, old), log = join(base, "spawn.log");
+    const upOld = runUpstream638(old, join(base, "up-old"), fzOld, log);
+    assert.ok(!("ledger_upstream" in readJson(join(upOld, "P6-r1", "bundle", "stage-checkpoint-t2-b1.json")).versions));
+    const repo = makeStageRepo713(base), fz = frozen545(base, repo);
+    const up = runUpstream638(repo, join(base, "up"), fz, log);
+    for (const [label, upstream] of [["absent", null], ["throw", "throw"], ["bad", { value: "x" }]]) {
+      setIndex713(repo, { upstream });
+      for (const [form, from] of [["up-old", upOld], ["up", up], ["set", makeStageSet640(join(base, `set-${label}`), up, fz)], ["set-old", makeStageSet640(join(base, `set-old-${label}`), upOld, fzOld)]]) {
+        const vlog = join(base, `v12-${label}-${form}.log`);
+        const r = runAgent(repo, join(base, `b1-${label}-${form}`), stageArgs638(form.endsWith("old") ? fzOld : fz, ["--stage-start", "write", "--stage-from", from]), { FAKE_SPAWN_LOG: log, FAKE_VERIFY_V12_LOG: vlog });
+        assert.equal(r.status, 0, `${label}-${form}: ${r.stderr}`);
+        for (const v of readLog(vlog)) assert.deepEqual(v, { ledger: "ledger-a", flags: FLAGS638 }, `${label}-${form}: 部分の値を渡さない`);
+      }
+    }
+    // 全体の指紋が違う dist：新しい欄が null の入力も、欄の無い今までの入力も断る（子 0 本・何も書かない）
+    setIndex713(repo, { ledger: "ledger-b" });
+    const n0 = spawnCount(log);
+    for (const [form, from, f] of [["up", up, fz], ["up-old", upOld, fzOld]]) {
+      const o = join(base, `out-ledger-${form}`);
+      assertStageRefused(runAgent(repo, o, stageArgs638(f, ["--stage-start", "write", "--stage-from", from]), { FAKE_SPAWN_LOG: log }), "stage-from:stage-input:version", [IDS545[15]], log, n0, o, form);
+    }
+  });
+});
+
+test("#713 (d) 実の工場の dist の値の受け渡し：package の入口を実の dist（pnpm build の出力）にすると、開始 T2 の照合の関数に実の部分の指紋（64 桁の 16 進・全体の指紋と別の値）を渡し、上流が書いた ledger_upstream と同じ値で受ける。開始 B1 には部分の値を渡さない", async () => {
+  const realIndex = resolve(here, "../../../../../../packages/factory/dist/index.js");
+  assert.ok(existsSync(realIndex), "実の工場の dist が無い（先に pnpm build）");
+  const real = await import(pathToFileURL(realIndex).href);
+  const realUpstream = await real.upstreamLedgerSha256(), realLedger = await real.propertyLedgerSha256();
+  assert.match(realUpstream, /^[0-9a-f]{64}$/);
+  assert.notEqual(realUpstream, realLedger);
+  await withRepo(async (base) => {
+    const repo = makeStageRepo713(base, "real");
+    writeFileSync(join(repo, "packages/factory/dist/index.js"), `export * from ${JSON.stringify(pathToFileURL(realIndex).href)};\n`);
+    const fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream638(repo, join(base, "up"), fz, log);
+    assert.equal(readJson(join(up, "P6-r1", "bundle", "stage-checkpoint-t1-t2.json")).versions.ledger_upstream, realUpstream);
+    const flags = JSON.parse(JSON.stringify(real.V12_PIPELINE_FLAGS));
+    const vlog = join(base, "v12-t2.log");
+    const r = runAgent(repo, join(base, "t2"), stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", up]), { FAKE_SPAWN_LOG: log, FAKE_VERIFY_V12_LOG: vlog });
+    assert.equal(r.status, 0, r.stderr);
+    const seen = readLog(vlog);
+    assert.equal(seen.length, 15);
+    for (const v of seen) assert.deepEqual(v, { ledger: realLedger, ledgerUpstream: realUpstream, flags });
+    const vlogB = join(base, "v12-b1.log");
+    const rb = runAgent(repo, join(base, "b1"), stageArgs638(fz, ["--stage-start", "write", "--stage-from", up]), { FAKE_SPAWN_LOG: log, FAKE_VERIFY_V12_LOG: vlogB });
+    assert.equal(rb.status, 0, rb.stderr);
+    for (const v of readLog(vlogB)) assert.deepEqual(v, { ledger: realLedger, flags });
+  });
+});

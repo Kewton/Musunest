@@ -34,7 +34,7 @@ import {
 import type { SemanticCheckResult, SemanticJudgment } from "../carry-over.js";
 import { nameTableSha256, type NameTable } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
-import type { LedgerView } from "../../v12/ledger.js";
+import type { UpstreamLedgerView } from "../../v12/ledger.js";
 
 /** T1'' の JSON Schema の名前 */
 export const SEMANTIC_CHECK_SCHEMA_NAME = "semantic-check";
@@ -91,7 +91,7 @@ const SEMANTIC_CHECK_LEDGER_RULE_HEAD =
  * 3 つの観点の文 → 台帳の行の受理条件の文（台帳の順）で組み直す（ID・why・since は変えない）。台帳が default-value の
  * 行だけなら off の定数とバイト列で同じになる。
  */
-export function semanticCheckRuleDefinitionsOf(ledger?: LedgerView): readonly RuleDefinition[] {
+export function semanticCheckRuleDefinitionsOf(ledger?: UpstreamLedgerView): readonly RuleDefinition[] {
   if (ledger === undefined) return SEMANTIC_CHECK_RULE_DEFINITIONS;
   return SEMANTIC_CHECK_RULE_DEFINITIONS.map((definition) =>
     definition.id === SEMANTIC_CHECK_LEDGER_RULE_ID
@@ -225,7 +225,7 @@ export interface SemanticCheckInput {
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
   /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の定数。Issue #548） */
-  readonly ledger?: LedgerView;
+  readonly ledger?: UpstreamLedgerView;
 }
 
 /** T1'' の結果（表の SHA-256 に結ぶ完全な結果と、点検の対象の要件 ID） */

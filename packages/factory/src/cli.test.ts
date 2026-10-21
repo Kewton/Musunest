@@ -53,6 +53,7 @@ import {
   STAGE_INPUT_CODES,
   STAGE_RUN_RECORD_FILE,
   stageCheckpointFile,
+  stageJsonText,
   stageOutputDigest,
   V11A_ARTIFACT_NAMES,
   verifyStageInput,
@@ -1459,13 +1460,15 @@ describe("v1.2 の一気通貫の走りの checkpoint（`--pipeline v1.2 --plan-
       const checkpoint = JSON.parse(await fs.readFile(`${dir}/${entry.path}`, "utf8")) as Record<string, unknown>;
       expect(entry.output_digest).toBe(await stageOutputDigest(checkpoint));
       expect(checkpoint["boundary"]).toBe(entry.boundary);
-      // v1.2 の走りの checkpoint の版は、台帳の指紋・実効の旗の組・呼び出しの上限を足した 7 欄（Issue #637 で 4 欄から広げた）
+      // v1.2 の走りの checkpoint の版は、台帳の指紋・実効の旗の組・呼び出しの上限を足した 7 欄（Issue #637 で 4 欄から広げた）に、
+      // 境界ごとの上流の台帳の部分の指紋（t1-t2 は部分の指紋、t2-b1 は null）を足した 8 欄（Issue #713 で 7 欄から広げた）
       expect(checkpoint["versions"]).toEqual({
         vocabulary: VOCABULARY_VERSION,
         contract: CONTRACT_VERSION,
         prompt: "v1.2",
         factory: "0.0.0",
         ledger: await ledgerModule.propertyLedgerSha256(),
+        ledger_upstream: entry.boundary === "t1-t2" ? await ledgerModule.upstreamLedgerSha256() : null,
         flags: factory.V12_PIPELINE_FLAGS,
         call_limits: { logical_calls: V12_CALL_LIMITS.logicalCalls, real_attempts: V12_CALL_LIMITS.realAttempts, judge_branch: V12_CALL_LIMITS.judgeBranch },
       });
@@ -1640,12 +1643,14 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     expect(record["range"]).toEqual({ start: "name-table", end: "semantic-check" });
     expect(record["stage_pass"]).toBe(true);
     const checkpoint = await readJson(`${dir}/${stageCheckpointFile("t1-t2")}`);
+    // 境界 t1-t2 の版は上流の台帳の部分の指紋も持つ（Issue #713 で足した欄）
     expect(checkpoint["versions"]).toEqual({
       vocabulary: VOCABULARY_VERSION,
       contract: CONTRACT_VERSION,
       prompt: "v1.2",
       factory: "0.0.0",
       ledger: await ledgerModule.propertyLedgerSha256(),
+      ledger_upstream: await ledgerModule.upstreamLedgerSha256(),
       flags: factory.V12_PIPELINE_FLAGS,
       call_limits: CALL_LIMITS,
     });
@@ -1736,8 +1741,9 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     const edits: readonly [string, (cp: Record<string, any>) => void][] = [
       ["flags-ids", (cp) => (cp["versions"]["flags"] = { ...cp["versions"]["flags"], ids: false })],
       ["flags-missing", (cp) => delete cp["versions"]["flags"]],
-      ["ledger", (cp) => (cp["versions"]["ledger"] = flip(cp["versions"]["ledger"] as string))],
-      ["ledger-missing", (cp) => delete cp["versions"]["ledger"]],
+      // 境界 t1-t2 の台帳の照合は上流の台帳の部分の指紋（Issue #713。全体の指紋 ledger の違い・欠けは t2-b1 の試験で断る）
+      ["ledger_upstream", (cp) => (cp["versions"]["ledger_upstream"] = flip(cp["versions"]["ledger_upstream"] as string))],
+      ["ledger_upstream-missing", (cp) => delete cp["versions"]["ledger_upstream"]],
     ];
     for (const [name, edit] of edits) {
       const input = await tamper(source, `${directory}/v12-stage-version-${name}`, "t1-t2", edit, true);
@@ -1754,8 +1760,8 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => ({ ledger: true, searchRepair: true, ids: false }));
     expect(await rejectedRun("run-flags", `${source}/${stageCheckpointFile("t1-t2")}`)).toEqual(version);
     vi.restoreAllMocks();
-    // 台帳の指紋が今の走りと違えば断る
-    vi.spyOn(ledgerModule, "propertyLedgerSha256").mockImplementation(async () => "0".repeat(64));
+    // 上流の台帳の部分の指紋が今の走りと違えば断る（境界 t1-t2。Issue #713 で全体の指紋から部分の指紋に替えた）
+    vi.spyOn(ledgerModule, "upstreamLedgerSha256").mockImplementation(async () => "0".repeat(64));
     expect(await rejectedRun("run-ledger", `${source}/${stageCheckpointFile("t1-t2")}`)).toEqual(version);
     vi.restoreAllMocks();
     // 同じなら通る
@@ -1766,6 +1772,151 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     const v11a = await runStageCli({ dir: `${directory}/v12-stage-version-out-v11a`, args: ["--stage-start", "test-spec", "--stage-end", "test-spec", "--stage-input", `${source}/${stageCheckpointFile("t1-t2")}`], calls: [structured(v11aTestSpec())] });
     expect(v11a.errors.filter((line) => line.startsWith("stage-input:"))).toEqual([]);
     expect(v11a.makeClient).toHaveBeenCalledTimes(1);
+  });
+
+  // ── 境界ごとの上流の台帳の部分の指紋（Issue #713）──────────────────────────────
+
+  /** 文に目印を足す（null は null のまま） */
+  const marked = (text: string | null): string | null => (text === null ? null : `${text}。目印の追記`);
+  /** 上流の見方に入らない欄（T2 と B1 の規則の文・行の T2 の型）だけを変えた台帳（妥当な台帳のまま） */
+  const t2OnlyLedger = (): readonly ledgerModule.PropertyRow[] =>
+    ledgerModule.PROPERTY_LEDGER.map((row) => ({
+      ...row,
+      rules: { ...row.rules, t2: marked(row.rules.t2), t2Ids: marked(row.rules.t2Ids), b1: marked(row.rules.b1) },
+      t2: row.t2 === null ? null : { ...row.t2, minTests: row.t2.minTests + 1 },
+    }));
+  /** 上流の見方に入る値（T1 の規則の文）を変えた台帳 */
+  const upstreamLedger = (): readonly ledgerModule.PropertyRow[] =>
+    ledgerModule.PROPERTY_LEDGER.map((row) => (row.rules.t1 === null ? row : { ...row, rules: { ...row.rules, t1: marked(row.rules.t1) } }));
+  /** 今の工場の台帳を差し替える（全体の指紋と部分の指紋を、差し替えた台帳から本物の関数で出す） */
+  const asFactoryWith = (rows: readonly ledgerModule.PropertyRow[]) => {
+    const full = ledgerModule.propertyLedgerSha256;
+    const upstream = ledgerModule.upstreamLedgerSha256;
+    vi.spyOn(ledgerModule, "propertyLedgerSha256").mockImplementation(async () => full(rows));
+    vi.spyOn(ledgerModule, "upstreamLedgerSha256").mockImplementation(async () => upstream(rows));
+  };
+  /** 断る段の走り（クライアントを作らない・何も書かない） */
+  const refusedStage = async (name: string, start: "test-spec" | "write", input: string) => {
+    const run = await runStageCli({ dir: `${directory}/v12-upstream-out-${name}`, args: ["--stage-start", start, "--stage-input", input], calls: [], pipeline: "v1.2" });
+    expect(run.makeClient, name).not.toHaveBeenCalled();
+    expect(run.written, name).toEqual([]);
+    expect(run.lines, name).toEqual([]);
+    return { code: run.code, errors: run.errors };
+  };
+  const versionRefusal = { code: EXIT_STAGE_INPUT, errors: ["stage-input:version"] };
+
+  it("台帳の部分の指紋（Issue #713）：上流の見方に入らない欄だけを変えた台帳の工場は変える前の工場の t1-t2 を受けて T2 を流し、t2-b1（ledger_upstream null・新しい全体の指紋）を書く。上流の値を変えた台帳の工場は t1-t2 を、T2 の型を変えた台帳の工場は t2-b1 を stage-input:version で断る", async () => {
+    expect(ledgerModule.ledgerRowDefects(t2OnlyLedger())).toEqual([]);
+    expect(ledgerModule.ledgerRowDefects(upstreamLedger())).toEqual([]);
+    expect(await ledgerModule.propertyLedgerSha256(t2OnlyLedger())).not.toBe(await ledgerModule.propertyLedgerSha256());
+    expect(await ledgerModule.upstreamLedgerSha256(t2OnlyLedger())).toBe(await ledgerModule.upstreamLedgerSha256());
+    expect(await ledgerModule.upstreamLedgerSha256(upstreamLedger())).not.toBe(await ledgerModule.upstreamLedgerSha256());
+    // 変える前の工場が書いた t1-t2・t2-b1（区間 0 と T2）
+    const source = `${directory}/v12-upstream-src`;
+    expect((await runStageCli({ dir: source, args: ["--stage-end", "test-spec"], calls: v12Head().slice(0, 6), pipeline: "v1.2" })).code).toBe(EXIT_OK);
+    // T2 から後ろだけを変えた台帳の工場：t1-t2 を照らして T2 だけを流し、t2-b1 を書く
+    asFactoryWith(t2OnlyLedger());
+    const t2Dir = `${directory}/v12-upstream-t2`;
+    const t2 = await runStageCli({
+      dir: t2Dir,
+      args: ["--stage-start", "test-spec", "--stage-end", "test-spec", "--stage-input", `${source}/${stageCheckpointFile("t1-t2")}`],
+      calls: [structured(v11aRenamed(v11aTestSpec()))],
+      pipeline: "v1.2",
+    });
+    expect(t2.errors.filter((line) => line.startsWith("stage-input:"))).toEqual([]);
+    expect(t2.code).toBe(EXIT_OK);
+    expect(t2.written).toEqual([stageCheckpointFile("t2-b1"), STAGE_RUN_RECORD_FILE]);
+    expect((await stageRecordOf(t2Dir))["input"]).toMatchObject({ checkpoint: stageCheckpointFile("t1-t2"), boundary: "t1-t2" });
+    const written = await readJson(`${t2Dir}/${stageCheckpointFile("t2-b1")}`);
+    expect(written["versions"]["ledger"]).toBe(await ledgerModule.propertyLedgerSha256(t2OnlyLedger()));
+    expect(written["versions"]).toHaveProperty("ledger_upstream", null);
+    // 同じ工場は、変える前の工場が書いた t2-b1 を今のまま全体の指紋で断る
+    expect(await refusedStage("t2-change-b1", "write", `${source}/${stageCheckpointFile("t2-b1")}`)).toEqual(versionRefusal);
+    vi.restoreAllMocks();
+    // 上流の見方に入る値を変えた台帳の工場は t1-t2 を断る
+    asFactoryWith(upstreamLedger());
+    expect(await refusedStage("upstream-change-t1", "test-spec", `${source}/${stageCheckpointFile("t1-t2")}`)).toEqual(versionRefusal);
+    vi.restoreAllMocks();
+    // 対照：変えない工場は同じ t1-t2 と t2-b1 を受ける
+    const same = await runStageCli({
+      dir: `${directory}/v12-upstream-same`,
+      args: ["--stage-start", "test-spec", "--stage-end", "test-spec", "--stage-input", `${source}/${stageCheckpointFile("t1-t2")}`],
+      calls: [structured(v11aRenamed(v11aTestSpec()))],
+      pipeline: "v1.2",
+    });
+    expect(same.code).toBe(EXIT_OK);
+    const b1 = await runStageCli({
+      dir: `${directory}/v12-upstream-same-b1`,
+      args: ["--stage-start", "write", "--stage-input", `${source}/${stageCheckpointFile("t2-b1")}`],
+      calls: [...v12Head(), structured(v11aJudgments())].slice(6),
+      pipeline: "v1.2",
+    });
+    expect(b1.errors.filter((line) => line.startsWith("stage-input:"))).toEqual([]);
+    expect(b1.code).toBe(EXIT_OK);
+  });
+
+  it("t1-t2 の入力の ledger_upstream の欠け・null・不正の形・不一致・全体の指紋への差し替えと旗の違いを、クライアントを作る前に出力なしで断る。今の工場の部分の指紋が不正の形でも断る（Issue #713）", async () => {
+    const source = `${directory}/v12-upstream-t1-src`;
+    await runStageCli({ dir: source, args: ["--stage-end", "semantic-check"], calls: segment0(), pipeline: "v1.2" });
+    const edits: readonly [string, (cp: Record<string, any>) => void][] = [
+      ["missing", (cp) => delete cp["versions"]["ledger_upstream"]],
+      ["null", (cp) => (cp["versions"]["ledger_upstream"] = null)],
+      ["upper", (cp) => (cp["versions"]["ledger_upstream"] = (cp["versions"]["ledger_upstream"] as string).toUpperCase())],
+      ["short", (cp) => (cp["versions"]["ledger_upstream"] = (cp["versions"]["ledger_upstream"] as string).slice(1))],
+      ["number", (cp) => (cp["versions"]["ledger_upstream"] = 1)],
+      ["mismatch", (cp) => (cp["versions"]["ledger_upstream"] = flip(cp["versions"]["ledger_upstream"] as string))],
+      ["full-instead", (cp) => (cp["versions"]["ledger_upstream"] = cp["versions"]["ledger"])],
+      ["flags", (cp) => (cp["versions"]["flags"] = { ...cp["versions"]["flags"], ids: false })],
+    ];
+    for (const [name, edit] of edits) {
+      const input = await tamper(source, `${directory}/v12-upstream-t1-${name}`, "t1-t2", edit, true);
+      expect(await refusedStage(`t1-${name}`, "test-spec", input), name).toEqual(versionRefusal);
+    }
+    // 今の工場の部分の指紋の値が取れない形なら、照合を省かずに断る
+    for (const [name, value] of [["empty", ""], ["short", "0".repeat(63)]] as const) {
+      vi.spyOn(ledgerModule, "upstreamLedgerSha256").mockImplementation(async () => value);
+      expect(await refusedStage(`t1-run-${name}`, "test-spec", `${source}/${stageCheckpointFile("t1-t2")}`), name).toEqual(versionRefusal);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("t2-b1 の入力は今のまま全体の指紋で照らす（Issue #713）：新しい欄の無い今までの入力・null 以外の値も受け、全体の指紋が違えば新しい欄が一致でも null でも、クライアントを作る前に出力なしで断る", async () => {
+    const calls = [...v12Head(), structured(v11aJudgments())];
+    const source = `${directory}/v12-upstream-b1-src`;
+    await runStageCli({ dir: source, args: ["--stage-end", "test-spec"], calls: calls.slice(0, 6), pipeline: "v1.2" });
+    const upstream = await ledgerModule.upstreamLedgerSha256();
+    const accepted: readonly [string, (cp: Record<string, any>) => void][] = [
+      ["no-field", (cp) => delete cp["versions"]["ledger_upstream"]],
+      ["value", (cp) => (cp["versions"]["ledger_upstream"] = upstream)],
+      ["other", (cp) => (cp["versions"]["ledger_upstream"] = "x")],
+    ];
+    for (const [name, edit] of accepted) {
+      const input = await tamper(source, `${directory}/v12-upstream-b1-${name}`, "t2-b1", edit, true);
+      const run = await runStageCli({ dir: `${directory}/v12-upstream-b1-out-${name}`, args: ["--stage-start", "write", "--stage-input", input], calls: calls.slice(6), pipeline: "v1.2" });
+      expect(run.errors.filter((line) => line.startsWith("stage-input:")), name).toEqual([]);
+      expect(run.code, name).toBe(EXIT_OK);
+    }
+    const refused: readonly [string, (cp: Record<string, any>) => void][] = [
+      ["ledger-null", (cp) => (cp["versions"]["ledger"] = flip(cp["versions"]["ledger"] as string))],
+      [
+        "ledger-upstream-same",
+        (cp) => {
+          cp["versions"]["ledger"] = flip(cp["versions"]["ledger"] as string);
+          cp["versions"]["ledger_upstream"] = upstream;
+        },
+      ],
+      ["ledger-missing", (cp) => delete cp["versions"]["ledger"]],
+      ["flags", (cp) => (cp["versions"]["flags"] = { ...cp["versions"]["flags"], ids: false })],
+    ];
+    for (const [name, edit] of refused) {
+      const input = await tamper(source, `${directory}/v12-upstream-b1-${name}`, "t2-b1", edit, true);
+      expect(await refusedStage(`b1-${name}`, "write", input), name).toEqual(versionRefusal);
+    }
+    // t2-b1 は今の工場の部分の指紋を受理の判断に使わない（値が取れない形でも、全体の指紋が同じなら通る）
+    vi.spyOn(ledgerModule, "upstreamLedgerSha256").mockImplementation(async () => "");
+    const run = await runStageCli({ dir: `${directory}/v12-upstream-b1-out-run`, args: ["--stage-start", "write", "--stage-input", `${source}/${stageCheckpointFile("t2-b1")}`], calls: calls.slice(6), pipeline: "v1.2" });
+    expect(run.errors.filter((line) => line.startsWith("stage-input:"))).toEqual([]);
+    expect(run.code).toBe(EXIT_OK);
   });
 
   it("1 段先の範囲（vocabulary..test-spec）：段の履歴が区間 0 と test-spec だけで、test_spec の dropped_tests が偽物の T2' で外した数と一致し、tests・coverage_units が t2-b1 の組と一致する", async () => {
@@ -1908,8 +2059,17 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
   it("(1) C1 の束 2 の初回が形で落ちてやり直しで通る段の走り：rejected-vocabulary に候補 1 件、記録・checkpoint・1 行の要約・終了コードは直す前とバイト列で同じ", async () => {
     const dir = `${directory}/v12-stage-diag-c1`;
     const run = await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: c1Retry(), pipeline: "v1.2" });
-    // 直す前（fa21c65）のコードで測った値（記録と t1-t2 の checkpoint。診断を足してもバイト列は変えない。手で直さない）
+    // Issue #713 で取り直した値（記録と t1-t2 の checkpoint。旧の値は下で確かめる。診断を足してもバイト列は変えない。手で直さない）
     expect(await digestsOf(dir, [STAGE_RUN_RECORD_FILE, stageCheckpointFile("t1-t2")])).toEqual(V12_STAGE_C1_RETRY_DIGESTS);
+    // 差は checkpoint の版の ledger_upstream と、それに由来する記録の出力ダイジェストだけ（Issue #713）：欄を除いた checkpoint と、
+    // その出力ダイジェストに戻した記録は、直す前（fa21c65）のバイト列と同じ
+    const checkpoint = JSON.parse(await fs.readFile(`${dir}/${stageCheckpointFile("t1-t2")}`, "utf8")) as Record<string, any>;
+    expect(checkpoint["versions"]["ledger_upstream"]).toBe(await ledgerModule.upstreamLedgerSha256());
+    delete checkpoint["versions"]["ledger_upstream"];
+    const record = await stageRecordOf(dir);
+    const before = record["checkpoints"] as { output_digest: string }[];
+    before[0]!.output_digest = await stageOutputDigest(checkpoint);
+    expect([await sha256Hex(stageJsonText(record)), await sha256Hex(stageJsonText(checkpoint))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_713);
     expect(run.code).toBe(EXIT_OK);
     expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_VOCABULARY_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
     expect(run.lines.at(-1)).toBe(
@@ -2072,8 +2232,18 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
   });
 });
 
-/** fa21c65（直す前）の段の走り：C1 の束 2 が形で落ちてやり直しで通る走りの記録と t1-t2 の checkpoint の SHA-256（Issue #683） */
+/**
+ * 段の走り：C1 の束 2 が形で落ちてやり直しで通る走りの記録と t1-t2 の checkpoint の SHA-256（Issue #683）。Issue #713 で取り直した
+ * （checkpoint の版に ledger_upstream を足し、記録の出力ダイジェストがそれに由来して変わったため。旧の値は下の
+ * `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_713` に残し、欄を除けば旧の値に戻ることを試験で確かめる）
+ */
 const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
+  "59d1e2cca45df344fe41a22ea214c8c7a445b2f7a8ad6b87fbfd8fbaa7ce6485",
+  "d6729878920d48a8e741d880c1763428771e46a0737ddd86af4d8272eaa60219",
+];
+
+/** fa21c65（Issue #713 の前）の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値。Issue #683） */
+const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_713: readonly string[] = [
   "70fa16375b25456ffd357636934df2e702a1e1cd1ec472ad26724414a71acfc0",
   "985a79f34387d6a673ea80594421610a3552c05d35ebef2436abbd57bc14d9ee",
 ];

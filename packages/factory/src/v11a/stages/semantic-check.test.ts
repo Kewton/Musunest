@@ -37,7 +37,7 @@ import {
 import { deriveCarryOver } from "../carry-over.js";
 import { checkNameTable, nameTableSha256, type NameTable } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
-import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
+import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView, type UpstreamLedgerView } from "../../v12/ledger.js";
 import {
   SEMANTIC_CHECK_LEDGER_RULE_ID,
   SEMANTIC_CHECK_RULE_DEFINITIONS,
@@ -48,6 +48,7 @@ import {
   runSemanticCheck,
   semanticCheckRuleDefinitionsOf,
   semanticCheckTargets,
+  type SemanticCheckInput,
 } from "./semantic-check.js";
 
 const structured = recordedStructured;
@@ -590,5 +591,26 @@ describe("T1'' の non-requirement の点検（旗 on。配線の検証。モデ
     expect(SEMANTIC_REJECTION_KINDS).toHaveLength(3);
     expect(JSON.stringify(requests[0]?.schema)).toBe(JSON.stringify(SEMANTIC_CHECK_SCHEMA));
     expect(requests[0]?.schemaName).toBe(SEMANTIC_CHECK_SCHEMA_NAME);
+  });
+});
+
+// ── 上流の台帳の見方で受ける（読み漏れの検出。Issue #712）──────────────
+
+/** 2 つの型が互いに代入できる（同じ型）なら true */
+type SameType<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+describe("読み漏れの検出：C3（T1''）は台帳を上流の見方で受ける（Issue #712）", () => {
+  it("規則・段の入力の台帳の型が上流の見方で、一覧の外の欄（B1 の文・生の行）を読めない", () => {
+    const same: readonly true[] = [
+      true satisfies SameType<NonNullable<Parameters<typeof semanticCheckRuleDefinitionsOf>[0]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<SemanticCheckInput["ledger"]>, UpstreamLedgerView>,
+    ];
+    const ledger: NonNullable<SemanticCheckInput["ledger"]> = PROPERTY_LEDGER_VIEW;
+    // @ts-expect-error C3 の段の台帳は B1 の規則の文を持たない
+    void ledger.b1RuleTexts;
+    // @ts-expect-error C3 の段の台帳は生の行を持たない
+    void ledger.rows;
+    expect(same).toHaveLength(2);
+    expect(ledger.t1AcceptanceTexts).toEqual(PROPERTY_LEDGER_VIEW.t1AcceptanceTexts);
   });
 });

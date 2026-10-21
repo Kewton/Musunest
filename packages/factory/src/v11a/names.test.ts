@@ -60,7 +60,7 @@ import {
   type NameTableLedgerOptions,
   type NameTableRow,
 } from "./names.js";
-import { PROPERTY_LEDGER_VIEW, type LedgerView } from "../v12/ledger.js";
+import { PROPERTY_LEDGER_VIEW, type LedgerView, type UpstreamLedgerView } from "../v12/ledger.js";
 
 const list = fixtureList();
 
@@ -1592,5 +1592,31 @@ describe("構造の検査の対象の照合と所属への足し込み（旗 v12
       ]),
     ).toEqual([...roles, { id: "f.item.title", basis: "dependency", reason: "view-shows" }]);
     expect(ownershipWithCheckTargets(roles, [])).toBe(roles);
+  });
+});
+
+// ── 上流の台帳の見方で受ける（読み漏れの検出。Issue #712）──────────────
+
+/** 2 つの型が互いに代入できる（同じ型）なら true */
+type SameType<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+describe("読み漏れの検出：T1'・C1'・C2' の共通の検査は台帳を上流の見方で受ける（Issue #712）", () => {
+  it("検査の口の台帳の型が上流の見方で、一覧の外の欄（T2 系の文・生の行）を読めない", () => {
+    const same: readonly true[] = [
+      true satisfies SameType<NonNullable<NameTableLedgerOptions["ledger"]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<NonNullable<Parameters<typeof checkNameTable>[3]>["ledger"]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<NonNullable<Parameters<typeof inspectNameTable>[3]>["ledger"]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<NonNullable<Parameters<typeof checkVocabularyRows>[2]>["ledger"]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<NonNullable<Parameters<typeof checkMappedTable>[3]>["ledger"]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<NonNullable<Parameters<typeof shapeOfMappingEntry>[3]>["ledger"]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<NonNullable<Parameters<typeof checkNameTableDraftShape>[1]>["ledger"]>, UpstreamLedgerView>,
+    ];
+    const ledger: NonNullable<NameTableLedgerOptions["ledger"]> = PROPERTY_LEDGER_VIEW;
+    // @ts-expect-error 共通の検査の台帳は生の行を持たない
+    void ledger.rows;
+    // @ts-expect-error 共通の検査の引き当ての値は T1 の記述子だけ（規則の文を読めない）
+    void ledger.rowByVerificationKind.get("default-value")?.rules;
+    expect(same).toHaveLength(7);
+    expect(ledger.verificationKinds).toEqual(PROPERTY_LEDGER_VIEW.verificationKinds);
   });
 });

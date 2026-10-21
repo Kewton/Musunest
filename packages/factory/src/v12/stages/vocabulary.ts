@@ -59,7 +59,7 @@ import {
   type ReferenceCounts,
   type VocabularyBundle,
 } from "../ids.js";
-import type { LedgerView } from "../ledger.js";
+import type { UpstreamLedgerView } from "../ledger.js";
 
 /** 束ごとの JSON Schema の名前（v1.2 の封筒の枝の判別子） */
 export const VOCABULARY_SCHEMA_NAMES: Readonly<Record<VocabularyBundle, string>> = {
@@ -140,7 +140,7 @@ export const VOCABULARY_AGGREGATE_RULE: RuleDefinition = {
 };
 
 /** 束の規則の定義（台帳が集計の種類を持てば束 3 の末尾に `R-voc-07`） */
-export function vocabularyRuleDefinitionsOf(bundle: VocabularyBundle, ledger?: LedgerView): readonly RuleDefinition[] {
+export function vocabularyRuleDefinitionsOf(bundle: VocabularyBundle, ledger?: UpstreamLedgerView): readonly RuleDefinition[] {
   const base = VOCABULARY_RULE_DEFINITIONS[bundle];
   return bundle === "behaviors" && (ledger?.aggregateKinds.length ?? 0) > 0 ? [...base, VOCABULARY_AGGREGATE_RULE] : base;
 }
@@ -222,7 +222,7 @@ function behaviorsSchemaOf(aggregateKinds: readonly string[]) {
 }
 
 /** 束の JSON Schema（台帳が集計の種類を持つ走りだけ、束 3 の計算に `aggregate` を足す） */
-export function vocabularySchemaOf(bundle: VocabularyBundle, ledger?: LedgerView): Record<string, unknown> {
+export function vocabularySchemaOf(bundle: VocabularyBundle, ledger?: UpstreamLedgerView): Record<string, unknown> {
   switch (bundle) {
     case "entities":
       return ENTITIES_SCHEMA;
@@ -245,7 +245,7 @@ export interface VocabularyBundleInput {
   /** 前の束までに組んだ行（束 1 は空） */
   readonly rows: readonly NameTableRow[];
   /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけ） */
-  readonly ledger?: LedgerView;
+  readonly ledger?: UpstreamLedgerView;
   /** 断った候補を受け取る観測用の口（省けば何もしない。要求・回数・結果は変わらない） */
   readonly onRejected?: (candidate: RejectedCandidate) => void;
 }
@@ -340,7 +340,7 @@ export function assembleVocabularyBundle(
   output: Record<string, unknown>,
   previous: readonly NameTableRow[],
   tally: ReferenceTally,
-  ledger?: LedgerView,
+  ledger?: UpstreamLedgerView,
 ): Assembled {
   const problems: Problem[] = [];
   const known = new Map<string, NameTableKind>(previous.map((row) => [row.id, row.kind] as const));
