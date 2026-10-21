@@ -778,10 +778,18 @@ test("#686 手 5b の台帳：文脈の ledger.on が真なら、評価口を作
   try { await refused(scoreMutants({ inventory: none.inv }), "ledger_unavailable"); } finally { none.w.cleanup(); }
 });
 
-test("#686 手 5b の台帳 off の出力は、直す前の道具（base の commit の score-mutants.mjs）の出力と、道具自身の指紋 fingerprints.tool を除いて深く等しい", async () => {
+/** 直す前の commit（#686 の base）。浅い clone（CI の checkout の既定）には無いので、無いときだけ下の試験を skip で明示して飛ばす */
+const BEFORE_686 = "f95432d";
+/** その commit が git の履歴にあるか（git cat-file -e <rev>^{commit} の終了コード） */
+export function commitAvailable(rev, cwd = root) {
+  return spawnSync("git", ["cat-file", "-e", `${rev}^{commit}`], { cwd, stdio: "ignore" }).status === 0;
+}
+const SKIP_BEFORE_686 = commitAvailable(BEFORE_686) ? false : `浅い clone で直す前の commit が無い（${BEFORE_686}）`;
+
+test("#686 手 5b の台帳 off の出力は、直す前の道具（base の commit の score-mutants.mjs）の出力と、道具自身の指紋 fingerprints.tool を除いて深く等しい", { skip: SKIP_BEFORE_686 }, async () => {
   // 直す前の道具は git から読み、同じディレクトリに今の手 5a（この Issue では変えない）を並べて動かす。旧い指紋は固定しない（指紋の欄だけを除いて比べる）
   const rel = relative(root, join(here, "score-mutants.mjs"));
-  const before = execFileSync("git", ["show", `f95432d:${rel}`], { cwd: root, encoding: "utf8" });
+  const before = execFileSync("git", ["show", `${BEFORE_686}:${rel}`], { cwd: root, encoding: "utf8" });
   const dir = mkdtempSync(join(tmpdir(), "score-mutants-before-"));
   const w = world({ candidates: ["a", "b", "c"] });
   try {
