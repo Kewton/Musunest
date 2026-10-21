@@ -2350,6 +2350,93 @@ describe("v1.2 の段の走りが ⑦ まで流したとき、判定した宣言
       expect(record).not.toHaveProperty("verification");
     }
   });
+
+  /** 要件の文をそのまま根拠に写した B3' の拒否（ids の要件ごと） */
+  const rejecting = (ids: readonly string[]) =>
+    structured(v11aJudgments(Object.fromEntries(ids.map((id) => [id, ["mismatch", V11A_BASE_LIST.requirements.find((requirement) => requirement.id === id)?.text ?? ""] as const]))));
+  /** 探索の直しの経路（v1.2 の旗の組。B1 から先の台本） */
+  const SEARCH_STOPS = [
+    {
+      name: "(a) 停滞",
+      // 同じ拒否の版が 2 つ続けて採れず B1 を作り直し、作り直しのあとも 2 つ採れずに止める
+      calls: (): RecordedCall[] => [
+        structured({ declaration: V11A_YAML }), structured(v11aJudgments(V11A_REJECT_R3)),
+        v11aRepairDone(), structured(v11aJudgments(V11A_REJECT_R3)),
+        v11aRepairDone(), structured(v11aJudgments(V11A_REJECT_R3)),
+        structured({ declaration: V11A_YAML }), structured(v11aJudgments(V11A_REJECT_R3)),
+        v11aRepairDone(), structured(v11aJudgments(V11A_REJECT_R3)),
+      ],
+      stopReason: "stagnation",
+      roundTrips: 3,
+      code: EXIT_OK,
+    },
+    {
+      name: "(b) 上限",
+      // 拒否の数が 4 → 3 → 2 → 1 と減って採り、同数の 2 版が採れずに点検 6 を使い切る（拒否は直す手 4a に渡る R3 を含む）
+      calls: (): RecordedCall[] => [
+        structured({ declaration: V11A_YAML }), rejecting(["R1", "R2", "R3", "R4"]),
+        v11aRepairDone(), rejecting(["R2", "R3", "R4"]),
+        v11aRepairDone(), rejecting(["R3", "R4"]),
+        v11aRepairDone(), rejecting(["R3"]),
+        v11aRepairDone(), rejecting(["R3"]),
+        v11aRepairDone(), rejecting(["R3"]),
+      ],
+      stopReason: "limit",
+      roundTrips: 5,
+      code: EXIT_OK,
+    },
+    {
+      name: "(c) 差し戻し",
+      // B3' の拒否 → B5 の主張 → B5' が Plan へ戻す
+      calls: (): RecordedCall[] => v11aReturnToPlan().slice(3),
+      stopReason: "unresolved",
+      roundTrips: 1,
+      code: EXIT_RETURN_TO_PLAN,
+    },
+  ] as const;
+
+  it.each(SEARCH_STOPS)("探索の直しの $name で止めた範囲 write..judge の走り：stop_reason・宣言のファイル（判定した宣言とバイト列で同じ・SHA が記録と一致）・記録の欄が同じ台本の一気通貫と同じで、manifest が無く、終了コードは今までどおり", async (scenario) => {
+    const { whole } = await wholeRun(`u3-search-src-${scenario.stopReason}`);
+    const head = [...v12Head(), structured(v11aJudgments())].slice(0, 6);
+    // 同じ台本の一気通貫（比較元の検証の記録・要約・宣言）
+    const reference = `${directory}/u3-search-ref-${scenario.stopReason}`;
+    const full = await runV11aCli({ dir: reference, calls: [...head, ...scenario.calls()], pipeline: "v1.2" });
+    expect(full.summary["stop_reason"], JSON.stringify(full.summary)).toBe(scenario.stopReason);
+    const dir = `${directory}/u3-search-${scenario.stopReason}`;
+    const run = await runStageCli({ dir, args: ["--stage-start", "write", "--stage-input", `${whole}/${stageCheckpointFile("t2-b1")}`], calls: scenario.calls(), pipeline: "v1.2" });
+    expect(run.errors.filter((line) => line.startsWith("stage-input:"))).toEqual([]);
+    expect(run.clientErrors).toEqual([]);
+    expect(run.code).toBe(scenario.code);
+    expect(run.written).toEqual([STAGE_DECLARATION_FILE, STAGE_RUN_RECORD_FILE]);
+    const text = await fs.readFile(`${dir}/${STAGE_DECLARATION_FILE}`, "utf8");
+    // 判定した宣言（一気通貫の納品物の宣言＝一番良い版）とバイト列で同じ
+    expect(text).toBe(await fs.readFile(`${reference}/artifacts/app.spec.yaml`, "utf8"));
+    const record = await stageRecordOf(dir);
+    expect(record["return_to_plan"]).toBe(scenario.stopReason === "unresolved");
+    expect(record["stage_judge_verdict"]).toBe(full.summary["verdict"]);
+    expect(record["declaration"]).toEqual({ file: STAGE_DECLARATION_FILE, sha256: await sha256Hex(text), static_check_passed: true });
+    const verification = record["verification"] as Record<string, unknown>;
+    const v11a = await readJson(`${reference}/${V11A_ARTIFACT_NAMES.verification}`);
+    const repairs = (full.summary["stages"] as readonly { readonly stage: string }[]).filter((entry) => entry.stage === "repair").length;
+    expect(verification).toMatchObject({
+      table_sha256: v11a["table_sha256"],
+      test_suite_sha256: v11a["test_suite_sha256"],
+      declaration_sha256: await sha256Hex(text),
+      checked_declaration_sha256s: v11a["checked_declaration_sha256s"],
+      decl_check: v11a["decl_check"],
+      b3_misses: 0,
+      c7_mismatches: 0,
+      not_run: null,
+      stop_reason: scenario.stopReason,
+    });
+    expect(v11a["declaration_sha256"]).toBe(verification["declaration_sha256"]);
+    expect(verification["round_trips"]).toBe(repairs);
+    expect(verification["round_trips"]).toBe(scenario.roundTrips);
+    expect(typeof verification["unresolved"]).toBe("number");
+    // 納品物を書かない
+    await expect(fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+    expect(run.written.some((path) => path.startsWith("artifacts/"))).toBe(false);
+  });
 });
 
 describe("封筒の枝は段が渡した schema と深く等しい（実 adapter・偽物の fetch。Issue #549 の直し）", () => {
