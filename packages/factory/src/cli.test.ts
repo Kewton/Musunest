@@ -2354,7 +2354,12 @@ describe("v1.2 の段の走りが ⑦ まで流したとき、判定した宣言
   /** 要件の文をそのまま根拠に写した B3' の拒否（ids の要件ごと） */
   const rejecting = (ids: readonly string[]) =>
     structured(v11aJudgments(Object.fromEntries(ids.map((id) => [id, ["mismatch", V11A_BASE_LIST.requirements.find((requirement) => requirement.id === id)?.text ?? ""] as const]))));
-  /** 探索の直しの経路（v1.2 の旗の組。B1 から先の台本） */
+  /** C7 で r4 の 3 本（normal・abnormal・boundary。どれも同じ参照データで率 6 を期待する）が不一致になる宣言（率の式を変える） */
+  const V11A_YAML_R4_BAD = V11A_YAML.replace("expression: base * 2", "expression: base * 3");
+  /**
+   * 探索の直しの経路（v1.2 の旗の組。B1 から先の台本）。`unresolved` ＝ 記録の verification.unresolved の期待値を台本から手で決めた値
+   * （裁定の未解決 ∪ 最終版の C7 の未解決 ∪ 停滞で足した試験 ＋ 停滞のときの最終版の B3 の落ち）
+   */
   const SEARCH_STOPS = [
     {
       name: "(a) 停滞",
@@ -2369,6 +2374,31 @@ describe("v1.2 の段の走りが ⑦ まで流したとき、判定した宣言
       stopReason: "stagnation",
       roundTrips: 3,
       code: EXIT_OK,
+      // 裁定 0（主張なし）＋ 最終版（一番良い版＝最初の版。どの候補も同数で採らない）の C7 の未解決 0 ＋ 停滞で足す試験 0（最終版の C7 の
+      // 不一致の行き先が 0 件）＋ B3 の落ち 0 ＝ 0
+      c7: 0,
+      unresolved: 0,
+    },
+    {
+      name: "(a') 停滞（C7 の不一致が残る版）",
+      // (a) と同じ形で、どの版も r4 の 3 本が C7 で不一致のまま、同じ拒否 R3 で採れずに止める（R3 の拒否は欄だけの直しに写せないので道具の直し）
+      calls: (): RecordedCall[] => [
+        structured({ declaration: V11A_YAML_R4_BAD }), structured(v11aJudgments(V11A_REJECT_R3)),
+        { kind: "tools", response: { kind: "done", declaration: { declaration: V11A_YAML_R4_BAD, disputes: [] }, usage: undefined } },
+        structured(v11aJudgments(V11A_REJECT_R3)),
+        { kind: "tools", response: { kind: "done", declaration: { declaration: V11A_YAML_R4_BAD, disputes: [] }, usage: undefined } },
+        structured(v11aJudgments(V11A_REJECT_R3)),
+        structured({ declaration: V11A_YAML_R4_BAD }), structured(v11aJudgments(V11A_REJECT_R3)),
+        { kind: "tools", response: { kind: "done", declaration: { declaration: V11A_YAML_R4_BAD, disputes: [] }, usage: undefined } },
+        structured(v11aJudgments(V11A_REJECT_R3)),
+      ],
+      stopReason: "stagnation",
+      roundTrips: 3,
+      code: EXIT_OK,
+      // 裁定 0（主張なし）＋ 最終版の C7 の未解決 0 ＋ **停滞で足す試験 3**（最終版の C7 の不一致 r4-normal・r4-abnormal・r4-boundary の行き先）
+      // ＋ B3 の落ち 0 ＝ 3。停滞で足した分を含まなければ 0 になる
+      c7: 3,
+      unresolved: 3,
     },
     {
       name: "(b) 上限",
@@ -2384,6 +2414,9 @@ describe("v1.2 の段の走りが ⑦ まで流したとき、判定した宣言
       stopReason: "limit",
       roundTrips: 5,
       code: EXIT_OK,
+      // 裁定 0（主張なし）＋ 最終版（拒否 R3 の 1 件の版）の C7 の未解決 0 ＋ 停滞でないので足さない ＝ 0
+      c7: 0,
+      unresolved: 0,
     },
     {
       name: "(c) 差し戻し",
@@ -2392,6 +2425,9 @@ describe("v1.2 の段の走りが ⑦ まで流したとき、判定した宣言
       stopReason: "unresolved",
       roundTrips: 1,
       code: EXIT_RETURN_TO_PLAN,
+      // 裁定の未解決 0（r4-normal は Plan へ戻す判断で、確定した仕様があるので未解決に落とさない）＋ 最終版の C7 の未解決 0 ＋ 停滞でない ＝ 0
+      c7: 0,
+      unresolved: 0,
     },
   ] as const;
 
@@ -2425,14 +2461,14 @@ describe("v1.2 の段の走りが ⑦ まで流したとき、判定した宣言
       checked_declaration_sha256s: v11a["checked_declaration_sha256s"],
       decl_check: v11a["decl_check"],
       b3_misses: 0,
-      c7_mismatches: 0,
+      c7_mismatches: scenario.c7,
       not_run: null,
       stop_reason: scenario.stopReason,
     });
     expect(v11a["declaration_sha256"]).toBe(verification["declaration_sha256"]);
     expect(verification["round_trips"]).toBe(repairs);
     expect(verification["round_trips"]).toBe(scenario.roundTrips);
-    expect(typeof verification["unresolved"]).toBe("number");
+    expect(verification["unresolved"]).toBe(scenario.unresolved);
     // 納品物を書かない
     await expect(fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
     expect(run.written.some((path) => path.startsWith("artifacts/"))).toBe(false);
