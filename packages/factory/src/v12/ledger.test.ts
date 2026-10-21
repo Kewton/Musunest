@@ -19,6 +19,7 @@
 //
 // LLM を呼ばない。外部の API を呼ばない。受入の題材の言葉は使わない。
 import { describe, expect, it } from "vitest";
+import { sha256Hex } from "@musunest/spec-engine";
 import { TEST_KINDS, type FixedTest } from "../fixed-test.js";
 import { ruleDefinitionDefects } from "../stages/prompt.js";
 import { ACCEPTANCE_MATERIAL_WORDS } from "../stages/__tests__/prompt.js";
@@ -45,6 +46,11 @@ import {
   PROPERTY_LEDGER_VIEW,
   PROPERTY_STATES,
   propertyLedgerSha256,
+  upstreamLedgerSha256,
+  upstreamLedgerViewOf,
+  deriveUpstreamLedgerView,
+  UPSTREAM_LEDGER_BOUNDARY,
+  UPSTREAM_LEDGER_VIEW_VERSION,
   OUTER_NOT_SCORED,
   V12_FLAGS_OFF,
   V12_FLAG_NAMES,
@@ -63,6 +69,11 @@ import {
   propertyCopyCells,
   resolveV12Flags,
   type PropertyRow,
+  type PropertyAggregateT2,
+  type PropertyConditionT2,
+  type PropertyT1,
+  type PropertyT2,
+  type UpstreamLedgerView,
   type V12Flags,
 } from "./ledger.js";
 
@@ -1064,5 +1075,269 @@ describe("性質の台帳の定義の指紋（段の走りの checkpoint の版�
       [{ ...first, why: `${first.why}。目印の追記` }, second, ...rest],
     ];
     for (const rows of changed) expect(await propertyLedgerSha256(rows)).not.toBe(fingerprint);
+  });
+});
+
+// ── 10. 上流の台帳の見方と部分の指紋（Issue #712）────────────────────
+
+/** 1 行を差し替えた台帳（台帳の並びは保つ） */
+const withRow = (id: string, change: (row: PropertyRow) => PropertyRow, rows: readonly PropertyRow[] = PROPERTY_LEDGER): readonly PropertyRow[] =>
+  rows.map((row) => (row.id === id ? change(row) : row));
+/** 文字列に目印を足す（null は null のまま） */
+const marked = <T extends string | null>(text: T): T => (text === null ? text : (`${text}。目印の追記` as T));
+/** 固定文の欄を 1 つずつ変えた写しの並び（null の欄は文にする） */
+const eachMessageChanged = <T extends Readonly<Record<string, string | null>>>(messages: T): readonly { readonly key: string; readonly messages: T }[] =>
+  Object.keys(messages).map((key) => ({ key, messages: { ...messages, [key]: `${messages[key] ?? "文"}。目印の追記` } }));
+/** T1 の記述子を変えた行 */
+const withT1 = (row: PropertyRow, change: (t1: PropertyT1) => PropertyT1): PropertyRow => {
+  if (row.t1 === null) throw new Error(`前提が壊れた：${row.id} に T1 の記述子が無い`);
+  return { ...row, t1: change(row.t1) };
+};
+
+describe("上流の台帳の見方（境界 t1-t2 までの段が読むもの。Issue #712）", () => {
+  it("全体の見方から代入でき、値は全体の見方と同じ導出の値（引き当ては T1 の記述子だけの包み）", () => {
+    const upstream: UpstreamLedgerView = PROPERTY_LEDGER_VIEW;
+    const derived = deriveUpstreamLedgerView(PROPERTY_LEDGER);
+    expect(Object.keys(derived).sort()).toEqual(
+      ["aggregateKinds", "excludedWhenAcceptedKinds", "rowByVerificationKind", "t1AcceptanceTexts", "t1RuleTexts", "verificationKinds"].sort(),
+    );
+    expect(derived.t1RuleTexts).toEqual(upstream.t1RuleTexts);
+    expect(derived.t1AcceptanceTexts).toEqual(upstream.t1AcceptanceTexts);
+    expect(derived.verificationKinds).toEqual(upstream.verificationKinds);
+    expect(derived.excludedWhenAcceptedKinds).toEqual(upstream.excludedWhenAcceptedKinds);
+    expect(derived.aggregateKinds).toEqual(upstream.aggregateKinds);
+    expect([...derived.rowByVerificationKind]).toEqual([...PROPERTY_LEDGER_VIEW.rowByVerificationKind].map(([kind, row]) => [kind, { t1: row.t1 }]));
+    for (const entry of derived.rowByVerificationKind.values()) expect(Object.keys(entry)).toEqual(["t1"]);
+    expect(upstreamLedgerViewOf(PROPERTY_LEDGER_VIEW)).toEqual(derived);
+  });
+
+  it("不備のある台帳は指紋より前に断る（全体の妥当性の検査は今のまま）", async () => {
+    const duplicated = [...PROPERTY_LEDGER, DEFAULT_VALUE];
+    expect(ledgerRowDefects(duplicated).length).toBeGreaterThan(0);
+    expect(() => deriveUpstreamLedgerView(duplicated)).toThrow(/^性質の台帳：/u);
+    await expect(upstreamLedgerSha256(duplicated)).rejects.toThrow(/^性質の台帳：/u);
+  });
+
+  it("読み漏れの検出：上流の見方からは一覧の外の欄（T2 系の文・試験の型・生の行・B1 の文）を型検査で読めない", () => {
+    const upstream: UpstreamLedgerView = PROPERTY_LEDGER_VIEW;
+    // @ts-expect-error 生の行は上流の見方に無い
+    void upstream.rows;
+    // @ts-expect-error T2 の規則の文は上流の見方に無い
+    void upstream.t2FormTexts;
+    // @ts-expect-error 旗 ids の T2 の文は上流の見方に無い
+    void upstream.t2IdsFormTexts;
+    // @ts-expect-error B1 の規則の文は上流の見方に無い
+    void upstream.b1RuleTexts;
+    // @ts-expect-error 集計の試験の型の行は上流の見方に無い
+    void upstream.aggregateRows;
+    // @ts-expect-error 観測する性質 → 行の引き当ては上流の見方に無い
+    void upstream.rowByObserves;
+    const entry = upstream.rowByVerificationKind.get("default-value");
+    // @ts-expect-error 引き当ての値は T1 の記述子だけを読める（T2 の試験の型は読めない）
+    void entry?.t2;
+    // @ts-expect-error 引き当ての値は T1 の記述子だけを読める（規則の文は読めない）
+    void entry?.rules;
+    expect(entry?.t1).toBe(DEFAULT_VALUE.t1);
+  });
+});
+
+describe("部分の指紋（境界 t1-t2 の上流の台帳の見方。全体の指紋とは別。Issue #712）", () => {
+  it("上流の見方を正規化した JSON と見方の版・境界の名前の SHA-256。既定は台帳の正本で、行の鍵の並びには依らない", async () => {
+    const fingerprint = await upstreamLedgerSha256();
+    expect(fingerprint).toMatch(/^[0-9a-f]{64}$/u);
+    expect(await upstreamLedgerSha256(PROPERTY_LEDGER)).toBe(fingerprint);
+    expect(fingerprint).not.toBe(await propertyLedgerSha256());
+    const reordered = PROPERTY_LEDGER.map((row) => Object.fromEntries(Object.entries(row).reverse()) as unknown as typeof row);
+    expect(await upstreamLedgerSha256(reordered)).toBe(fingerprint);
+    // 材料：キーを並べ替えた JSON（版・境界・見方。引き当てはキーと値の並び）
+    const view = PROPERTY_LEDGER_VIEW;
+    const material = {
+      boundary: "t1-t2",
+      version: 1,
+      view: {
+        aggregateKinds: view.aggregateKinds,
+        excludedWhenAcceptedKinds: view.excludedWhenAcceptedKinds,
+        rowByVerificationKind: [...view.rowByVerificationKind].map(([kind, row]) => ({ kind, t1: row.t1 })),
+        t1AcceptanceTexts: view.t1AcceptanceTexts,
+        t1RuleTexts: view.t1RuleTexts,
+        verificationKinds: view.verificationKinds,
+      },
+    };
+    const sortKeys = (value: unknown): unknown =>
+      Array.isArray(value)
+        ? value.map(sortKeys)
+        : typeof value === "object" && value !== null
+          ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)).map(([key, inner]) => [key, sortKeys(inner)]))
+          : value;
+    expect(fingerprint).toBe(await sha256Hex(JSON.stringify(sortKeys(material))));
+    expect(UPSTREAM_LEDGER_VIEW_VERSION).toBe(1);
+    expect(UPSTREAM_LEDGER_BOUNDARY).toBe("t1-t2");
+  });
+
+  /** 上流の見方に入る値を、妥当な台帳のまま 1 つずつ変えた台帳 */
+  const sensitive = (): readonly { readonly name: string; readonly rows: readonly PropertyRow[] }[] => {
+    const t1Rows = PROPERTY_LEDGER.filter((row) => row.t1 !== null);
+    return [
+      // 各文
+      ...PROPERTY_LEDGER.filter((row) => row.rules.t1 !== null).map((row) => ({
+        name: `${row.id} の T1 の規則の文`,
+        rows: withRow(row.id, (target) => ({ ...target, rules: { ...target.rules, t1: marked(target.rules.t1) } })),
+      })),
+      ...PROPERTY_LEDGER.filter((row) => row.rules.t1Acceptance !== null).map((row) => ({
+        name: `${row.id} の T1'' の受理条件の文`,
+        rows: withRow(row.id, (target) => ({ ...target, rules: { ...target.rules, t1Acceptance: marked(target.rules.t1Acceptance) } })),
+      })),
+      { name: "T1 の規則の文が無い行に文を足す", rows: withRow("value", (row) => ({ ...row, rules: { ...row.rules, t1: "足した文。" } })) },
+      { name: "T1'' の受理条件の文が無い行に文を足す", rows: withRow("value", (row) => ({ ...row, rules: { ...row.rules, t1Acceptance: "足した文。" } })) },
+      // 種類
+      ...t1Rows.map((row) => ({ name: `${row.id} の確かめ方の種類`, rows: withRow(row.id, (target) => withT1(target, (t1) => ({ ...t1, kind: `${t1.kind}-2` }))) })),
+      // T1 の記述子の各欄
+      { name: "enum-membership の valueField", rows: withRow("enum-membership", (row) => withT1(row, (t1) => ({ ...t1, valueField: "value" }))) },
+      {
+        name: "default-value の所属の行の型",
+        rows: withRow("default-value", (row) => withT1(row, (t1) => ({ ...t1, ownership: { ...t1.ownership, row: { kind: "field", type: "string" } } }))),
+      },
+      {
+        name: "default-value の所属の行の種類",
+        rows: withRow("default-value", (row) => withT1(row, (t1) => ({ ...t1, ownership: { ...t1.ownership, row: { kind: "entity", type: "enum" } } }))),
+      },
+      { name: "default-value の所属の行の数", rows: withRow("default-value", (row) => withT1(row, (t1) => ({ ...t1, ownership: { ...t1.ownership, count: 2 } }))) },
+      {
+        name: "default-value の entityAddedByCode",
+        rows: withRow("default-value", (row) => withT1(row, (t1) => ({ ...t1, ownership: { ...t1.ownership, entityAddedByCode: false } }))),
+      },
+      {
+        name: "default-value の valueInOptions",
+        rows: withRow("default-value", (row) => withT1(row, (t1) => ({ ...t1, ownership: { ...t1.ownership, valueInOptions: false } }))),
+      },
+      {
+        name: "enum-membership の optionsNonEmpty",
+        rows: withRow("enum-membership", (row) => withT1(row, (t1) => ({ ...t1, ownership: { ...t1.ownership, optionsNonEmpty: false } }))),
+      },
+      { name: "default-value の分類", rows: withRow("default-value", (row) => withT1(row, (t1) => ({ ...t1, nature: "existence-only" }))) },
+      { name: "default-value の分類を見ない", rows: withRow("default-value", (row) => withT1(row, (t1) => ({ ...t1, nature: null }))) },
+      {
+        // 受理で除くのをやめる（妥当な台帳のままにするため、試験の型・照合の名前・旗 ids の文も足す。差は受理で除く種類に出る）
+        name: "non-requirement の excludeWhenAccepted",
+        rows: withRow("non-requirement", (row) => ({
+          ...withT1(row, (t1) => ({ ...t1, excludeWhenAccepted: false })),
+          t2: ENUM_MEMBERSHIP.t2,
+          evaluation: "v1-run-tests",
+          rules: { ...row.rules, t2Ids: "足した文。" },
+        })),
+      },
+      ...t1Rows.flatMap((row) =>
+        eachMessageChanged((row.t1 as PropertyT1).messages).map(({ key, messages }) => ({
+          name: `${row.id} の T1' の固定文 ${key}`,
+          rows: withRow(row.id, (target) => withT1(target, (t1) => ({ ...t1, messages }))),
+        })),
+      ),
+      // 集計の種類の順・状態による選別・集計の試験の型の有無
+      {
+        name: "集計の種類の順",
+        rows: withRow("empty-aggregate", (row) => ({ ...row, t2Aggregate: { ...(row.t2Aggregate as PropertyAggregateT2), values: [...(row.t2Aggregate as PropertyAggregateT2).values].reverse() } })),
+      },
+      {
+        name: "集計の種類を 1 つ除く",
+        rows: withRow("empty-aggregate", (row) => ({ ...row, t2Aggregate: { ...(row.t2Aggregate as PropertyAggregateT2), values: (row.t2Aggregate as PropertyAggregateT2).values.slice(1) } })),
+      },
+      {
+        name: "集計の行を未対応にする（状態による選別）",
+        rows: withRow("empty-aggregate", (row) => ({ ...row, state: "registered-unsupported", evaluation: null, unsupportedMessage: "未対応の文" })),
+      },
+      { name: "集計の試験の型を除く", rows: withRow("empty-aggregate", (row) => ({ ...row, t2Aggregate: null })) },
+      // 行の並び・引き当てのキーの増減
+      {
+        name: "確かめ方の種類を持つ行の並び",
+        rows: PROPERTY_LEDGER.map((row) => (row.id === "default-value" ? ENUM_MEMBERSHIP : row.id === "enum-membership" ? DEFAULT_VALUE : row)),
+      },
+      { name: "確かめ方の種類を持つ行を除く", rows: PROPERTY_LEDGER.filter((row) => row.id !== "enum-membership") },
+    ];
+  };
+
+  it("感度：上流の見方に入る値（各文・種類・T1 の記述子の各欄・集計の種類の順・状態による選別）を妥当な台帳のまま 1 つずつ変えると部分の指紋が変わる", async () => {
+    const fingerprint = await upstreamLedgerSha256();
+    const cases = sensitive();
+    expect(cases.length).toBeGreaterThan(30);
+    for (const { name, rows } of cases) {
+      expect(ledgerRowDefects(rows), name).toEqual([]);
+      expect(await upstreamLedgerSha256(rows), name).not.toBe(fingerprint);
+    }
+  });
+
+  /** 上流の見方に入らない欄を、妥当な台帳のまま 1 つずつ変えた台帳 */
+  const insensitive = (): readonly { readonly name: string; readonly rows: readonly PropertyRow[] }[] => {
+    const aggregate = EMPTY_AGGREGATE.t2Aggregate as PropertyAggregateT2;
+    const condition = WHEN.t2Condition as PropertyConditionT2;
+    const withT2 = (id: string, change: (t2: PropertyT2) => PropertyT2) => withRow(id, (row) => ({ ...row, t2: change(row.t2 as PropertyT2) }));
+    const withAggregate = (change: (t2: PropertyAggregateT2) => PropertyAggregateT2) =>
+      withRow("empty-aggregate", (row) => ({ ...row, t2Aggregate: change(row.t2Aggregate as PropertyAggregateT2) }));
+    const withCondition = (change: (t2: PropertyConditionT2) => PropertyConditionT2) =>
+      withRow("when", (row) => ({ ...row, t2Condition: change(row.t2Condition as PropertyConditionT2) }));
+    return [
+      // 写しの欄
+      ...PROPERTY_LEDGER.flatMap((row) => [
+        { name: `${row.id} の since`, rows: withRow(row.id, (target) => ({ ...target, since: marked(target.since) })) },
+        { name: `${row.id} の why`, rows: withRow(row.id, (target) => ({ ...target, why: marked(target.why) })) },
+      ]),
+      // T2・ids の T2・B1 の規則の文（無い行には足す）
+      ...PROPERTY_LEDGER.flatMap((row) =>
+        (["t2", "t2Ids", "b1"] as const).map((key) => ({
+          name: `${row.id} の規則の文 ${key}`,
+          rows: withRow(row.id, (target) => ({ ...target, rules: { ...target.rules, [key]: target.rules[key] === null ? "足した文。" : marked(target.rules[key]) } })),
+        })),
+      ),
+      // 行の T2 の型
+      ...(["default-value", "enum-membership"] as const).flatMap((id) => {
+        const t2 = rowOf(id).t2 as PropertyT2;
+        return [
+          { name: `${id} の T2 の対象の種類`, rows: withT2(id, (target) => ({ ...target, targetKind: "entity" })) },
+          { name: `${id} の T2 の操作`, rows: withT2(id, (target) => ({ ...target, operation: "screen" })) },
+          { name: `${id} の T2 の必須の kind`, rows: withT2(id, (target) => ({ ...target, requiredKinds: ["normal", "abnormal"] })) },
+          { name: `${id} の T2 の期待の値の型`, rows: withT2(id, (target) => ({ ...target, expected: { ...target.expected, valueType: target.expected.valueType === "json-string" ? "json-string-array" : "json-string" } })) },
+          { name: `${id} の T2 のデータ状態`, rows: withT2(id, (target) => ({ ...target, dataStates: target.dataStates.map((entry) => ({ ...entry, state: marked(entry.state) })) })) },
+          { name: `${id} の T2 の本数`, rows: withT2(id, (target) => ({ ...target, minTests: target.minTests + 1 })) },
+          {
+            name: `${id} の T2 の期待の値の書き手と参照データ`,
+            rows: withT2(id, (target) => ({ ...target, expectedWriter: "llm-written-code-checked", referenceTargets: ["entity"] })),
+          },
+          ...eachMessageChanged(t2.messages).map(({ key, messages }) => ({ name: `${id} の T2' の固定文 ${key}`, rows: withT2(id, (target) => ({ ...target, messages })) })),
+        ];
+      }),
+      // T2 の集計の型のうち集計の種類以外
+      { name: "集計のデータ状態の文", rows: withAggregate((t2) => ({ ...t2, states: t2.states.map((entry) => ({ ...entry, label: marked(entry.label) })) })) },
+      { name: "集計のデータ状態の kind", rows: withAggregate((t2) => ({ ...t2, states: t2.states.map((entry) => ({ ...entry, kind: "normal" })) })) },
+      { name: "集計の空・未読の値", rows: withAggregate((t2) => ({ ...t2, values: t2.values.map((entry) => ({ ...entry, empty: "null", unread: "zero" })) })) },
+      { name: "集計の参照データ", rows: withAggregate((t2) => ({ ...t2, referenceTargets: ["entity"] })) },
+      { name: "集計のほかの観測する性質", rows: withAggregate((t2) => ({ ...t2, alsoObserves: [] })) },
+      { name: "集計の本数", rows: withAggregate((t2) => ({ ...t2, minTests: t2.minTests + 1 })) },
+      { name: "集計の期待の値の書き手", rows: withAggregate((t2) => ({ ...t2, expectedWriter: "code" })) },
+      { name: "集計のコードが作る範囲", rows: withAggregate((t2) => ({ ...t2, codeRanges: ["app"] })) },
+      ...eachMessageChanged(aggregate.messages).map(({ key, messages }) => ({ name: `集計の T2' の固定文 ${key}`, rows: withAggregate((t2) => ({ ...t2, messages })) })),
+      // T2 の条件の型
+      { name: "条件の kind", rows: withCondition((t2) => ({ ...t2, kinds: ["normal"] })) },
+      { name: "条件の期待の値の書き手", rows: withCondition((t2) => ({ ...t2, expectedWriter: "code" })) },
+      ...eachMessageChanged(condition.messages).map(({ key, messages }) => ({ name: `条件の T2' の固定文 ${key}`, rows: withCondition((t2) => ({ ...t2, messages })) })),
+      // 上流の段が読まないほかの欄
+      { name: "default-value の要件の決まりの型", rows: withRow("default-value", (row) => ({ ...row, requirementRule: marked(row.requirementRule) })) },
+      { name: "default-value の受理条件（行の欄）", rows: withRow("default-value", (row) => ({ ...row, t1Acceptance: marked(row.t1Acceptance) })) },
+      { name: "default-value の網羅の鍵", rows: withRow("default-value", (row) => ({ ...row, coverageKey: ["requirementId", "targetId"] })) },
+      { name: "default-value の照合の名前", rows: withRow("default-value", (row) => ({ ...row, evaluation: "v1-run-tests" })) },
+      { name: "default-value の外の対応", rows: withRow("default-value", (row) => ({ ...row, outer: OUTER_NOT_SCORED })) },
+      { name: "value の引き継ぎの印", rows: withRow("value", (row) => ({ ...row, inherited: false })) },
+    ];
+  };
+
+  it("不感度：上流の見方に入らない欄（T2 の型・T2・ids の T2・B1 の文・集計と条件の型のうち集計の種類以外・since・why）を妥当な台帳のまま 1 つずつ変えても部分の指紋は変わらない（全体の指紋は変わる）", async () => {
+    const fingerprint = await upstreamLedgerSha256();
+    const whole = await propertyLedgerSha256();
+    const cases = insensitive();
+    expect(cases.length).toBeGreaterThan(60);
+    for (const { name, rows } of cases) {
+      // 妥当性の検査で断られる変異は数えない（全部が妥当であることを先に確かめる）
+      expect(ledgerRowDefects(rows), name).toEqual([]);
+      expect(await propertyLedgerSha256(rows), name).not.toBe(whole);
+      expect(await upstreamLedgerSha256(rows), name).toBe(fingerprint);
+    }
   });
 });

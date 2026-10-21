@@ -110,7 +110,7 @@ async function loadStageDist(distDir) {
     if (!isFlagMap(entry.V12_PIPELINE_FLAGS) || typeof entry.propertyLedgerSha256 !== "function") return null;
     const ledger = await entry.propertyLedgerSha256();
     if (typeof ledger !== "string") return null;
-    return { lib, cli, checks, recordFiles: [lib.STAGE_RUN_RECORD_FILE, cliPlan.BUILD_CLI_RECORD_FILE], v12: { ledger, flags: JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS)) } };
+    return { lib, cli, entry, checks, recordFiles: [lib.STAGE_RUN_RECORD_FILE, cliPlan.BUILD_CLI_RECORD_FILE], v12: { ledger, flags: JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS)) } };
   } catch { return null; }
 }
 
@@ -128,6 +128,16 @@ export async function freezeStageInputSet({ repo, outRoot, scorePath, id, versio
   if (!lib.STAGE_BOUNDARIES.includes(boundary)) return { code: "freeze:boundary" };
   const start = lib.STAGE_STARTS.find((s) => lib.boundaryBefore(s) === boundary);
   if (start === undefined) return { code: "freeze:boundary" };
+  // #713：境界が dist の境界の表の最初（上流の段だけが前にある境界）なら、照合の関数に上流の台帳の部分の指紋（upstreamLedgerSha256）の今の値も渡す。
+  // 関数が無い・例外・返りの値が 64 桁の 16 進でなければ dist の読み取りの失敗。ほかの境界では部分の関数を取らず・呼ばない（今までの dist も受ける）
+  let v12 = dist.v12;
+  if (boundary === lib.STAGE_BOUNDARIES[0]) {
+    if (typeof dist.entry.upstreamLedgerSha256 !== "function") return { code: "freeze:dist-unreadable" };
+    let ledgerUpstream = null;
+    try { ledgerUpstream = await dist.entry.upstreamLedgerSha256(); } catch { ledgerUpstream = null; }
+    if (typeof ledgerUpstream !== "string" || !HEX64.test(ledgerUpstream)) return { code: "freeze:dist-unreadable" };
+    v12 = { ledger: dist.v12.ledger, ledgerUpstream, flags: dist.v12.flags };
+  }
   // 参照の計測の条件：経路 v1.2（v7 か v8）・署名が中身と合う・旗の組が今の dist と同じ・凍結した組 (b) の SHA が今の (b) と同じ
   const loaded = loadConditions(outRoot);
   if (loaded.status === "missing") return { code: "freeze:conditions-missing" };
@@ -191,7 +201,7 @@ export async function freezeStageInputSet({ repo, outRoot, scorePath, id, versio
       const v = await lib.verifyStageInput({
         start, checkpointText: checkpointBytes === null ? null : checkpointBytes.toString("utf8"), checkpointFile, recordText: recordBytes.toString("utf8"),
         plan: validated.plan, planSha256: entry.plan_sha256, sourceSha256: entry.source_sha256,
-        vocabularyVersion: dist.cli.VOCABULARY_VERSION, contractVersion: dist.cli.CONTRACT_VERSION, v12: dist.v12,
+        vocabularyVersion: dist.cli.VOCABULARY_VERSION, contractVersion: dist.cli.CONTRACT_VERSION, v12,
       });
       if (v?.ok !== true) continue; // (ii) 照合の関数が通らない本
       verified += 1;

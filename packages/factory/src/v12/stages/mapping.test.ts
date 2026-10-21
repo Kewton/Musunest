@@ -28,7 +28,7 @@ import { buildSized } from "../../v11a/__tests__/sizes.js";
 import { CHECK_TARGET_MESSAGES, checkMappedTable, nameTableSha256, type NameTable } from "../../v11a/names.js";
 import type { RequirementList } from "../../pipeline.js";
 import { semanticCheckTargets } from "../../v11a/stages/semantic-check.js";
-import { PROPERTY_LEDGER_VIEW, type LedgerView } from "../ledger.js";
+import { PROPERTY_LEDGER_VIEW, type LedgerView, type UpstreamLedgerView } from "../ledger.js";
 import type { ReferenceCounts } from "../ids.js";
 import {
   MAPPING_DATA_NAMES,
@@ -47,6 +47,7 @@ import {
   rejectedRequirementIds,
   runMapping,
   type MappingInspector,
+  type MappingInput,
   type MappingPrevious,
   type MappingRejectedCandidate,
 } from "./mapping.js";
@@ -1177,5 +1178,32 @@ describe("C3 の拒否のあとの 2 回目を拒否された要件だけの書�
     if (!outcome.ok) return;
     expect(outcome.value.table.verification.find((entry) => entry.requirementId === X)?.kind).toBe("unresolved");
     expect(semanticCheckTargets(sized.list, outcome.value.table)).toEqual(sized.ids.filter((id) => id !== X));
+  });
+});
+
+// ── 上流の台帳の見方で受ける（読み漏れの検出。Issue #712）──────────────
+
+/** 2 つの型が互いに代入できる（同じ型）なら true */
+type SameType<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+describe("読み漏れの検出：C2・C2'・C2 の書き直しは台帳を上流の見方で受ける（Issue #712）", () => {
+  it("規則・書き直しの規則・schema・検査・段の入力の台帳の型が上流の見方で、一覧の外の欄（T2 系の文・生の行）を読めない", () => {
+    const same: readonly true[] = [
+      true satisfies SameType<NonNullable<Parameters<typeof mappingRuleDefinitionsOf>[0]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<Parameters<typeof mappingRewriteRuleDefinitionsOf>[0]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<Parameters<typeof mappingSchemaOf>[0]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<Parameters<typeof legacyMappingSchemaOf>[0]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<Parameters<typeof inspectMapping>[4]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<Parameters<typeof inspectMappingSourced>[4]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<Parameters<MappingInspector>[4]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<MappingInput["ledger"]>, UpstreamLedgerView>,
+    ];
+    const ledger: NonNullable<MappingInput["ledger"]> = PROPERTY_LEDGER_VIEW;
+    // @ts-expect-error C2 の段の台帳は旗 ids の T2 の文を持たない
+    void ledger.t2IdsFormTexts;
+    // @ts-expect-error C2 の段の引き当ての値は T1 の記述子だけ（T2 の試験の型を読めない）
+    void ledger.rowByVerificationKind.get("default-value")?.t2;
+    expect(same).toHaveLength(8);
+    expect(ledger.t1RuleTexts).toEqual(PROPERTY_LEDGER_VIEW.t1RuleTexts);
   });
 });

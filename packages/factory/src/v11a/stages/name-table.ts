@@ -62,7 +62,7 @@ import {
   requirementCopy,
   type NameTable,
 } from "../names.js";
-import type { LedgerView } from "../../v12/ledger.js";
+import type { UpstreamLedgerView } from "../../v12/ledger.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 
 /** T1 の JSON Schema の名前 */
@@ -165,7 +165,7 @@ const NAME_TABLE_LEDGER_RULE_TAIL = "使わない欄は null か空の並びに�
  * 種類の文 → 台帳の行の T1 の文（台帳の順）→ 末尾の文で組み直す（ID・why・since は変えない）。手 2a では off の定数と
  * バイト列で同じになる。
  */
-export function nameTableRuleDefinitionsOf(ledger?: LedgerView): readonly RuleDefinition[] {
+export function nameTableRuleDefinitionsOf(ledger?: UpstreamLedgerView): readonly RuleDefinition[] {
   if (ledger === undefined) return NAME_TABLE_RULE_DEFINITIONS;
   return NAME_TABLE_RULE_DEFINITIONS.map((definition) =>
     definition.id === NAME_TABLE_LEDGER_RULE_ID
@@ -289,7 +289,7 @@ function aggregateTypeSchemaOf(kinds: readonly string[]) {
  * 欄の並びは変えない（off の定数とバイト列で同じ JSON になる）。台帳が集計の種類を持てば（`empty-aggregate`。Issue #549）、
  * 行の `type` の末尾に `aggregate`（集計の種類と集計元。種別 aggregate でない計算・計算でない行は null）を足す。
  */
-export function nameTableSchemaOf(ledger?: LedgerView): typeof NAME_TABLE_SCHEMA {
+export function nameTableSchemaOf(ledger?: UpstreamLedgerView): typeof NAME_TABLE_SCHEMA {
   if (ledger === undefined) return NAME_TABLE_SCHEMA;
   const requirements = NAME_TABLE_SCHEMA.properties.requirements;
   const verification = requirements.items.properties.verification;
@@ -365,7 +365,7 @@ export interface NameTableInput {
    */
   readonly onRejected?: (candidate: RejectedCandidate) => void;
   /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の定数と関数。Issue #547） */
-  readonly ledger?: LedgerView;
+  readonly ledger?: UpstreamLedgerView;
 }
 
 /** T1 の結果（表・表の SHA-256・形の検査に掛けた raw の応答） */
@@ -423,7 +423,7 @@ const AGGREGATE_TYPE_KEY = "aggregate";
  */
 export function toNameTableDraftValue(
   output: Record<string, unknown>,
-  ledger?: LedgerView,
+  ledger?: UpstreamLedgerView,
 ): {
   readonly value: Record<string, unknown>;
   readonly problems: readonly Problem[];

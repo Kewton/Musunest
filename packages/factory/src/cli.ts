@@ -31,6 +31,8 @@
 // 台帳の指紋 `ledger`・実効の旗の組 `flags`・呼び出しの上限 `call_limits` を足し（一気通貫の走りの checkpoint も同じ）、段の入力の
 // 照合は `flags`・`ledger` が今の走りと同じことを求める。段の走りの記録の条件に `pipeline`・`v12_flags`・`v12_call_limits`、記録に
 // `v12_calls` と（範囲が `test-spec` を含むとき）`test_spec` を足す。v1.1a の段の走りは何も変えない（Issue #637）。
+// v1.2 の checkpoint の版には境界ごとの上流の台帳の部分の指紋 `ledger_upstream`（t1-t2 は部分の指紋、t2-b1 は null）も足し、
+// 入力の境界が t1-t2 の照合は `ledger` の代わりにそれを今の工場の部分の指紋と照らす（t2-b1 は今のまま `ledger`。Issue #713）。
 //
 // `--pipeline v1.2` の一気通貫の走りのうち旗 v12.ids が on の走りは、通った境界（T1''／T2・T2／B1）の checkpoint を段の走りと
 // 同じ関数・同じ名前で `--out` の直下に書き（納品物の manifest には載せない）、Build だけの記録に `checkpoints` で宣言する。
@@ -91,6 +93,7 @@ import {
   stageOutputDigest,
   stagePassOf,
   stagesInRange,
+  stageVersionsAt,
   verifyStageInput,
   STAGE_BUDGET_SCOPE,
   STAGE_RUN_RECORD_FILE,
@@ -100,6 +103,7 @@ import {
   type StageCallLimits,
   type StageRange,
   type StageRunConditions,
+  type StageV12Versions,
   type StageVersions,
 } from "./v11a/bundle-v11a.js";
 import { runGenerationV11a, runStageRangeV11a, type GenerationResultV11a } from "./v11a/run.js";
@@ -107,6 +111,7 @@ import {
   fromPublicV12Flags,
   propertyLedgerSha256,
   toPublicV12Flags,
+  upstreamLedgerSha256,
   V12_PIPELINE_FLAGS,
   type V12Flags,
   type V12PublicFlags,
@@ -950,7 +955,7 @@ async function runBuildFromPlanFile(
     build.boundaries === undefined
       ? undefined
       : await writeStageCheckpoints(deps, job.outDir, build.boundaries, {
-          versions: await stageVersionsOf(promptVersionOf(job.pipeline), build.flags),
+          stageVersions: await stageVersionsOf(promptVersionOf(job.pipeline), build.flags),
           planSha256: validation.planSha256,
           sourceSha256: validation.sourceSha256,
         });
@@ -980,18 +985,25 @@ function baseNameOf(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
+/** checkpoint に残す版と、v1.2 の照合が今の走りと同じことを求める版（v1.2 の走りだけ。上流の台帳の部分の指紋を必ず持つ。Issue #713） */
+interface StageVersionsOfRun {
+  readonly versions: StageVersions;
+  readonly v12?: StageV12Versions & { readonly ledgerUpstream: string };
+}
+
 /**
  * checkpoint に残す版（語彙・契約・prompt・工場。段の走りと `--pipeline v1.2` の走りで同じ形。Issue #636）。v1.2 の走り（実効の旗を
- * 渡す）だけ、台帳の指紋・実効の旗の組の公開の形・呼び出しの上限（旗 ids が off なら null）を足す（v1.1a は 4 欄のまま。Issue #637）
+ * 渡す）だけ、台帳の指紋・実効の旗の組の公開の形・呼び出しの上限（旗 ids が off なら null）を足す（v1.1a は 4 欄のまま。Issue #637）。
+ * v1.2 の走りは照合の版も返す（全体の指紋・上流の台帳の部分の指紋・旗の組。境界ごとの欄は書くときに `stageVersionsAt` で足す。
+ * Issue #713）
  */
-async function stageVersionsOf(promptVersion: string, flags?: V12Flags): Promise<StageVersions> {
+async function stageVersionsOf(promptVersion: string, flags?: V12Flags): Promise<StageVersionsOfRun> {
   const versions = { vocabulary: VOCABULARY_VERSION, contract: CONTRACT_VERSION, prompt: promptVersion, factory: FACTORY_VERSION };
-  if (flags === undefined) return versions;
+  if (flags === undefined) return { versions };
+  const v12 = { ledger: await propertyLedgerSha256(), ledgerUpstream: await upstreamLedgerSha256(), flags: toPublicV12Flags(flags) };
   return {
-    ...versions,
-    ledger: await propertyLedgerSha256(),
-    flags: toPublicV12Flags(flags),
-    call_limits: flags.ids ? v12CallLimitsRecord() : null,
+    versions: { ...versions, ledger: v12.ledger, flags: v12.flags, call_limits: flags.ids ? v12CallLimitsRecord() : null },
+    v12,
   };
 }
 
@@ -1003,11 +1015,17 @@ async function writeStageCheckpoints(
   deps: CliDeps,
   outDir: string,
   boundaries: readonly BoundaryMaterials[],
-  options: { readonly versions: StageVersions; readonly planSha256: string; readonly sourceSha256: string },
+  options: { readonly stageVersions: StageVersionsOfRun; readonly planSha256: string; readonly sourceSha256: string },
 ): Promise<{ boundary: StageBoundary; path: string; output_digest: string }[]> {
+  const { stageVersions, planSha256, sourceSha256 } = options;
   const checkpoints: { boundary: StageBoundary; path: string; output_digest: string }[] = [];
   for (const materials of boundaries) {
-    const checkpoint = buildStageCheckpoint({ materials, ...options });
+    // v1.2 の版は境界ごとに組む（t1-t2 は上流の台帳の部分の指紋、t2-b1 は null。v1.1a は 4 欄のまま。Issue #713）
+    const versions =
+      stageVersions.v12 === undefined
+        ? stageVersions.versions
+        : stageVersionsAt(stageVersions.versions, materials.boundary, stageVersions.v12.ledgerUpstream);
+    const checkpoint = buildStageCheckpoint({ materials, versions, planSha256, sourceSha256 });
     const path = stageCheckpointFile(materials.boundary);
     await deps.writeFile(joinPath(outDir, path), stageJsonText(checkpoint));
     checkpoints.push({ boundary: materials.boundary, path, output_digest: await stageOutputDigest(checkpoint) });
@@ -1071,7 +1089,7 @@ async function runStageFromPlanFile(
   const pipeline = parsed.pipeline === "v1.2" ? "v1.2" : "v1.1a";
   const publicFlags = v12FlagsOf(pipeline);
   const flags = publicFlags === undefined ? undefined : fromPublicV12Flags(publicFlags);
-  const versions = await stageVersionsOf(promptVersionOf(pipeline), flags);
+  const stageVersions = await stageVersionsOf(promptVersionOf(pipeline), flags);
   let resume: Parameters<typeof runStageRangeV11a>[0]["resume"];
   let inputRecord: { readonly checkpoint: string; readonly boundary: StageBoundary; readonly output_digest: string } | null =
     null;
@@ -1087,9 +1105,8 @@ async function runStageFromPlanFile(
       sourceSha256: validation.sourceSha256,
       vocabularyVersion: VOCABULARY_VERSION,
       contractVersion: CONTRACT_VERSION,
-      ...(versions.ledger === undefined || versions.flags === undefined
-        ? {}
-        : { v12: { ledger: versions.ledger, flags: versions.flags } }),
+      // v1.2 の段の走りは照合の版を必ず渡す（版の値の有無で v1.2 の照合を省かない。Issue #713）
+      ...(stageVersions.v12 === undefined ? {} : { v12: stageVersions.v12 }),
     });
     if (!verified.ok) {
       logError(verified.code);
@@ -1140,7 +1157,7 @@ async function runStageFromPlanFile(
 
   await deps.makeDirectory(job.outDir);
   const checkpoints = await writeStageCheckpoints(deps, job.outDir, outcome.boundaries, {
-    versions,
+    stageVersions,
     planSha256: validation.planSha256,
     sourceSha256: validation.sourceSha256,
   });
