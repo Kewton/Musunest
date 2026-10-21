@@ -61,7 +61,7 @@ import {
   type PromptDocument,
   type ShapeCheck,
 } from "../stages/prompt.js";
-import { BASE_VERIFICATION_KINDS, type LedgerView, type PropertyT1 } from "../v12/ledger.js";
+import { BASE_VERIFICATION_KINDS, type UpstreamLedgerView, type PropertyT1 } from "../v12/ledger.js";
 
 // ── 型の値の一覧（D3。B3 の照合先は A5）────────────────────────────────
 
@@ -192,7 +192,7 @@ export const NAME_TABLE_VERIFICATION_KINDS = ["fixed-test", "structural", "unres
  * 掛け、台帳に無い種類を固定文で落とす。
  */
 export interface NameTableLedgerOptions {
-  readonly ledger?: LedgerView;
+  readonly ledger?: UpstreamLedgerView;
 }
 
 /** 型付きの表の確かめ方の種類が、性質の台帳（と台帳の外の種類）に無いときの固定文（旗 on。Issue #547） */
@@ -218,7 +218,7 @@ function shapeOfAggregate(
   value: unknown,
   field: string,
   problems: Problem[],
-  ledger: LedgerView | undefined,
+  ledger: UpstreamLedgerView | undefined,
   required = true,
 ): ComputationAggregate | null | undefined {
   const kinds = ledger?.aggregateKinds ?? [];
@@ -388,7 +388,7 @@ function shapeOfType(
   value: unknown,
   field: string,
   problems: Problem[],
-  ledger?: LedgerView,
+  ledger?: UpstreamLedgerView,
   requireAggregate = true,
 ): NameTableRowType | undefined {
   switch (kind) {
@@ -487,7 +487,7 @@ function shapeOfNullableId(value: unknown, field: string, problems: Problem[]): 
   return value;
 }
 
-function shapeOfRow(value: unknown, field: string, problems: Problem[], ledger?: LedgerView): NameTableDraftRow | undefined {
+function shapeOfRow(value: unknown, field: string, problems: Problem[], ledger?: UpstreamLedgerView): NameTableDraftRow | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "行は写像（object）であること" });
     return undefined;
@@ -554,7 +554,7 @@ function shapeOfVerification(
   value: unknown,
   field: string,
   problems: Problem[],
-  ledger?: LedgerView,
+  ledger?: UpstreamLedgerView,
 ): NameTableDraftVerification | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "確かめ方は写像（object）であること" });
@@ -613,7 +613,7 @@ function shapeOfVerificationByLedger(
   value: Record<string, unknown>,
   field: string,
   problems: Problem[],
-  ledger: LedgerView,
+  ledger: UpstreamLedgerView,
 ): NameTableDraftVerification | undefined {
   const kind = value["kind"];
   const t1 = typeof kind === "string" ? ledger.rowByVerificationKind.get(kind)?.t1 : undefined;
@@ -641,7 +641,7 @@ function shapeOfDraftRequirement(
   value: unknown,
   field: string,
   problems: Problem[],
-  ledger?: LedgerView,
+  ledger?: UpstreamLedgerView,
 ): NameTableDraftRequirement | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "要件ごとの 1 件は写像（object）であること" });
@@ -682,7 +682,7 @@ interface DraftShapeScan {
 
 function scanNameTableDraftShape(
   value: unknown,
-  ledger?: LedgerView,
+  ledger?: UpstreamLedgerView,
 ): DraftShapeScan | { readonly problems: readonly Problem[] } {
   const problems: Problem[] = [];
   if (!isRecord(value)) return { problems: [{ field: "", message: "名前の表は写像（object）であること" }] };
@@ -862,7 +862,7 @@ const isScreenType = (type: NameTableRowType): type is ScreenRowType =>
   type !== null && typeof type === "object" && "view" in type;
 
 /** 行の型と種類の組（形の再確認。型付きで組み立てた表にも掛ける） */
-function checkRowType(row: NameTableRow, field: string, problems: Problem[], ledger?: LedgerView): void {
+function checkRowType(row: NameTableRow, field: string, problems: Problem[], ledger?: UpstreamLedgerView): void {
   const shapeProblems: Problem[] = [];
   shapeOfType(row.kind, row.type, `${field}.type`, shapeProblems, ledger, false);
   problems.push(...shapeProblems);
@@ -962,7 +962,7 @@ interface TableCheckOptions {
    */
   readonly rowIdsOwnedByDropped?: ReadonlySet<string>;
   /** 性質の台帳の導出（旗 on。Issue #547） */
-  readonly ledger?: LedgerView;
+  readonly ledger?: UpstreamLedgerView;
   /** 行の出典が null であることを受ける（旗 `v12.ids` の C1'・C2'。出典の検査は欄が無いので掛からない。Issue #593） */
   readonly sourceless?: boolean;
   /** 行の検査（(b)(c)(d)）だけを掛け、所属・確かめ方・分類（(e)(g)）と孤立した行を見ない（C1'。Issue #593） */

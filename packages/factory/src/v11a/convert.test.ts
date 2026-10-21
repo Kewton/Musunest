@@ -16,7 +16,7 @@ import {
 } from "./__tests__/fixtures.js";
 import { UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE, identityMappings, toRoleEntries, toV1 } from "./convert.js";
 import type { NameTable } from "./names.js";
-import { PROPERTY_LEDGER_VIEW } from "../v12/ledger.js";
+import { PROPERTY_LEDGER_VIEW, type UpstreamLedgerView } from "../v12/ledger.js";
 
 describe("名前の表を v1 の型へ写す（07 §2.2）", () => {
   it("写しは決定的（2 回深く等しい）", () => {
@@ -175,5 +175,23 @@ describe("旗 v12.ids の構造の検査の対象（Issue #594）", () => {
     const converted = toV1(withTargets);
     expect(converted.design.designs.find((entry) => entry.requirementId === "R2")?.checks).toEqual(["view-shows"]);
     expect(converted).toEqual(toV1(table));
+  });
+});
+
+// ── 上流の台帳の見方で受ける（読み漏れの検出。Issue #712）──────────────
+
+/** 2 つの型が互いに代入できる（同じ型）なら true */
+type SameType<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+describe("読み漏れの検出：確かめ方の変換は台帳を上流の見方で受ける（Issue #712）", () => {
+  it("変換の台帳の型が上流の見方で、一覧の外の欄（評価の方法の表・生の行）を読めない", () => {
+    const same: true = true satisfies SameType<NonNullable<Parameters<typeof toV1>[1]>, UpstreamLedgerView>;
+    const ledger: NonNullable<Parameters<typeof toV1>[1]> = PROPERTY_LEDGER_VIEW;
+    // @ts-expect-error 変換の台帳は評価の方法の表を持たない
+    void ledger.combinations;
+    // @ts-expect-error 変換の台帳は生の行を持たない
+    void ledger.rows;
+    expect(same).toBe(true);
+    expect([...ledger.rowByVerificationKind.keys()]).toEqual([...PROPERTY_LEDGER_VIEW.rowByVerificationKind.keys()]);
   });
 });

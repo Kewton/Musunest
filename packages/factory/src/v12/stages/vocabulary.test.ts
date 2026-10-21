@@ -17,14 +17,16 @@ import {
 } from "../../v11a/__tests__/fixtures.js";
 import type { NameTableRow } from "../../v11a/names.js";
 import { ID_MESSAGES, VOCABULARY_BUNDLES, type ReferenceCounts, type VocabularyBundle } from "../ids.js";
-import { PROPERTY_LEDGER_VIEW } from "../ledger.js";
+import { PROPERTY_LEDGER_VIEW, type UpstreamLedgerView } from "../ledger.js";
 import {
   VOCABULARY_AGGREGATE_RULE,
   VOCABULARY_RULE_DEFINITIONS,
   VOCABULARY_SCHEMA_NAMES,
+  assembleVocabularyBundle,
   runVocabularyBundle,
   vocabularyRuleDefinitionsOf,
   vocabularySchemaOf,
+  type VocabularyBundleInput,
 } from "./vocabulary.js";
 
 const LIST = fixtureList();
@@ -202,5 +204,28 @@ describe("C1' の負例：固定文で落ち、その束だけが形のやり直
     const outcome = await runVocabularyBundle({ bundle: "entities", plan: PLAN, list: LIST, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(recording.client), rows: [] });
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.failure.kind).toBe("malformed");
+  });
+});
+
+// ── 上流の台帳の見方で受ける（読み漏れの検出。Issue #712）──────────────
+
+/** 2 つの型が互いに代入できる（同じ型）なら true */
+type SameType<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+describe("読み漏れの検出：C1・C1' は台帳を上流の見方で受ける（Issue #712）", () => {
+  it("規則・schema・組立て・段の入力の台帳の型が上流の見方で、一覧の外の欄（T2 系の文・生の行）を読めない", () => {
+    const same: readonly true[] = [
+      true satisfies SameType<NonNullable<Parameters<typeof vocabularyRuleDefinitionsOf>[1]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<Parameters<typeof vocabularySchemaOf>[1]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<Parameters<typeof assembleVocabularyBundle>[4]>, UpstreamLedgerView>,
+      true satisfies SameType<NonNullable<VocabularyBundleInput["ledger"]>, UpstreamLedgerView>,
+    ];
+    const ledger: NonNullable<VocabularyBundleInput["ledger"]> = PROPERTY_LEDGER_VIEW;
+    // @ts-expect-error C1 の段の台帳は T2 の規則の文を持たない
+    void ledger.t2FormTexts;
+    // @ts-expect-error C1 の段の台帳は生の行を持たない
+    void ledger.rows;
+    expect(same).toHaveLength(4);
+    expect(ledger.aggregateKinds).toEqual(PROPERTY_LEDGER_VIEW.aggregateKinds);
   });
 });

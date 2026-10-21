@@ -18,6 +18,7 @@ import {
   type SemanticJudgment,
 } from "./carry-over.js";
 import { nameTableSha256 } from "./names.js";
+import { PROPERTY_LEDGER_VIEW, type UpstreamLedgerView } from "../v12/ledger.js";
 
 const accept = (requirementId: string) => ({ requirementId, verdict: "accept" as const });
 const reject = (requirementId: string, kind: string) => ({
@@ -299,5 +300,23 @@ describe("要件でない文：T1'' が受理した non-requirement の要件は
     });
     expect(carry.nonRequirements).toBeUndefined();
     expect(carry.remainingRequirementIds).toEqual([...ids, "R:alt:x1"]);
+  });
+});
+
+// ── 上流の台帳の見方で受ける（読み漏れの検出。Issue #712）──────────────
+
+/** 2 つの型が互いに代入できる（同じ型）なら true */
+type SameType<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+describe("読み漏れの検出：持ち越しは台帳を上流の見方で受ける（Issue #712）", () => {
+  it("持ち越しの入力の台帳の型が上流の見方で、一覧の外の欄（試験の型の行・生の行）を読めない", () => {
+    const same: true = true satisfies SameType<NonNullable<CarryOverInput["ledger"]>, UpstreamLedgerView>;
+    const ledger: NonNullable<CarryOverInput["ledger"]> = PROPERTY_LEDGER_VIEW;
+    // @ts-expect-error 持ち越しの台帳は条件の試験の型の行を持たない
+    void ledger.conditionRows;
+    // @ts-expect-error 持ち越しの台帳は生の行を持たない
+    void ledger.rows;
+    expect(same).toBe(true);
+    expect(ledger.excludedWhenAcceptedKinds).toEqual(PROPERTY_LEDGER_VIEW.excludedWhenAcceptedKinds);
   });
 });

@@ -71,7 +71,7 @@ import {
 import { planWithoutRequirementKinds, type SemanticRejection } from "../../v11a/stages/name-table.js";
 import type { JudgeAdviceMarkEntry } from "../../v11a/stages/judge-advice.js";
 import { ReferenceTally, idKindOf, type ReferenceCounts } from "../ids.js";
-import type { LedgerView } from "../ledger.js";
+import type { UpstreamLedgerView } from "../ledger.js";
 
 /** C2 の JSON Schema の名前 */
 export const MAPPING_SCHEMA_NAME = "mapping";
@@ -153,7 +153,7 @@ const MAPPING_LEDGER_RULE_HEAD = `verification は要件の確かめ方である
 const MAPPING_LEDGER_RULE_TAIL = "使わない欄は null か空の並びにする。";
 
 /** C2 の規則の定義（旗 `v12.ledger` が on なら R-map-03 を台帳の文で組み直す） */
-export function mappingRuleDefinitionsOf(ledger?: LedgerView): readonly RuleDefinition[] {
+export function mappingRuleDefinitionsOf(ledger?: UpstreamLedgerView): readonly RuleDefinition[] {
   if (ledger === undefined) return MAPPING_RULE_DEFINITIONS;
   return MAPPING_RULE_DEFINITIONS.map((definition) =>
     definition.id === "R-map-03"
@@ -184,7 +184,7 @@ const MAPPING_REWRITE_RULE_DEFINITIONS: Readonly<Record<"R-map-01" | "R-map-02",
 };
 
 /** 書き直しの要求の規則の定義（`mappingRuleDefinitionsOf` の R-map-01・R-map-02 だけを部分の文に差し替える。Issue #660） */
-export function mappingRewriteRuleDefinitionsOf(ledger?: LedgerView): readonly RuleDefinition[] {
+export function mappingRewriteRuleDefinitionsOf(ledger?: UpstreamLedgerView): readonly RuleDefinition[] {
   return mappingRuleDefinitionsOf(ledger).map((definition) =>
     definition.id === "R-map-01" || definition.id === "R-map-02" ? MAPPING_REWRITE_RULE_DEFINITIONS[definition.id] : definition,
   );
@@ -235,7 +235,7 @@ const LEGACY_CHECKS_SCHEMA: Record<string, unknown> = {
 };
 
 /** C2 の JSON Schema（静的。確かめ方の kind の enum は台帳の種類の並び。strict の規則に合わせる） */
-export function mappingSchemaOf(ledger?: LedgerView): Record<string, unknown> {
+export function mappingSchemaOf(ledger?: UpstreamLedgerView): Record<string, unknown> {
   return mappingSchemaWith(CHECK_FIELDS_SCHEMA, ledger);
 }
 
@@ -243,11 +243,11 @@ export function mappingSchemaOf(ledger?: LedgerView): Record<string, unknown> {
  * 旧の C2 の JSON Schema（checks が並びの形。Issue #594 の形）。**段の要求には使わない**——識別子 `v1.2` の封筒の C2 の枝を
  * Issue #682 の前とバイト列で同じに保つためだけに使う（`LEGACY_CHECKS_SCHEMA`）
  */
-export function legacyMappingSchemaOf(ledger?: LedgerView): Record<string, unknown> {
+export function legacyMappingSchemaOf(ledger?: UpstreamLedgerView): Record<string, unknown> {
   return mappingSchemaWith(LEGACY_CHECKS_SCHEMA, ledger);
 }
 
-function mappingSchemaWith(checks: Record<string, unknown>, ledger?: LedgerView): Record<string, unknown> {
+function mappingSchemaWith(checks: Record<string, unknown>, ledger?: UpstreamLedgerView): Record<string, unknown> {
   return {
     type: "object",
     additionalProperties: false,
@@ -311,7 +311,7 @@ export interface MappingInput {
   /** C1 が組んだ行（出典は null） */
   readonly rows: readonly NameTableRow[];
   readonly previous?: MappingPrevious;
-  readonly ledger?: LedgerView;
+  readonly ledger?: UpstreamLedgerView;
   readonly onRejected?: (candidate: MappingRejectedCandidate) => void;
   /**
    * C2' の検査（試験の口。既定は `inspectMappingSourced`）。初回の応答と、書き直しを合併した写像に**同じ検査**を掛けることを、偽物の
@@ -428,7 +428,7 @@ function shapeOfEntry(
   value: unknown,
   field: string,
   problems: Problem[],
-  ledger?: LedgerView,
+  ledger?: UpstreamLedgerView,
 ): MappingEntry | undefined {
   let targets: readonly NameTableCheckTarget[] | undefined;
   let item = value;
@@ -471,7 +471,7 @@ export type MappingInspector = (
   rows: readonly NameTableRow[],
   output: Record<string, unknown>,
   documents: readonly PromptDocument[],
-  ledger?: LedgerView,
+  ledger?: UpstreamLedgerView,
 ) => MappingInspection;
 
 /**
@@ -483,7 +483,7 @@ export function inspectMapping(
   rows: readonly NameTableRow[],
   output: Record<string, unknown>,
   documents: readonly PromptDocument[],
-  ledger?: LedgerView,
+  ledger?: UpstreamLedgerView,
 ): { readonly ok: true; readonly table: NameTable } | { readonly ok: false; readonly problems: readonly Problem[] } {
   const inspected = inspectMappingSourced(list, rows, output, documents, ledger);
   return inspected.ok ? inspected : { ok: false, problems: inspected.problems };
@@ -495,7 +495,7 @@ export function inspectMappingSourced(
   rows: readonly NameTableRow[],
   output: Record<string, unknown>,
   documents: readonly PromptDocument[],
-  ledger?: LedgerView,
+  ledger?: UpstreamLedgerView,
 ): MappingInspection {
   const problems: Problem[] = [];
   const shaped = (output["requirements"] as readonly unknown[]).map((item, index) => shapeOfEntry(item, `requirements[${String(index)}]`, problems, ledger));

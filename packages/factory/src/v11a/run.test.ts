@@ -122,12 +122,17 @@ import {
   PROPERTY_LEDGER,
   PROPERTY_LEDGER_VIEW,
   V12_PIPELINE_FLAGS,
+  deriveLedgerView,
+  ledgerRowDefects,
+  propertyLedgerSha256,
+  upstreamLedgerSha256,
   V12_FLAG_NAMES,
   V12_FLAG_PUBLIC_NAMES,
   V12_PUBLIC_FLAG_NAMES,
   fromPublicV12Flags,
   resolveV12Flags,
   toPublicV12Flags,
+  type PropertyRow,
   type V12Flags,
 } from "../v12/ledger.js";
 import * as ledgerModule from "../v12/ledger.js";
@@ -1664,6 +1669,105 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(stage.stopped).toMatchObject({ stage: "test-spec", kind: "malformed" });
     expect(stage.tableRounds).toHaveLength(1);
     expect(stage.tableRounds?.map((round) => round.adopted)).toEqual([false]);
+  });
+
+  /** 文に目印を足す（null は null のまま） */
+  const markedText = (text: string | null): string | null => (text === null ? null : `${text}。目印の追記`);
+  /** 固定文の欄の全部に目印を足す */
+  const markedMessages = <T extends Readonly<Record<string, string | null>>>(messages: T): T =>
+    Object.fromEntries(Object.entries(messages).map(([key, text]) => [key, markedText(text)])) as T;
+  /**
+   * 上流の見方に入らない欄（行の T2 の型・T2 と ids の T2 と B1 の規則の文・集計と条件の型のうち集計の種類以外・since・why）を
+   * 全行で変えた台帳（妥当な台帳のまま。Issue #712）
+   */
+  const downstreamChangedLedger = (): readonly PropertyRow[] =>
+    PROPERTY_LEDGER.map((row) => ({
+      ...row,
+      since: `${row.since}。目印の追記`,
+      why: `${row.why}。目印の追記`,
+      rules: { ...row.rules, t2: markedText(row.rules.t2), t2Ids: markedText(row.rules.t2Ids), b1: markedText(row.rules.b1) },
+      t2: row.t2 === null ? null : { ...row.t2, minTests: row.t2.minTests + 1, messages: markedMessages(row.t2.messages) },
+      t2Aggregate:
+        row.t2Aggregate === null
+          ? null
+          : {
+              ...row.t2Aggregate,
+              alsoObserves: [],
+              states: row.t2Aggregate.states.map((entry) => ({ ...entry, label: `${entry.label}。目印の追記` })),
+              messages: markedMessages(row.t2Aggregate.messages),
+            },
+      t2Condition: row.t2Condition === null ? null : { ...row.t2Condition, messages: markedMessages(row.t2Condition.messages) },
+    }));
+  /** 上流の見方に入る値（default-value の T1 の規則の文）だけを変えた台帳（測り方の対照） */
+  const upstreamChangedLedger = (): readonly PropertyRow[] =>
+    PROPERTY_LEDGER.map((row) => (row.id === "default-value" ? { ...row, rules: { ...row.rules, t1: markedText(row.rules.t1) } } : row));
+  /** 境界 t1-t2 までの台本（段の走り name-table..semantic-check）。ids on は C1〜C3、ids off は T1・T1'' */
+  const upstreamScripts = (): readonly { readonly name: string; readonly flags: Partial<V12Flags>; readonly calls: readonly RecordedCall[] }[] => {
+    const requirements = good().mapping["requirements"] as readonly unknown[];
+    const missingFirst = { requirements: requirements.slice(1) };
+    const missingLast = { requirements: requirements.slice(0, -1) };
+    const rejectR3 = judgments(IDS, { R3: ["unnecessary-ownership", "締められる"] });
+    const ledgerOnly = { ledger: true };
+    return [
+      { name: "正常", flags: IDS_FLAGS, calls: idsHead().slice(0, 5) },
+      { name: "C1' の形の拒否と再試行", flags: IDS_FLAGS, calls: passingWith({ fields: [fieldsWithEntity("E8")] }).slice(0, 6) },
+      { name: "C1' の形の拒否が 2 回で止まる", flags: IDS_FLAGS, calls: [structured(good().entities), structured(fieldsWithEntity("E8")), structured(fieldsWithEntity("E9"))] },
+      { name: "C2' の形の拒否と再試行", flags: IDS_FLAGS, calls: passingWith({ mapping: [missingFirst] }).slice(0, 6) },
+      { name: "C2' の形の拒否が 2 回で止まる", flags: IDS_FLAGS, calls: [...vocabularyCalls(), structured(missingFirst), structured(missingLast)] },
+      { name: "C2 の形のやり直しの書き直し", flags: IDS_FLAGS, calls: rewriteScript(true).slice(0, 6) },
+      { name: "C3 の拒否と C2 の中身の再試行（書き直し）と再点検で持ち越し", flags: IDS_FLAGS, calls: [...vocabularyCalls(), structured(good().mapping), structured(rejectR3), structured(onlyEntries("R3")), structured(rejectR3)] },
+      { name: "C3 の拒否と再点検で全部受理", flags: IDS_FLAGS, calls: [...vocabularyCalls(), structured(good().mapping), structured(judgments(IDS, REJECT_R3_R4)), structured(onlyEntries("R3", "R4")), structured(acceptAll())] },
+      { name: "C3 の拒否のあとの C2 が C2' に落ちて持ち越し", flags: IDS_FLAGS, calls: [...vocabularyCalls(), structured(good().mapping), structured(rejectR3), structured(missingFirst)] },
+      { name: "ids off の T1 の正常", flags: ledgerOnly, calls: [structured(t1Of(LIST, TABLE_ON)), structured(acceptAll())] },
+      { name: "ids off の T1' の拒否が 2 回で止まる", flags: ledgerOnly, calls: [structured(badDraft()), structured(badDraft())] },
+      {
+        name: "ids off の T1'' の拒否と T1 の 2 回目で持ち越し",
+        flags: ledgerOnly,
+        calls: [structured(t1Of(LIST, TABLE_ON)), structured(rejectR3), structured(t1Of(LIST, TABLE_ON)), structured(rejectR3)],
+      },
+    ];
+  };
+  /** 台本を境界 t1-t2 まで流し、C1〜C3（T1・T1''）の要求の全体・段の結果（検査の結果と文・停止・持ち越し・境界の材料）・checkpoint を集める */
+  const upstreamRunOf = async (script: { readonly flags: Partial<V12Flags>; readonly calls: readonly RecordedCall[] }) => {
+    const recording = createCheckedRecordingClient(script.calls);
+    const outcome = await runStageRangeV11a({ ...inputOf(recording.client), flags: script.flags, range: { start: "name-table", end: "semantic-check" } });
+    const versions = { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0" };
+    const checkpoints = outcome.boundaries.map((boundary) =>
+      stageJsonText(buildStageCheckpoint({ materials: boundary, versions, planSha256: "a".repeat(64), sourceSha256: "b".repeat(64) })),
+    );
+    return { requests: { structured: recording.structured, tools: recording.tools }, outcome, checkpoints };
+  };
+
+  it("二点測定（Issue #712）：上流の見方に入らない欄を変えた台帳で、境界 t1-t2 までの台本の要求の全体・検査の結果と文・t1-t2 の checkpoint の材料が、変えない台帳と同じ。上流の見方に入る値を変えれば要求が変わる", async () => {
+    const changed = downstreamChangedLedger();
+    expect(ledgerRowDefects(changed)).toEqual([]);
+    expect(await propertyLedgerSha256(changed)).not.toBe(await propertyLedgerSha256());
+    expect(await upstreamLedgerSha256(changed)).toBe(await upstreamLedgerSha256());
+    const changedView = deriveLedgerView(changed);
+    const scripts = upstreamScripts();
+    for (const script of scripts) {
+      const before = await upstreamRunOf(script);
+      const spy = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? changedView : undefined));
+      const after = await upstreamRunOf(script);
+      spy.mockRestore();
+      // JSON のバイト列で照らす（要求の中断の信号 signal は走りごとの別の値で、JSON に出ない）
+      expect(JSON.stringify(after), script.name).toBe(JSON.stringify(before));
+    }
+    // 台本の分岐を通っている（停止・持ち越し・形と中身の再試行・境界の材料のある走りを含む）
+    const outcomes = await Promise.all(scripts.map(async (script) => (await upstreamRunOf(script)).outcome));
+    expect(outcomes.some((outcome) => outcome.stopped !== null)).toBe(true);
+    expect(outcomes.some((outcome) => outcome.boundaries.some((boundary) => boundary.carryOver.entries.length > 0))).toBe(true);
+    expect(outcomes.some((outcome) => outcome.stages.some((record) => record.retries.shape > 0))).toBe(true);
+    expect(outcomes.some((outcome) => outcome.stages.some((record) => record.retries.content > 0))).toBe(true);
+    expect(outcomes.filter((outcome) => outcome.boundaries.length > 0).length).toBeGreaterThan(5);
+    // 対照：上流の見方に入る値を変えた台帳では、同じ台本の要求が変わる（差し替えが段に届いている）
+    const control = deriveLedgerView(upstreamChangedLedger());
+    const normal = scripts[0];
+    if (normal === undefined) throw new Error("前提が壊れた：台本が無い");
+    const before = await upstreamRunOf(normal);
+    vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? control : undefined));
+    const after = await upstreamRunOf(normal);
+    expect(JSON.stringify(after.requests)).not.toBe(JSON.stringify(before.requests));
   });
 });
 

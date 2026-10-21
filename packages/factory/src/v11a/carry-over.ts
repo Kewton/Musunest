@@ -31,7 +31,7 @@ import { isRecord } from "../stages/prompt.js";
 import type { CoverageLoss } from "./coverage.js";
 import { toV1, type V1Conversion } from "./convert.js";
 import { nameTableSha256, ownersByRowId, type NameTable } from "./names.js";
-import { PROPERTY_LEDGER_VIEW, type LedgerView } from "../v12/ledger.js";
+import { PROPERTY_LEDGER_VIEW, type UpstreamLedgerView } from "../v12/ledger.js";
 
 /** 持ち越しの出どころ */
 export const CARRY_OVER_ORIGINS = ["name-table", "semantic-check", "decl-check", "coverage"] as const;
@@ -71,7 +71,7 @@ export interface CarryOverInput {
   /** B6 の結果（棄却のあとに省かずに渡す。棄却が無ければ空の並び） */
   readonly coverage?: readonly CoverageLoss[];
   /** 受理で除く確かめ方の種類を引く台帳の導出（省けばコードの台帳。Issue #550） */
-  readonly ledger?: LedgerView;
+  readonly ledger?: UpstreamLedgerView;
 }
 
 /** 持ち越しの理由 1 つ（出どころと理由） */
