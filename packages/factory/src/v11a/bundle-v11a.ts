@@ -46,7 +46,7 @@ import { canonicalJson, nameTableSha256, type NameTable } from "./names.js";
 import type { JudgeAdviceMarkEntry, JudgeAdviceRecord } from "./stages/judge-advice.js";
 import { semanticCheckTargets } from "./stages/semantic-check.js";
 import { testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
-import type { V12PublicFlags } from "../v12/ledger.js";
+import { UPSTREAM_LEDGER_BOUNDARY, type V12PublicFlags } from "../v12/ledger.js";
 import type { SearchRepairRecord, VersionViolations } from "../v12/search-repair.js";
 
 /** v1.1α の記録の置き場所（成果物の置き場所の下。v1 の成果物と重ならない） */
@@ -539,7 +539,9 @@ export interface StageCallLimits {
 /**
  * checkpoint に残す版（語彙・契約は照合し、prompt・工場は記録だけ）。`--pipeline v1.2` の走り（段の走り・一気通貫の走り）だけ、
  * 性質の台帳の指紋 `ledger`・実効の旗の組の公開の形 `flags`（v1.2 の照合で今の走りと同じことを求める）と、呼び出しの上限
- * `call_limits`（旗 ids が off なら null。記録だけ）を足す。v1.1α の checkpoint は 4 欄のまま（Issue #637）
+ * `call_limits`（旗 ids が off なら null。記録だけ）を足す。v1.1α の checkpoint は 4 欄のまま（Issue #637）。
+ * v1.2 は境界ごとの上流の台帳の部分の指紋 `ledger_upstream` も足す（境界 t1-t2 は部分の指紋、t2-b1 は null。`stageVersionsAt`。
+ * 全体の指紋 `ledger` は今のまま記録する。Issue #713）
  */
 export interface StageVersions {
   readonly vocabulary: string;
@@ -547,15 +549,41 @@ export interface StageVersions {
   readonly prompt: string;
   readonly factory: string;
   readonly ledger?: string;
+  readonly ledger_upstream?: string | null;
   readonly flags?: V12PublicFlags;
   readonly call_limits?: StageCallLimits | null;
 }
 
-/** v1.2 の段の入力の照合が今の走りと同じことを求める版（台帳の指紋と実効の旗の組。Issue #637） */
+/**
+ * v1.2 の段の入力の照合が今の走りと同じことを求める版（台帳の指紋と実効の旗の組。Issue #637）。`ledgerUpstream` は今の工場の
+ * 上流の台帳の部分の指紋で、入力の境界が t1-t2 の照合だけが読む（無ければ断る。t2-b1 は読まない。Issue #713）
+ */
 export interface StageV12Versions {
   readonly ledger: string;
+  readonly ledgerUpstream?: string;
   readonly flags: V12PublicFlags;
 }
+
+/**
+ * v1.2 の checkpoint の版を境界ごとに組む（一気通貫と段の走りの書き手が共有する）。`ledger_upstream` を `ledger` の直後に置き、
+ * 境界 t1-t2 には上流の台帳の部分の指紋、t2-b1 には null を書く（全境界に同じ版を使い回さない。Issue #713）
+ */
+export function stageVersionsAt(versions: StageVersions, boundary: StageBoundary, ledgerUpstream: string): StageVersions {
+  const { vocabulary, contract, prompt, factory, ledger, flags, call_limits } = versions;
+  return {
+    vocabulary,
+    contract,
+    prompt,
+    factory,
+    ...(ledger === undefined ? {} : { ledger }),
+    ledger_upstream: boundary === UPSTREAM_LEDGER_BOUNDARY ? ledgerUpstream : null,
+    ...(flags === undefined ? {} : { flags }),
+    ...(call_limits === undefined ? {} : { call_limits }),
+  };
+}
+
+/** SHA-256 の 16 進の 64 桁の文字列か（部分の指紋の形の検査。Issue #713） */
+const isSha256Hex = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
 
 /** checkpoint（JSON の値） */
 export interface StageCheckpoint {
@@ -827,7 +855,8 @@ export async function verifyStageInput(input: {
   readonly contractVersion: string;
   /**
    * `--pipeline v1.2` の段の走りだけ：checkpoint の版の `ledger`・`flags` がこの値と同じことを求める（欄が無ければ断る）。省けば
-   * 見ない（v1.1α の照合は今までどおり。Issue #637）
+   * 見ない（v1.1α の照合は今までどおり。Issue #637）。入力の境界が t1-t2 なら `ledger` の代わりに上流の台帳の部分の指紋
+   * `ledger_upstream` を `ledgerUpstream` と照らす（両方が 64 桁の 16 進で同じことを求める。Issue #713）
    */
   readonly v12?: StageV12Versions;
 }): Promise<StageInputVerification> {
@@ -861,12 +890,18 @@ export async function verifyStageInput(input: {
     return fail("stage-input:version");
   }
   // v1.2 の段の走り：台帳の指紋と実効の旗の組が今の走りと同じ（欄の無い checkpoint・旗の違う上流を混ぜない。上限は照合しない。
-  // Issue #637）
-  if (
-    input.v12 !== undefined &&
-    (versions["ledger"] !== input.v12.ledger || !isObject(versions["flags"]) || !sameJson(versions["flags"], input.v12.flags))
-  ) {
-    return fail("stage-input:version");
+  // Issue #637）。境界 t1-t2 は上流の段が読む台帳の部分の指紋で照らし（欠け・形の違い・不一致は断る。両方の欠けを一致とみなさない・
+  // 全体の指紋に代えない）、t2-b1 は今のまま全体の指紋で照らす（`ledger_upstream` の有無・値を受理の判断に使わない。Issue #713）
+  if (input.v12 !== undefined) {
+    const ledgerMatches =
+      needed === UPSTREAM_LEDGER_BOUNDARY
+        ? isSha256Hex(versions["ledger_upstream"]) &&
+          isSha256Hex(input.v12.ledgerUpstream) &&
+          versions["ledger_upstream"] === input.v12.ledgerUpstream
+        : versions["ledger"] === input.v12.ledger;
+    if (!ledgerMatches || !isObject(versions["flags"]) || !sameJson(versions["flags"], input.v12.flags)) {
+      return fail("stage-input:version");
+    }
   }
 
   // 出力ダイジェスト：中身から計算し直して記録の値と一致

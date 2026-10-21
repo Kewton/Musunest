@@ -677,7 +677,7 @@ test("#686 README：§10.8.1 の後ろに §10.8.2 があり、定義の語が�
   const at = text.indexOf("\n#### 10.8.2 ");
   assert.ok(at > text.indexOf("\n#### 10.8.1 ") && text.indexOf("\n#### 10.8.1 ") > 0, "§10.8.2 は §10.8.1 の後ろ");
   const sec = text.slice(at);
-  assert.equal(sec.indexOf("\n#", 1), -1, "§10.8.2 が末尾");
+  assert.ok(!/\n#{1,3} /.test(sec), "§10.8.2 の後ろは #### の小節だけ（#713 で §10.8.3 を足すため「末尾」から改めた）");
   for (const w of ["U2", "参照の宣言", "条件付き", "分母は予定", "版 1", "納品の成功ではない", "mismatch", "--make-reference", "adopted-run-declaration", "table-mismatch", "no-declaration", "upstream-missing", "--compare", "--anonymous", "ledgerViewOf", "fingerprints.tool"]) assert.ok(sec.includes(w), w);
   assert.equal(sha256(text.slice(0, text.indexOf("## 7. 表の採点（正解の表との照合）") - 1)), "662d41ded93107ecd130dfa090b09df1280ec78277509d131bf21b253e82cba4");
   assert.equal(sha256(text.slice(0, text.indexOf("### 7.11 断った候補の下書きの採点（読取元 (c)。#607）") - 1)), "1c21bdefca9e6e5373316f7ce143bdad580dea3d25ad5d1bbda1e8e64f9b2e1f");
