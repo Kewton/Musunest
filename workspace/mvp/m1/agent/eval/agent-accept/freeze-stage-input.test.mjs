@@ -21,10 +21,15 @@ const MARK = "leak-marker-text";
 const sha256 = (data) => createHash("sha256").update(data).digest("hex");
 const FLAGS = { ledger: true, ids: true };
 const LEDGER = "ledger-a";
+/** 上流の台帳の部分の指紋（偽物の dist の公開の値。#713） */
+const UPSTREAM = "e".repeat(64);
 const BUILD_RECORD_SCHEMA = "musunest-factory/build-cli-record/v1";
 
-// 偽物の段の表と照合の関数（段の走りの記録と Build だけの記録の両方を前の走りの記録として受ける。#636 の工場と同じ振る舞いの合成）
-const fakeStageLib = String.raw`import { createHash } from "node:crypto";
+// 偽物の段の表と照合の関数（段の走りの記録と Build だけの記録の両方を前の走りの記録として受ける。#636 の工場と同じ振る舞いの合成）。
+// 台帳の照合は #713 の工場と同じ規則（入力の境界が t1-t2 なら版の ledger_upstream と渡した ledgerUpstream がどちらも 64 桁の 16 進で同じ、
+// t2-b1 なら ledger が同じ）。FAKE_VERIFY_V12_LOG があれば渡された v12 を 1 行ずつ書く
+const fakeStageLib = String.raw`import { appendFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 const h = (t) => createHash("sha256").update(t).digest("hex");
 export const STAGE_STARTS = ["name-table", "test-spec", "write"];
 export const STAGE_ENDS = ["semantic-check", "test-spec", "judge"];
@@ -44,7 +49,10 @@ export async function verifyStageInput(input) {
   const declared = Array.isArray(rec.checkpoints) ? rec.checkpoints.find((e) => e && e.boundary === needed && e.path === input.checkpointFile) : undefined;
   if (!declared) return fail("stage-input:boundary");
   if (!PREVIOUS.includes(rec.schema_version) || cp.versions?.vocabulary !== input.vocabularyVersion || cp.versions?.contract !== input.contractVersion) return fail("stage-input:version");
-  if (cp.versions?.ledger !== input.v12?.ledger || JSON.stringify(cp.versions?.flags) !== JSON.stringify(input.v12?.flags)) return fail("stage-input:version");
+  if (process.env.FAKE_VERIFY_V12_LOG) appendFileSync(process.env.FAKE_VERIFY_V12_LOG, JSON.stringify(input.v12 ?? null) + "\n");
+  const hex = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+  const ledgerOk = needed === "t1-t2" ? hex(cp.versions?.ledger_upstream) && hex(input.v12?.ledgerUpstream) && cp.versions.ledger_upstream === input.v12.ledgerUpstream : cp.versions?.ledger === input.v12?.ledger;
+  if (!ledgerOk || JSON.stringify(cp.versions?.flags) !== JSON.stringify(input.v12?.flags)) return fail("stage-input:version");
   if (h(JSON.stringify(cp)) !== declared.output_digest) return fail("stage-input:digest");
   if (cp.plan_sha256 !== input.planSha256) return fail("stage-input:plan-sha256");
   if (cp.source_sha256 !== input.sourceSha256) return fail("stage-input:source-sha256");
@@ -70,7 +78,13 @@ export async function validatePlanFile({ envelope, source, vocabularyVersion }) 
   return { kind: "ok", plan: envelope.plan, planSha256, sourceSha256: h(source) };
 }
 `;
-const fakeIndex = (flags = FLAGS) => `export const V12_PIPELINE_FLAGS = ${JSON.stringify(flags)};\nexport async function propertyLedgerSha256() { return ${JSON.stringify(LEDGER)}; }\n`;
+/**
+ * package の入口（旗の組・台帳の指紋・上流の台帳の部分の指紋の関数）。upstream が null なら部分の関数を出さない（今までの dist）、"throw" なら例外、
+ * { value } なら任意の値を返す（#713）
+ */
+const fakeIndex = (flags = FLAGS, { ledger = LEDGER, upstream = UPSTREAM } = {}) =>
+  `export const V12_PIPELINE_FLAGS = ${JSON.stringify(flags)};\nexport async function propertyLedgerSha256() { return ${JSON.stringify(ledger)}; }\n` +
+  (upstream === null ? "" : upstream === "throw" ? 'export async function upstreamLedgerSha256() { throw new Error("x"); }\n' : `export async function upstreamLedgerSha256() { return ${JSON.stringify(typeof upstream === "object" ? upstream.value : upstream)}; }\n`);
 
 const PIDS = ["P1", "P2", "P3", "P4"];
 const RUNS = 3;
@@ -107,13 +121,18 @@ function writePlanSet(base, repo) {
   writeFileSync(path, JSON.stringify(set, null, 1));
   return path;
 }
-/** 合成の checkpoint（表の行は目印だけ）。badTable なら表の SHA を合わせない（照合に落ちる本） */
-function checkpointOf(id, boundary, { badTable = false } = {}) {
+/**
+ * 合成の checkpoint（表の行は目印だけ）。badTable なら表の SHA を合わせない（照合に落ちる本）。版の ledger_upstream は t1-t2 が部分の指紋、t2-b1 が null
+ * （#713 の工場の形）。versions(版) で版を書き換える
+ */
+function checkpointOf(id, boundary, { badTable = false, versions = null } = {}) {
   const pid = id.split("-")[0];
   const rows = [{ id: "R1", name: `mark-${id}-a` }, { id: "R2", name: `mark-${id}-b` }];
   const suite = { tests: [{ id: "T1", target: "R1" }] };
+  const v = { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0", ledger: LEDGER, ledger_upstream: boundary === "t1-t2" ? UPSTREAM : null, flags: FLAGS };
+  if (versions !== null) versions(v, boundary);
   return {
-    schema_version: "musunest.factory.v11a-stage-checkpoint/v1", boundary, versions: { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0", ledger: LEDGER, flags: FLAGS },
+    schema_version: "musunest.factory.v11a-stage-checkpoint/v1", boundary, versions: v,
     plan_sha256: PSHA(pid), source_sha256: SSHA(pid), name_table: { table_sha256: badTable ? sha256("other") : sha256(JSON.stringify(rows)), rows },
     semantic_check: { table_sha256: sha256(JSON.stringify(rows)) }, ...(boundary === "t2-b1" ? { test_spec: { suite_sha256: sha256(JSON.stringify(suite)), suite } } : {}),
   };
@@ -135,7 +154,7 @@ const PLAN = {
 };
 const OUTCOMES = (score) => (score === null ? null : [...Array(score[0]).fill("correct"), ...Array(score[1]).fill("wrong"), ...Array(score[2]).fill("held")].map((outcome, i) => ({ requirement_id: `MARK_${i}`, outcome })));
 /** 合成の参照の計測（条件 v7・経路 v1.2）の出力先。edit(cond) で条件を書き換え、署名は中身から計算し直す */
-function writeMeasurement(base, repo, fzPath, { name = "ref", plan = PLAN, edit = null } = {}) {
+function writeMeasurement(base, repo, fzPath, { name = "ref", plan = PLAN, edit = null, versions = null } = {}) {
   const out = join(base, name);
   mkdirSync(out, { recursive: true });
   const fz = JSON.parse(readFileSync(fzPath, "utf8"));
@@ -156,7 +175,7 @@ function writeMeasurement(base, repo, fzPath, { name = "ref", plan = PLAN, edit 
     const checkpoints = [];
     if (p.kind !== "no-cp") {
       for (const b of ["t1-t2", "t2-b1"]) {
-        const cp = checkpointOf(id, b, { badTable: p.kind === "bad" }), path = `stage-checkpoint-${b}.json`;
+        const cp = checkpointOf(id, b, { badTable: p.kind === "bad", versions }), path = `stage-checkpoint-${b}.json`;
         writeFileSync(join(bundle, path), JSON.stringify(cp, null, 2) + "\n");
         checkpoints.push({ boundary: b, path, output_digest: sha256(JSON.stringify(cp)) });
       }
@@ -177,7 +196,7 @@ function writeScore(base, out, { name = "table-score.json", plan = PLAN, edit = 
   writeFileSync(path, JSON.stringify(score, null, 2) + "\n");
   return path;
 }
-const runNode = (argv) => spawnSync(process.execPath, [freezeFile, ...argv], { encoding: "utf8" });
+const runNode = (argv, env = {}) => spawnSync(process.execPath, [freezeFile, ...argv], { encoding: "utf8", env: { ...process.env, ...env } });
 const freeze = (repo, out, score, dest, extra = []) => runNode([repo, out, score, dest, "--id", "stage-set-t", "--version", "1", "--boundary", "t2-b1", ...extra]);
 const readJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 function treeOf(root) { const out = {}; if (!existsSync(root)) return out; const walk = (d) => { for (const n of readdirSync(d).sort()) { const f = join(d, n); if (statSync(f).isDirectory()) walk(f); else out[relative(root, f)] = readFileSync(f).toString("base64"); } }; walk(root); return out; }
@@ -358,6 +377,54 @@ test("#640 人の採否：P を 1 つ除外すると adopted が 1 減って mis
     t.adopted[0].run = "P1-r1"; t.missing = [];
     writeFileSync(join(tampered, FROZEN_STAGE_SET_FILE), JSON.stringify(t, null, 1));
     assert.equal(loadFrozenStageSet(tampered).status, "signature");
+  });
+});
+
+test("#713 境界 t1-t2 の凍結は dist の部分の指紋の関数の今の値を照合の関数に渡し、checkpoint の ledger_upstream で照らす（全体の指紋だけが違う dist でも同じ本を採る）。関数が無い・例外・返りの値の形の異常は freeze:dist-unreadable で何も書かない。t2-b1 は部分の関数を呼ばず、今までの dist と欄の無い今までの checkpoint を受け、全体の指紋で照らす", async () => {
+  await withWorld(async ({ base, repo, fz, out, score }) => {
+    const index = join(repo, "packages/factory/dist/index.js");
+    const setIndex = (opts) => writeFileSync(index, fakeIndex(FLAGS, opts));
+    const at = (boundary, dest, env = {}) => runNode([repo, out, score, dest, "--id", "stage-set-t", "--version", "1", "--boundary", boundary], env);
+    const adoptedOf = (dest) => readJson(join(dest, FROZEN_STAGE_SET_FILE)).adopted.map((a) => a.run);
+    const ADOPTED = ["P1-r1", "P2-r2", "P4-r2"];
+    // 渡す値：t1-t2 は部分の指紋を足し、t2-b1 は足さない
+    for (const [boundary, expected] of [["t1-t2", { ledger: LEDGER, ledgerUpstream: UPSTREAM, flags: FLAGS }], ["t2-b1", { ledger: LEDGER, flags: FLAGS }]]) {
+      const vlog = join(base, `v12-${boundary}.log`), dest = join(base, `set-${boundary}`);
+      const r = at(boundary, dest, { FAKE_VERIFY_V12_LOG: vlog });
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(adoptedOf(dest), ADOPTED, boundary);
+      const seen = readFileSync(vlog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      assert.ok(seen.length > 0, boundary);
+      for (const v of seen) assert.deepEqual(v, expected, boundary);
+    }
+    const before = [treeOf(out), readFileSync(score).toString("base64")];
+    // t1-t2：部分の関数の異常は dist の読み取りの失敗（何も書かない・入力は不変）。t2-b1 では呼ばないので通る
+    for (const [label, upstream] of [["absent", null], ["throw", "throw"], ["upper", { value: UPSTREAM.toUpperCase() }], ["short", { value: "e".repeat(63) }], ["number", { value: 1 }]]) {
+      setIndex({ upstream });
+      assertRefused(at("t1-t2", join(base, `never-${label}`)), "freeze:dist-unreadable", { inputs: [out], before: [before[0]], dest: join(base, `never-${label}`), label });
+      const dest = join(base, `b1-${label}`);
+      const r = at("t2-b1", dest);
+      assert.equal(r.status, 0, `${label}: ${r.stderr}`);
+      assert.deepEqual(adoptedOf(dest), ADOPTED, label);
+    }
+    // 全体の指紋だけが違う dist：t1-t2 は同じ本を採り、t2-b1 は全部が照合に落ちる
+    setIndex({ ledger: "ledger-b" });
+    const sameT1 = join(base, "ledger-b-t1");
+    assert.equal(at("t1-t2", sameT1).status, 0);
+    assert.deepEqual(adoptedOf(sameT1), ADOPTED);
+    assertRefused(at("t2-b1", join(base, "ledger-b-b1")), "freeze:none-adopted", { dest: join(base, "ledger-b-b1"), label: "ledger-b-b1" });
+    // 部分の指紋が違う dist：t1-t2 は全部が照合に落ち、t2-b1 は今のまま
+    setIndex({ upstream: "f".repeat(64) });
+    assertRefused(at("t1-t2", join(base, "up-f-t1")), "freeze:none-adopted", { dest: join(base, "up-f-t1"), label: "up-f-t1" });
+    assert.equal(at("t2-b1", join(base, "up-f-b1")).status, 0);
+    setIndex({});
+    assert.deepEqual([treeOf(out), readFileSync(score).toString("base64")], before, "入力は不変");
+    // 新しい欄の無い今までの checkpoint：t1-t2 は照合に落ち（欄の無い checkpoint を受けない）、t2-b1 は受ける
+    const oldOut = writeMeasurement(base, repo, fz, { name: "ref-old", versions: (v) => { delete v.ledger_upstream; } }), oldScore = writeScore(base, oldOut, { name: "score-old.json" });
+    assertRefused(runNode([repo, oldOut, oldScore, join(base, "old-t1"), "--id", "x", "--version", "1", "--boundary", "t1-t2"]), "freeze:none-adopted", { dest: join(base, "old-t1"), label: "old-t1" });
+    const oldB1 = join(base, "old-b1");
+    assert.equal(runNode([repo, oldOut, oldScore, oldB1, "--id", "x", "--version", "1", "--boundary", "t2-b1"]).status, 0);
+    assert.deepEqual(adoptedOf(oldB1), ADOPTED);
   });
 });
 

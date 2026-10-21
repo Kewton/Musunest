@@ -82,7 +82,9 @@ import {
   stageJsonText,
   stageOutputDigest,
   stagesInRange,
+  stageVersionsAt,
   verifyStageInput,
+  type BoundaryMaterials,
 } from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
 import { DEFAULT_VALUE_DETAILS, ENUM_MEMBERSHIP_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
@@ -1768,6 +1770,68 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? control : undefined));
     const after = await upstreamRunOf(normal);
     expect(JSON.stringify(after.requests)).not.toBe(JSON.stringify(before.requests));
+  });
+
+  /** 台帳の行から工場の照合の版を出す（全体の指紋・上流の台帳の部分の指紋・旗の組。Issue #713） */
+  const factoryVersionsOf = async (rows: readonly PropertyRow[] = PROPERTY_LEDGER) => ({
+    ledger: await propertyLedgerSha256(rows),
+    ledgerUpstream: await upstreamLedgerSha256(rows),
+    flags: toPublicV12Flags({ ledger: true, searchRepair: true, ids: true }),
+  });
+  /** 境界の材料から、その工場が書く v1.2 の checkpoint と記録（境界ごとの版） */
+  const writtenBy = async (factory: Awaited<ReturnType<typeof factoryVersionsOf>>, materials: BoundaryMaterials) => {
+    const base = { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0", ledger: factory.ledger, flags: factory.flags, call_limits: null };
+    const versions = stageVersionsAt(base, materials.boundary, factory.ledgerUpstream);
+    const checkpoint = JSON.parse(stageJsonText(buildStageCheckpoint({ materials, versions, planSha256: "a".repeat(64), sourceSha256: "b".repeat(64) }))) as Record<string, unknown>;
+    const record = { schema_version: STAGE_RUN_RECORD_SCHEMA, checkpoints: [{ boundary: materials.boundary, path: "cp.json", output_digest: await stageOutputDigest(checkpoint) }] };
+    return { checkpoint, checkpointText: stageJsonText(checkpoint), recordText: JSON.stringify(record) };
+  };
+  const verifiedBy = (factory: Awaited<ReturnType<typeof factoryVersionsOf>>, start: "test-spec" | "write", texts: { checkpointText: string; recordText: string }) =>
+    verifyStageInput({
+      start,
+      ...texts,
+      checkpointFile: "cp.json",
+      plan: PLAN,
+      planSha256: "a".repeat(64),
+      sourceSha256: "b".repeat(64),
+      vocabularyVersion: "v1",
+      contractVersion: "v0.2",
+      v12: factory,
+    });
+
+  it("台帳の部分の指紋（Issue #713）：上流の見方に入らない欄を変えた台帳の工場は、変える前の工場が書いた t1-t2 の checkpoint を全台本で受ける。上流の値を変えた台帳の工場は t1-t2 を、T2 の型を変えた台帳の工場は t2-b1 を stage-input:version で断る", async () => {
+    const before = await factoryVersionsOf();
+    const downstream = await factoryVersionsOf(downstreamChangedLedger());
+    const upstream = await factoryVersionsOf(upstreamChangedLedger());
+    expect(downstream.ledger).not.toBe(before.ledger);
+    expect(downstream.ledgerUpstream).toBe(before.ledgerUpstream);
+    expect(upstream.ledgerUpstream).not.toBe(before.ledgerUpstream);
+    const version = { ok: false, code: "stage-input:version" };
+    let checked = 0;
+    for (const script of upstreamScripts()) {
+      const { outcome } = await upstreamRunOf(script);
+      for (const materials of outcome.boundaries) {
+        const texts = await writtenBy(before, materials);
+        expect((texts.checkpoint["versions"] as Record<string, unknown>)["ledger_upstream"], script.name).toBe(before.ledgerUpstream);
+        const ok = await verifiedBy(before, "test-spec", texts);
+        expect(ok, script.name).toMatchObject({ ok: true });
+        // 変えた台帳の工場も同じ再開の材料で受ける
+        expect(await verifiedBy(downstream, "test-spec", texts), script.name).toEqual(ok);
+        expect(await verifiedBy(upstream, "test-spec", texts), script.name).toEqual(version);
+        checked += 1;
+      }
+    }
+    expect(checked).toBeGreaterThan(5);
+    // 境界 t2-b1：T2 まで流した材料。変える前の工場が書いた t2-b1 は ledger_upstream が null で、T2 の型を変えた台帳の工場は全体の指紋で断る
+    const recording = createCheckedRecordingClient(idsHead().slice(0, 6));
+    const reached = await runStageRangeV11a({ ...inputOf(recording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "test-spec" } });
+    expect(reached.boundaries.map((materials) => materials.boundary)).toEqual(["t1-t2", "t2-b1"]);
+    const t2b1 = reached.boundaries[1];
+    if (t2b1 === undefined) throw new Error("前提が壊れた：t2-b1 が無い");
+    const texts = await writtenBy(before, t2b1);
+    expect((texts.checkpoint["versions"] as Record<string, unknown>)["ledger_upstream"]).toBeNull();
+    expect(await verifiedBy(before, "write", texts)).toMatchObject({ ok: true });
+    expect(await verifiedBy(downstream, "write", texts)).toEqual(version);
   });
 });
 

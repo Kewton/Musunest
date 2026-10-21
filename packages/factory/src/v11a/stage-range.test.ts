@@ -34,6 +34,7 @@ import {
 import { deriveCarryOver } from "./carry-over.js";
 import { nameTableSha256 } from "./names.js";
 import { undeterminedJudgeAdvice } from "./run.js";
+import { UPSTREAM_LEDGER_BOUNDARY } from "../v12/ledger.js";
 
 // ── 段の表 ─────────────────────────────────────────────────────────
 
@@ -283,6 +284,12 @@ describe("区間の表（STAGE_SEGMENTS）と範囲の段", () => {
     expect(STAGE_SEGMENTS.map((x) => x.end)).toEqual([...STAGE_ENDS]);
     expect(STAGE_SEGMENTS.map((x) => x.boundary)).toEqual(STAGE_STARTS.map((start) => boundaryBefore(start)));
     expect(STAGE_SEGMENTS.map((x) => x.boundary).filter((b) => b !== null)).toEqual([...STAGE_BOUNDARIES]);
+  });
+
+  it("上流の台帳の部分の指紋で照らす境界は、境界の表の最初（開始 T2 の直前・上流の段だけが前にある境界）。評価の道具はこの並びで境界を選ぶ（Issue #713）", () => {
+    expect(STAGE_BOUNDARIES[0]).toBe(UPSTREAM_LEDGER_BOUNDARY);
+    expect(boundaryBefore("test-spec")).toBe(UPSTREAM_LEDGER_BOUNDARY);
+    expect(STAGE_SEGMENTS.findIndex((segment) => segment.boundary === UPSTREAM_LEDGER_BOUNDARY)).toBe(1);
   });
 
   it("区間の段はすべて段の識別子の一覧にあり、開始・終了を含み、持ち越しの停止のほか区間をまたいで重ならない", () => {

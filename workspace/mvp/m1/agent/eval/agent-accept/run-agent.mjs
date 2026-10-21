@@ -328,12 +328,22 @@ let stageFrom = null; // 条件の params.stage_from（上流の計測の条件�
 const planOf = async (checks, pid) => { const parsed = checks.parsePlanFile(Buffer.from(envelopeBytes.get(pid)).toString("utf8")); const v = await checks.validatePlanFile({ envelope: parsed.envelope, source: reqOf(pid) + "\n", vocabularyVersion: checks.vocabularyVersion }); return v?.plan; };
 const codeOf = (lib, code) => (Array.isArray(lib.STAGE_INPUT_CODES) && lib.STAGE_INPUT_CODES.includes(code) ? code : "stage-input:unknown");
 // v1.2（#638）：照合の関数に渡す旗の組と台帳の指紋は、checkout ごとの dist の package の入口が公開する値（V12_PIPELINE_FLAGS・propertyLedgerSha256）
-const v12Of = async (entry) => {
+// #713：開始の段の直前の境界が、その dist の境界の表の最初（上流の段だけが前にある境界）なら、上流の台帳の部分の指紋（upstreamLedgerSha256）の
+// 今の値も渡す（照合の関数はその境界でこれを照らす）。関数が無い・例外・返りの値が 64 桁の 16 進でなければ dist の読み取りの失敗（子を起こす前）。
+// ほかの境界では部分の関数を取らず・呼ばない（部分の関数の無い今までの dist も、ほかの条件を満たせば受ける）
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+const v12Of = async (entry, lib) => {
   if (typeof entry?.propertyLedgerSha256 !== "function") refuseCode("stage:dist-unreadable");
   let ledger = null;
   try { ledger = await entry.propertyLedgerSha256(); } catch { ledger = null; }
   if (typeof ledger !== "string") refuseCode("stage:dist-unreadable");
-  return { ledger, flags: JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS)) };
+  const flags = JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS));
+  if (stageBoundary !== lib.STAGE_BOUNDARIES[0]) return { ledger, flags };
+  if (typeof entry.upstreamLedgerSha256 !== "function") refuseCode("stage:dist-unreadable");
+  let ledgerUpstream = null;
+  try { ledgerUpstream = await entry.upstreamLedgerSha256(); } catch { ledgerUpstream = null; }
+  if (typeof ledgerUpstream !== "string" || !SHA256_HEX.test(ledgerUpstream)) refuseCode("stage:dist-unreadable");
+  return { ledger, ledgerUpstream, flags };
 };
 // #640：組のディレクトリ（凍結した上流の組。組のファイルがある）。組の署名・写しの SHA・境界・(b)・経路と旗の組・人の採否を照らし、採用した P の 1 本を
 // その P の全反復に同じバイト列で渡す（写しにも工場の dist の照合の関数を当て直す）。組が外した P は入力なし。断れば exit 4・stage-from:set-* で子 0 本
@@ -355,7 +365,7 @@ if (stageMode && stageBoundary !== null && existsSync(join(resolve(stageFromArg)
   for (const [pid, input] of loaded.inputs) if (input.checkpointFile !== stageLib.stageCheckpointFile(stageBoundary) || !recordNames.includes(input.recordFile)) refuseStage("stage-from:set-invalid", { ids: [pid] });
   const uncovered = [...new Set(jobs.map((j) => j.pid))].filter((pid) => !set.adopted.some((a) => a.pattern === pid) && !set.missing.some((m) => m.pattern === pid));
   if (uncovered.length > 0) refuseStage("stage-from:set-pattern", { ids: uncovered });
-  const v12s = pipeline === V12_PIPELINE ? [await v12Of(v12Entry), ...(baseline === null ? [] : [await v12Of(baselineEntry)])] : null;
+  const v12s = pipeline === V12_PIPELINE ? [await v12Of(v12Entry, libs[0]), ...(baseline === null ? [] : [await v12Of(baselineEntry, libs[1])])] : null;
   const verifiedPatterns = new Set();
   for (const job of jobs) {
     const id = idOf(job), input = loaded.inputs.get(job.pid);
@@ -400,7 +410,7 @@ if (stageMode && stageBoundary !== null && existsSync(join(resolve(stageFromArg)
   if (!passesBoundary(stageLib, upRange, stageBoundary)) refuseStage("stage-from:range");
   stageFrom = { conditions_sha256: sha256(readFileSync(join(root, "conditions.json"))), signature: upCond.signature, range: upRange };
   const checkpointFile = stageLib.stageCheckpointFile(stageBoundary);
-  const v12s = pipeline === V12_PIPELINE ? [await v12Of(v12Entry), ...(baseline === null ? [] : [await v12Of(baselineEntry)])] : null;
+  const v12s = pipeline === V12_PIPELINE ? [await v12Of(v12Entry, libs[0]), ...(baseline === null ? [] : [await v12Of(baselineEntry, libs[1])])] : null;
   for (const job of jobs) {
     const id = idOf(job), upDir = join(root, id, "bundle"), entry = frozen.adopted.find((a) => a.pattern === job.pid);
     // 上流の段の走りの記録：読める・形の版・範囲が上流の条件と同じ・確定した仕様と依頼文の SHA が凍結した組の値と同じ（読めない・壊れた記録は入力なしにしない）
