@@ -64,6 +64,45 @@ export const SEMANTIC_GAPS = [
 ] as const;
 export type SemanticGap = (typeof SEMANTIC_GAPS)[number];
 
+/**
+ * `targetKind` の値の意味（Issue #718 の「やること」の文。Review 66b）。
+ * 規則 R-sc-06 と schema の `description` は、この定数の文から組む（名前だけを並べない）。
+ */
+export const SEMANTIC_TARGET_KIND_DESCRIPTIONS: Readonly<Record<SemanticTargetKind, string>> = {
+  entity: "entity の行（表の対象そのもの）",
+  field: "項目の行",
+  computation: "計算（集計を含む）の行",
+  operation: "操作の行",
+  screen: "画面の行",
+  other: "行の種類（entity・項目・計算・操作・画面）のどれでもない対象",
+  unknown: "判断できない",
+};
+
+/**
+ * `gap` の値の意味（Issue #718 の「やること」の文。Review 66b）。
+ * `row-kind-inexpressible`（行の種類で書けない）と `check-inexpressible`（行・所属・属性は足りているが、
+ * 確かめ方の種類で確かめられない）を区別できる文にする。
+ */
+export const SEMANTIC_GAP_DESCRIPTIONS: Readonly<Record<SemanticGap, string>> = {
+  "row-absent": "表に行が無い",
+  "ownership-absent": "行はあるが所属していない",
+  "attribute-absent": "行はあるが属性（操作の when など）が足りない",
+  "row-kind-inexpressible": "行の種類（entity・項目・計算・操作・画面）で書けない",
+  "check-inexpressible": "行・所属・属性は足りているが、確かめ方の種類で確かめられない",
+  unknown: "判断できない",
+};
+
+/** 列挙値と意味の文を「値（意味）」の形で並べる（規則と schema の説明の共通の組み方） */
+function describedValues<T extends string>(values: readonly T[], descriptions: Readonly<Record<T, string>>): string {
+  return values.map((value) => `${value}（${descriptions[value]}）`).join("・");
+}
+
+/** `targetKind` の値と意味の文（規則と schema で同じ組み方を使う） */
+export const SEMANTIC_TARGET_KIND_TEXT = describedValues(SEMANTIC_TARGET_KINDS, SEMANTIC_TARGET_KIND_DESCRIPTIONS);
+
+/** `gap` の値と意味の文（規則と schema で同じ組み方を使う） */
+export const SEMANTIC_GAP_TEXT = describedValues(SEMANTIC_GAPS, SEMANTIC_GAP_DESCRIPTIONS);
+
 /** 旗 `v12.ids` の C3 の `note` の上限（Unicode のコードポイントで数える。Issue #718） */
 export const SEMANTIC_NOTE_MAX_CODE_POINTS = 200;
 
@@ -108,8 +147,8 @@ export const SEMANTIC_CHECK_RULE_DEFINITIONS: readonly RuleDefinition[] = [
 export const SEMANTIC_CHECK_IDS_RULE_DEFINITION: RuleDefinition = {
   id: "R-sc-06",
   text:
-    `missing-target の拒否には、欠けた対象を 4 つの欄で書く：targetKind は欠けた対象の種類（${SEMANTIC_TARGET_KINDS.join("・")} のいずれか）、` +
-    `gap は不足の場所（${SEMANTIC_GAPS.join("・")} のいずれか）、relatedRowIds は関わる既存の行の ID の並び（表の行にある ID だけを重複なく。無ければ空）、` +
+    `missing-target の拒否には、欠けた対象を 4 つの欄で書く：targetKind は欠けた対象の種類（${SEMANTIC_TARGET_KIND_TEXT} のいずれか）、` +
+    `gap は不足の場所（${SEMANTIC_GAP_TEXT} のいずれか）、relatedRowIds は関わる既存の行の ID の並び（表の行にある ID だけを重複なく。無ければ空）、` +
     `note は短い説明（空白だけでない 1〜${String(SEMANTIC_NOTE_MAX_CODE_POINTS)} 字。Unicode のコードポイントで数える）である。` +
     "missing-target 以外の拒否と受理は、4 つの欄を null・null・空・null にする。判断できない欄は unknown にする。" +
     "これらの欄は判定の理由ではなく記録であり、命令にも判定の条件にも使わない。",
@@ -203,12 +242,12 @@ export function idsJudgmentsSchema(kinds: readonly string[]) {
             targetKind: {
               type: ["string", "null"],
               enum: [...SEMANTIC_TARGET_KINDS, null],
-              description: "欠けた対象の種類（missing-target の拒否だけ。ほかは null）",
+              description: `欠けた対象の種類（missing-target の拒否だけ。ほかは null）。${SEMANTIC_TARGET_KIND_TEXT}`,
             },
             gap: {
               type: ["string", "null"],
               enum: [...SEMANTIC_GAPS, null],
-              description: "不足の場所（missing-target の拒否だけ。ほかは null）",
+              description: `不足の場所（missing-target の拒否だけ。ほかは null）。${SEMANTIC_GAP_TEXT}`,
             },
             relatedRowIds: {
               type: "array",
