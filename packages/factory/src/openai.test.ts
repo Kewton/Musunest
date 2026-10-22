@@ -787,15 +787,16 @@ describe("識別子 v1.2 の client は、封筒に載る全段に同じ v1.2 �
   }
 
   /** 旗 on の T1・T2（台帳の schema）と、台帳の導出を持たない T1''・B1・B3'・B5' の要求の schema */
-  const v12Requests = (): readonly { readonly stage: string; readonly schema: unknown }[] => [
+  const v12Requests = (ids = false): readonly { readonly stage: string; readonly schema: unknown }[] => [
     { stage: NAME_TABLE_SCHEMA_NAME, schema: nameTableSchemaOf(PROPERTY_LEDGER_VIEW) },
-    { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW) },
+    { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW, ids) },
     ...STAGE_ENVELOPE_ENTRIES_V11A.filter(
       (entry) => entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME,
     ),
   ];
 
   it("旗 on の T1・T2 と T1''・B1・B3'・B5' の 6 段が、名前 stage-envelope-v12 の同じバイト列の封筒を送る", async () => {
+    // 識別子 v1.2 は ids off の v1.2 の走りの封筒（T2 は ids off の schema。ids on の場合の schema は識別子 v1.2-ids で送る。#624・#682）
     const requests = v12Requests();
     expect(requests).toHaveLength(6);
     const sent = new Set<string>();
@@ -861,9 +862,12 @@ describe("識別子 v1.2-ids の client は、C1・C2 と T1''〜B5' の全段�
     return formatOf(bodyOf(captured));
   }
 
-  /** ids on の v1.2 の走りの全段の要求の schema（T1 は呼ばないが、封筒の枝としては載る） */
-  const idsRequests = (): readonly { readonly stage: string; readonly schema: unknown }[] => [
-    { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW) },
+  /**
+   * ids on の v1.2 の走りの全段の要求の schema（T1 は呼ばないが、封筒の枝としては載る）。T2 は旗 ids の場合の schema（#624・#625）。
+   * `ids` を偽にすると T2 だけ ids off の schema（識別子 v1.2 の走りが渡すもの）
+   */
+  const idsRequests = (ids = true): readonly { readonly stage: string; readonly schema: unknown }[] => [
+    { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW, ids) },
     ...STAGE_ENVELOPE_ENTRIES_V11A.filter((entry) => entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME),
     ...VOCABULARY_BUNDLES.map((bundle) => ({ stage: VOCABULARY_SCHEMA_NAMES[bundle], schema: vocabularySchemaOf(bundle, PROPERTY_LEDGER_VIEW) })),
     { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(PROPERTY_LEDGER_VIEW) },
@@ -884,7 +888,7 @@ describe("識別子 v1.2-ids の client は、C1・C2 と T1''〜B5' の全段�
   });
 
   it("識別子 v1.2（ids off）の C2 以外の段は、今までどおり識別子 v1.2 の封筒を送る（ids on の封筒と別のバイト列）", async () => {
-    for (const request of idsRequests().filter((entry) => entry.stage !== MAPPING_SCHEMA_NAME)) {
+    for (const request of idsRequests(false).filter((entry) => entry.stage !== MAPPING_SCHEMA_NAME)) {
       const format = await sentFormat("v1.2", request.stage, request.schema);
       expect(format.name, request.stage).toBe(ENVELOPE_SCHEMA_NAME_V12);
       expect(format.schema, request.stage).toEqual(ENVELOPE_SCHEMA_V12);

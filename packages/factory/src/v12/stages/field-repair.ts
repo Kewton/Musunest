@@ -18,6 +18,10 @@
 //   - マージ（`mergeReplacements`。コード）：一番良い版の原文のうち、その要素の行の範囲だけを返った本文に置き換え、spec-engine の
 //     読み取りで読み直し、**置き換えた要素の外の値が一番良い版と深く等しい**ことを確かめてから版にする。読めない・等しくない・
 //     大きさの上限を超える、は固定文で断る（走らせる側が採れない版に数える）。マージのあとの静的チェックは走らせる側が省かない
+//   - 追加の場所（旗 `v12.ids` の走りだけ。場所の結果が `additions` を持つとき。Issue #667）：場所の enum には追加の場所も入り、
+//     データの各場所に種類（replace・add）を足し、規則 R-fr-07 を足す。追加の本文は検査 1 つで、name と entity が場所と同じこと
+//     （違えば固定文で 1 回直させる）。マージは本文を validations の節の末尾に挿し込み、外の値が深く等しく、検査の数がちょうど追加の
+//     数だけ増え、追加した要素がその位置に在ることを確かめてから版にする。off（`additions` が無い）の要求・形の検査・マージは今のまま
 import { readSpecDocument } from "@musunest/spec-engine";
 import type { CallGateway } from "../../call.js";
 import { checkDeclarationBytes } from "../../limits.js";
@@ -39,7 +43,7 @@ import {
 import { REPAIR_ANSWER_SCHEMA, checkRepairAnswer } from "../../stages/repair.js";
 import { utf8ByteLength } from "../../stages/write.js";
 import { canonicalJson } from "../../v11a/names.js";
-import { declarationSpans, type DeclarationSpan, type FailureLocations } from "../locate.js";
+import { declarationSpans, type DeclarationSpan, type FailureLocations, type ValidationAddition } from "../locate.js";
 
 /** この段の schema の名前（どの封筒にも登録しない。`text.format.name` にそのまま載る） */
 export const FIELD_REPAIR_SCHEMA_NAME = "field-repair";
@@ -118,6 +122,23 @@ export const FIELD_REPAIR_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
 ];
 
+/** 旗 `v12.ids` の走りだけ足す規則（追加の場所。Issue #667） */
+export const FIELD_REPAIR_IDS_R07_DEFINITION: RuleDefinition = {
+  id: "R-fr-07",
+  text: "追加の場所には、その entity と名前の検査 1 つの本文を `-` で始まる行から書く。名前と entity は変えない。式は要件と固定した試験から書く。別の要素を書かない。",
+  why: "要求する検査が宣言に無い初版は、既存の欄の置換では直せず、場所なしとして全文の直しへ流れて段内の上限で止まった（#650 の原因 2。方法論 03 の H4）",
+  since: "Issue #667",
+};
+
+/** 旗 `v12.ids` の走りの規則（off の規則の後ろに R-fr-07 を足す。off の規則はそのまま） */
+export const FIELD_REPAIR_IDS_RULE_DEFINITIONS: readonly RuleDefinition[] = [...FIELD_REPAIR_RULE_DEFINITIONS, FIELD_REPAIR_IDS_R07_DEFINITION];
+
+/** 場所の種類（旗 `v12.ids` の走りのデータだけ。置換・追加） */
+export type FieldLocationKind = "replace" | "add";
+
+/** 検査の要素が持てる欄（追加の場所・旗 ids の走りの検査の置換の場所で照らす） */
+const VALIDATION_ELEMENT_KEYS = ["name", "entity", "expression", "message"] as const;
+
 /** データの塊の名前（この順に並べる） */
 export const FIELD_REPAIR_DATA_NAMES = ["宣言", "失敗の一覧", "固定した試験", "要件の一覧"] as const;
 
@@ -147,6 +168,7 @@ export const FIELD_REPAIR_PROBLEMS = {
   unreadable: "要素の本文が読めない",
   wrongKind: "要素の種類が場所と違う",
   wrongName: "要素の名前か所属する entity が場所と違う",
+  notValidation: "検査の場所の本文は検査 1 つであること（持てる欄は name・entity・expression・message だけ）",
 } as const;
 
 /** 本文の前後の空行を除き、共通の字下げを外した行（空なら空の並び） */
@@ -159,8 +181,14 @@ export function dedentElement(element: string): readonly string[] {
   return lines.map((line) => (line.trim() === "" ? "" : line.slice(common)));
 }
 
-/** 本文 1 つを単独で読み、場所の要素（種類・名前・所属 entity）と合うかを確かめる（合わなければ固定文） */
-function elementProblem(element: string, span: DeclarationSpan): string | null {
+/** 本文を照らす場所の要素（種類・名前・所属 entity） */
+type ElementTarget = Pick<DeclarationSpan, "kind" | "entity" | "name">;
+
+/**
+ * 本文 1 つを単独で読み、場所の要素（種類・名前・所属 entity）と合うかを確かめる（合わなければ固定文）。`validationOnly` が真
+ * （旗 ids の走りの検査の場所）なら、並びの要素が検査の欄だけを持つことも照らす
+ */
+function elementProblem(element: string, span: ElementTarget, validationOnly = false): string | null {
   const lines = dedentElement(element);
   if (lines.length === 0) return FIELD_REPAIR_PROBLEMS.emptyElement;
   const isItem = /^-(\s|$)/.test(lines[0] ?? "");
@@ -176,6 +204,9 @@ function elementProblem(element: string, span: DeclarationSpan): string | null {
   if (!Array.isArray(value) || value.length !== 1) return FIELD_REPAIR_PROBLEMS.wrongKind;
   const item: unknown = value[0];
   if (!isRecord(item)) return FIELD_REPAIR_PROBLEMS.wrongKind;
+  if (validationOnly && Object.keys(item).some((key) => !(VALIDATION_ELEMENT_KEYS as readonly string[]).includes(key))) {
+    return FIELD_REPAIR_PROBLEMS.notValidation;
+  }
   const entity = typeof item["entity"] === "string" ? item["entity"] : null;
   return item["name"] === span.name && entity === span.entity ? null : FIELD_REPAIR_PROBLEMS.wrongName;
 }
@@ -190,6 +221,8 @@ export interface FieldRepairCheckContext {
   readonly source: string;
   /** 固定した試験の ID（主張できる試験） */
   readonly testIds: ReadonlySet<string>;
+  /** 追加の場所（旗 `v12.ids` の走りだけ。渡せば検査の場所の本文が検査 1 つであることも照らす。Issue #667） */
+  readonly additions?: readonly ValidationAddition[];
 }
 
 /**
@@ -218,8 +251,11 @@ export function checkFieldRepairAnswer(value: unknown, context: FieldRepairCheck
         if (!(REPLACEMENT_KEYS as readonly string[]).includes(key)) problems.push({ field: `${field}.${key}`, message: FIELD_REPAIR_PROBLEMS.replacementExtraKey });
       }
       const location = item["location"];
-      const span = typeof location === "string" && context.locations.includes(location)
-        ? context.spans.find((candidate) => candidate.key === location)
+      const addition = context.additions?.find((candidate) => candidate.key === location);
+      const span: ElementTarget | undefined = typeof location === "string" && context.locations.includes(location)
+        ? addition === undefined
+          ? context.spans.find((candidate) => candidate.key === location)
+          : { kind: "validation", entity: addition.entity, name: addition.name }
         : undefined;
       if (typeof location !== "string" || span === undefined) {
         problems.push({ field: `${field}.location`, message: FIELD_REPAIR_PROBLEMS.outsideChoices });
@@ -235,7 +271,7 @@ export function checkFieldRepairAnswer(value: unknown, context: FieldRepairCheck
         problems.push({ field: `${field}.element`, message: FIELD_REPAIR_PROBLEMS.emptyElement });
         return;
       }
-      const problem = elementProblem(element, span);
+      const problem = elementProblem(element, span, context.additions !== undefined && span.kind === "validation");
       if (problem !== null) {
         problems.push({ field: `${field}.element`, message: problem });
         return;
@@ -266,14 +302,24 @@ export interface FieldRepairInput {
   readonly gateway: CallGateway;
 }
 
-/** この段のデータ（見せる範囲は今の直す段を超えない。前の版の失敗・会話を積まない） */
+/**
+ * この段のデータ（見せる範囲は今の直す段を超えない。前の版の失敗・会話を積まない）。旗 `v12.ids` の走り（場所の結果が `additions`
+ * を持つ）だけ、失敗の一覧の各場所を場所の名前と種類（replace・add）の組にする（Issue #667）
+ */
 export function buildFieldRepairData(input: Pick<FieldRepairInput, "list" | "suite" | "declaration" | "failures">): readonly PromptData[] {
+  const additions = input.failures.additions;
   const failures = input.failures.located.map((failure) => ({
     testId: failure.testId,
     requirementId: failure.requirementId,
     kind: failure.kind,
     message: failure.message,
-    locations: failure.locations,
+    locations:
+      additions === undefined
+        ? failure.locations
+        : failure.locations.map((location) => ({
+            location,
+            kind: (additions.some((addition) => addition.key === location) ? "add" : "replace") satisfies FieldLocationKind,
+          })),
   }));
   const [declaration, failureList, suite, list] = FIELD_REPAIR_DATA_NAMES;
   return [
@@ -293,8 +339,9 @@ export async function runFieldRepair(input: FieldRepairInput): Promise<StageOutc
   if (locations.length === 0 || unlocated.length > 0) {
     throw new Error("欄だけの直し：場所の無い失敗が残る往復では呼ばない（回す部分の前提が壊れた）");
   }
+  const additions = input.failures.additions;
   const request = buildStructuredRequest({
-    rules: ruleTexts(FIELD_REPAIR_RULE_DEFINITIONS),
+    rules: ruleTexts(additions === undefined ? FIELD_REPAIR_RULE_DEFINITIONS : FIELD_REPAIR_IDS_RULE_DEFINITIONS),
     documents: input.documents,
     data: buildFieldRepairData(input),
     schemaName: FIELD_REPAIR_SCHEMA_NAME,
@@ -304,7 +351,8 @@ export async function runFieldRepair(input: FieldRepairInput): Promise<StageOutc
   const testIds = new Set(input.suite.tests.map((test) => test.id));
   const outcome = await callStructuredChecked(input.gateway, {
     request,
-    check: (output) => checkFieldRepairAnswer(output, { locations, spans, source: input.source, testIds }),
+    check: (output) =>
+      checkFieldRepairAnswer(output, { locations, spans, source: input.source, testIds, ...(additions === undefined ? {} : { additions }) }),
   });
   return outcome.ok ? { ok: true, value: outcome.value } : outcome;
 }
@@ -317,6 +365,8 @@ export const MERGE_REFUSALS = {
   bytes: "置き換えた版が宣言の大きさの上限を超える",
   unreadable: "置き換えた版が宣言として読めない",
   outside: "置き換えた要素の外の値が一番良い版と等しくない",
+  noSection: "追加の先の検査の節（validations）が宣言に無い",
+  added: "追加した検査がその位置に無いか、検査の数が追加の数だけ増えていない",
 } as const;
 export type MergeRefusal = (typeof MERGE_REFUSALS)[keyof typeof MERGE_REFUSALS];
 
@@ -343,48 +393,132 @@ function withoutSlots(document: unknown, spans: readonly DeclarationSpan[]): unk
   return copy;
 }
 
+/** 行の編集 1 つ（`start` から `remove` 行を `lines` に替える） */
+interface LineEdit {
+  readonly start: number;
+  readonly remove: number;
+  readonly lines: readonly string[];
+}
+
+/**
+ * 追加の本文を validations の節の末尾に挿し込む編集（旗 ids の走りだけ。Issue #667）。並びの節は最後の中身の行の後ろに、
+ * `validations: []` の節は並びの形に直して挿し込む。節が無い・ほかの流れの書き方は null（断る）。字下げは節の要素の `-` の位置
+ * （要素が無ければ、ほかの並びの節の要素の位置。無ければ 2）にそろえる。
+ */
+function insertionEdit(lines: readonly string[], bodies: readonly string[], spans: readonly DeclarationSpan[]): LineEdit | null {
+  const isContentLine = (line: string): boolean => line.trim() !== "" && !line.trim().startsWith("#");
+  const fallbackIndent = spans.find((span) => span.kind !== "field")?.indent ?? 2;
+  const padded = (indent: number): readonly string[] =>
+    bodies.flatMap((body) => dedentElement(body).map((line) => (line === "" ? "" : `${" ".repeat(indent)}${line}`)));
+  const empty = lines.findIndex((line) => /^validations:\s*\[\s*\]\s*(#.*)?$/.test(line));
+  const block = lines.findIndex((line) => /^validations:\s*(#.*)?$/.test(line));
+  if (block < 0) return empty < 0 ? null : { start: empty, remove: 1, lines: ["validations:", ...padded(fallbackIndent)] };
+  let last = block;
+  let itemIndent: number | null = null;
+  for (let index = block + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (!isContentLine(line)) continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent === 0) break;
+    if (itemIndent === null) itemIndent = indent;
+    last = index;
+  }
+  return { start: last + 1, remove: 0, lines: padded(itemIndent ?? fallbackIndent) };
+}
+
+/** 読み取りの値の validations（無い・null は空の並び。並びでなければ null） */
+const validationsOf = (document: unknown): unknown[] | null => {
+  if (!isRecord(document)) return null;
+  const value = document["validations"] ?? [];
+  return Array.isArray(value) ? value : null;
+};
+
 /**
  * 一番良い版の原文に置き換えを当てる（純粋）。各要素の行の範囲だけを、字下げをその要素の最初の行にそろえた本文に替え、
  * spec-engine の読み取りで読み直し、置き換えた要素の外の値と要素の数が一番良い版と深く等しいときだけ版にする。
+ *
+ * `additions`（旗 `v12.ids` の走りだけ。Issue #667）を渡せば、追加の場所の本文を validations の節の末尾に場所の順で挿し込み、
+ * 置換と追加の外の値が一番良い版と深く等しく、検査の数がちょうど追加の数だけ増え、追加した検査がその位置（末尾）に在ることも
+ * 確かめる。節が無い宣言は断る。
  */
 export function mergeReplacements(
   declaration: string,
   replacements: readonly FieldReplacement[],
   spans: readonly DeclarationSpan[],
+  additions: readonly ValidationAddition[] = [],
 ): MergeResult {
   const targets: { readonly span: DeclarationSpan; readonly lines: readonly string[] }[] = [];
+  const inserted: { readonly addition: ValidationAddition; readonly element: string }[] = [];
   for (const replacement of replacements) {
+    const addition = additions.find((candidate) => candidate.key === replacement.location);
+    if (addition !== undefined) {
+      inserted.push({ addition, element: replacement.element });
+      continue;
+    }
     const span = spans.find((candidate) => candidate.key === replacement.location);
     if (span === undefined) return { ok: false, refusal: MERGE_REFUSALS.unknownLocation };
     const pad = " ".repeat(span.indent);
     targets.push({ span, lines: dedentElement(replacement.element).map((line) => (line === "" ? "" : `${pad}${line}`)) });
   }
   const lines = declaration.split("\n");
-  for (const target of [...targets].sort((a, b) => b.span.start - a.span.start)) {
-    lines.splice(target.span.start, target.span.end - target.span.start, ...target.lines);
+  const edits: LineEdit[] = targets.map((target) => ({ start: target.span.start, remove: target.span.end - target.span.start, lines: target.lines }));
+  if (inserted.length > 0) {
+    const edit = insertionEdit(lines, inserted.map((entry) => entry.element), spans);
+    if (edit === null) return { ok: false, refusal: MERGE_REFUSALS.noSection };
+    edits.push(edit);
   }
+  for (const edit of [...edits].sort((a, b) => b.start - a.start)) lines.splice(edit.start, edit.remove, ...edit.lines);
   const source = lines.join("\n");
   if (checkDeclarationBytes(utf8ByteLength(source)) !== undefined) return { ok: false, refusal: MERGE_REFUSALS.bytes };
   const before = readSpecDocument(declaration);
   const after = readSpecDocument(source);
   if (!before.ok || !after.ok) return { ok: false, refusal: MERGE_REFUSALS.unreadable };
   const replaced = targets.map((target) => target.span);
-  if (canonicalJson(withoutSlots(before.document, replaced)) !== canonicalJson(withoutSlots(after.document, replaced))) {
+  let beforeValues = withoutSlots(before.document, replaced);
+  let afterValues = withoutSlots(after.document, replaced);
+  if (inserted.length > 0) {
+    // 検査の数がちょうど追加の数だけ増え、末尾の検査が追加の場所の（entity・名前）と同じ順で並ぶこと
+    const beforeList = validationsOf(beforeValues);
+    const afterList = validationsOf(afterValues);
+    if (beforeList === null || afterList === null || afterList.length !== beforeList.length + inserted.length) {
+      return { ok: false, refusal: MERGE_REFUSALS.added };
+    }
+    const tail = afterList.slice(beforeList.length);
+    const placed = inserted.every(({ addition }, index) => {
+      const item: unknown = tail[index];
+      return isRecord(item) && item["name"] === addition.name && item["entity"] === addition.entity;
+    });
+    if (!placed) return { ok: false, refusal: MERGE_REFUSALS.added };
+    beforeValues = { ...(beforeValues as Record<string, unknown>), validations: beforeList };
+    afterValues = { ...(afterValues as Record<string, unknown>), validations: afterList.slice(0, beforeList.length) };
+  }
+  if (canonicalJson(beforeValues) !== canonicalJson(afterValues)) {
     return { ok: false, refusal: MERGE_REFUSALS.outside };
   }
   // 要素の並び（場所の名前と順）が同じで、置き換えていない要素の原文の行がバイト列で同じこと（重なったキーのように、読み取りの
-  // 値では見えない変化も断る）
+  // 値では見えない変化も断る）。追加した検査は、その場所の名前で節の末尾の位置に在ること
   const merged = declarationSpans(source);
   if (!merged.ok) return { ok: false, refusal: MERGE_REFUSALS.unreadable };
   const beforeLines = declaration.split("\n");
   const replacedKeys = new Set(replaced.map((span) => span.key));
+  const addedKeys = new Set(inserted.map((entry) => entry.addition.key));
+  const kept = merged.spans.filter((span) => !addedKeys.has(span.key));
   const same =
-    merged.spans.length === spans.length &&
-    merged.spans.every((span, index) => {
+    kept.length === spans.length &&
+    kept.every((span, index) => {
       const original = spans[index];
       if (original === undefined || original.key !== span.key) return false;
       return replacedKeys.has(span.key) || spanText(lines, span) === spanText(beforeLines, original);
     });
   if (!same) return { ok: false, refusal: MERGE_REFUSALS.outside };
+  if (inserted.length > 0) {
+    const count = validationsOf(after.document)?.length ?? 0;
+    const at = inserted.every(({ addition }, index) => {
+      const found = merged.spans.filter((span) => span.key === addition.key);
+      const slot = found[0]?.slot;
+      return found.length === 1 && slot?.section === "validations" && slot.index === count - inserted.length + index;
+    });
+    if (!at) return { ok: false, refusal: MERGE_REFUSALS.added };
+  }
   return { ok: true, source };
 }

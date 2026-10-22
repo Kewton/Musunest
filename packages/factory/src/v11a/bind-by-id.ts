@@ -5,7 +5,8 @@
 // 決定的に引き、**試験 ID で引く写像**を返す（並びで引かない。棄却で並びが変わっても古い位置を使わない）。
 //
 //   - 宣言に無ければ未解決（`unbound`。v1 の `BindCause` の `no-candidate`）。表に無い `id` は `no-mapping`
-//   - validate の試験は v1 と同じく**項目の名前で検査を探す**（M-03 は残る。表に validation の行が無い。D3）
+//   - validate の試験は v1 と同じく**項目の名前で検査を探す**（M-03 は残る。表に validation の行が無い。D3）。その場所の
+//     持ち主は `requiredValidationLocation` 1 つで、B1・直す段に渡す「要る検査の骨組み」も同じ関数から導く（Issue #666）
 //
 // B3' の印（`markRows`）は、表の `id` ごとに正規化した JSON の中の該当箇所（要素の種類・名前・経路）と
 // 参照先（式が参照する計算・項目、画面の `show`・`highlight` が指す項目と計算、集計の `entity` と `groupBy`
@@ -29,11 +30,13 @@ import { parseExpression, type AstNode } from "@musunest/spec-engine";
 import type {
   CorrespondenceEntry,
   DeclarationLocation,
+  FixedTest,
   TestSuite,
 } from "../pipeline.js";
 import type { BindResult } from "../stages/bind.js";
 import { declarationHasLocation, declarationKindOfRole } from "../stages/correspondence.js";
 import { deriveOwnership, type NameTable, type NameTableRow } from "./names.js";
+import type { TestObserves } from "./stages/test-spec.js";
 
 // ── 表の `id` → 宣言の場所 ────────────────────────────────────────────
 
@@ -96,12 +99,13 @@ export function bindTestsById(app: NormalizedAppSpec, table: NameTable, suite: T
       });
       continue;
     }
-    const base = row.kind === test.target.kind ? locationOfRow(table, row) : undefined;
-    let location: DeclarationLocation | undefined = base;
-    if (base !== undefined && test.operation === "validate") {
-      const entity = row.kind === "entity" ? row.name : base.entity;
-      location = { kind: "validation", entity, name: row.name };
-    }
+    // validate の試験の場所は `requiredValidationLocation` 1 つが決める（M-03。v1 と同じ。Issue #666）
+    const location: DeclarationLocation | undefined =
+      test.operation === "validate"
+        ? requiredValidationLocation(table, test)
+        : row.kind === test.target.kind
+          ? locationOfRow(table, row)
+          : undefined;
     if (location === undefined || !declarationHasLocation(app, location)) {
       bindings.set(test.id, {
         kind: "unbound",
@@ -114,6 +118,74 @@ export function bindTestsById(app: NormalizedAppSpec, table: NameTable, suite: T
     bindings.set(test.id, { kind: "bound", testId: test.id, location });
   }
   return { bindings, entityNames: entityNamesById(app, table) };
+}
+
+// ── validate の試験が要求する検査の場所と、要る検査の骨組み（Issue #666）──────────────────────────
+
+/**
+ * validate の試験 1 件が**要求する検査の場所**（結び付けの契約。M-03：名前で結ぶ）。表の id の結び付け
+ * （`bindTestsById`）はこの関数で validate の場所を決める。要る検査の骨組み（`requiredValidationsOf`）も同じ関数から導く。
+ *
+ *   - 項目の行 → 所属 entity の名前・項目の名前
+ *   - entity の行 → その entity の名前・entity の名前
+ *   - validate でない・表に無い id・試験の対象の種類が行の種類と合わない・所属 entity の行が引けない → undefined
+ */
+export function requiredValidationLocation(table: NameTable, test: FixedTest): DeclarationLocation | undefined {
+  if (test.operation !== "validate") return undefined;
+  const roleId = test.target.roleId;
+  const row = roleId === undefined ? undefined : table.rows.find((candidate) => candidate.id === roleId);
+  if (row === undefined || row.kind !== test.target.kind) return undefined;
+  const base = locationOfRow(table, row);
+  if (base === undefined) return undefined;
+  return { kind: "validation", entity: row.kind === "entity" ? row.name : base.entity, name: row.name };
+}
+
+/**
+ * 要る検査の骨組み 1 件（B1・直す段にデータで渡す）。所属 entity の名前・検査の名前・対象の行の id と種類・要求する試験 ID の
+ * 並び・競合の印だけを持つ（式・期待・分類・宣言・表の名前の写しは持たない。R2-1）。
+ * `conflict` が真の件は、ほかの件に同じ名前がある（別の entity の同名の行、または同じ（entity・名前）を要求する別の行。検査の
+ * 名前は宣言全体で一意なので、名前で結ぶ契約の上では両方を実現できない）。書く要求にしない（どちらかを選ばない・改名しない）。
+ */
+export interface RequiredValidation {
+  readonly entity: string | null;
+  readonly name: string;
+  readonly rowId: string;
+  readonly rowKind: NameTableRow["kind"];
+  readonly testIds: readonly string[];
+  readonly conflict: boolean;
+}
+
+/**
+ * 固定した組と表から、要る検査の骨組みを導く（純粋。宣言に依らない）。観測する性質が `validation` の validate の試験だけ
+ * （既定値・選択肢の集合の試験は専用の照合で検査を要求しないので除く）。同じ行の試験は 1 件にまとめ、並びは表の行の順
+ * （試験 ID は組の順）。同じ名前を 2 つ以上の行が要求すれば（別 entity の同名・同じ（entity・名前）を要求する entity の行と項目の
+ * 行）、その全件に競合の印を付ける（並びで選ばない）。呼ぶ側は評価の文脈と同じ組（棄却・持ち越しで外した後の組）を渡す。
+ */
+export function requiredValidationsOf(
+  table: NameTable,
+  suite: TestSuite,
+  observes: ReadonlyMap<string, TestObserves>,
+): readonly RequiredValidation[] {
+  const rowIndex = new Map(table.rows.map((row, index) => [row.id, index] as const));
+  const entries = new Map<string, { row: NameTableRow; location: DeclarationLocation; testIds: string[] }>();
+  for (const test of suite.tests) {
+    if (observes.get(test.id) !== "validation") continue;
+    const location = requiredValidationLocation(table, test);
+    const row = table.rows.find((candidate) => candidate.id === test.target.roleId);
+    if (location === undefined || row === undefined) continue;
+    const found = entries.get(row.id);
+    if (found === undefined) entries.set(row.id, { row, location, testIds: [test.id] });
+    else found.testIds.push(test.id);
+  }
+  const ordered = [...entries.values()].sort((a, b) => (rowIndex.get(a.row.id) ?? 0) - (rowIndex.get(b.row.id) ?? 0));
+  return ordered.map((entry) => ({
+    entity: entry.location.entity,
+    name: entry.location.name,
+    rowId: entry.row.id,
+    rowKind: entry.row.kind,
+    testIds: entry.testIds,
+    conflict: ordered.some((other) => other !== entry && other.location.name === entry.location.name),
+  }));
 }
 
 /**

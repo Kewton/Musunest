@@ -10,7 +10,9 @@ import type { LlmStructuredRequest } from "../../llm.js";
 import { createOpenAiLlmClient, type FetchLike } from "../../openai.js";
 import { ENVELOPE_SCHEMA_NAME_V11A, ENVELOPE_SCHEMA_V11A, envelopeStageFor } from "../../schema-envelope.js";
 import { makeGateway } from "../../stages/__tests__/prompt.js";
-import { FIXTURE_DOCUMENTS, FIXTURE_YAML, fixtureList, fixtureTable } from "../../v11a/__tests__/fixtures.js";
+import { FIXTURE_DOCUMENTS, FIXTURE_YAML, fixtureList, fixtureTable, fixtureYaml } from "../../v11a/__tests__/fixtures.js";
+import { requiredValidationsOf } from "../../v11a/bind-by-id.js";
+import type { TestObserves } from "../../v11a/stages/test-spec.js";
 import { DECLARATION_V11A_SCHEMA, WRITE_V11A_SCHEMA_NAME } from "../../v11a/stages/write.js";
 import { locateFailures } from "../locate.js";
 import { FIELD_REPAIR_SCHEMA_NAME, fieldRepairSchemaOf, runFieldRepair } from "./field-repair.js";
@@ -131,5 +133,40 @@ describe("通信：この段の要求は封筒の外で、往復ごとの動的�
     expect(JSON.stringify(writeAfter)).toBe(JSON.stringify(writeBefore));
     expect(formatOf(writeBefore).name).toBe(ENVELOPE_SCHEMA_NAME_V11A);
     expect(JSON.stringify(formatOf(writeBefore).schema)).toBe(JSON.stringify(ENVELOPE_SCHEMA_V11A));
+  });
+});
+
+describe("通信（旗 v12.ids。Issue #667）：追加の場所も往復ごとの動的な schema の enum に入って text.format に載る", () => {
+  it("検査 0 の宣言で validate の不一致を追加の場所に写した往復は、送った enum に追加の場所があり、封筒の anyOf に置き換わらない", async () => {
+    const source = fixtureYaml({ validation: false });
+    const suite: TestSuite = { tests: [{ ...test("v-amount", "R1", "field", "f.item.amount", "validate") }, ...SUITE.tests] };
+    const observes = new Map<string, TestObserves>([["v-amount", "validation"]]);
+    const failures = locateFailures({
+      source,
+      table: fixtureTable(),
+      suite,
+      staticCheckPassed: true,
+      diagnostics: [],
+      correspondenceMisses: [],
+      rejections: [],
+      unmarked: [],
+      mismatches: [{ testId: "v-amount" }, { testId: "r3-when" }],
+      unresolved: [],
+      ids: { observes, requiredValidations: requiredValidationsOf(fixtureTable(), suite, observes) },
+    });
+    expect(failures.locations).toEqual(["validation:item.amount", "action:item.closeItem"]);
+    const answer = {
+      replacements: [{ location: "validation:item.amount", element: "- name: amount\n  entity: item\n  expression: amount > 0" }],
+      disputes: [],
+    };
+    const { fetch, bodies } = recordingFetch([answer]);
+    const client = createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope: "v1.1a" });
+    const outcome = await runFieldRepair({ source: SOURCE, list: LIST, suite, declaration: source, failures, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(client) });
+    expect(outcome.ok).toBe(true);
+    const format = formatOf(bodies[0]);
+    expect(format.name).toBe(FIELD_REPAIR_SCHEMA_NAME);
+    expect(format.schema).toEqual(fieldRepairSchemaOf(failures.locations));
+    expect(JSON.stringify(format.schema)).toContain("validation:item.amount");
+    expect(JSON.stringify(format.schema)).not.toContain("anyOf");
   });
 });
