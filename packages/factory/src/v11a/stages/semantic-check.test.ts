@@ -46,9 +46,13 @@ import {
   SEMANTIC_CHECK_SCHEMA,
   SEMANTIC_CHECK_SCHEMA_IDS,
   SEMANTIC_CHECK_SCHEMA_NAME,
+  SEMANTIC_GAP_DESCRIPTIONS,
+  SEMANTIC_GAP_TEXT,
   SEMANTIC_GAPS,
   SEMANTIC_NOTE_MAX_CODE_POINTS,
   SEMANTIC_REJECTION_KINDS,
+  SEMANTIC_TARGET_KIND_DESCRIPTIONS,
+  SEMANTIC_TARGET_KIND_TEXT,
   SEMANTIC_TARGET_KINDS,
   runSemanticCheck,
   semanticCheckRuleDefinitionsOf,
@@ -650,7 +654,23 @@ describe("旗 v12.ids の C3：missing-target の 4 つの欄（Issue #718）", 
     expect(ruleDefinitionDefects(idsRules)).toEqual([]);
     expect(SEMANTIC_CHECK_IDS_RULE_DEFINITION.id).toBe("R-sc-06");
     for (const value of [...SEMANTIC_TARGET_KINDS, ...SEMANTIC_GAPS]) expect(SEMANTIC_CHECK_IDS_RULE_DEFINITION.text).toContain(value);
-    expect(SEMANTIC_CHECK_IDS_RULE_DEFINITION.text).toContain("unknown");
+    // 名前だけでなく、値の意味の文（コードの定数）を規則と schema の説明の両方に入れる（Review 66b）
+    for (const description of [...Object.values(SEMANTIC_TARGET_KIND_DESCRIPTIONS), ...Object.values(SEMANTIC_GAP_DESCRIPTIONS)]) {
+      expect(SEMANTIC_CHECK_IDS_RULE_DEFINITION.text).toContain(description);
+    }
+    expect(items.properties.targetKind.description).toContain(SEMANTIC_TARGET_KIND_TEXT);
+    expect(items.properties.gap.description).toContain(SEMANTIC_GAP_TEXT);
+    for (const description of Object.values(SEMANTIC_TARGET_KIND_DESCRIPTIONS)) {
+      expect(items.properties.targetKind.description).toContain(description);
+    }
+    for (const description of Object.values(SEMANTIC_GAP_DESCRIPTIONS)) {
+      expect(items.properties.gap.description).toContain(description);
+    }
+    // とくに row-kind-inexpressible（行の種類で書けない）と check-inexpressible（確かめ方の種類で確かめられない）を区別する
+    expect(SEMANTIC_GAP_DESCRIPTIONS["row-kind-inexpressible"]).toContain("行の種類（entity・項目・計算・操作・画面）で書けない");
+    expect(SEMANTIC_GAP_DESCRIPTIONS["check-inexpressible"]).toContain("行・所属・属性は足りているが、確かめ方の種類で確かめられない");
+    expect(SEMANTIC_GAP_DESCRIPTIONS["row-kind-inexpressible"]).not.toBe(SEMANTIC_GAP_DESCRIPTIONS["check-inexpressible"]);
+    expect(SEMANTIC_CHECK_IDS_RULE_DEFINITION.text).toContain("判断できない");
     expect(SEMANTIC_CHECK_IDS_RULE_DEFINITION.text).toContain("判定の理由ではなく記録");
     expect(SEMANTIC_CHECK_IDS_RULE_DEFINITION.text).toContain(String(SEMANTIC_NOTE_MAX_CODE_POINTS));
     // 要求の schema と規則が ids の枝になる
