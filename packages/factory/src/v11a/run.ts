@@ -1181,6 +1181,8 @@ async function runV11a(
           advice: marks,
           documents: input.documents,
           gateway,
+          // 旗 `v12.ids` の C3 だけ、missing-target の欄を持つ schema と規則 R-sc-06 を使う（Issue #718）
+          ...(flags.ids ? { ids: true } : {}),
           ...withLedger,
         });
         if (!checked.ok) return checked;

@@ -473,8 +473,13 @@ function inputOf(client: GenerationInputV11a["client"], overrides: Partial<Gener
   return { ...makeRunInput(client), source: SOURCE, documents: FIXTURE_DOCUMENTS, plan: PLAN, ...overrides };
 }
 
-async function runScenario(calls: readonly RecordedCall[], overrides: Partial<GenerationInputV11a> = {}) {
-  const recording = createCheckedRecordingClient(calls);
+async function runScenario(
+  calls: readonly RecordedCall[],
+  overrides: Partial<GenerationInputV11a> = {},
+  options: { readonly idsC3?: boolean } = {},
+) {
+  const idsC3 = options.idsC3 ?? overrides.flags?.ids === true;
+  const recording = createCheckedRecordingClient(calls, { idsC3 });
   const result = await runGenerationV11a(inputOf(recording.client, overrides));
   return { result, recording };
 }
@@ -1021,7 +1026,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       "5c064c0fca66daff785b9cddf84e051ee45ea3a7bb7471bcd953e8b16bfbb927",
       // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 752a0c66bd0921ddef70aae2a4b6a1c70b012d6003a14dccbd94bd006493e24e、#682 の前 a0093fffd46e0316db7a39788e7bc23cdbd879e9440dc900394944b4634643e3）
       // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 aa61d49da041316d61a2363ad590036a1486361eba20d106a56b7a821b1e83b5）
-      "7672dc5e7cc5bb29c6e9add669a90c45a22da87b4de55a9169aafbfefc45c9fb",
+      // 要求の SHA-256 は Issue #718 で取り直した（C3 の封筒の枝と規則 R-sc-06 の分だけ。旧 7672dc5e7cc5bb29c6e9add669a90c45a22da87b4de55a9169aafbfefc45c9fb）
+      "ad2cef551de35ac563abf9d71b1985da29b2c7c4b4a09e5c3d3c4fba0d00cc9b",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d3d46bd0bae1ed1bce66a419612e4d05b1d6d0cefa9b95072d2af39c8137d700）
       "ef2dc4cd77f101896bc8c4c377efeabe8f621d092497fdef0ee93b69490e031f",
@@ -1032,7 +1038,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       "e2cfd686f2296c3ff2a5f91bb45409dbb6efbc02feb54b7e246af97eaf762089",
       // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 8921cc36209615b5948b4830e79f7b8ed1cab4c38fe1751b1825b28ff2d149e1、#682 の前 6c3f9e9cf8c384b59958beb5300a3fc50847416fbfd411fb63f2c876e239a18d）
       // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 2c75ec3f7e097736f78a181425c7360fab93d01e3571468dbcb793f2b8c60e0a）
-      "5bccc6c03cf22bcd5bd9ce8ee9ddb7ecdc5987f4fa4d3a7d744db156fb7488fc",
+      // 要求の SHA-256 は Issue #718 で取り直した（C3 の封筒の枝と規則 R-sc-06 の分だけ。旧 5bccc6c03cf22bcd5bd9ce8ee9ddb7ecdc5987f4fa4d3a7d744db156fb7488fc）
+      "78394fa24f36c0b9ed39f78aceca4192741b97155189e00ece7ec3cee073074c",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 c479ec4fc3ac733a9b470499f5d8fc631583a94ca9e4169834ae571ea7499645）
       "a3848402cdf1bbedbdbb51431bd971ccc94a351d6bfb88ae7a9f56054cdec635",
@@ -1045,7 +1052,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 旧 #682 f2f3aa9dc28f4b4fc536c18ea4dfae4e38cda3bfdf07d26524b8526c91674c2d、#682 の前 6af97b9e827e24b9d14505ee677d3b15af2f3e3615d6f448b90f818b8d8e061b）。
       // #661 は C2 の 2 回目の要求（部分専用の規則と「書き直す要件」）だけが変わる。それを外した要求は直す前と同じ（下の試験）
       // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 7aa71911309b5ef91f9c680ac454d31ca2a49fe63156cbbb6f1314476b3b94bd）
-      "dd5f9cf02049d7f833e5a99599915ce35b0b4296b5d512535c641e5d0d71e984",
+      // 要求の SHA-256 は Issue #718 で取り直した（C3 の封筒の枝と規則 R-sc-06 の分だけ。旧 dd5f9cf02049d7f833e5a99599915ce35b0b4296b5d512535c641e5d0d71e984）
+      "326e8bb51e4d5d08bed50095ab27075ffa95068b3177202ca7626a361241716b",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 2f032bbaf50ff8e7c6c0fbe9708107eb043cca23ae2bc5b6b25680e7c2f4151a）
       "f039481b055d8d893ee5535d5b56acc5182d6e5b392c8c4f3a21c4632403f859",
@@ -1071,7 +1079,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       "14b868bfb4d6b944e2419cae0411c22b0f983c23a5ef1c7e47fc4424d7e6a298",
       // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 46f31a920a94f54c37b32fedb8e771028ecfa6e6a6b7789133d3c11101c04deb、#682 の前 5b4777c8abe5dcdfa274689e1ff8083e1c610a80180c54792f668d1dda010e1c）
       // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 b05e55ebd15b607f7c856b6fa50c7ff31d54ae87005478ad294c825c14bab561）
-      "9d0407679405956fb7d3d5ba4707f720cde73e174fa2a6c4f9a966c2929c8560",
+      // 要求の SHA-256 は Issue #718 で取り直した（C3 の封筒の枝と規則 R-sc-06 の分だけ。旧 9d0407679405956fb7d3d5ba4707f720cde73e174fa2a6c4f9a966c2929c8560）
+      "e6474fc52dcc0a09d1522d99255103b84d1a5b09542bed479c3e5b233c870d4e",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d762715a3037b44cbc202848f40b5fa2cd1551bba549bd418f56fefc0e9def0e）
       "4a2626d7964d9f231142488d8151d75f3c36d8ef216d65f06c6fb63bc8a102ab",
@@ -1087,7 +1096,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
    * run.ts に戻した作業木で測った値。新しいコードの出力から作っていない。Issue #661）
    */
   // #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（T2 と B1 の要求が変わるため。v12-h3e の作業木で測った値。旧 cc800c696c72a5ba2708099d2be1125c0238c95dce8fc9d2255975e9c2960f1c）
-  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING = "865603b1b7822c4a8a1e5f9ce348fa1d2ae57f6a29a00270b3893f7740d5cb95";
+  // Issue #718 で取り直した（C3 の封筒の枝と規則 R-sc-06 の分だけ。旧 865603b1b7822c4a8a1e5f9ce348fa1d2ae57f6a29a00270b3893f7740d5cb95）
+  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING = "f68ef4e5013fb2ecc28565ec77f41c168988fccd2e3b96386dfd5f4e55d58e30";
 
   const BEFORE_MATERIALS_DIGESTS: Readonly<Record<string, string>> = {
     "(4) C2 が 2 回落ちて止まる": "a1c6f1158b66a23deb3a2fefe0b0ea6a0c315529a826a9d67b5fad4d8960cf27",
@@ -1245,7 +1255,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 問題は R6 に帰属するので、2 回目の応答は R6 だけ（Issue #660）
       structured({ requirements: (good.mapping["requirements"] as readonly Record<string, unknown>[]).filter((entry) => entry["requirementId"] === "R6") }),
       structured(acceptAll(["R1", "R2", "R3", "R4", "R6"])),
-    ]);
+    ], { idsC3: true });
     const outcome = await runStageRangeV11a({
       ...inputOf(recording.client, { plan: planOf(list) }),
       flags: IDS_FLAGS,
@@ -1671,7 +1681,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       structured(onlyEntries("R3", "R4")),
       structured(acceptAll()),
     ];
-    const stageRecording = createCheckedRecordingClient(calls);
+    const stageRecording = createCheckedRecordingClient(calls, { idsC3: true });
     const stage = await runStageRangeV11a({
       ...inputOf(stageRecording.client),
       flags: IDS_FLAGS,
@@ -1709,7 +1719,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
   });
 
   it("(7) 同じ台本の段の走り（ids on・name-table..test-spec）でも tableRounds の adopted は全部 false（Issue #699）", async () => {
-    const recording = createCheckedRecordingClient(t2SkeletonTwice());
+    const recording = createCheckedRecordingClient(t2SkeletonTwice(), { idsC3: true });
     const stage = await runStageRangeV11a({
       ...inputOf(recording.client),
       flags: IDS_FLAGS,
@@ -1718,6 +1728,144 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(stage.stopped).toMatchObject({ stage: "test-spec", kind: "malformed" });
     expect(stage.tableRounds).toHaveLength(1);
     expect(stage.tableRounds?.map((round) => round.adopted)).toEqual([false]);
+  });
+
+  // ── missing-target の欄（Issue #718）────────────────────────────────
+  const idsAccept = (requirementId: string) => ({ requirementId, verdict: "accept", kind: null, quote: null, targetKind: null, gap: null, relatedRowIds: [], note: null });
+  const idsMissing = (
+    requirementId: string,
+    quote: string,
+    targetKind: string,
+    gap: string,
+    relatedRowIds: readonly string[],
+    note: string,
+  ) => ({ requirementId, verdict: "reject", kind: "missing-target", quote, targetKind, gap, relatedRowIds, note });
+  const idsJudgmentSet = (rejects: Readonly<Record<string, Record<string, unknown>>> = {}) => ({
+    judgments: IDS.map((id) => rejects[id] ?? idsAccept(id)),
+  });
+  const FIRST_MISSING = idsMissing("R3", "締められる", "operation", "attribute-absent", ["OP2"], "操作の条件が足りない");
+  const SECOND_MISSING = idsMissing("R4", "全体の率", "computation", "check-inexpressible", ["C2"], "確かめ方で表せない");
+
+  it("(8) missing-target の欄が、初回と 2 回目の table-rounds の C3 の判定に残り、採用した回の欄が checkpoint の semantic_check に残る。納品物の C3 の記録には欄を出さない（Issue #718）", async () => {
+    const calls = [
+      ...vocabularyCalls(),
+      structured(good().mapping),
+      structured(idsJudgmentSet({ R3: FIRST_MISSING, R4: SECOND_MISSING })),
+      structured(onlyEntries("R3", "R4")),
+      structured(idsJudgmentSet({ R4: SECOND_MISSING })),
+      ...tailFor(["R1", "R2", "R3"]),
+    ];
+    const { result, recording } = await runScenario(calls, { flags: IDS_FLAGS, collectBoundaries: true }, { idsC3: false });
+    expect(result.stopped).toBeNull();
+    expect(result.outcome.verdict).toBe("partial");
+    const rounds = tableRoundsOf(result);
+    expect(rounds).toHaveLength(2);
+    const tableSha = await nameTableSha256(MAPPED_IDS);
+    expect(rounds.map((round) => [round.round, round.semantic_check?.table_sha256])).toEqual([
+      [1, tableSha],
+      [2, tableSha],
+    ]);
+    const judgmentOfRound = (round: (typeof rounds)[number] | undefined, requirementId: string): unknown => {
+      const semantic = round?.semantic_check as { readonly judgments?: readonly unknown[] } | null | undefined;
+      return semantic?.judgments?.find((entry) => (entry as { readonly requirementId?: string }).requirementId === requirementId);
+    };
+    expect(judgmentOfRound(rounds[0], "R3")).toEqual(FIRST_MISSING);
+    expect(judgmentOfRound(rounds[0], "R4")).toEqual(SECOND_MISSING);
+    expect(judgmentOfRound(rounds[1], "R4")).toEqual(SECOND_MISSING);
+    // 2 回目に入る条件・C2 の書き直しの要求・2 回目の C3 の対象（全対象）は今と同じ。拒否に欄は渡さない
+    const mappingRequests = requestsOf(recording, "mapping");
+    expect(mappingRequests).toHaveLength(2);
+    expect(dataBlockOf(mappingRequests[1]?.input ?? "", "書き直す要件")).toEqual(["R3", "R4"]);
+    expect(dataBlockOf(mappingRequests[1]?.input ?? "", "表の点検の拒否")).toEqual([
+      { requirementId: "R3", kind: "missing-target", quote: "締められる" },
+      { requirementId: "R4", kind: "missing-target", quote: "全体の率" },
+    ]);
+    expect(JSON.stringify(dataBlockOf(mappingRequests[1]?.input ?? "", "表の点検の拒否"))).not.toContain("targetKind");
+    expect(requestsOf(recording, SEMANTIC_CHECK_SCHEMA_NAME)).toHaveLength(2);
+    expect(requestsOf(recording, SEMANTIC_CHECK_SCHEMA_NAME).map(semanticTargetsOf)).toEqual([[...IDS], [...IDS]]);
+    // 採用した回（2 回目）の欄が checkpoint の semantic_check に残り、表の SHA・回・要件 ID に結ぶ
+    const boundary = result.boundaries?.find((entry) => entry.boundary === "t1-t2");
+    expect(boundary?.tableSha256).toBe(tableSha);
+    expect(boundary?.semanticCheck.judgments.find((judgment) => judgment.requirementId === "R4")).toEqual(SECOND_MISSING);
+    expect(carryEntriesOf(result.bundle)).toEqual([{ requirementId: "R4", reasons: [{ origin: "semantic-check", reason: "missing-target" }] }]);
+    // 納品物の C3 の記録は今の形（受理は 2 欄・拒否は 4 欄）に投影し、欄を出さない
+    const artifact = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.semanticCheck) as {
+      readonly rounds: readonly { readonly table_sha256: string; readonly judgments: readonly Record<string, unknown>[] }[];
+    };
+    expect(artifact.rounds.map((round) => round.table_sha256)).toEqual([tableSha, tableSha]);
+    for (const round of artifact.rounds) {
+      for (const judgment of round.judgments) {
+        expect(Object.keys(judgment).sort()).toEqual(judgment["verdict"] === "accept" ? ["requirementId", "verdict"] : ["kind", "quote", "requirementId", "verdict"]);
+      }
+    }
+    expect(JSON.stringify(artifact)).not.toContain("targetKind");
+    expect(JSON.stringify(artifact)).not.toContain("relatedRowIds");
+    // 要約・段の記録には欄も note の値も書かない
+    expect(JSON.stringify({ summary: result.summary, record: result.record })).not.toContain("targetKind");
+    expect(JSON.stringify({ summary: result.summary, record: result.record })).not.toContain("確かめ方で表せない");
+    // 段の走りと同じ台本の table-rounds は深く等しい
+    const stageRecording = createCheckedRecordingClient(calls.slice(0, 7), { idsC3: false });
+    const stage = await runStageRangeV11a({ ...inputOf(stageRecording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "semantic-check" } });
+    expect(stage.stopped).toBeNull();
+    expect(stage.tableRounds).toEqual(rounds);
+  });
+
+  it("(9) 欄の無い旧の checkpoint から T2 へ再開できる（欄の欠けだけを許し、表・版・対象・持ち越しの照合は今のまま。Issue #718）", async () => {
+    const calls = [
+      ...vocabularyCalls(),
+      structured(good().mapping),
+      structured(idsJudgmentSet({ R4: SECOND_MISSING })),
+      structured(onlyEntries("R4")),
+      structured(idsJudgmentSet({ R4: SECOND_MISSING })),
+      ...tailFor(["R1", "R2", "R3"]),
+    ];
+    const { result } = await runScenario(calls, { flags: IDS_FLAGS, collectBoundaries: true }, { idsC3: false });
+    const boundary = result.boundaries?.find((entry) => entry.boundary === "t1-t2");
+    if (boundary === undefined) throw new Error("前提が壊れた：境界が無い");
+    // 欄を落とした旧い判定（受理は 2 欄・拒否は 4 欄）
+    const oldJudgments = boundary.semanticCheck.judgments.map((judgment) =>
+      judgment.verdict === "accept"
+        ? { requirementId: judgment.requirementId, verdict: "accept" as const }
+        : { requirementId: judgment.requirementId, verdict: "reject" as const, kind: judgment.kind, quote: judgment.quote },
+    );
+    const { boundary: _boundary, ...materials } = boundary;
+    const checkpoint = JSON.parse(
+      stageJsonText(
+        buildStageCheckpoint({
+          materials: { ...materials, boundary: "t1-t2", semanticCheck: { ...materials.semanticCheck, judgments: oldJudgments } },
+          versions: { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0" },
+          planSha256: "a".repeat(64),
+          sourceSha256: "b".repeat(64),
+        }),
+      ),
+    ) as Record<string, unknown>;
+    const record = {
+      schema_version: STAGE_RUN_RECORD_SCHEMA,
+      checkpoints: [{ boundary: "t1-t2", path: "cp.json", output_digest: await stageOutputDigest(checkpoint) }],
+    };
+    const verified = await verifyStageInput({
+      start: "test-spec",
+      checkpointText: stageJsonText(checkpoint),
+      checkpointFile: "cp.json",
+      recordText: JSON.stringify(record),
+      plan: PLAN,
+      planSha256: "a".repeat(64),
+      sourceSha256: "b".repeat(64),
+      vocabularyVersion: "v1",
+      contractVersion: "v0.2",
+    });
+    if (!verified.ok) throw new Error(`再開の照合に落ちた：${verified.code}`);
+    expect(verified.resume.semanticCheck.judgments).toEqual(oldJudgments);
+    // T2 だけを再開して流す（C3 は呼ばない）
+    const t2Recording = createCheckedRecordingClient(tailFor(["R1", "R2", "R3"]), { idsC3: false });
+    const t2 = await runStageRangeV11a({
+      ...inputOf(t2Recording.client),
+      flags: { ledger: true, ids: true },
+      range: { start: "test-spec", end: "test-spec" },
+      resume: verified.resume,
+    });
+    expect(t2.stopped).toBeNull();
+    expect(t2Recording.structured.every((request) => request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME)).toBe(true);
   });
 
   /** 文に目印を足す（null は null のまま） */
@@ -1778,7 +1926,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
   };
   /** 台本を境界 t1-t2 まで流し、C1〜C3（T1・T1''）の要求の全体・段の結果（検査の結果と文・停止・持ち越し・境界の材料）・checkpoint を集める */
   const upstreamRunOf = async (script: { readonly flags: Partial<V12Flags>; readonly calls: readonly RecordedCall[] }) => {
-    const recording = createCheckedRecordingClient(script.calls);
+    const recording = createCheckedRecordingClient(script.calls, { idsC3: true });
     const outcome = await runStageRangeV11a({ ...inputOf(recording.client), flags: script.flags, range: { start: "name-table", end: "semantic-check" } });
     const versions = { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0" };
     const checkpoints = outcome.boundaries.map((boundary) =>
@@ -1870,7 +2018,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     }
     expect(checked).toBeGreaterThan(5);
     // 境界 t2-b1：T2 まで流した材料。変える前の工場が書いた t2-b1 は ledger_upstream が null で、T2 の型を変えた台帳の工場は全体の指紋で断る
-    const recording = createCheckedRecordingClient(idsHead().slice(0, 6));
+    const recording = createCheckedRecordingClient(idsHead().slice(0, 6), { idsC3: true });
     const reached = await runStageRangeV11a({ ...inputOf(recording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "test-spec" } });
     expect(reached.boundaries.map((materials) => materials.boundary)).toEqual(["t1-t2", "t2-b1"]);
     const t2b1 = reached.boundaries[1];
@@ -3516,7 +3664,7 @@ describe("段単位の走り：範囲の外の段を呼ばず、納品物を組�
       structured(raw[3]!),
       structured(acceptAll()),
     ];
-    const recording = createCheckedRecordingClient(calls);
+    const recording = createCheckedRecordingClient(calls, { idsC3: true });
     const stage = await runStageRangeV11a({ ...inputOf(recording.client), flags, range: { start: "name-table", end: "semantic-check" } });
     expect(stage.rejected).toHaveLength(1);
     expect(stage.rejected?.[0]).toMatchObject({ stage: "mapping", operation: null, call: 1, round: 1, attempt: 1, kind: "shape" });
@@ -3545,7 +3693,7 @@ describe("段単位の走り：範囲の外の段を呼ばず、納品物を組�
   });
 
   it("旗 v12.ids の終了 T1''：C1 の 3 束・C2・C3 だけを呼び、記録の段は範囲の段の内側。境界の checkpoint の形と照合は今と同じで、表の SHA は C2 が組んだ表に結ぶ（Issue #593）", async () => {
-    const recording = createCheckedRecordingClient(idsHead().slice(0, 5));
+    const recording = createCheckedRecordingClient(idsHead().slice(0, 5), { idsC3: true });
     const flags = { ledger: true, searchRepair: true, ids: true };
     const outcome = await runStageRangeV11a({ ...inputOf(recording.client), flags, range: { start: "name-table", end: "semantic-check" } });
     expect(outcome.stopped).toBeNull();
@@ -3598,7 +3746,7 @@ describe("段の走りの判定した宣言と検証の数（⑦ を流したと
 
   /** 同じ台本を範囲 T1〜⑦ の段の走りと一気通貫に流す */
   async function both(calls: readonly RecordedCall[]) {
-    const stage = await runStageRangeV11a({ ...inputOf(createCheckedRecordingClient(calls).client), range: { start: "name-table", end: "judge" } });
+    const stage = await runStageRangeV11a({ ...inputOf(createCheckedRecordingClient(calls, { idsC3: true }).client), range: { start: "name-table", end: "judge" } });
     const { result } = await runScenario(calls);
     return { stage, result };
   }
@@ -3758,7 +3906,7 @@ describe("範囲の無い走りの境界の材料（collectBoundaries。`--pipel
     expect(withBoundaries.recording.structured.map((request) => JSON.stringify(request))).toEqual(
       without.recording.structured.map((request) => JSON.stringify(request)),
     );
-    const recording = createCheckedRecordingClient(fullCalls());
+    const recording = createCheckedRecordingClient(fullCalls(), { idsC3: true });
     const stage = await runStageRangeV11a({ ...inputOf(recording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "judge" } });
     expect(plainOf(boundaries)).toEqual(plainOf(stage.boundaries));
   });
@@ -3780,7 +3928,7 @@ describe("段の走りの結果の v12Calls・testSpec（`--pipeline v1.2` の�
   const IDS_FLAGS = { ledger: true, searchRepair: true, ids: true };
 
   it("旗 ids の段の走りは門と枝の数を返し、T2 を回して T2' を通れば組の試験・外した試験・網羅の単位の数を返す（t2-b1 の組と一致）", async () => {
-    const recording = createCheckedRecordingClient(idsHead().slice(0, 6));
+    const recording = createCheckedRecordingClient(idsHead().slice(0, 6), { idsC3: true });
     const outcome = await runStageRangeV11a({ ...inputOf(recording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "test-spec" } });
     expect(outcome.stopped).toBeNull();
     expect(outcome.v12Calls).toMatchObject({ real_attempts: { limit: V12_CALL_LIMITS.realAttempts }, judge_branch: { limit: V12_CALL_LIMITS.judgeBranch } });
@@ -3789,7 +3937,7 @@ describe("段の走りの結果の v12Calls・testSpec（`--pipeline v1.2` の�
   });
 
   it("T2 に届かない（区間 0 で終わる）走りは testSpec を持たず、旗 off（v1.1a）の段の走りは v12Calls を持たない", async () => {
-    const idsRecording = createCheckedRecordingClient(idsHead().slice(0, 5));
+    const idsRecording = createCheckedRecordingClient(idsHead().slice(0, 5), { idsC3: true });
     const segment0 = await runStageRangeV11a({ ...inputOf(idsRecording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "semantic-check" } });
     expect(segment0).toHaveProperty("v12Calls");
     expect(segment0).not.toHaveProperty("testSpec");
@@ -4984,11 +5132,31 @@ describe("題材の言葉の走査（Issue #551 で足した・直したファ�
     ];
     expectNoAcceptanceMaterial(files.map((file) => nodeFs.readFileSync(new URL(file, import.meta.url), "utf8")));
   });
+
+  it("Issue #718 で直したファイル（語の並びを持つ試験のファイルを除く）に受入の題材の言葉が無い", () => {
+    const files = [
+      "./stages/semantic-check.ts",
+      "./stages/semantic-check.test.ts",
+      "./carry-over.ts",
+      "./carry-over.test.ts",
+      "./bundle-v11a.ts",
+      "./bundle-v11a.test.ts",
+      "./run.ts",
+      "./run.test.ts",
+      "./calls.test.ts",
+      "./stage-range.test.ts",
+      "./__tests__/fixtures.ts",
+      "../schema-envelope.ts",
+      "../schema-envelope.test.ts",
+      "../openai.test.ts",
+    ];
+    expectNoAcceptanceMaterial(files.map((file) => nodeFs.readFileSync(new URL(file, import.meta.url), "utf8")));
+  });
 });
 
 // ── 旗 v12.ids（手 3p。Issue #592）：ids off の走りはバイト列で同じ・on の走りだけ門と枝の欄 ─────────────────
 
-describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と同じで、ids on の差は要約の旗の欄と門の欄だけ", () => {
+describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と同じで、ids on の差は要約の旗の欄・門の欄と C3 の枝・規則だけ", () => {
   const SCENARIOS: readonly { readonly name: string; readonly calls: () => RecordedCall[]; readonly prior: Partial<V12Flags> }[] = [
     {
       name: "台帳と探索型の直し（完走）",
@@ -5084,7 +5252,16 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     // 試験 ID と時計を両側から除いて比べる（ほかの欄は同じ）
     const withoutIdClock = (text: string) =>
       text.replace(/\\"id\\": \\"[^\\]*\\",(\\n *)\\"target\\"/g, '\\"id\\": \\"-\\",$1\\"target\\"').replace(/\\"clock\\": \\"[^\\]*\\"/g, '\\"clock\\": \\"-\\"');
-    expect(notT2(onLater).map((request) => withoutIdClock(withoutTargets(JSON.stringify(withOffRules(request)))))).toEqual(
+    // 旗 ids の C3 の差（規則 R-sc-06 と missing-target の欄を持つ schema。Issue #718）を、ids off の要求に戻して比べる
+    const withoutIdsC3 = (request: LlmStructuredRequest): LlmStructuredRequest =>
+      request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME
+        ? request
+        : {
+            ...request,
+            rules: (request.rules ?? []).filter((text) => text !== semanticCheckStage.SEMANTIC_CHECK_IDS_RULE_DEFINITION.text),
+            schema: semanticCheckStage.SEMANTIC_CHECK_SCHEMA,
+          };
+    expect(notT2(onLater).map((request) => withoutIdClock(withoutTargets(JSON.stringify(withoutIdsC3(withOffRules(request))))))).toEqual(
       notT2(offLater).map((request) => withoutIdClock(withoutR2Nature(withoutSource(JSON.stringify(request))))),
     );
     const t2Of = (requests: readonly LlmStructuredRequest[]) => requests.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
@@ -5725,11 +5902,11 @@ describe("窓口の条件（Issue #665）：ids off の要約・診断・stage-r
 
   it("(ii) ids on の段の走り：stopped にだけ limit が足され、checkpoint は直す段の結果に依らず同じで limit を持たず、再開の照合は limit を読まない（stopped を差し替えても同じ結果）", async () => {
     const flags = { flags: { ledger: true, ids: true } } as const;
-    const stopRecording = createCheckedRecordingClient([...idsHead({ yaml: WRONG_YAML }), structured(acceptAll()), ...repairBundles()]);
+    const stopRecording = createCheckedRecordingClient([...idsHead({ yaml: WRONG_YAML }), structured(acceptAll()), ...repairBundles()], { idsC3: true });
     const stopped = await runStageRangeV11a({ ...inputOf(stopRecording.client, flags), range: RANGE });
     expect(stopped.stopped).toEqual({ stage: "repair", kind: "call-limit", limit: { name: "repairStepTurns", max: 8, actual: 9 } });
     // 対照：同じ境界までの台本で、直す段が done を返して最後まで流れる走り
-    const doneRecording = createCheckedRecordingClient([...idsHead({ yaml: WRONG_YAML }), structured(acceptAll()), repairDone(WRONG_YAML), structured(acceptAll())]);
+    const doneRecording = createCheckedRecordingClient([...idsHead({ yaml: WRONG_YAML }), structured(acceptAll()), repairDone(WRONG_YAML), structured(acceptAll())], { idsC3: true });
     const passed = await runStageRangeV11a({ ...inputOf(doneRecording.client, flags), range: RANGE });
     expect(passed.stopped).toBeNull();
 

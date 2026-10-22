@@ -41,6 +41,7 @@ import {
 } from "./schema-envelope.js";
 import { DESIGN_SCHEMA, DESIGN_SCHEMA_NAME } from "./stages/design.js";
 import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
+import { SEMANTIC_CHECK_SCHEMA, SEMANTIC_CHECK_SCHEMA_IDS, SEMANTIC_CHECK_SCHEMA_NAME } from "./v11a/stages/semantic-check.js";
 import { TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
 import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
 import { VOCABULARY_BUNDLES } from "./v12/ids.js";
@@ -868,7 +869,12 @@ describe("識別子 v1.2-ids の client は、C1・C2 と T1''〜B5' の全段�
    */
   const idsRequests = (ids = true): readonly { readonly stage: string; readonly schema: unknown }[] => [
     { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW, ids) },
-    ...STAGE_ENVELOPE_ENTRIES_V11A.filter((entry) => entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME),
+    ...STAGE_ENVELOPE_ENTRIES_V11A.filter((entry) => entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME).map(
+      (entry) =>
+        entry.stage === SEMANTIC_CHECK_SCHEMA_NAME
+          ? { stage: entry.stage, schema: ids ? SEMANTIC_CHECK_SCHEMA_IDS : SEMANTIC_CHECK_SCHEMA }
+          : entry,
+    ),
     ...VOCABULARY_BUNDLES.map((bundle) => ({ stage: VOCABULARY_SCHEMA_NAMES[bundle], schema: vocabularySchemaOf(bundle, PROPERTY_LEDGER_VIEW) })),
     { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(PROPERTY_LEDGER_VIEW) },
   ];

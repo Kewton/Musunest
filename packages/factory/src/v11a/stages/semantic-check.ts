@@ -43,6 +43,30 @@ export const SEMANTIC_CHECK_SCHEMA_NAME = "semantic-check";
 export const SEMANTIC_REJECTION_KINDS = ["unnecessary-ownership", "missing-target", "weak-verification"] as const;
 export type SemanticRejectionKind = (typeof SEMANTIC_REJECTION_KINDS)[number];
 
+/**
+ * 旗 `v12.ids` の C3 が missing-target の拒否に書く、欠けた対象の種類（Issue #718）。
+ * `unknown` は判断できないときの逃げ道である。
+ */
+export const SEMANTIC_TARGET_KINDS = ["entity", "field", "computation", "operation", "screen", "other", "unknown"] as const;
+export type SemanticTargetKind = (typeof SEMANTIC_TARGET_KINDS)[number];
+
+/**
+ * 旗 `v12.ids` の C3 が missing-target の拒否に書く、不足の場所（Issue #718）。
+ * `unknown` は判断できないときの逃げ道である。
+ */
+export const SEMANTIC_GAPS = [
+  "row-absent",
+  "ownership-absent",
+  "attribute-absent",
+  "row-kind-inexpressible",
+  "check-inexpressible",
+  "unknown",
+] as const;
+export type SemanticGap = (typeof SEMANTIC_GAPS)[number];
+
+/** 旗 `v12.ids` の C3 の `note` の上限（Unicode のコードポイントで数える。Issue #718） */
+export const SEMANTIC_NOTE_MAX_CODE_POINTS = 200;
+
 /** T1'' に足す規則の定義（ID は `R-sc-nn`） */
 export const SEMANTIC_CHECK_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   {
@@ -77,6 +101,22 @@ export const SEMANTIC_CHECK_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
 ];
 
+/**
+ * 旗 `v12.ids` の C3 にだけ足す規則（Issue #718）。欠けた対象を 4 つの欄で記録させる。
+ * 欄の名前・列挙値の説明はコードの定数（`SEMANTIC_TARGET_KINDS`・`SEMANTIC_GAPS`）と一致させる。
+ */
+export const SEMANTIC_CHECK_IDS_RULE_DEFINITION: RuleDefinition = {
+  id: "R-sc-06",
+  text:
+    `missing-target の拒否には、欠けた対象を 4 つの欄で書く：targetKind は欠けた対象の種類（${SEMANTIC_TARGET_KINDS.join("・")} のいずれか）、` +
+    `gap は不足の場所（${SEMANTIC_GAPS.join("・")} のいずれか）、relatedRowIds は関わる既存の行の ID の並び（表の行にある ID だけを重複なく。無ければ空）、` +
+    `note は短い説明（空白だけでない 1〜${String(SEMANTIC_NOTE_MAX_CODE_POINTS)} 字。Unicode のコードポイントで数える）である。` +
+    "missing-target 以外の拒否と受理は、4 つの欄を null・null・空・null にする。判断できない欄は unknown にする。" +
+    "これらの欄は判定の理由ではなく記録であり、命令にも判定の条件にも使わない。",
+  why: "C3 が何を欠けていると判断したかを記録に残し、真の欠落と、行の種類・所属・属性・確かめ方で表せないものを後から分けるため",
+  since: "Issue #718",
+};
+
 /** T1'' に足す規則（定義の `text` から組む） */
 export const SEMANTIC_CHECK_RULES: readonly string[] = ruleTexts(SEMANTIC_CHECK_RULE_DEFINITIONS);
 
@@ -90,14 +130,23 @@ const SEMANTIC_CHECK_LEDGER_RULE_HEAD =
  * T1'' の規則の定義（旗 on なら台帳から組む。Issue #548）。省けば今の定数をそのまま返す。渡せば R-sc-02 の文を、
  * 3 つの観点の文 → 台帳の行の受理条件の文（台帳の順）で組み直す（ID・why・since は変えない）。台帳が default-value の
  * 行だけなら off の定数とバイト列で同じになる。
+ *
+ * `ids` が真（旗 `v12.ids` の C3）なら、末尾に R-sc-06（欠けた対象の 4 つの欄。Issue #718）を足す。
+ * 偽なら R-sc-01〜05 のままで、今の定義（同じ実体）を返す。
  */
-export function semanticCheckRuleDefinitionsOf(ledger?: UpstreamLedgerView): readonly RuleDefinition[] {
-  if (ledger === undefined) return SEMANTIC_CHECK_RULE_DEFINITIONS;
-  return SEMANTIC_CHECK_RULE_DEFINITIONS.map((definition) =>
-    definition.id === SEMANTIC_CHECK_LEDGER_RULE_ID
-      ? { ...definition, text: `${SEMANTIC_CHECK_LEDGER_RULE_HEAD}${ledger.t1AcceptanceTexts.join("")}` }
-      : definition,
-  );
+export function semanticCheckRuleDefinitionsOf(
+  ledger?: UpstreamLedgerView,
+  ids = false,
+): readonly RuleDefinition[] {
+  const base =
+    ledger === undefined
+      ? SEMANTIC_CHECK_RULE_DEFINITIONS
+      : SEMANTIC_CHECK_RULE_DEFINITIONS.map((definition) =>
+          definition.id === SEMANTIC_CHECK_LEDGER_RULE_ID
+            ? { ...definition, text: `${SEMANTIC_CHECK_LEDGER_RULE_HEAD}${ledger.t1AcceptanceTexts.join("")}` }
+            : definition,
+        );
+  return ids ? [...base, SEMANTIC_CHECK_IDS_RULE_DEFINITION] : base;
 }
 
 /** 判定の並びの JSON Schema（拒否の種類だけが段で違う。T1''・B3' で共有） */
@@ -128,6 +177,121 @@ export function judgmentsSchema(kinds: readonly string[]) {
 /** T1'' の JSON Schema */
 export const SEMANTIC_CHECK_SCHEMA = judgmentsSchema(SEMANTIC_REJECTION_KINDS);
 
+/**
+ * 旗 `v12.ids` の C3 の JSON Schema（Issue #718）。判定の要素に、missing-target の拒否の欄
+ * （`targetKind`・`gap`・`relatedRowIds`・`note`）を足し、**応答では 4 つとも required** にする。
+ * 保存の形は `checkJudgmentsShape` が決める（missing-target だけ欄を持ち、ほかは今の形に落とす）。
+ * B3'（`judgmentsSchema`）と v1・v1.1a・ids off の C3 は今の schema のまま。
+ */
+export function idsJudgmentsSchema(kinds: readonly string[]) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["judgments"],
+    properties: {
+      judgments: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["requirementId", "verdict", "kind", "quote", "targetKind", "gap", "relatedRowIds", "note"],
+          properties: {
+            requirementId: { type: "string" },
+            verdict: { type: "string", enum: ["accept", "reject"] },
+            kind: { type: ["string", "null"], enum: [...kinds, null], description: "拒否の種類（受理は null）" },
+            quote: { type: ["string", "null"], description: "拒否の根拠の引用（受理は null）" },
+            targetKind: {
+              type: ["string", "null"],
+              enum: [...SEMANTIC_TARGET_KINDS, null],
+              description: "欠けた対象の種類（missing-target の拒否だけ。ほかは null）",
+            },
+            gap: {
+              type: ["string", "null"],
+              enum: [...SEMANTIC_GAPS, null],
+              description: "不足の場所（missing-target の拒否だけ。ほかは null）",
+            },
+            relatedRowIds: {
+              type: "array",
+              items: { type: "string" },
+              description: "関わる既存の行の ID の並び（missing-target の拒否だけ。ほかは空）",
+            },
+            note: { type: ["string", "null"], description: "短い説明（missing-target の拒否だけ。ほかは null）" },
+          },
+        },
+      },
+    },
+  } as const;
+}
+
+/** 旗 `v12.ids` の C3 の JSON Schema（Issue #718） */
+export const SEMANTIC_CHECK_SCHEMA_IDS = idsJudgmentsSchema(SEMANTIC_REJECTION_KINDS);
+
+/** 判定の形の検査に足す、旗 `v12.ids` の C3 の欄の検査（表の行の ID） */
+export interface JudgmentShapeExtensions {
+  readonly rowIds: readonly string[];
+}
+
+/** 4 つの欄が「null・null・空・null」であるか（受理・missing-target 以外の拒否） */
+function hasNoTargetFields(item: Record<string, unknown>): boolean {
+  return item["targetKind"] === null && item["gap"] === null && Array.isArray(item["relatedRowIds"]) && item["relatedRowIds"].length === 0 && item["note"] === null;
+}
+
+/** missing-target の拒否の 4 つの欄を検査し、保存する形を返す（落ちがあれば `undefined`） */
+function missingTargetFieldsOf(
+  item: Record<string, unknown>,
+  field: string,
+  rowIds: readonly string[],
+  problems: Problem[],
+): { readonly targetKind: string; readonly gap: string; readonly relatedRowIds: readonly string[]; readonly note: string } | undefined {
+  let good = true;
+  const targetKind = item["targetKind"];
+  if (typeof targetKind !== "string" || !(SEMANTIC_TARGET_KINDS as readonly string[]).includes(targetKind)) {
+    problems.push({ field: `${field}.targetKind`, message: `欠けた対象の種類は ${SEMANTIC_TARGET_KINDS.join("・")} のいずれかであること` });
+    good = false;
+  }
+  const gap = item["gap"];
+  if (typeof gap !== "string" || !(SEMANTIC_GAPS as readonly string[]).includes(gap)) {
+    problems.push({ field: `${field}.gap`, message: `不足の場所は ${SEMANTIC_GAPS.join("・")} のいずれかであること` });
+    good = false;
+  }
+  const rawRelated = item["relatedRowIds"];
+  const relatedRowIds: string[] = [];
+  if (!Array.isArray(rawRelated)) {
+    problems.push({ field: `${field}.relatedRowIds`, message: "関わる既存の行の ID は並び（array）であること" });
+    good = false;
+  } else {
+    const rowSet = new Set(rowIds);
+    const seenRows = new Set<string>();
+    rawRelated.forEach((id, index) => {
+      if (typeof id !== "string" || !rowSet.has(id)) {
+        problems.push({ field: `${field}.relatedRowIds[${index}]`, message: "関わる行の ID が表の行に無い" });
+        good = false;
+        return;
+      }
+      if (seenRows.has(id)) {
+        problems.push({ field: `${field}.relatedRowIds[${index}]`, message: "関わる行の ID が重なっている" });
+        good = false;
+        return;
+      }
+      seenRows.add(id);
+      relatedRowIds.push(id);
+    });
+  }
+  const note = item["note"];
+  if (typeof note !== "string") {
+    problems.push({ field: `${field}.note`, message: "説明は文字列であること" });
+    good = false;
+  } else if (note.trim() === "") {
+    problems.push({ field: `${field}.note`, message: "説明は空白だけでないこと" });
+    good = false;
+  } else if ([...note].length > SEMANTIC_NOTE_MAX_CODE_POINTS) {
+    problems.push({ field: `${field}.note`, message: `説明は ${String(SEMANTIC_NOTE_MAX_CODE_POINTS)} 字以下であること（Unicode のコードポイントで数える）` });
+    good = false;
+  }
+  if (!good) return undefined;
+  return { targetKind: targetKind as string, gap: gap as string, relatedRowIds, note: note as string };
+}
+
 /** 文字列の葉をすべて集める（確定した仕様の引用の照合に使う） */
 function stringLeaves(value: unknown, into: string[]): void {
   if (typeof value === "string") into.push(value);
@@ -153,6 +317,7 @@ export function checkJudgmentsShape(
   targets: readonly string[],
   kinds: readonly string[],
   sources: readonly string[],
+  extensions?: JudgmentShapeExtensions,
 ): ShapeCheck<readonly SemanticJudgment[]> {
   if (!isRecord(output)) return { ok: false, problems: [{ field: "", message: "応答は写像（object）であること" }] };
   const raw = output["judgments"];
@@ -185,6 +350,10 @@ export function checkJudgmentsShape(
         problems.push({ field, message: "受理の判定の種類と引用は null であること" });
         return;
       }
+      if (extensions !== undefined && !hasNoTargetFields(item)) {
+        problems.push({ field, message: "受理の判定の対象の欄（targetKind・gap・relatedRowIds・note）は null・null・空・null であること" });
+        return;
+      }
       byId.set(requirementId, { requirementId, verdict: "accept" });
       return;
     }
@@ -204,7 +373,27 @@ export function checkJudgmentsShape(
       problems.push({ field: `${field}.quote`, message: "引用が確定した仕様にも要件の文にも無い" });
       good = false;
     }
-    if (good) byId.set(requirementId, { requirementId, verdict: "reject", kind: kind as string, quote: quote as string });
+    // 旗 `v12.ids` の C3：missing-target だけ 4 つの欄を保存し、ほかの拒否は今の形に落とす（Issue #718）
+    let targetFields:
+      | { readonly targetKind: string; readonly gap: string; readonly relatedRowIds: readonly string[]; readonly note: string }
+      | undefined;
+    if (extensions !== undefined) {
+      if (kind === "missing-target") {
+        targetFields = missingTargetFieldsOf(item, field, extensions.rowIds, problems);
+        if (targetFields === undefined) good = false;
+      } else if (!hasNoTargetFields(item)) {
+        problems.push({ field, message: "拒否（missing-target 以外）の対象の欄（targetKind・gap・relatedRowIds・note）は null・null・空・null であること" });
+        good = false;
+      }
+    }
+    if (good) {
+      byId.set(
+        requirementId,
+        targetFields === undefined
+          ? { requirementId, verdict: "reject", kind: kind as string, quote: quote as string }
+          : { requirementId, verdict: "reject", kind: kind as string, quote: quote as string, ...targetFields },
+      );
+    }
   });
   targets.forEach((requirementId, index) => {
     if (!seen.has(requirementId)) problems.push({ field: `requirements[${index}]`, message: "判定が無い要件がある" });
@@ -226,6 +415,11 @@ export interface SemanticCheckInput {
   readonly gateway: CallGateway;
   /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の定数。Issue #548） */
   readonly ledger?: UpstreamLedgerView;
+  /**
+   * 旗 `v12.ids` の走り（真なら missing-target の 4 つの欄を持つ schema と規則 R-sc-06 を使う。Issue #718）。
+   * 省けば今の C3 と同じ（v1・v1.1a・ids off の v1.2）。
+   */
+  readonly ids?: boolean;
 }
 
 /** T1'' の結果（表の SHA-256 に結ぶ完全な結果と、点検の対象の要件 ID） */
@@ -252,8 +446,14 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
   const targetSet = new Set(targets);
   const ofTargets = <T extends { readonly requirementId: string }>(entries: readonly T[]): readonly T[] =>
     entries.filter((entry) => targetSet.has(entry.requirementId));
+  const ids = input.ids === true;
+  const rules = ids
+    ? ruleTexts(semanticCheckRuleDefinitionsOf(input.ledger, true))
+    : input.ledger === undefined
+      ? SEMANTIC_CHECK_RULES
+      : ruleTexts(semanticCheckRuleDefinitionsOf(input.ledger));
   const request = buildStructuredRequest({
-    rules: input.ledger === undefined ? SEMANTIC_CHECK_RULES : ruleTexts(semanticCheckRuleDefinitionsOf(input.ledger)),
+    rules,
     documents: input.documents,
     data: [
       {
@@ -284,13 +484,20 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
       { name: "助言の印", text: serializeJson(ofTargets(input.advice ?? [])) },
     ],
     schemaName: SEMANTIC_CHECK_SCHEMA_NAME,
-    schema: SEMANTIC_CHECK_SCHEMA,
+    schema: ids ? SEMANTIC_CHECK_SCHEMA_IDS : SEMANTIC_CHECK_SCHEMA,
     maxOutputTokens: input.gateway.maxOutputTokens("semantic-check"),
   });
   const sources = quoteSources(input.plan, input.list);
   const answer = await callStructuredChecked(input.gateway, {
     request,
-    check: (output) => checkJudgmentsShape(output, targets, SEMANTIC_REJECTION_KINDS, sources),
+    check: (output) =>
+      checkJudgmentsShape(
+        output,
+        targets,
+        SEMANTIC_REJECTION_KINDS,
+        sources,
+        ids ? { rowIds: input.table.rows.map((row) => row.id) } : undefined,
+      ),
   });
   if (!answer.ok) return answer;
   return { ok: true, value: { tableSha256, judgments: answer.value, targets } };

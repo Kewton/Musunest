@@ -169,6 +169,17 @@ function toJson(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+/**
+ * 納品物の C3 の記録に書く判定（受理は 2 欄・拒否は 4 欄の今の形。Issue #718）。旗 `v12.ids` の C3 が
+ * missing-target の拒否に持つ欄（`targetKind`・`gap`・`relatedRowIds`・`note`）は、**診断（table-rounds）と
+ * checkpoint にだけ**残し、納品物の側へは投影して出さない（欄の無い判定はそのまま同じバイト列になる）。
+ */
+function bundledSemanticJudgment(judgment: SemanticJudgment): SemanticJudgment {
+  return judgment.verdict === "accept"
+    ? { requirementId: judgment.requirementId, verdict: "accept" }
+    : { requirementId: judgment.requirementId, verdict: "reject", kind: judgment.kind, quote: judgment.quote };
+}
+
 /** 違反の数を記録の JSON の形にする（欄の名前は snake_case） */
 function violationsJson(violations: VersionViolations): unknown {
   if (violations.kind === "static-check-failed") {
@@ -251,7 +262,7 @@ export function buildV11aArtifacts(input: V11aRecordsInput): readonly BundleArti
           round: round.round,
           table_sha256: round.tableSha256,
           targets: round.targets,
-          judgments: round.judgments,
+          judgments: round.judgments.map(bundledSemanticJudgment),
           advice: round.advice,
         })),
       }),

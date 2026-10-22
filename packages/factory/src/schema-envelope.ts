@@ -35,7 +35,7 @@ import { TEST_SUITE_SCHEMA, TEST_SUITE_SCHEMA_NAME } from "./stages/test-suite.j
 import { DECLARATION_SCHEMA, WRITE_SCHEMA_NAME } from "./stages/write.js";
 import { DECL_CHECK_SCHEMA, DECL_CHECK_SCHEMA_NAME } from "./v11a/stages/decl-check.js";
 import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
-import { SEMANTIC_CHECK_SCHEMA, SEMANTIC_CHECK_SCHEMA_NAME } from "./v11a/stages/semantic-check.js";
+import { SEMANTIC_CHECK_SCHEMA, SEMANTIC_CHECK_SCHEMA_IDS, SEMANTIC_CHECK_SCHEMA_NAME } from "./v11a/stages/semantic-check.js";
 import { TEST_SPEC_SCHEMA, TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
 import { DECLARATION_V11A_SCHEMA, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { fromPublicV12Flags, ledgerViewOf, V12_PIPELINE_FLAGS, type V12Flags } from "./v12/ledger.js";
@@ -180,6 +180,7 @@ export const ENVELOPE_SCHEMA_NAME_V12 = "stage-envelope-v12";
  * （`vocabulary-*`）と C2（`mapping`）の枝を足す（schema は段が渡すものと同じ導出。Issue #593。C2 は検査の種類ごとの欄。Issue #682）。
  * `ids` を省けば off。
  * T2 の枝は旗 `ids` からも導く（on なら operation の enum に structure が無く assertion は null だけ。段が渡すものと同じ導出。#624）。
+ * 旗 `ids` が on なら C3 の枝も段が渡すものと同じ導出（missing-target の 4 つの欄を持つ schema。Issue #718）にする。
  */
 export function stageEnvelopeEntriesV12Of(flags: Pick<V12Flags, "ledger"> & Partial<Pick<V12Flags, "ids">>): readonly StageEnvelopeEntry[] {
   const ledger = ledgerViewOf(flags);
@@ -195,7 +196,9 @@ export function stageEnvelopeEntriesV12Of(flags: Pick<V12Flags, "ledger"> & Part
         );
   if (flags.ids !== true) return base;
   return [
-    ...base,
+    ...base.map((entry) =>
+      entry.stage === SEMANTIC_CHECK_SCHEMA_NAME ? { stage: entry.stage, schema: SEMANTIC_CHECK_SCHEMA_IDS } : entry,
+    ),
     ...VOCABULARY_BUNDLES.map((bundle) => ({ stage: VOCABULARY_SCHEMA_NAMES[bundle], schema: vocabularySchemaOf(bundle, ledger) })),
     { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(ledger) },
   ];
@@ -211,13 +214,17 @@ const PIPELINE_V12_FLAGS = fromPublicV12Flags(V12_PIPELINE_FLAGS);
  * まま**にする——旗 ids off の v1.2 の走りが送る封筒のバイト列を変えないためだけに残す（旧の枝は段の要求には使わない）。ids on の
  * 走りは識別子 `v1.2-ids` の一覧（`STAGE_ENVELOPE_ENTRIES_V12_IDS`）を送る。T2 の枝も同じ理由で ids off の導出
  * （`testSpecSchemaOf(ledger, false)`）のままにする（ids on の場合の形は識別子 `v1.2-ids` の一覧だけに載る。#624・#625）。
+ * C3 の枝も同じ理由で旧の schema（`SEMANTIC_CHECK_SCHEMA`）に戻す（ids on の missing-target の欄は識別子 `v1.2-ids` の
+ * 一覧だけに載る。Issue #718）。
  */
 export const STAGE_ENVELOPE_ENTRIES_V12: readonly StageEnvelopeEntry[] = stageEnvelopeEntriesV12Of(PIPELINE_V12_FLAGS).map((entry) =>
   entry.stage === MAPPING_SCHEMA_NAME
     ? { stage: entry.stage, schema: legacyMappingSchemaOf(ledgerViewOf(PIPELINE_V12_FLAGS)) }
     : entry.stage === TEST_SPEC_SCHEMA_NAME
       ? { stage: entry.stage, schema: testSpecSchemaOf(ledgerViewOf(PIPELINE_V12_FLAGS), false) }
-      : entry,
+      : entry.stage === SEMANTIC_CHECK_SCHEMA_NAME
+        ? { stage: entry.stage, schema: SEMANTIC_CHECK_SCHEMA }
+        : entry,
 );
 
 /** 識別子 `v1.2` の全段で送る封筒の schema（起動時に 1 度だけ組む。全段で**同じ実体**を使う） */

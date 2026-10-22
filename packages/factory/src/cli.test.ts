@@ -101,6 +101,7 @@ import {
   testSpecSchemaOf,
 } from "./v11a/stages/test-spec.js";
 import * as testSpecModule from "./v11a/stages/test-spec.js";
+import { SEMANTIC_CHECK_IDS_RULE_DEFINITION, SEMANTIC_CHECK_SCHEMA, SEMANTIC_CHECK_SCHEMA_NAME } from "./v11a/stages/semantic-check.js";
 import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
 import type { NameTable } from "./v11a/names.js";
@@ -1412,7 +1413,19 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     // 手 3d（Issue #624）から構造の要件は T2 の要求に無いので、検査の対象の欄を持つのは C3 だけ
     expect(JSON.stringify(onWithTargets[0]).match(targetsPattern) !== null).toBe(true);
     expect(JSON.stringify(onWithTargets[1]).match(targetsPattern)).toBeNull();
-    const onRequests = withoutStructuralRequirement(withoutCheckTargets(onWithTargets), PROPERTY_LEDGER_VIEW);
+    // 旗 ids の C3 の差（規則 R-sc-06 と missing-target の欄を持つ schema。Issue #718）を、ids off の要求に戻して比べる
+    const withoutIdsC3 = (requests: readonly unknown[]): unknown[] =>
+      requests.map((value) => {
+        const request = value as LlmStructuredRequest;
+        return request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME
+          ? request
+          : {
+              ...request,
+              rules: (request.rules ?? []).filter((text) => text !== SEMANTIC_CHECK_IDS_RULE_DEFINITION.text),
+              schema: SEMANTIC_CHECK_SCHEMA,
+            };
+      });
+    const onRequests = withoutStructuralRequirement(withoutIdsC3(withoutCheckTargets(onWithTargets)), PROPERTY_LEDGER_VIEW);
     const offRequests = withoutStructuralRequirement(laterRequests(v11a.recording.structured));
     expect(onRequests).toHaveLength(offRequests.length);
     // 試験 ID と時計はコードが振る（#625）。両側から除いて差を見る
@@ -1437,10 +1450,12 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     // 旗 ids on の差（Issue #595）：#548 の台帳でも R-tsp-16 は旗 ids の文（既定値・選択肢の集合の文）。空の集計の行が無いので
     // 空の集計のコードの試験は作らない。手 3d（Issue #624）から構造の検査と画面の構造の確認はコードが作るので、B1 の塊の末尾にその
     // 試験が並ぶ（除いて比べる）。R-tsp-16 は旗 off の文に戻して比べる
-    const beforeRequests = withoutIdsGenerated(
-      withoutStructuralRequirement(withoutCheckTargets(laterRequests(v12Before.recording.structured)), LEDGER_VIEW_2B),
-      LEDGER_VIEW_2B,
-      true,
+    const beforeRequests = withoutIdsC3(
+      withoutIdsGenerated(
+        withoutStructuralRequirement(withoutCheckTargets(laterRequests(v12Before.recording.structured)), LEDGER_VIEW_2B),
+        LEDGER_VIEW_2B,
+        true,
+      ),
     );
     const beforeDiffs = requestDiffsOf(withoutTestIdClock(beforeRequests), withoutTestIdClock(offRequests));
     const enumDiff = withoutTableStage(ENUM_MEMBERSHIP_REQUEST_DIFF);
@@ -1456,7 +1471,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const spy2C = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2C : undefined));
     const v12Before2C = await runV11aCli({ dir: `${directory}/v12-complete-2c`, calls: [...v12Head(LEDGER_VIEW_2C), structured(v11aJudgments())], pipeline: "v1.2" });
     spy2C.mockRestore();
-    const before2CRequests = withoutStructuralRequirement(withoutCheckTargets(laterRequests(v12Before2C.recording.structured)), LEDGER_VIEW_2C);
+    const before2CRequests = withoutIdsC3(withoutStructuralRequirement(withoutCheckTargets(laterRequests(v12Before2C.recording.structured)), LEDGER_VIEW_2C));
     const diffs2C = requestDiffsOf(onRequests, before2CRequests);
     const when2C = withoutTableStage(WHEN_NON_REQUIREMENT_REQUEST_DIFF);
     for (const diff of diffs2C) expect(diff.paths, diff.schemaName).toEqual(when2C[diff.schemaName] ?? []);

@@ -42,6 +42,7 @@ import {
 } from "./schema-envelope.js";
 import { SURFACE_DIFF_SCHEMA_NAME } from "./plan/surface.js";
 import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
+import { SEMANTIC_CHECK_SCHEMA, SEMANTIC_CHECK_SCHEMA_IDS, SEMANTIC_CHECK_SCHEMA_NAME } from "./v11a/stages/semantic-check.js";
 import { TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
 import { testCasesSchemaOf } from "./v12/test-cases.js";
 import { PROPERTY_LEDGER_VIEW, V12_FLAGS_OFF, V12_PIPELINE_FLAGS, fromPublicV12Flags } from "./v12/ledger.js";
@@ -492,14 +493,16 @@ describe("経路 v1.2 の封筒は 1 つ（旗の組から導き、全段で同�
 
   it("v1.2 の封筒は名前 stage-envelope-v12 で、一覧は --pipeline v1.2 の旗の組から導いたもの", () => {
     expect(ENVELOPE_SCHEMA_NAME_V12).toBe("stage-envelope-v12");
-    // C2 と T2 の枝だけは旧の schema（ids off の v1.2 の封筒を保つためだけ。Issue #682・#624）。ほかの枝は旗の組から導いたもの
+    // C2・T2・C3 の枝だけは旧の schema（ids off の v1.2 の封筒を保つためだけ。Issue #682・#624・#718）。ほかの枝は旗の組から導いたもの
     expect(STAGE_ENVELOPE_ENTRIES_V12).toEqual(
       stageEnvelopeEntriesV12Of(fromPublicV12Flags(V12_PIPELINE_FLAGS)).map((entry) =>
         entry.stage === MAPPING_SCHEMA_NAME
           ? { stage: entry.stage, schema: legacyMappingSchemaOf(PROPERTY_LEDGER_VIEW) }
           : entry.stage === TEST_SPEC_SCHEMA_NAME
             ? { stage: entry.stage, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW) }
-            : entry,
+            : entry.stage === SEMANTIC_CHECK_SCHEMA_NAME
+              ? { stage: entry.stage, schema: SEMANTIC_CHECK_SCHEMA }
+              : entry,
       ),
     );
     expect(ENVELOPE_SCHEMA_V12).toEqual(buildEnvelopeSchema(STAGE_ENVELOPE_ENTRIES_V12));
@@ -670,15 +673,32 @@ describe("旗 v12.ids の C1・C2 の枝は v1.2 の封筒にだけ載る（Issu
 describe("旗 ids on の v1.2 は識別子 v1.2-ids の封筒を全段で送る（C2 の枝だけが検査の種類ごとの欄。Issue #682）", () => {
   const sha256 = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-  it("v1.2-ids の封筒は名前 stage-envelope-v12・一覧と段の順は v1.2 と同じで、違う枝は T2 と C2 だけ（ほかの枝は v1.2 と深く等しい。T2 は #624・#625）", () => {
+  it("v1.2-ids の封筒は名前 stage-envelope-v12・一覧と段の順は v1.2 と同じで、違う枝は C3 と T2 と C2 だけ（ほかの枝は v1.2 と深く等しい。T2 は #624・#625。C3 は #718）", () => {
     expect(envelopeOf("v1.2-ids")).toEqual({ name: ENVELOPE_SCHEMA_NAME_V12, schema: ENVELOPE_SCHEMA_V12_IDS, entries: STAGE_ENVELOPE_ENTRIES_V12_IDS });
     expect(envelopeOf("v1.2-ids").schema).toBe(ENVELOPE_SCHEMA_V12_IDS);
     expect(STAGE_ENVELOPE_ENTRIES_V12_IDS).toEqual(stageEnvelopeEntriesV12Of(fromPublicV12Flags(V12_PIPELINE_FLAGS)));
     expect(ENVELOPE_SCHEMA_V12_IDS).toEqual(buildEnvelopeSchema(STAGE_ENVELOPE_ENTRIES_V12_IDS));
     expect(STAGE_ENVELOPE_ENTRIES_V12_IDS.map((entry) => entry.stage)).toEqual(STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage));
     const changed = STAGE_ENVELOPE_ENTRIES_V12_IDS.filter((entry, index) => JSON.stringify(entry) !== JSON.stringify(STAGE_ENVELOPE_ENTRIES_V12[index]));
-    expect(changed.map((entry) => entry.stage)).toEqual([TEST_SPEC_SCHEMA_NAME, MAPPING_SCHEMA_NAME]);
+    expect(changed.map((entry) => entry.stage)).toEqual([SEMANTIC_CHECK_SCHEMA_NAME, TEST_SPEC_SCHEMA_NAME, MAPPING_SCHEMA_NAME]);
     expect(ENVELOPE_SCHEMA_V12_IDS).not.toEqual(ENVELOPE_SCHEMA_V12);
+  });
+
+  it("C3 の枝は識別子 v1.2-ids だけ新しい schema（missing-target の 4 つの欄）。v1.2・v1.1a・旗 ledger の封筒は旧の schema のまま（Issue #718）", () => {
+    const c3Of = (entries: readonly StageEnvelopeEntry[]) => entries.find((entry) => entry.stage === SEMANTIC_CHECK_SCHEMA_NAME)?.schema;
+    expect(c3Of(STAGE_ENVELOPE_ENTRIES_V12_IDS)).toEqual(SEMANTIC_CHECK_SCHEMA_IDS);
+    expect(c3Of(STAGE_ENVELOPE_ENTRIES_V12)).toEqual(SEMANTIC_CHECK_SCHEMA);
+    expect(c3Of(STAGE_ENVELOPE_ENTRIES_V11A)).toEqual(SEMANTIC_CHECK_SCHEMA);
+    expect(c3Of(STAGE_ENVELOPE_ENTRIES_V12_LEDGER)).toEqual(SEMANTIC_CHECK_SCHEMA);
+    expect(strictProblems(buildStageBranch({ stage: SEMANTIC_CHECK_SCHEMA_NAME, schema: SEMANTIC_CHECK_SCHEMA_IDS }))).toEqual([]);
+    expect(
+      strictProblems(
+        buildStageBranch({
+          stage: SEMANTIC_CHECK_SCHEMA_NAME,
+          schema: stageEnvelopeEntriesV12Of({ ledger: true, ids: true }).find((entry) => entry.stage === SEMANTIC_CHECK_SCHEMA_NAME)?.schema,
+        }),
+      ),
+    ).toEqual([]);
   });
 
   it("v1.2-ids の封筒の全枝が strict の走査で問題 0。C2 の枝の checks は 6 欄が全部 required で、各欄と checks が null を許し、view-shows だけ sourceId を持つ", () => {
@@ -706,8 +726,12 @@ describe("旗 ids on の v1.2 は識別子 v1.2-ids の封筒を全段で送る�
   it("識別子 v1.2-ids では、C1・C2 と T1''〜B5' の全段が同じ実体（1 種類のバイト列）の封筒を送る。新しい C2 の schema を識別子 v1.2 で送ると第 3 の道（段ごとの差し替え）に落ちる", () => {
     const requests = [
       { stage: NAME_TABLE_SCHEMA_NAME, schema: nameTableSchemaOf(PROPERTY_LEDGER_VIEW) },
+      { stage: SEMANTIC_CHECK_SCHEMA_NAME, schema: SEMANTIC_CHECK_SCHEMA_IDS },
       { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW, true) },
-      ...STAGE_ENVELOPE_ENTRIES_V11A.filter((entry) => entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME),
+      ...STAGE_ENVELOPE_ENTRIES_V11A.filter(
+        (entry) =>
+          entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME && entry.stage !== SEMANTIC_CHECK_SCHEMA_NAME,
+      ),
       ...VOCABULARY_BUNDLES.map((bundle) => ({ stage: VOCABULARY_SCHEMA_NAMES[bundle], schema: vocabularySchemaOf(bundle, PROPERTY_LEDGER_VIEW) })),
       { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(PROPERTY_LEDGER_VIEW) },
     ];

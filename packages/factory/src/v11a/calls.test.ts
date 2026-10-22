@@ -42,6 +42,7 @@ import { ARBITRATION_SCHEMA_NAME } from "../stages/arbitrate.js";
 import {
   FIXTURE_DOCUMENTS,
   bundledT2Client,
+  idsC3Client,
   negative,
   recordedStructured,
   requestListedIds,
@@ -119,14 +120,17 @@ function createMouth(
   failFirst: boolean,
   bySchema?: Readonly<Record<string, readonly RecordedCall[]>>,
   home?: readonly (readonly [string, string])[],
+  idsC3 = false,
 ) {
+  // 旗 `v12.ids` の C3 の既存の台本に、欠けた対象の欄の最小の値を足す（Issue #718）
+  const wrap = (client: LlmClient): LlmClient => (idsC3 ? idsC3Client(client) : client);
   // `bySchema` を渡すと、要求の schema 名ごとの記録から順に返す（段の数が走りで変わる二点測定用。Issue #594）
   const routed =
     bySchema === undefined
       ? undefined
-      : new Map(Object.entries(bySchema).map(([name, calls]) => [name, bundledT2Client(createFakeLlmClient(calls, { validateAgainstSchema: true }), home)] as const));
+      : new Map(Object.entries(bySchema).map(([name, calls]) => [name, wrap(bundledT2Client(createFakeLlmClient(calls, { validateAgainstSchema: true }), home))] as const));
   // 旗 v12.ids の T2 は束ごとに同時に呼ぶので、記録した T2 の応答を束ごとに独立に読んで絞る（順序に依らない。Issue #626）
-  const ordered = bundledT2Client(createFakeLlmClient(recorded, { validateAgainstSchema: true }), home);
+  const ordered = wrap(bundledT2Client(createFakeLlmClient(recorded, { validateAgainstSchema: true }), home));
   const inner: LlmClient = {
     callStructured: (request) => (routed?.get(request.schemaName) ?? ordered).callStructured(request),
     callWithTools: (request) => ordered.callWithTools(request),
@@ -271,7 +275,7 @@ function generationInputOf(materials: SizedMaterials, client: LlmClient, judge: 
 }
 
 async function observe(materials: SizedMaterials, recorded: readonly RecordedCall[], options: RunOptions = {}) {
-  const mouth = createMouth(recorded, options.failFirst ?? false, options.bySchema, options.home);
+  const mouth = createMouth(recorded, options.failFirst ?? false, options.bySchema, options.home, options.flags?.ids === true);
   const judge = createCountingJudge(materials.adviceAnswers(), options.wrapJudge);
   const result = await runGenerationV11a(generationInputOf(materials, mouth.client, judge.judge, options));
   const stages = Object.fromEntries(COUNTED_STAGES.map((stage) => [stage, totalsOf(result.record.stages, stage)])) as Record<StageKey, StageTotals>;
@@ -1167,7 +1171,7 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
     const ranged = await runStageRangeV11a({
       source: materials.source,
       documents: FIXTURE_DOCUMENTS,
-      client: createMouth([], false, bySchema()).client,
+      client: createMouth([], false, bySchema(), undefined, true).client,
       judge: createCountingJudge(materials.adviceAnswers()).judge,
       budgetUsd: 1_000,
       rates: RATES,
@@ -1887,7 +1891,7 @@ describe("(10) 旗 v12.ids の T2 の束（手 3f・Issue #626）：束ごとの
   /** 表を組む段まで流して、境界 T1''／T2 の材料を取る */
   async function resumeOf(materials: SizedMaterials) {
     const head = await runStageRangeV11a({
-      ...generationInputOf(materials, createMouth([...materials.tableResponses().map(structured), structured(materials.judgments())], false).client, createCountingJudge(materials.adviceAnswers()).judge, { flags: ALL_ON }),
+      ...generationInputOf(materials, createMouth([...materials.tableResponses().map(structured), structured(materials.judgments())], false, undefined, undefined, true).client, createCountingJudge(materials.adviceAnswers()).judge, { flags: ALL_ON }),
       range: { start: "name-table", end: "semantic-check" },
     });
     const boundary = head.boundaries[0];
