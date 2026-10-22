@@ -1844,14 +1844,43 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(judgmentOfRound(rounds[1], "R4")).toEqual(rejection);
     const boundary = result.boundaries?.find((entry) => entry.boundary === "t1-t2");
     expect(boundary?.semanticCheck.judgments.find((judgment) => judgment.requirementId === "R4")).toEqual(rejection);
+    if (boundary === undefined) throw new Error("前提が壊れた：境界が無い");
+    // checkpoint に書き出して JSON を読み戻した semantic_check にも残る（Review 66c）
+    const written = JSON.parse(
+      stageJsonText(
+        buildStageCheckpoint({
+          materials: boundary,
+          versions: { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0" },
+          planSha256: "a".repeat(64),
+          sourceSha256: "b".repeat(64),
+        }),
+      ),
+    ) as { readonly semantic_check: { readonly judgments: readonly Record<string, unknown>[] } };
+    expect(written.semantic_check.judgments.find((judgment) => judgment["requirementId"] === "R4")).toEqual(rejection);
   });
 
   /**
    * 変更前の工場（6fe5f4c）の ids on・v1.2 の t1-t2 の checkpoint の出力ダイジェスト。全件受理の C3 は欄を持たず、
    * checkpoint の列も T2 以降のコードも変わっていないので、今のコードでも同じバイト列になる（欄付きの拒否を含む
    * checkpoint だけが変わる。Issue #718 の Review 66b）。
+   *
+   * 取り方：6fe5f4c の作業場（detached・pnpm install/build 済み）で、この試験と同じ台本（全件受理の C3 →
+   * `tailFor(IDS)` の T2、欄を持たない t1-t2 の checkpoint、ids on の flags と ledger_upstream）を流した。
+   * 次の値はその走りから取った（一時の試験ファイルで測り、作業場の変更はコミットしていない）。
    */
   const PRE_CHANGE_T1_T2_DIGEST = "c3146ba9a9c67e232a21139f87afe903ef5966f079009dbd98cbeb61e2bed4f9";
+  /** 6fe5f4c で同じ再開の T2 を流したときの、段の記録（`outcome.stages`）の JSON の SHA-256 */
+  const PRE_CHANGE_T2_STAGES_SHA = "b17435f76cd4a949c9004ac41b8a99cd3ef800110a49032e263c3ba811e85515";
+  /**
+   * 6fe5f4c で同じ再開の T2 を流したときの t2-b1 の checkpoint の出力ダイジェスト。
+   * 版は `stageVersionsAt(base, "t2-b1", ledgerUpstream)`（prompt v1.2・flags・ledger 全体・ledger_upstream null）。
+   */
+  const PRE_CHANGE_T2_B1_DIGEST = "b21ef016e60cf0467516876146d83318f3ec69f88f34587d5013a24f63a37673";
+  /**
+   * 6fe5f4c で同じ再開の T2 を流したときの段の走りの記録（`buildStageRunRecord`）の JSON の SHA-256。
+   * 条件は prompt v1.2・pipeline v1.2・ids on の flags・`V12_CALL_LIMITS`・予算 0.3・締切 600000・timeout null。
+   */
+  const PRE_CHANGE_T2_RECORD_SHA = "55ac70eefb0f7937f84aa94c372c10466020ea0cf3787977b6c9539ba56487ec";
 
   it("(9) 変更前の形（欄を持たない）の ids on・v1.2 の t1-t2 の checkpoint から T2 へ再開でき、走りの記録とダイジェストが直す前と同じ。SHA・flags・上流の指紋が合わなければ今どおり断る（Issue #718）", async () => {
     // 全件受理の C3（missing-target の拒否が無い）ので、t1-t2 の checkpoint は 6fe5f4c の形（欄を持たない）とバイト列で同じ
@@ -1868,11 +1897,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const ledger = await propertyLedgerSha256();
     const ledgerUpstream = await upstreamLedgerSha256();
     const flags = toPublicV12Flags({ ledger: true, searchRepair: true, ids: true });
-    const versions = stageVersionsAt(
-      { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0", ledger, flags, call_limits: null },
-      "t1-t2",
-      ledgerUpstream,
-    );
+    const baseVersions = { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0", ledger, flags, call_limits: null };
+    const versions = stageVersionsAt(baseVersions, "t1-t2", ledgerUpstream);
     const checkpoint = JSON.parse(
       stageJsonText(buildStageCheckpoint({ materials: boundary, versions, planSha256: "a".repeat(64), sourceSha256: "b".repeat(64) })),
     ) as Record<string, unknown>;
@@ -1920,7 +1946,52 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(fromCheckpoint.stages).toEqual(direct.stages);
     expect(fromCheckpoint.boundaries).toEqual(direct.boundaries);
     expect(fromCheckpoint.testSpec).toEqual(direct.testSpec);
+    // 入力の再計算。T2 の出力は下の固定値で照らす
     expect(await stageOutputDigest(JSON.parse(checkpointText))).toBe(digest);
+    // 再開後の段の記録と t2-b1 の checkpoint は、6fe5f4c で同じ台本を流した固定の値と同じ
+    expect(await sha256Hex(JSON.stringify(fromCheckpoint.stages))).toBe(PRE_CHANGE_T2_STAGES_SHA);
+    const t2b1 = fromCheckpoint.boundaries.find((entry) => entry.boundary === "t2-b1");
+    if (t2b1 === undefined) throw new Error("前提が壊れた：t2-b1 の境界が無い");
+    const t2b1Checkpoint = buildStageCheckpoint({
+      materials: t2b1,
+      versions: stageVersionsAt(baseVersions, "t2-b1", ledgerUpstream),
+      planSha256: "a".repeat(64),
+      sourceSha256: "b".repeat(64),
+    });
+    expect(await stageOutputDigest(t2b1Checkpoint)).toBe(PRE_CHANGE_T2_B1_DIGEST);
+    // 段の走りの記録（stage-run.json と同じ組み方）も固定の値と同じ
+    const stageRecord = buildStageRunRecord({
+      range: { start: "test-spec", end: "test-spec" },
+      input: { checkpoint: "cp.json", boundary: "t1-t2", output_digest: digest },
+      planSha256: "a".repeat(64),
+      sourceSha256: "b".repeat(64),
+      checkpoints: [{ boundary: "t2-b1", path: "cp-t2-b1.json", output_digest: await stageOutputDigest(t2b1Checkpoint) }],
+      conditions: {
+        model: "m",
+        effort: "high",
+        documents: [],
+        judge: { primary: "llm", fallback: null },
+        prompt_version: "v1.2",
+        vocabulary_version: "v1",
+        contract_version: "v0.2",
+        factory_version: "0.0.0",
+        spec_engine_version: "0.0.0",
+        budget_usd: 0.3,
+        deadline_ms: 600_000,
+        timeout_ms: null,
+        pipeline: "v1.2",
+        v12_flags: flags,
+        v12_call_limits: {
+          logical_calls: V12_CALL_LIMITS.logicalCalls,
+          real_attempts: V12_CALL_LIMITS.realAttempts,
+          judge_branch: V12_CALL_LIMITS.judgeBranch,
+        },
+      },
+      outcome: fromCheckpoint,
+      exitCode: fromCheckpoint.stopped === null ? 0 : 1,
+      v12: { testSpecInRange: true },
+    });
+    expect(await sha256Hex(stageJsonText(stageRecord))).toBe(PRE_CHANGE_T2_RECORD_SHA);
     // 負例：SHA・flags・上流の指紋が合わない checkpoint は今どおり断る
     const writeWith = async (mutate: (value: Record<string, any>) => void, overrideDigest?: string) => {
       const value = JSON.parse(checkpointText) as Record<string, any>;
