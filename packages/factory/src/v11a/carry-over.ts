@@ -37,10 +37,25 @@ import { PROPERTY_LEDGER_VIEW, type UpstreamLedgerView } from "../v12/ledger.js"
 export const CARRY_OVER_ORIGINS = ["name-table", "semantic-check", "decl-check", "coverage"] as const;
 export type CarryOverOrigin = (typeof CARRY_OVER_ORIGINS)[number];
 
-/** 意味の点検の 1 判定（受理／拒否。拒否は種類と引用を持つ） */
+/**
+ * 意味の点検の 1 判定（受理／拒否。拒否は種類と引用を持つ）。
+ *
+ * 旗 `v12.ids` の C3 は、missing-target の拒否にだけ欠けた対象の欄（`targetKind`・`gap`・`relatedRowIds`・
+ * `note`。Issue #718）を足す。欄は任意である——欄の無い旧い記録（checkpoint・fixture）もそのまま読める。
+ * 欄は記録だけで、持ち越し・判定・採用した回の選び方には使わない。
+ */
 export type SemanticJudgment =
   | { readonly requirementId: string; readonly verdict: "accept" }
-  | { readonly requirementId: string; readonly verdict: "reject"; readonly kind: string; readonly quote: string };
+  | {
+      readonly requirementId: string;
+      readonly verdict: "reject";
+      readonly kind: string;
+      readonly quote: string;
+      readonly targetKind?: string;
+      readonly gap?: string;
+      readonly relatedRowIds?: readonly string[];
+      readonly note?: string;
+    };
 
 /** T1'' の完全な結果（表の SHA に結ぶ） */
 export interface SemanticCheckResult {

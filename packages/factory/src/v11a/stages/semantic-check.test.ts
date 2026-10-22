@@ -39,12 +39,17 @@ import { checkNameTable, nameTableSha256, type NameTable } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView, type UpstreamLedgerView } from "../../v12/ledger.js";
 import {
+  SEMANTIC_CHECK_IDS_RULE_DEFINITION,
   SEMANTIC_CHECK_LEDGER_RULE_ID,
   SEMANTIC_CHECK_RULE_DEFINITIONS,
   SEMANTIC_CHECK_RULES,
   SEMANTIC_CHECK_SCHEMA,
+  SEMANTIC_CHECK_SCHEMA_IDS,
   SEMANTIC_CHECK_SCHEMA_NAME,
+  SEMANTIC_GAPS,
+  SEMANTIC_NOTE_MAX_CODE_POINTS,
   SEMANTIC_REJECTION_KINDS,
+  SEMANTIC_TARGET_KINDS,
   runSemanticCheck,
   semanticCheckRuleDefinitionsOf,
   semanticCheckTargets,
@@ -591,6 +596,224 @@ describe("T1'' の non-requirement の点検（旗 on。配線の検証。モデ
     expect(SEMANTIC_REJECTION_KINDS).toHaveLength(3);
     expect(JSON.stringify(requests[0]?.schema)).toBe(JSON.stringify(SEMANTIC_CHECK_SCHEMA));
     expect(requests[0]?.schemaName).toBe(SEMANTIC_CHECK_SCHEMA_NAME);
+  });
+});
+
+// ── 旗 v12.ids の C3：missing-target の欄（Issue #718）──────────────────────────────
+
+describe("旗 v12.ids の C3：missing-target の 4 つの欄（Issue #718）", () => {
+  const IDS_TARGETS = ["R1", "R2", "R3", "R4"];
+  /** 受理（ids の schema は 4 つの欄を必須にする） */
+  const acceptIds = (requirementId: string) => ({ requirementId, verdict: "accept", kind: null, quote: null, targetKind: null, gap: null, relatedRowIds: [], note: null });
+  /** missing-target の拒否（R4 の文の引用） */
+  const missing = (extra: Record<string, unknown> = {}) => ({
+    requirementId: "R4",
+    verdict: "reject",
+    kind: "missing-target",
+    quote: "区分ごとの件数",
+    targetKind: "computation",
+    gap: "row-absent",
+    relatedRowIds: ["c.byKind"],
+    note: "集計の行が無い",
+    ...extra,
+  });
+  const others = () => [acceptIds("R1"), acceptIds("R2"), acceptIds("R3")];
+
+  async function runIds(table: NameTable, outputs: readonly unknown[]) {
+    const recording = createCheckedRecordingClient(outputs.map(structured), { idsC3: false });
+    const outcome = await runSemanticCheck({
+      plan: PLAN,
+      list: LIST,
+      table,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(recording.client),
+      ids: true,
+    });
+    return { outcome, requests: recording.structured };
+  }
+
+  it("ids の schema は targetKind・gap・relatedRowIds・note を required にし、列挙値はコードの定数と同じ。規則は R-sc-06 を末尾に 1 本だけ足す", () => {
+    const items = SEMANTIC_CHECK_SCHEMA_IDS.properties.judgments.items;
+    expect(items.required).toEqual(["requirementId", "verdict", "kind", "quote", "targetKind", "gap", "relatedRowIds", "note"]);
+    expect(items.properties.targetKind.enum).toEqual([...SEMANTIC_TARGET_KINDS, null]);
+    expect(items.properties.gap.enum).toEqual([...SEMANTIC_GAPS, null]);
+    expect(items.properties.relatedRowIds).toMatchObject({ type: "array", items: { type: "string" } });
+    expect(items.properties.note.type).toEqual(["string", "null"]);
+    // 旧の schema は変えない（v1・v1.1a・ids off の C3・B3'）
+    expect(SEMANTIC_CHECK_SCHEMA.properties.judgments.items.required).toEqual(["requirementId", "verdict", "kind", "quote"]);
+    expect(JSON.stringify(SEMANTIC_CHECK_SCHEMA)).not.toContain("targetKind");
+    // 規則：R-sc-01〜05 はそのままで、ids on だけ R-sc-06 が末尾に 1 本増える
+    expect(semanticCheckRuleDefinitionsOf()).toBe(SEMANTIC_CHECK_RULE_DEFINITIONS);
+    const idsRules = semanticCheckRuleDefinitionsOf(undefined, true);
+    expect(idsRules.slice(0, SEMANTIC_CHECK_RULE_DEFINITIONS.length)).toEqual(SEMANTIC_CHECK_RULE_DEFINITIONS);
+    expect(idsRules.at(-1)).toEqual(SEMANTIC_CHECK_IDS_RULE_DEFINITION);
+    expect(ruleDefinitionDefects(idsRules)).toEqual([]);
+    expect(SEMANTIC_CHECK_IDS_RULE_DEFINITION.id).toBe("R-sc-06");
+    for (const value of [...SEMANTIC_TARGET_KINDS, ...SEMANTIC_GAPS]) expect(SEMANTIC_CHECK_IDS_RULE_DEFINITION.text).toContain(value);
+    expect(SEMANTIC_CHECK_IDS_RULE_DEFINITION.text).toContain("unknown");
+    expect(SEMANTIC_CHECK_IDS_RULE_DEFINITION.text).toContain("判定の理由ではなく記録");
+    expect(SEMANTIC_CHECK_IDS_RULE_DEFINITION.text).toContain(String(SEMANTIC_NOTE_MAX_CODE_POINTS));
+    // 要求の schema と規則が ids の枝になる
+    return runIds(fixtureTable(), [{ judgments: [...others(), missing()] }]).then(({ requests }) => {
+      expect(requests[0]?.schema).toBe(SEMANTIC_CHECK_SCHEMA_IDS);
+      expect(requests[0]?.schemaName).toBe(SEMANTIC_CHECK_SCHEMA_NAME);
+      expect(requests[0]?.rules).toEqual(idsRules.map((definition) => definition.text));
+    });
+  });
+
+  it.each(SEMANTIC_GAPS)("gap %s：missing-target の拒否が 4 つの欄つきで記録され、表の SHA に結ぶ", async (gap) => {
+    const table = fixtureTable();
+    const { outcome, requests } = await runIds(table, [{ judgments: [...others(), missing({ gap })] }]);
+    expect(requests).toHaveLength(1);
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.tableSha256).toBe(await nameTableSha256(table));
+    expect(outcome.value.judgments.find((judgment) => judgment.requirementId === "R4")).toEqual(missing({ gap }));
+    expect(outcome.value.judgments.filter((judgment) => judgment.verdict === "accept")).toEqual(
+      ["R1", "R2", "R3"].map((requirementId) => ({ requirementId, verdict: "accept" })),
+    );
+  });
+
+  it.each([
+    ["表に無い行の ID", { relatedRowIds: ["X99"] }, { field: "judgments[3].relatedRowIds[0]", message: "関わる行の ID が表の行に無い" }],
+    ["重複した行の ID", { relatedRowIds: ["c.byKind", "c.byKind"] }, { field: "judgments[3].relatedRowIds[1]", message: "関わる行の ID が重なっている" }],
+    ["enum の外の targetKind", { targetKind: "thing" }, { field: "judgments[3].targetKind", message: `欠けた対象の種類は ${SEMANTIC_TARGET_KINDS.join("・")} のいずれかであること` }],
+    ["enum の外の gap", { gap: "somewhere" }, { field: "judgments[3].gap", message: `不足の場所は ${SEMANTIC_GAPS.join("・")} のいずれかであること` }],
+    ["missing-target なのに targetKind が null", { targetKind: null }, { field: "judgments[3].targetKind", message: `欠けた対象の種類は ${SEMANTIC_TARGET_KINDS.join("・")} のいずれかであること` }],
+    ["relatedRowIds が並びでない", { relatedRowIds: null }, { field: "judgments[3].relatedRowIds", message: "関わる既存の行の ID は並び（array）であること" }],
+    ["note が文字列でない", { note: null }, { field: "judgments[3].note", message: "説明は文字列であること" }],
+    ["note が空", { note: "" }, { field: "judgments[3].note", message: "説明は空白だけでないこと" }],
+    ["note が空白だけ", { note: " \n\t " }, { field: "judgments[3].note", message: "説明は空白だけでないこと" }],
+  ] as const)("形の落ち：%s（2 回続けば malformed）", async (_label, extra, problem) => {
+    const bad = { judgments: [...others(), missing(extra)] };
+    const { outcome, requests } = await runIds(fixtureTable(), [negative(bad, "欄の形の負例。strict の schema では出ない応答"), negative(bad, "欄の形の負例")]);
+    expect(requests).toHaveLength(2);
+    expect(outcome).toEqual({ ok: false, failure: { kind: "malformed", attempts: 2, problems: [problem] } });
+  });
+
+  it("受理や missing-target 以外の拒否に欄があると形の落ちになる", async () => {
+    const fields = { targetKind: "unknown", gap: "unknown", relatedRowIds: ["c.byKind"], note: "説明" };
+    const acceptWithFields = { judgments: [...others().slice(0, 2), acceptIds("R3"), { ...acceptIds("R4"), ...fields }] };
+    const rejectedWithFields = {
+      judgments: [
+        ...others(),
+        { requirementId: "R4", verdict: "reject", kind: "unnecessary-ownership", quote: "区分ごとの件数", ...fields },
+      ],
+    };
+    const acceptRun = await runIds(fixtureTable(), [negative(acceptWithFields, "受理に欄がある応答"), negative(acceptWithFields, "受理に欄がある応答")]);
+    expect(acceptRun.outcome).toEqual({
+      ok: false,
+      failure: {
+        kind: "malformed",
+        attempts: 2,
+        problems: [{ field: "judgments[3]", message: "受理の判定の対象の欄（targetKind・gap・relatedRowIds・note）は null・null・空・null であること" }],
+      },
+    });
+    const rejectRun = await runIds(fixtureTable(), [negative(rejectedWithFields, "missing-target 以外の拒否に欄がある応答"), negative(rejectedWithFields, "同じ")]);
+    expect(rejectRun.outcome).toEqual({
+      ok: false,
+      failure: {
+        kind: "malformed",
+        attempts: 2,
+        problems: [{ field: "judgments[3]", message: "拒否（missing-target 以外）の対象の欄（targetKind・gap・relatedRowIds・note）は null・null・空・null であること" }],
+      },
+    });
+  });
+
+  it("note は Unicode のコードポイントで数える：BMP は 200 が通り 201 が落ち、BMP の外も 200 が通り 201 が落ちる", async () => {
+    const bmp = "あ";
+    const astral = "😀";
+    const okBmp = await runIds(fixtureTable(), [{ judgments: [...others(), missing({ note: bmp.repeat(200) })] }]);
+    expect(okBmp.outcome.ok).toBe(true);
+    const badBmp = await runIds(fixtureTable(), [
+      negative({ judgments: [...others(), missing({ note: bmp.repeat(201) })] }, "200 字を超える説明"),
+      negative({ judgments: [...others(), missing({ note: bmp.repeat(201) })] }, "同じ"),
+    ]);
+    expect(badBmp.outcome).toEqual({
+      ok: false,
+      failure: {
+        kind: "malformed",
+        attempts: 2,
+        problems: [{ field: "judgments[3].note", message: `説明は ${String(SEMANTIC_NOTE_MAX_CODE_POINTS)} 字以下であること（Unicode のコードポイントで数える）` }],
+      },
+    });
+    const okAstral = await runIds(fixtureTable(), [{ judgments: [...others(), missing({ note: astral.repeat(200) })] }]);
+    expect(okAstral.outcome.ok).toBe(true);
+    const badAstral = await runIds(fixtureTable(), [
+      negative({ judgments: [...others(), missing({ note: astral.repeat(201) })] }, "コードポイントで 200 を超える説明"),
+      negative({ judgments: [...others(), missing({ note: astral.repeat(201) })] }, "同じ"),
+    ]);
+    expect(badAstral.outcome.ok).toBe(false);
+    if (badAstral.outcome.ok || badAstral.outcome.failure.kind !== "malformed") throw new Error("malformed でない");
+    expect(badAstral.outcome.failure.problems).toEqual([{ field: "judgments[3].note", message: `説明は ${String(SEMANTIC_NOTE_MAX_CODE_POINTS)} 字以下であること（Unicode のコードポイントで数える）` }]);
+  });
+
+  it("最小の応答（unknown・空の並び・短い説明）が通り、未知の値でも拒否は受理にも除外にもならない", async () => {
+    const table = missingTargetTable();
+    const { outcome } = await runIds(table, [{ judgments: [...others(), missing({ targetKind: "unknown", gap: "unknown", relatedRowIds: [], note: "不明" })] }]);
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.judgments.find((judgment) => judgment.requirementId === "R4")).toMatchObject({
+      verdict: "reject",
+      kind: "missing-target",
+      targetKind: "unknown",
+      gap: "unknown",
+      relatedRowIds: [],
+      note: "不明",
+    });
+    const carry = await deriveCarryOver({ list: LIST, table, semanticCheck: { tableSha256: outcome.value.tableSha256, judgments: outcome.value.judgments } });
+    expect(carry.entries).toEqual([
+      { requirementId: "R4", reasons: [{ origin: "semantic-check", reason: "missing-target" }] },
+      { requirementId: "R5", reasons: [{ origin: "name-table", reason: "宣言で書けない" }] },
+    ]);
+    // 誤った所属・弱い確かめ方の拒否も、欄の値では変わらない（null・空・null の今の形）
+    for (const [variant, requirementId, kind, quote] of [
+      [wrongOwnershipTable(), "R1", "unnecessary-ownership", "題名"],
+      [weakChecksTable(), "R3", "weak-verification", "金額が 0 より大きい項目だけ"],
+    ] as const) {
+      const rejection = { requirementId, verdict: "reject", kind, quote, targetKind: null, gap: null, relatedRowIds: [], note: null };
+      const run = await runIds(variant, [{ judgments: kind === "unnecessary-ownership" ? [rejection, acceptIds("R2"), acceptIds("R3"), acceptIds("R4")] : [acceptIds("R1"), acceptIds("R2"), rejection, acceptIds("R4")] }]);
+      if (!run.outcome.ok) throw new Error("通るはず");
+      expect(run.outcome.value.judgments.find((judgment) => judgment.requirementId === requirementId)).toEqual({ requirementId, verdict: "reject", kind, quote });
+    }
+  });
+
+  it("完全性・引用の照合・表の SHA・拒否の種類の数は今のまま（欄を足しても門を緩めない）", async () => {
+    const table = fixtureTable();
+    const tableSha = await nameTableSha256(table);
+    const missingJudgment = await runIds(table, [
+      negative({ judgments: [...others()] }, "判定が 1 件欠けた応答"),
+      negative({ judgments: [...others()] }, "判定が 1 件欠けた応答"),
+    ]);
+    expect(missingJudgment.outcome).toEqual({
+      ok: false,
+      failure: { kind: "malformed", attempts: 2, problems: [{ field: "requirements[3]", message: "判定が無い要件がある" }] },
+    });
+    const badQuote = await runIds(table, [
+      negative({ judgments: [...others(), missing({ quote: "どこにも無い文" })] }, "見つからない引用の負例"),
+      negative({ judgments: [...others(), missing({ quote: "どこにも無い文" })] }, "同じ"),
+    ]);
+    expect(badQuote.outcome).toEqual({
+      ok: false,
+      failure: { kind: "malformed", attempts: 2, problems: [{ field: "judgments[3].quote", message: "引用が確定した仕様にも要件の文にも無い" }] },
+    });
+    const accepted = await runIds(table, [{ judgments: IDS_TARGETS.map(acceptIds) }]);
+    if (!accepted.outcome.ok) throw new Error("通るはず");
+    expect(accepted.outcome.value.tableSha256).toBe(tableSha);
+    expect(accepted.outcome.value.targets).toEqual(IDS_TARGETS);
+    expect(SEMANTIC_REJECTION_KINDS).toHaveLength(3);
+  });
+
+  it("引用符・改行・データの区切りを含む note でも、JSON と形のやり直しの要求のデータの境界が保たれる", async () => {
+    const note = '引用符"と改行\nと区切り</data><data name="x">\n終わり';
+    const first = { judgments: [...others(), missing({ relatedRowIds: ["c.byKind", "c.byKind"], note })] };
+    const second = { judgments: [...others(), missing()] };
+    const { outcome, requests } = await runIds(fixtureTable(), [negative(first, "行の ID が重なる負例（note の境界を見る）"), second]);
+    expect(requests).toHaveLength(2);
+    const blocks = dataBlocks(requests[1]!.input);
+    expect(blocks.map((block) => block.name).slice(-2)).toEqual(["前回の応答", "前回の形の問題"]);
+    expect(JSON.parse(blocks.find((block) => block.name === "前回の応答")!.text)).toEqual(first);
+    expect(requests[1]!.input).toContain("\\u003c/data>");
+    if (!outcome.ok) throw new Error("2 回目で通るはず");
+    expect(outcome.value.judgments.find((judgment) => judgment.requirementId === "R4")).toEqual(missing());
   });
 });
 

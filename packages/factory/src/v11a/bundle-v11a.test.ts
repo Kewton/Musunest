@@ -158,6 +158,36 @@ describe("v1.1α の 7 つの記録", () => {
     expect(byPath.get(V11A_ARTIFACT_NAMES.judgeAdvice).rounds[0].thresholds).toEqual(JUDGE_ADVICE_THRESHOLDS);
     expect(byPath.get(V11A_ARTIFACT_NAMES.verification).decl_check).toEqual({ exhausted: 0, malformed: 1, rejected: 0 });
   });
+
+  it("旗 v12.ids の C3 が missing-target に持つ欄は、納品物の semantic-check.json へ投影して出さない（Issue #718）", () => {
+    const base = input();
+    const enriched: V11aRecordsInput = {
+      ...base,
+      semanticCheck: base.semanticCheck.map((round) => ({
+        ...round,
+        judgments: [
+          { requirementId: "R1", verdict: "accept" as const },
+          {
+            requirementId: "R2",
+            verdict: "reject" as const,
+            kind: "missing-target",
+            quote: "担当者",
+            targetKind: "field",
+            gap: "attribute-absent",
+            relatedRowIds: ["f.member.title"],
+            note: "属性が足りない",
+          },
+        ],
+      })),
+    };
+    const artifact = buildV11aArtifacts(enriched).find((entry) => entry.path === V11A_ARTIFACT_NAMES.semanticCheck);
+    const parsed = JSON.parse(artifact?.text ?? "{}") as { readonly rounds: readonly { readonly judgments: readonly Record<string, unknown>[] }[] };
+    expect(parsed.rounds[0]?.judgments).toEqual([
+      { requirementId: "R1", verdict: "accept" },
+      { requirementId: "R2", verdict: "reject", kind: "missing-target", quote: "担当者" },
+    ]);
+    for (const key of ["targetKind", "gap", "relatedRowIds", "note", "属性が足りない"]) expect(artifact?.text).not.toContain(key);
+  });
 });
 
 // ── 探索の記録（旗 v12.search-repair。Issue #551）──────────────────────────────

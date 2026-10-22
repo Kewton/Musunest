@@ -26,7 +26,7 @@ import {
 import { STRUCTURAL_ASSERTIONS, STRUCTURAL_TARGET_KINDS, type StructuralAssertionKind } from "../../fixed-test.js";
 import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
-import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
+import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
 import { TEST_SPEC_RETAINED_DATA_NAME, TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
 import {
   WRITE_V11A_IDS_R07_DEFINITION,
@@ -819,22 +819,77 @@ export const WHEN_NON_REQUIREMENT_REQUEST_DIFF: Readonly<Record<string, readonly
  * `createRecordingClient`（`stages/__tests__/prompt.ts`）と同じ形で、**記録した構造化出力を要求の schema に照らす**
  * 偽物を作る。段の形の検査と schema を組む関数のずれが、手で書いた記録で隠れないようにする。
  * 負例の記録は、`unchecked`（`uncheckedBecause` で理由を付ける）で照合を外す。
+ *
+ * `idsC3` が真なら、旗 `v12.ids` の C3 の既存の台本（4 つの欄を書かない応答）に、欠けた対象の欄の最小の値を
+ * 足してから段へ渡す（Issue #718）。**段の要求と形の検査は新しい schema のまま**で、足す値は決まった最小値だけ。
  */
-export function createCheckedRecordingClient(recorded: readonly RecordedCall[]): RecordingClient {
+export function createCheckedRecordingClient(
+  recorded: readonly RecordedCall[],
+  options: { readonly idsC3?: boolean } = {},
+): RecordingClient {
   const inner = createFakeLlmClient(recorded, { validateAgainstSchema: true });
+  const target = options.idsC3 === false ? inner : idsC3Client(inner);
   const structured: LlmStructuredRequest[] = [];
   const tools: LlmToolRequest[] = [];
   const client: LlmClient = {
     async callStructured<T>(request: LlmStructuredRequest) {
       structured.push(request);
-      return inner.callStructured<T>(request);
+      return target.callStructured<T>(request);
     },
     async callWithTools(request: LlmToolRequest) {
       tools.push(request);
-      return inner.callWithTools(request);
+      return target.callWithTools(request);
     },
   };
   return { client, structured, tools };
+}
+
+/** 要求の schema が旗 `v12.ids` の C3（4 つの欄を必須にする）か */
+function requiresIdsTargetFields(schema: unknown): boolean {
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return false;
+  const judgments = (schema as Record<string, unknown>)["properties"];
+  if (judgments === null || typeof judgments !== "object" || Array.isArray(judgments)) return false;
+  const items = ((judgments as Record<string, unknown>)["judgments"] as Record<string, unknown> | undefined)?.["items"] as
+    | Record<string, unknown>
+    | undefined;
+  const required = items?.["required"];
+  return Array.isArray(required) && required.includes("targetKind");
+}
+
+/**
+ * 旗 `v12.ids` の C3 の応答（既存の台本）に、欠けた対象の欄の最小の値を足す（Issue #718）。欄が既にあれば触らない。
+ * missing-target は `unknown`・`unknown`・空・短い説明、それ以外は null・null・空・null。
+ */
+export function withIdsC3Fields(output: unknown): unknown {
+  if (output === null || typeof output !== "object" || Array.isArray(output)) return output;
+  const raw = (output as Record<string, unknown>)["judgments"];
+  if (!Array.isArray(raw)) return output;
+  const judgments = raw.map((item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return item;
+    const judgment = item as Record<string, unknown>;
+    if ("targetKind" in judgment) return judgment;
+    return judgment["verdict"] === "reject" && judgment["kind"] === "missing-target"
+      ? { ...judgment, targetKind: "unknown", gap: "unknown", relatedRowIds: [], note: "不明" }
+      : { ...judgment, targetKind: null, gap: null, relatedRowIds: [], note: null };
+  });
+  return { ...(output as Record<string, unknown>), judgments };
+}
+
+/**
+ * 旗 `v12.ids` の C3 の要求だけ、記録を旧の schema で照らしてから 4 つの欄を足す包み（Issue #718）。
+ * 旧い台本（欄を書かない応答）を、新しい schema の C3 の走りの試験に使うためだけの偽物である。
+ */
+export function idsC3Client(inner: LlmClient): LlmClient {
+  return {
+    async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+      if (request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME || !requiresIdsTargetFields(request.schema)) {
+        return inner.callStructured<T>(request);
+      }
+      const response = await inner.callStructured<unknown>({ ...request, schema: SEMANTIC_CHECK_SCHEMA });
+      return { ...response, output: withIdsC3Fields(response.output) as T };
+    },
+    callWithTools: (request: LlmToolRequest) => inner.callWithTools(request),
+  };
 }
 
 /** 負例の応答（わざと schema に合わない。照合ありの偽物が照らさない。理由が要る） */
