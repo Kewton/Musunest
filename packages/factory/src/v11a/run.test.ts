@@ -1946,6 +1946,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(fromCheckpoint.stages).toEqual(direct.stages);
     expect(fromCheckpoint.boundaries).toEqual(direct.boundaries);
     expect(fromCheckpoint.testSpec).toEqual(direct.testSpec);
+    // 入力の再計算。T2 の出力は下の固定値で照らす
+    expect(await stageOutputDigest(JSON.parse(checkpointText))).toBe(digest);
     // 再開後の段の記録と t2-b1 の checkpoint は、6fe5f4c で同じ台本を流した固定の値と同じ
     expect(await sha256Hex(JSON.stringify(fromCheckpoint.stages))).toBe(PRE_CHANGE_T2_STAGES_SHA);
     const t2b1 = fromCheckpoint.boundaries.find((entry) => entry.boundary === "t2-b1");
