@@ -43,6 +43,7 @@ import { PROPERTY_LEDGER_VIEW, type LedgerView, type UpstreamLedgerView } from "
 import type { ReferenceCounts } from "../ids.js";
 import {
   MAPPING_DATA_NAMES,
+  MAPPING_LEDGER_DATA_NAMES,
   MAPPING_MESSAGES,
   MAPPING_NORMALIZATION_DEFINITIONS,
   MAPPING_NORMALIZATION_REASON,
@@ -652,14 +653,25 @@ describe("検査の種類ごとの欄（Issue #682）", () => {
         "同じ種類の検査を 2 つ以上の行に掛けて確かめる要件は、その種類の欄に行ごとに 1 件ずつ並べる。同じ組（view-shows は画面と表示元の組、ほかは行）を 2 回書かない。",
         "structural は、検査の種類のうち 1 つ以上で確かめられる要件だけである。",
         "確かめ方の種類を選ぶ既存の条件（default-value など、専用の種類を指定する文）は今までどおり先に当てる。",
-        "そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。",
         "欄が全部 null の structural は表の検査で断られる。",
-        "constraintIds に書けない根拠となる文書の制約 ID を 1 件以上（文書の制約 ID の一覧にあるものだけ）書く。",
-        "根拠となる制約 ID を一覧から挙げられない要件は unresolved にしない。",
         "使わない欄は null か空の並びにする。",
       ]) {
         expect(r3, phrase).toContain(phrase);
       }
+      // unresolved の根拠の文：台帳を受けない版は文書の制約 ID だけ（直す前と同じ文）、台帳を受けた版は台帳の未対応の観測を足した
+      // 文（構造の文の中の誘導も同じ条件。Issue #725。台帳版の期待をこの節で置き換えた）
+      const documentOnly = [
+        "そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。",
+        "constraintIds に書けない根拠となる文書の制約 ID を 1 件以上（文書の制約 ID の一覧にあるものだけ）書く。",
+        "根拠となる制約 ID を一覧から挙げられない要件は unresolved にしない。",
+      ];
+      const withLedger = [
+        "そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、宣言で書けないか台帳が未対応とする観測でしか確かめられず、根拠の ID を文書の制約 ID の一覧か台帳の未対応の観測の一覧から 1 件以上挙げられるなら unresolved にする。",
+        "宣言で書けない、または台帳が未対応とする観測でしか確かめられない要件は kind を unresolved にし、reason に理由を書き、constraintIds に根拠の ID を 1 件以上（文書の制約 ID の一覧か台帳の未対応の観測の一覧にあるものだけ）書く。根拠を一覧から挙げられない要件は unresolved にしない。",
+      ];
+      const [present, absent] = definitions === MAPPING_RULE_DEFINITIONS ? [documentOnly, withLedger] : [withLedger, documentOnly];
+      for (const phrase of present) expect(r3, phrase).toContain(phrase);
+      for (const phrase of absent) expect(r3, phrase).not.toContain(phrase);
       // Issue #724 で外した文（#682 の 1 種類 1 件と、2 つ以上の行に掛ける要件の fixed-test への選び方）
       expect(r3).not.toContain("同じ種類の検査は要件ごとに 1 件である");
       expect(r3).not.toContain("2 つ以上の行に掛けなければ確かめられない要件");
@@ -680,11 +692,22 @@ describe("検査の種類ごとの欄（Issue #682）", () => {
       rejections: "表の点検の拒否",
       advice: "助言の印",
     });
-    // 台帳の文で組み直す版は R-map-03 の頭が同じ（台帳の文の前に構造・未解決の文が来る）
+    // 台帳の文で組み直す版は R-map-03 の頭が、unresolved の 2 文（構造の文の中の誘導と未解決の文）だけを台帳の版に差し替えた
+    // 通常版の頭と同じ（台帳の文の前に構造・未解決の文が来る。Issue #725 で startsWith の期待をこの差し替えの一致に置き換えた）
     const plain = MAPPING_RULE_DEFINITIONS.find((definition) => definition.id === "R-map-03")?.text ?? "";
     const ledger = mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW).find((definition) => definition.id === "R-map-03")?.text ?? "";
     const head = plain.slice(0, plain.indexOf("要件の決まりが"));
-    expect(ledger.startsWith(head)).toBe(true);
+    const ledgerHead = head
+      .replace(
+        "宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。",
+        "宣言で書けないか台帳が未対応とする観測でしか確かめられず、根拠の ID を文書の制約 ID の一覧か台帳の未対応の観測の一覧から 1 件以上挙げられるなら unresolved にする。",
+      )
+      .replace(
+        "宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に書けない根拠となる文書の制約 ID を 1 件以上（文書の制約 ID の一覧にあるものだけ）書く。根拠となる制約 ID を一覧から挙げられない要件は unresolved にしない。",
+        "宣言で書けない、または台帳が未対応とする観測でしか確かめられない要件は kind を unresolved にし、reason に理由を書き、constraintIds に根拠の ID を 1 件以上（文書の制約 ID の一覧か台帳の未対応の観測の一覧にあるものだけ）書く。根拠を一覧から挙げられない要件は unresolved にしない。",
+      );
+    expect(ledgerHead).not.toBe(head);
+    expect(ledger.startsWith(ledgerHead)).toBe(true);
   });
 });
 
@@ -1891,19 +1914,24 @@ describe("検査の対象の並び（同じ種類の検査を 2 つ以上の行�
 
   it("要求：通常版・台帳版・書き直しの版の R-map-03 が同じ新しい文で、ID・why は直す前のまま・since に履歴がある", () => {
     const plain = MAPPING_RULE_DEFINITIONS.find((definition) => definition.id === "R-map-03");
-    for (const definitions of [
-      MAPPING_RULE_DEFINITIONS,
-      mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW),
-      mappingRewriteRuleDefinitionsOf(),
-      mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW),
-    ]) {
+    for (const [definitions, ledgerVersion] of [
+      [MAPPING_RULE_DEFINITIONS, false],
+      [mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW), true],
+      [mappingRewriteRuleDefinitionsOf(), false],
+      [mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW), true],
+    ] as const) {
       expect(ruleDefinitionDefects(definitions)).toEqual([]);
       const r3 = definitions.find((definition) => definition.id === "R-map-03");
       expect(r3?.text).toContain("同じ種類の検査を 2 つ以上の行に掛けて確かめる要件は、その種類の欄に行ごとに 1 件ずつ並べる。同じ組（view-shows は画面と表示元の組、ほかは行）を 2 回書かない。");
       expect(r3?.text).not.toContain("同じ種類の検査は要件ごとに 1 件");
       expect(r3?.text).not.toContain("structural にせず、kind を fixed-test にしてそれらの行を所属させる");
       expect(r3?.why).toBe(plain?.why);
-      expect(r3?.since).toBe(plain?.since);
+      // 台帳版と台帳版の書き直しの since は、直す前の since の後ろに #725 の履歴を足したもの（Issue #725 で台帳版の期待を置き換えた）
+      expect(r3?.since).toBe(
+        ledgerVersion
+          ? `${plain?.since ?? ""}。#682 は空の並び 34/129 件を理由に 1 件以上とした。根拠を文書に縛る理由（怠慢の持ち越しを塞ぐ）は保ち、台帳の未対応を根拠に足した（Issue #725）`
+          : plain?.since,
+      );
     }
     expect(plain?.why).toBe(
       "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（T1 の R-nt-08）。構造の検査の対象は規則の文で所属を求めず、応答の欄で行の ID を書かせて対と所属をコードが導く（方法論 03 の F4・H1・H2）",
@@ -1911,5 +1939,153 @@ describe("検査の対象の並び（同じ種類の検査を 2 つ以上の行�
     expect(plain?.since).toContain("#682 は形の落ち率を理由に 1 種類 1 件とした。fixed-test にすると試験 0 本・操作が未検証になる要件があり（U1 の 30 本の分析）");
     expect(plain?.since).toContain("Issue #724");
     expectNoAcceptanceMaterial([JSON.stringify(twoOperations()), JSON.stringify(twoSources()), MAPPING_MESSAGES.checksEmpty, plain?.text ?? ""]);
+  });
+});
+
+describe("台帳の未対応の観測を unresolved の根拠に足す（旗 ids と ledger が on の C2 だけ。v1.2 表の契約 A-U。Issue #725）", () => {
+  /** 台帳を受けた C2 の行（計算の行に集計の欄）と、その行で書いた正しい応答 */
+  const LEDGER_TABLE = withCodeIds(withAggregates(fixtureTable()));
+  const LEDGER_GOOD = idsResponsesOf(LIST, LEDGER_TABLE, PROPERTY_LEDGER_VIEW).mapping;
+  const LEDGER_ID = "state-after-set";
+  const unresolvedIndex = (LEDGER_GOOD["requirements"] as Entry[]).findIndex((entry) => (entry["verification"] as Entry)["kind"] === "unresolved");
+  /** 未解決の要件の constraintIds だけを差し替えた応答 */
+  const withConstraintIds = (good: Record<string, unknown>, constraintIds: readonly string[]) => ({
+    requirements: (good["requirements"] as Entry[]).map((entry, index) =>
+      index === unresolvedIndex ? { ...entry, verification: { ...(entry["verification"] as Entry), constraintIds } } : entry,
+    ),
+  });
+  /** 要求のデータの塊の名前の並び */
+  const dataNamesOf = (input: string | undefined): readonly string[] => [...(input ?? "").matchAll(/<data name="([^"]+)">\n/gu)].map((match) => match[1] ?? "");
+  const EXPECTED_BLOCK = { observations: [{ id: LEDGER_ID, message: PROPERTY_LEDGER_VIEW.unsupportedObservations[0]?.message }] };
+
+  it("前提：未解決の要件が 1 件で、文書の制約 ID を挙げている。台帳の未対応の観測は state-after-set の 1 件で、文書の制約 ID ではない", () => {
+    expect(unresolvedIndex).toBe(4);
+    expect(((LEDGER_GOOD["requirements"] as Entry[])[unresolvedIndex]?.["verification"] as Entry | undefined)?.["constraintIds"]).toEqual([...constraintIdsIn(FIXTURE_DOCUMENTS)].slice(0, 1));
+    expect(PROPERTY_LEDGER_VIEW.unsupportedObservations.map((entry) => entry.id)).toEqual([LEDGER_ID]);
+    expect(constraintIdsIn(FIXTURE_DOCUMENTS).has(LEDGER_ID)).toBe(false);
+  });
+
+  it("(1) 台帳の未対応の観測の ID だけを挙げた unresolved は、台帳を受けた C2' で問題 0（1 回で通る）。表の確かめ方は unresolved のまま理由とその ID を持つ。台帳を受けない C2 では今までどおり「制約 ID が文書に無い」で落ちる", async () => {
+    const response = withConstraintIds(LEDGER_GOOD, [LEDGER_ID]);
+    const { outcome, recording } = await run([response], { table: LEDGER_TABLE, ledger: PROPERTY_LEDGER_VIEW });
+    expect(recording.structured).toHaveLength(1);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.value.table.verification[unresolvedIndex]).toMatchObject({ kind: "unresolved", reason: "宣言で書けない", constraintIds: [LEDGER_ID] });
+    }
+    const inspected = inspectMapping(LIST, LEDGER_TABLE.rows, response, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+    expect(inspected.ok).toBe(true);
+    // 台帳を受けない C2（ids on・ledger off）は今のまま落ちる
+    // （初回の問題は要件 R5 に帰属するので、2 本目は R5 だけの書き直し。同じ ID のまま書けば落ちる）
+    const offResponse = withConstraintIds(GOOD, [LEDGER_ID]);
+    const off = await run([offResponse, rewriteOf(offResponse, ["R5"])]);
+    expect(off.outcome.ok).toBe(false);
+    expect(messagesOf(off.outcome)).toEqual(["制約 ID が文書に無い"]);
+  });
+
+  it("(2) 文書の制約 ID の unresolved は、台帳を受けても直す前と同じ表（応答から組んだ表）で通る", async () => {
+    const { outcome } = await run([LEDGER_GOOD], { table: LEDGER_TABLE, ledger: PROPERTY_LEDGER_VIEW });
+    expect(outcome.ok).toBe(true);
+    const inspected = inspectMapping(LIST, LEDGER_TABLE.rows, LEDGER_GOOD, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+    expect(inspected.ok).toBe(true);
+    if (outcome.ok && inspected.ok) {
+      expect(outcome.value.table).toEqual(inspected.table);
+      expect(outcome.value.table.verification[unresolvedIndex]).toMatchObject({ kind: "unresolved", constraintIds: [...constraintIdsIn(FIXTURE_DOCUMENTS)].slice(0, 1) });
+    }
+  });
+
+  it("(3)(4) 負例：空の constraintIds・台帳の有効な観測の ID・どちらにも無い ID は、台帳を受けた C2' でも今の固定文で落ちる", () => {
+    const problemsOf = (ids: readonly string[]) => {
+      const inspected = inspectMapping(LIST, LEDGER_TABLE.rows, withConstraintIds(LEDGER_GOOD, ids), FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+      return inspected.ok ? [] : inspected.problems.map((problem) => problem.message);
+    };
+    expect(problemsOf([])).toEqual(["未解決の要件に制約 ID が無い"]);
+    for (const id of ["when", "value", "default-value", "どちらにも無い"]) expect(problemsOf([id]), id).toEqual(["制約 ID が文書に無い"]);
+  });
+
+  it("要求：台帳を受けた C2 のデータは文書の塊の直後に未対応の観測の一覧（ID と文）を持ち、それを除けば台帳を受けない要求のデータと同じ。規則は R-map-03 だけが違う", async () => {
+    const on = await run([LEDGER_GOOD], { table: LEDGER_TABLE, ledger: PROPERTY_LEDGER_VIEW });
+    const off = await run([LEDGER_GOOD, LEDGER_GOOD], { table: LEDGER_TABLE });
+    const onRequest = on.recording.structured[0];
+    const offRequest = off.recording.structured[0];
+    expect(dataNamesOf(onRequest?.input)).toEqual([
+      MAPPING_DATA_NAMES.plan,
+      MAPPING_DATA_NAMES.list,
+      MAPPING_DATA_NAMES.rows,
+      MAPPING_DATA_NAMES.documents,
+      MAPPING_LEDGER_DATA_NAMES.unsupported,
+    ]);
+    expect(dataNamesOf(offRequest?.input)).toEqual([MAPPING_DATA_NAMES.plan, MAPPING_DATA_NAMES.list, MAPPING_DATA_NAMES.rows, MAPPING_DATA_NAMES.documents]);
+    expect(blockOf(onRequest?.input, MAPPING_LEDGER_DATA_NAMES.unsupported)).toEqual(EXPECTED_BLOCK);
+    const block = `\n<data name="${MAPPING_LEDGER_DATA_NAMES.unsupported}">\n${(onRequest?.input ?? "").split(`<data name="${MAPPING_LEDGER_DATA_NAMES.unsupported}">\n`)[1]?.split("\n</data>")[0] ?? ""}\n</data>`;
+    expect(onRequest?.input.replace(block, "")).toBe(offRequest?.input);
+    expect(MAPPING_LEDGER_DATA_NAMES).toEqual({ unsupported: "台帳の未対応の観測" });
+    // 規則：R-map-03 のほかは同じ文・同じ順
+    const onRules = mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    expect(onRules.map((definition) => definition.id)).toEqual(MAPPING_RULE_DEFINITIONS.map((definition) => definition.id));
+    expect(onRules.filter((definition) => definition.id !== "R-map-03")).toEqual(MAPPING_RULE_DEFINITIONS.filter((definition) => definition.id !== "R-map-03"));
+    expect(onRequest?.rules).toEqual(ruleTexts(onRules));
+    expect(offRequest?.rules).toEqual(ruleTexts(MAPPING_RULE_DEFINITIONS));
+    expectNoAcceptanceMaterial([onRequest?.input ?? "", ...ruleTexts(onRules)]);
+  });
+
+  it("要求：落ちた要件だけの書き直しと C3 の拒否のあとの 2 回目の要求も、文書の塊の直後に同じ一覧を持ち、台帳版の書き直しの規則（新しい R-map-03）を使う", async () => {
+    const rewriteRules = ruleTexts(mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW));
+    // 落ちた要件だけの書き直し（R1 の所属に行に無い ID）
+    const bad = {
+      requirements: (LEDGER_GOOD["requirements"] as Entry[]).map((entry, index) =>
+        index === 0 ? { ...entry, roles: [...(entry["roles"] as Entry[]), { id: "X99", basis: "stated", reason: null }] } : entry,
+      ),
+    };
+    const shape = await run([bad, rewriteOf(LEDGER_GOOD, ["R1"])], { table: LEDGER_TABLE, ledger: PROPERTY_LEDGER_VIEW });
+    expect(shape.outcome.ok).toBe(true);
+    const second = shape.recording.structured[1];
+    expect(dataNamesOf(second?.input).slice(0, 5)).toEqual([
+      MAPPING_DATA_NAMES.plan,
+      MAPPING_DATA_NAMES.list,
+      MAPPING_DATA_NAMES.rows,
+      MAPPING_DATA_NAMES.documents,
+      MAPPING_LEDGER_DATA_NAMES.unsupported,
+    ]);
+    expect(blockOf(second?.input, MAPPING_LEDGER_DATA_NAMES.unsupported)).toEqual(EXPECTED_BLOCK);
+    expect(second?.rules).toEqual(rewriteRules);
+    // C3 の拒否のあとの 2 回目
+    const previous: MappingPrevious = {
+      response: LEDGER_GOOD,
+      rejections: [{ requirementId: "R2", verdict: "reject", kind: "unnecessary-ownership", quote: "一覧で見られる" }] as unknown as MappingPrevious["rejections"],
+      advice: [],
+    };
+    const rejected = await run([rewriteOf(LEDGER_GOOD, ["R2"])], { table: LEDGER_TABLE, ledger: PROPERTY_LEDGER_VIEW, previous });
+    expect(rejected.outcome.ok).toBe(true);
+    const request = rejected.recording.structured[0];
+    expect(dataNamesOf(request?.input)).toEqual([
+      MAPPING_DATA_NAMES.plan,
+      MAPPING_DATA_NAMES.list,
+      MAPPING_DATA_NAMES.rows,
+      MAPPING_DATA_NAMES.documents,
+      MAPPING_LEDGER_DATA_NAMES.unsupported,
+      MAPPING_DATA_NAMES.response,
+      MAPPING_DATA_NAMES.rejections,
+      MAPPING_DATA_NAMES.advice,
+      MAPPING_REWRITE_DATA_NAMES.requirements,
+    ]);
+    expect(request?.rules).toEqual(rewriteRules);
+    // 台帳版の書き直しの R-map-03 は新しい文（kind・reason の記入の指示と、根拠の一覧に台帳の未対応の観測）
+    const r3 = mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW).find((definition) => definition.id === "R-map-03")?.text ?? "";
+    expect(r3).toContain("kind を unresolved にし、reason に理由を書き、constraintIds に根拠の ID を 1 件以上（文書の制約 ID の一覧か台帳の未対応の観測の一覧にあるものだけ）書く。");
+    expect(r3).toContain("根拠を一覧から挙げられない要件は unresolved にしない。");
+  });
+
+  it("規則の定義の不備 0（台帳の文で組み直した版・書き直しの版）。台帳を受けない版の R-map-03 は直す前と同じ文・同じ since", () => {
+    for (const definitions of [mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW), mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW), MAPPING_RULE_DEFINITIONS, mappingRewriteRuleDefinitionsOf()]) {
+      expect(ruleDefinitionDefects(definitions)).toEqual([]);
+    }
+    const plain = MAPPING_RULE_DEFINITIONS.find((definition) => definition.id === "R-map-03");
+    expect(plain?.text).not.toContain("台帳");
+    expect(plain?.since).not.toContain("#725");
+    const ledger = mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW).find((definition) => definition.id === "R-map-03");
+    expect(ledger?.id).toBe(plain?.id);
+    expect(ledger?.why).toBe(plain?.why);
+    expect(ledger?.since).toContain("#682 は空の並び 34/129 件を理由に 1 件以上とした。根拠を文書に縛る理由（怠慢の持ち越しを塞ぐ）は保ち、台帳の未対応を根拠に足した");
   });
 });

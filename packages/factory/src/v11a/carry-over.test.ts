@@ -2,11 +2,16 @@
 import { describe, expect, it } from "vitest";
 import { checkDesignOwnership } from "../stages/design.js";
 import {
+  FIXTURE_CONSTRAINT_ID,
+  FIXTURE_DOCUMENTS,
   LEDGER_VIEW_2C,
+  codeIdRenameOf,
   fixtureList,
   fixtureNonRequirementList,
   fixtureNonRequirementTable,
   fixtureTable,
+  withAggregates,
+  withCodeIds,
 } from "./__tests__/fixtures.js";
 import type { FixedTest } from "../fixed-test.js";
 import {
@@ -17,7 +22,7 @@ import {
   type DeclJudgment,
   type SemanticJudgment,
 } from "./carry-over.js";
-import { nameTableSha256 } from "./names.js";
+import { checkMappedTable, nameTableSha256, type NameTable } from "./names.js";
 import { PROPERTY_LEDGER_VIEW, type UpstreamLedgerView } from "../v12/ledger.js";
 
 const accept = (requirementId: string) => ({ requirementId, verdict: "accept" as const });
@@ -318,5 +323,41 @@ describe("読み漏れの検出：持ち越しは台帳を上流の見方で受�
     void ledger.rows;
     expect(same).toBe(true);
     expect(ledger.excludedWhenAcceptedKinds).toEqual(PROPERTY_LEDGER_VIEW.excludedWhenAcceptedKinds);
+  });
+});
+
+describe("台帳の未対応の観測の ID を根拠にした unresolved（Issue #725）：持ち越しの本体は変えず、今の本体を例外なく通る", () => {
+  const LEDGER_ID = PROPERTY_LEDGER_VIEW.unsupportedObservations[0]?.id ?? "";
+  /** 旗 ids と ledger が on の C2' が受ける表（コードの形の ID・計算の行に集計の欄）。未解決の要件 R5 の根拠だけを差し替える */
+  const mappedTable = (constraintIds: readonly string[]): NameTable => {
+    const table = withCodeIds(withAggregates(fixtureTable()));
+    return { ...table, verification: table.verification.map((entry) => (entry.kind === "unresolved" ? { ...entry, constraintIds } : entry)) };
+  };
+  const inputOf = async (table: NameTable): Promise<CarryOverInput> => ({
+    list: fixtureList(),
+    table,
+    semanticCheck: {
+      tableSha256: await nameTableSha256(table),
+      judgments: [accept("R1"), accept("R2"), accept("R3"), reject("R4", "missing-target")],
+    },
+    declCheck: {
+      declarationSha256: DECL_SHA,
+      result: { declarationSha256: DECL_SHA, judgments: [accept("R1"), accept("R2"), reject("R3", "condition-mismatch")] },
+    },
+    coverage: [{ requirementId: "R1", units: [{ requirementId: "R1", targetId: codeIdRenameOf(fixtureTable()).get("f.item.amount") ?? "", key: "k" }] }],
+    ledger: PROPERTY_LEDGER_VIEW,
+  });
+
+  it("台帳の ID だけを挙げた表は台帳を受けた C2' を通り、持ち越しは出どころ name-table・理由は reason の写しで、文書の制約 ID の表と同じ持ち越し・同じ除く範囲になる（constraintIds を読まない）", async () => {
+    expect(LEDGER_ID).toBe("state-after-set");
+    const byLedger = mappedTable([LEDGER_ID]);
+    const byDocument = mappedTable([FIXTURE_CONSTRAINT_ID]);
+    expect(checkMappedTable(fixtureList(), byLedger, FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW })).toEqual([]);
+    expect(checkMappedTable(fixtureList(), byDocument, FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW })).toEqual([]);
+    const carried = await deriveCarryOver(await inputOf(byLedger));
+    expect(carried.entries.find((entry) => entry.requirementId === "R5")).toEqual({ requirementId: "R5", reasons: [{ origin: "name-table", reason: "宣言で書けない" }] });
+    expect(carried).toEqual(await deriveCarryOver(await inputOf(byDocument)));
+    // 根拠の ID を足しても・並べ替えても持ち越しは同じ（本体は constraintIds を読まない）
+    expect(await deriveCarryOver(await inputOf(mappedTable([FIXTURE_CONSTRAINT_ID, LEDGER_ID])))).toEqual(carried);
   });
 });

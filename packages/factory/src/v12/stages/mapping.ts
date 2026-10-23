@@ -43,6 +43,12 @@
 // 前回の写像（C2 の 2 回目の要求のデータ）は整える前の raw のまま（整えた差分を LLM に見せない）。整えた中身は結果の `normalized`
 // で返し、診断の table-rounds にだけ残す。
 //
+// 台帳の未対応の観測（Issue #725。方法論 03 の H3・H2）：unresolved の根拠は文書の制約 ID だけで、文書には「工場が観測できない」を
+// 指す ID が無く、台帳が未対応とする観測でしか確かめられない要件は根拠を挙げられずに fixed-test へ寄っていた。台帳を受けた C2
+// だけ、文書の塊の直後に未対応の観測の一覧（ID と文）を渡し、R-map-03 の unresolved の文（構造の文の中の誘導を含む）の根拠にその
+// 一覧を足し、C2' は constraintIds の各要素を文書の制約 ID か未対応の観測の ID で受ける。1 件以上・空の理由・文書に無い ID の
+// 固定文と、根拠を挙げられない要件を unresolved にしない規律は同じ。台帳を受けない C2 は今のまま。
+//
 // 参照の照合の数（`ReferenceCounts`）：照らした参照＝応答の要件 ID・所属の ID・検査の対象の ID の全部、知らない ID＝一覧に無い
 // 要件 ID・行に無い所属や対象の ID、重複＝同じ要件 2 件・同じ要件の中の同じ行、別の束の ID＝要件 ID の欄に行の ID の形・所属や
 // 対象の欄に一覧の要件 ID。
@@ -105,6 +111,11 @@ export const MAPPING_DATA_NAMES = {
   advice: "助言の印",
 } as const;
 
+/** 台帳を受けた C2 だけが足すデータの塊の名前（文書の塊の直後。Issue #725） */
+export const MAPPING_LEDGER_DATA_NAMES = {
+  unsupported: "台帳の未対応の観測",
+} as const;
+
 /**
  * 落ちた要件だけの書き直しの要求で足すデータの塊の名前（Issue #660。前回の写像は `MAPPING_DATA_NAMES.response`）。C3 の拒否のあとの
  * 2 回目は「書き直す要件」だけを足す（問題は拒否の塊。Issue #661）
@@ -128,13 +139,28 @@ export const MAPPING_MESSAGES = {
   checksEmpty: "checks の欄は null か 1 件以上の対象の並びであること（使わない種類の欄は null にする）",
 } as const;
 
-/** 構造の検査の書き方（R-map-03 と台帳の文の頭で同じ文） */
-const STRUCTURAL_RULE_TEXT =
-  "構造で確かめるなら kind を structural にし、reason に理由を書く。checks は検査の種類ごとの欄で、各欄は検査の対象の並びである。使う種類の欄に、targetId で検査が見る行の ID（field-type は項目、action-kind・action-unconditioned・write-anonymous は操作、view-shows は画面、aggregate-no-period は計算）を書いた対象を並べ、view-shows の対象は sourceId に画面と同じ entity の項目か計算の行の ID（entity を持たない画面は entity を持たない計算の ID）も書き、使わない種類の欄は空の並びにせず null にする。同じ種類の検査を 2 つ以上の行に掛けて確かめる要件は、その種類の欄に行ごとに 1 件ずつ並べる。同じ組（view-shows は画面と表示元の組、ほかは行）を 2 回書かない。structural は、検査の種類のうち 1 つ以上で確かめられる要件だけである。確かめ方の種類を選ぶ既存の条件（default-value など、専用の種類を指定する文）は今までどおり先に当てる。そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。欄が全部 null の structural は表の検査で断られる。検査の対象の行はコードが所属に足す。";
+/** 構造の検査の書き方（R-map-03 と台帳の文の頭で同じ文。unresolved への誘導の文だけ台帳の版で差し替える。Issue #725） */
+const structuralRuleText = (unresolvedGuide: string): string =>
+  `構造で確かめるなら kind を structural にし、reason に理由を書く。checks は検査の種類ごとの欄で、各欄は検査の対象の並びである。使う種類の欄に、targetId で検査が見る行の ID（field-type は項目、action-kind・action-unconditioned・write-anonymous は操作、view-shows は画面、aggregate-no-period は計算）を書いた対象を並べ、view-shows の対象は sourceId に画面と同じ entity の項目か計算の行の ID（entity を持たない画面は entity を持たない計算の ID）も書き、使わない種類の欄は空の並びにせず null にする。同じ種類の検査を 2 つ以上の行に掛けて確かめる要件は、その種類の欄に行ごとに 1 件ずつ並べる。同じ組（view-shows は画面と表示元の組、ほかは行）を 2 回書かない。structural は、検査の種類のうち 1 つ以上で確かめられる要件だけである。確かめ方の種類を選ぶ既存の条件（default-value など、専用の種類を指定する文）は今までどおり先に当てる。そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、${unresolvedGuide}欄が全部 null の structural は表の検査で断られる。検査の対象の行はコードが所属に足す。`;
+
+/** 構造の文の中の unresolved への誘導（台帳を受けない版） */
+const STRUCTURAL_RULE_TEXT = structuralRuleText("宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。");
+
+/** 構造の文の中の unresolved への誘導（台帳を受けた版。未解決の文と同じ条件。Issue #725） */
+const STRUCTURAL_LEDGER_RULE_TEXT = structuralRuleText(
+  "宣言で書けないか台帳が未対応とする観測でしか確かめられず、根拠の ID を文書の制約 ID の一覧か台帳の未対応の観測の一覧から 1 件以上挙げられるなら unresolved にする。",
+);
 
 /** 書けない要件の書き方（R-map-03 と台帳の文の頭で同じ文。制約 ID の 1 件以上は Issue #682） */
 const UNRESOLVED_RULE_TEXT =
   "宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に書けない根拠となる文書の制約 ID を 1 件以上（文書の制約 ID の一覧にあるものだけ）書く。根拠となる制約 ID を一覧から挙げられない要件は unresolved にしない。";
+
+/**
+ * 書けない要件の書き方（台帳を受けた版。根拠に台帳の未対応の観測の ID を足す。根拠を一覧から挙げられない要件は unresolved に
+ * しない規律は同じ。Issue #725）
+ */
+const UNRESOLVED_LEDGER_RULE_TEXT =
+  "宣言で書けない、または台帳が未対応とする観測でしか確かめられない要件は kind を unresolved にし、reason に理由を書き、constraintIds に根拠の ID を 1 件以上（文書の制約 ID の一覧か台帳の未対応の観測の一覧にあるものだけ）書く。根拠を一覧から挙げられない要件は unresolved にしない。";
 
 /** C2 の規則の定義（ID は `R-map-nn`） */
 export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
@@ -165,16 +191,27 @@ export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
 ];
 
-/** 性質の台帳の文を差し込む規則（R-map-03。T1 の R-nt-08 と同じ作法） */
-const MAPPING_LEDGER_RULE_HEAD = `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}${UNRESOLVED_RULE_TEXT}`;
+/**
+ * 性質の台帳の文を差し込む規則（R-map-03。T1 の R-nt-08 と同じ作法）。台帳を受けた版は、unresolved の根拠に台帳の未対応の観測の
+ * ID を足した文にする（構造の文の中の誘導も同じ条件。Issue #725）
+ */
+const MAPPING_LEDGER_RULE_HEAD = `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_LEDGER_RULE_TEXT}${UNRESOLVED_LEDGER_RULE_TEXT}`;
 const MAPPING_LEDGER_RULE_TAIL = "使わない欄は null か空の並びにする。";
+
+/** 台帳を受けた版の R-map-03 の since（ID・why は同じ。Issue #725） */
+const MAPPING_LEDGER_RULE_SINCE_TAIL =
+  "。#682 は空の並び 34/129 件を理由に 1 件以上とした。根拠を文書に縛る理由（怠慢の持ち越しを塞ぐ）は保ち、台帳の未対応を根拠に足した（Issue #725）";
 
 /** C2 の規則の定義（旗 `v12.ledger` が on なら R-map-03 を台帳の文で組み直す） */
 export function mappingRuleDefinitionsOf(ledger?: UpstreamLedgerView): readonly RuleDefinition[] {
   if (ledger === undefined) return MAPPING_RULE_DEFINITIONS;
   return MAPPING_RULE_DEFINITIONS.map((definition) =>
     definition.id === "R-map-03"
-      ? { ...definition, text: `${MAPPING_LEDGER_RULE_HEAD}${ledger.t1RuleTexts.join("")}${MAPPING_LEDGER_RULE_TAIL}` }
+      ? {
+          ...definition,
+          text: `${MAPPING_LEDGER_RULE_HEAD}${ledger.t1RuleTexts.join("")}${MAPPING_LEDGER_RULE_TAIL}`,
+          since: `${definition.since}${MAPPING_LEDGER_RULE_SINCE_TAIL}`,
+        }
       : definition,
   );
 }
@@ -850,6 +887,13 @@ function buildData(input: MappingInput): readonly PromptData[] {
       text: serializeJson({ names: input.documents.map((document) => document.name), constraintIds: [...constraintIdsIn(input.documents)] }),
     },
   ];
+  // 台帳を受けた C2 だけ、文書の塊に並べて未対応の観測の一覧（ID と文。台帳の順）を渡す（Issue #725）
+  if (input.ledger !== undefined) {
+    data.push({
+      name: MAPPING_LEDGER_DATA_NAMES.unsupported,
+      text: serializeJson({ observations: input.ledger.unsupportedObservations.map((entry) => ({ id: entry.id, message: entry.message })) }),
+    });
+  }
   const previous = input.previous;
   if (previous !== undefined) {
     data.push({ name: MAPPING_DATA_NAMES.response, text: rawResponseText(previous.response) });

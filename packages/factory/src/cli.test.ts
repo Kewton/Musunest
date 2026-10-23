@@ -1996,6 +1996,8 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
       ["number", (cp) => (cp["versions"]["ledger_upstream"] = 1)],
       ["mismatch", (cp) => (cp["versions"]["ledger_upstream"] = flip(cp["versions"]["ledger_upstream"] as string))],
       ["full-instead", (cp) => (cp["versions"]["ledger_upstream"] = cp["versions"]["ledger"])],
+      // 版 1（Issue #725 の前）の部分の指紋を持つ checkpoint は今の固定文で断る
+      ["version-1", (cp) => (cp["versions"]["ledger_upstream"] = V12_UPSTREAM_BEFORE_725)],
       ["flags", (cp) => (cp["versions"]["flags"] = { ...cp["versions"]["flags"], ids: false })],
     ];
     for (const [name, edit] of edits) {
@@ -2197,6 +2199,13 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     // その出力ダイジェストに戻した記録は、直す前（fa21c65）のバイト列と同じ
     const checkpoint = JSON.parse(await fs.readFile(`${dir}/${stageCheckpointFile("t1-t2")}`, "utf8")) as Record<string, any>;
     expect(checkpoint["versions"]["ledger_upstream"]).toBe(await ledgerModule.upstreamLedgerSha256());
+    // Issue #725 で取り直した差は、checkpoint の ledger_upstream と記録の出力ダイジェストだけ：版 1 の部分の指紋に戻すと #725 の前と同じ
+    {
+      const reverted = { ...checkpoint, versions: { ...checkpoint["versions"], ledger_upstream: V12_UPSTREAM_BEFORE_725 } };
+      const revertedRecord = await stageRecordOf(dir);
+      (revertedRecord["checkpoints"] as { output_digest: string }[])[0]!.output_digest = await stageOutputDigest(reverted);
+      expect([await sha256Hex(stageJsonText(revertedRecord)), await sha256Hex(stageJsonText(reverted))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_725);
+    }
     delete checkpoint["versions"]["ledger_upstream"];
     const record = await stageRecordOf(dir);
     const before = record["checkpoints"] as { output_digest: string }[];
@@ -2375,9 +2384,24 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
  * 差は h3e の台帳の全体の指紋 `propertyLedgerSha256` だけで、部分の指紋 ledger_upstream は main と同じ）
  */
 const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
+  // Issue #725 で取り直した（上流の台帳の見方に未対応の観測を足して版を 2 に上げ、checkpoint の ledger_upstream と、それに由来する
+  // 記録の出力ダイジェストが変わったため。旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_725` に残し、2 つの欄を旧の値に戻せば一致する
+  // ことを試験で確かめる）
+  "9e94a228cc565b2d77e210828065bfa74cc337bd6c05cab330e8bbdbd5b09a3d",
+  "8cad6abfb8cd5659407e25934411c26fb9ca537adae3e88a6b4a9cd327258a5a",
+];
+
+/** Issue #725 の前の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値。base 354cc49 で測った値） */
+const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_725: readonly string[] = [
   "cdaf2ba05d4a63866abb54483e97cb6867e4a14ad7761d6e1c583a89b5472f2a",
   "da9ba01f59695d1ec5e5a5fca6816932c507717a4956ba176dc6dfcea3dd4321",
 ];
+
+/**
+ * Issue #725 の前（上流の台帳の見方の版 1。Issue #712）の部分の指紋。base 354cc49 の作業木で v1.2 の走りの t1-t2 の checkpoint の
+ * ledger_upstream を測った値（新しいコードの出力から作っていない）
+ */
+const V12_UPSTREAM_BEFORE_725 = "f34e414b103df9a32f8ace0a248d6cc083c3c3a9e7b147e03739c17286c407ae";
 
 /**
  * Issue #713 の前の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値。Issue #683）。v12-h3e の値：手 3d・3h が性質の台帳
@@ -2406,6 +2430,245 @@ const V11A_STAGE_RUN_DIGESTS: readonly string[] = [
   "50dde03644297779f6259db18fe73422c80f2aaa48439be189ea472bfb93ec33",
   "0d3d1378e80402c9f7e6625191e1e9b4821b1a75a4872b62716bbc0e125eecb2",
 ];
+
+describe("部分の指紋の版 2（台帳の未対応の観測を上流の見方に足した。Issue #725）：記録と checkpoint の差は申告した 3 つの欄だけ", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  type Flags = { readonly ledger: boolean; readonly searchRepair: boolean; readonly ids: boolean };
+  /** 走りの組（段の走り・一気通貫 × 旗の組） */
+  const SCENARIOS: readonly { readonly name: string; readonly kind: "stage" | "whole"; readonly flags: Flags | null }[] = [
+    { name: "段の走り・ids と ledger が on", kind: "stage", flags: null },
+    { name: "段の走り・ids on・ledger off", kind: "stage", flags: { ledger: false, searchRepair: true, ids: true } },
+    { name: "段の走り・ids off", kind: "stage", flags: { ledger: true, searchRepair: true, ids: false } },
+    { name: "一気通貫・ids と ledger が on", kind: "whole", flags: null },
+    { name: "一気通貫・ids on・ledger off", kind: "whole", flags: { ledger: false, searchRepair: true, ids: true } },
+    { name: "一気通貫・ids off", kind: "whole", flags: { ledger: true, searchRepair: true, ids: false } },
+  ];
+
+  /** 1 つの組を流し、書いたファイルの SHA-256・checkpoint の部分の指紋・要求・要約・終了コードを返す */
+  async function measure(scenario: (typeof SCENARIOS)[number], index: number) {
+    if (scenario.flags !== null) {
+      const flags = scenario.flags;
+      vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => flags);
+    }
+    const dir = `${directory}/v12-upstream-v2-${String(index)}`;
+    const idsOff = scenario.flags?.ids === false;
+    // ledger off の C1 の schema は計算の行に集計の欄を持たない（応答も持たせない）
+    const head = scenario.flags?.ledger === false ? v12Head({ ...ledgerModule.PROPERTY_LEDGER_VIEW, aggregateKinds: [] }) : v12Head();
+    let requests: unknown;
+    let summary: string;
+    let code: number;
+    let written: readonly string[];
+    if (scenario.kind === "stage") {
+      const run = idsOff
+        ? await runStageCli({ dir, args: ["--stage-end", "semantic-check"], calls: [structured(v11aT1(true)), structured(v11aJudgments())], pipeline: "v1.2" })
+        : await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: head.slice(0, 5), pipeline: "v1.2" });
+      requests = run.requests;
+      summary = run.lines.at(-1) ?? "";
+      code = run.code;
+      written = run.written;
+    } else {
+      const calls = idsOff
+        ? [structured(v11aT1(true)), structured(v11aJudgments()), structured(v11aTestSpec()), structured({ declaration: V11A_YAML }), structured(v11aJudgments())]
+        : [...head, structured(v11aJudgments())];
+      const run = await runV11aCli({ dir, calls, pipeline: "v1.2" });
+      requests = { structured: run.recording.structured, tools: run.recording.tools };
+      summary = JSON.stringify(run.summary);
+      code = run.code;
+      written = run.written;
+    }
+    // manifest の storage_unit は出力の場所（試験ごとの一時の場所）なので、目印に置き換えて照らす
+    const textOf = async (path: string): Promise<string> => {
+      const text = await fs.readFile(`${dir}/${path}`, "utf8");
+      return path === BUNDLE_MANIFEST_FILE ? text.replaceAll(JSON.stringify(dir), JSON.stringify("<out>")) : text;
+    };
+    const files: Record<string, string> = {};
+    for (const path of [...written].sort()) files[path] = await sha256Hex(await textOf(path));
+    const upstream: Record<string, unknown> = {};
+    for (const path of written.filter((name) => name.startsWith("stage-checkpoint-"))) {
+      upstream[path] = (JSON.parse(await fs.readFile(`${dir}/${path}`, "utf8")) as Record<string, any>)["versions"]["ledger_upstream"];
+    }
+    return {
+      textOf,
+      written,
+      files,
+      upstream,
+      requests: await sha256Hex(JSON.stringify(requests)),
+      summary: await sha256Hex(summary),
+      code,
+    };
+  }
+
+  /**
+   * 直す前の値：base 354cc49（統合 v12-table。直す前の ledger.ts・names.ts・mapping.ts）に戻した作業木で、上の組を流して測った
+   * SHA-256（書いたファイル〔manifest は storage_unit を目印に置き換えた本文〕・要求・要約の 1 行）と終了コード。新しいコードの出力
+   * から作っていない。手で直さない（Issue #725）
+   */
+  const BEFORE: Readonly<Record<string, { readonly files: Readonly<Record<string, string>>; readonly requests: string; readonly summary: string; readonly code: number }>> = {
+  "段の走り・ids と ledger が on": {
+    files: {
+      "diagnostics/table-rounds.json": "5be58b3cbaa9905f37fbbd9ce6fb5fd09f2db2e90ca8c4916eee3c179ebdd518",
+      "stage-checkpoint-t1-t2.json": "da9ba01f59695d1ec5e5a5fca6816932c507717a4956ba176dc6dfcea3dd4321",
+      "stage-run.json": "f96539e19275f83b51fc3108ccd051adf7bb781f47a6e186136c10358d9da36a",
+    },
+    requests: "dcfb2f82e1b00e16b8e8529b894762cb86fab11a4870d9e907b64a80949cf6bb",
+    summary: "855a9d8d55150b082f06b89eccdd1e98dfa15b3a1c8f667e57354d3ca824e337",
+    code: 0,
+  },
+  "段の走り・ids on・ledger off": {
+    files: {
+      "diagnostics/table-rounds.json": "654a783d66b53a393a47cafc1c6951c211383047056307857470c5716845ebc5",
+      "stage-checkpoint-t1-t2.json": "27bcaadf71cdd59e9596514a9682bd972fd2deaa88ebdfce2279a757f03f8835",
+      "stage-run.json": "6152f38be6a8ad6536373e084a1420ac8ce4d7526c0c6cc516a2b38832d35c65",
+    },
+    requests: "85c86dec759762a1fafab6166d88bbf51380638e7830a11fd8e2c5eb51bc8200",
+    summary: "855a9d8d55150b082f06b89eccdd1e98dfa15b3a1c8f667e57354d3ca824e337",
+    code: 0,
+  },
+  "段の走り・ids off": {
+    files: {
+      "stage-checkpoint-t1-t2.json": "b15ed78e1cd2deadd55780ce6ebef714272eecda23795c4e6a216ad714b122aa",
+      "stage-run.json": "0f852e681763b54501bbbcb2b2f5914828cd9729f71a2d49050e87a07a4d273e",
+    },
+    requests: "26408ef9c0c70129c2144df8e8f839ed5252146be6ffcb5dea789bb6d7c8fdbb",
+    summary: "855a9d8d55150b082f06b89eccdd1e98dfa15b3a1c8f667e57354d3ca824e337",
+    code: 0,
+  },
+  "一気通貫・ids と ledger が on": {
+    files: {
+      "artifacts/app.spec.yaml": "c8fe455d81ff59f824563aceac4a41485197df08f46ff71af0ed9c496e75e363",
+      "artifacts/arbitration.json": "934d0f70c5f8e7a2638e4f8ecd685291435ab62ccdde0da19d67ad402cf85a87",
+      "artifacts/carry-over.json": "2d84a832ac76be55cfecc0faab4171394316b7086faecf00d7bec4a02fe1a0b5",
+      "artifacts/correspondence.json": "0ec4b2bcae430811cbb114484336754ef7326b24543cbaf2103b2eea6c304c64",
+      "artifacts/decl-check.json": "325e7cbdbbccee120e12ed6712bbdc7c93e25075194057bf173000bda6280546",
+      "artifacts/design.json": "2e2e34a42d3e2318ec8ced24e989abed2ddea7188a1c34c66de9aa11b7a7774e",
+      "artifacts/disputes.json": "8b6d71437a82a109d91942fe1e7a41a4c5287e7c0047f8b8dbbc1ad2160c547b",
+      "artifacts/judge-advice.json": "980d2de899d653f3a10d2a2e044ba04268ab2f98cec69a28f0710754b6dcaa48",
+      "artifacts/mappings.json": "57828b8f85a64f27f33908279deca1d151236df37322d1e32210f3e85c4c0aa0",
+      "artifacts/name-table.json": "cf9676e8ed6f03b302816f5272a0d355df23c47e7d76ec99ea65a801aadb6f24",
+      "artifacts/plan.json": "0ff2c269077514ddcd1dfd577552f0943b0848bda08524d71ed87870870309a2",
+      "artifacts/requirements.json": "057b4c7e48db2131aaf4e62c418f77959828e937444bb9f6f35d80fe064327aa",
+      "artifacts/search-repair.json": "aea2f8087861abeefc0269e976a466a9eb0feba25150525309f70d7cf0e3b38b",
+      "artifacts/semantic-check.json": "7368b8db9144f328e89ae5ead95d856ad7d447c096384f0bcbcc1f1600d1a817",
+      "artifacts/summary.json": "f63c2335030394c2e111840e5ed73f0721f692ed18c0b6c141aa829e86911955",
+      "artifacts/test-spec.json": "fa52e701462e0ee5ee4f63488c3270a393865e7c78942f1501b7913429d0c6b1",
+      "artifacts/test-suite.json": "118e057660c7142fcb95cc949b737ac29c70b75292a5fcd4c467a1f9b659735b",
+      "artifacts/tests.json": "6a5d046101c09dcd4b7ffa9befa087ed1fe288656da2dc711c04cd00bd0ee679",
+      "artifacts/unwritable.json": "7aa99d40265914de1263e06b9057bcfae145c301dcbee43ced959daae51cec93",
+      "artifacts/verification-v11a.json": "433245dc099e6828d0b115141678e6e768c895524cce8172cab65acebfe411b3",
+      "artifacts/verification.json": "23bb5181d89dfbf88f7681c357513c00744a41165eae273f427ca63070cafc39",
+      "build-record.json": "ba72cd89a0989cc12ab676a73c1e37fe37d202476b7263a2c3e11d929523496a",
+      "bundle-manifest.json": "ff37ebd9abce36a63412317351a81b09a1364db0cbaea7c51df9c9126b16baa9",
+      "diagnostics/table-rounds.json": "5be58b3cbaa9905f37fbbd9ce6fb5fd09f2db2e90ca8c4916eee3c179ebdd518",
+      "stage-checkpoint-t1-t2.json": "da9ba01f59695d1ec5e5a5fca6816932c507717a4956ba176dc6dfcea3dd4321",
+      "stage-checkpoint-t2-b1.json": "770b203007c2ae91ee674bea0977d45e1693f6e0fde6c0cd934135faf89d76f9",
+    },
+    requests: "6b8bd7582dd0930257c228cb5566f014b721d36969b20d712bc9c40aef020e59",
+    summary: "34995be74f75cfd12ba85667a0e1f4a5b9327367f2d2b9baeb97339ccc0a6e1b",
+    code: 0,
+  },
+  "一気通貫・ids on・ledger off": {
+    files: {
+      "build-record.json": "557d87dcf3d8a5a63436ebf26a1dbe9150cca73a256109ae365e36adb319251e",
+      "diagnostics/design.json": "ad9f70aebead04f7c61c2fe720891bcb4468e8677e4aa0ff325487bf5463db7c",
+      "diagnostics/mappings.json": "6cd1f81d45fc5a8dcdf2c13f680b78c889871e66537d9b2913efb9ac8ee118ea",
+      "diagnostics/materials.json": "e14f2b929c57a3669dd69c1865a627dfeac6128488131b0a4b28c9a5c5f00825",
+      "diagnostics/table-rounds.json": "744fe6f44ae3a93b19f560b1626a324087aed155f9d90fe95d96c8115314f43b",
+      "stage-checkpoint-t1-t2.json": "27bcaadf71cdd59e9596514a9682bd972fd2deaa88ebdfce2279a757f03f8835",
+    },
+    requests: "3af251ea9baa55848c88e8aa0e9c6a3f35a8e6a4c11e653718695f0e0ec85599",
+    summary: "390f3d092dbcd7d93c1269d02bce5c61cefa658add774d2c2017081f4fa22e11",
+    code: 1,
+  },
+  "一気通貫・ids off": {
+    files: {
+      "artifacts/app.spec.yaml": "c8fe455d81ff59f824563aceac4a41485197df08f46ff71af0ed9c496e75e363",
+      "artifacts/arbitration.json": "934d0f70c5f8e7a2638e4f8ecd685291435ab62ccdde0da19d67ad402cf85a87",
+      "artifacts/carry-over.json": "2d84a832ac76be55cfecc0faab4171394316b7086faecf00d7bec4a02fe1a0b5",
+      "artifacts/correspondence.json": "0ec4b2bcae430811cbb114484336754ef7326b24543cbaf2103b2eea6c304c64",
+      "artifacts/decl-check.json": "8f8b72d9f0265e5ca711f47b68c68d006bfe17152bbf9cc52fdc2bb9caa700ad",
+      "artifacts/design.json": "57f7797b692e43add66c76e11f0a9a9fcbd9afcdef0e061e37e7868da8c755a4",
+      "artifacts/disputes.json": "8b6d71437a82a109d91942fe1e7a41a4c5287e7c0047f8b8dbbc1ad2160c547b",
+      "artifacts/judge-advice.json": "55639da2fb4cd75c81ef1338c63914a25e95ecb18c7bd5d2ebfd84dee4462d5e",
+      "artifacts/mappings.json": "bd21c6d5f38a2add0ad01158cf7b082738098b42f86b6177b019e1739e4473c6",
+      "artifacts/name-table.json": "1ba6b4f1d1587b3d451d4f34b27bd6f9b50023066e4f4098125868e3c2aac72e",
+      "artifacts/plan.json": "0ff2c269077514ddcd1dfd577552f0943b0848bda08524d71ed87870870309a2",
+      "artifacts/requirements.json": "057b4c7e48db2131aaf4e62c418f77959828e937444bb9f6f35d80fe064327aa",
+      "artifacts/search-repair.json": "aea2f8087861abeefc0269e976a466a9eb0feba25150525309f70d7cf0e3b38b",
+      "artifacts/semantic-check.json": "be4be78531638df843580ee880402d7291491763d6834e55ffdd34416423b1e6",
+      "artifacts/summary.json": "6da50333cd726bde435dc23b0f556af6830621386361843fd50177641f7dac08",
+      "artifacts/test-spec.json": "af638f5122e4b138c2b504caa78c21ab488cf45a727d9ba60082ba60e574e74a",
+      "artifacts/test-suite.json": "aa0170b1fe98ea51df5590dd55a3b6418332ac9e0791f627523151d26dcc85f6",
+      "artifacts/tests.json": "a41395cf78e146834e2c993d3c1da287e7c4de4e5869fb849c050b4ba5869a32",
+      "artifacts/unwritable.json": "7aa99d40265914de1263e06b9057bcfae145c301dcbee43ced959daae51cec93",
+      "artifacts/verification-v11a.json": "2cb132cc2ca9cda1454e42daccb40b487055cd3e59556160604d6b965e887a03",
+      "artifacts/verification.json": "891ca9236cd68375c8d338f73ae0848579b46885f936f20664bdfc1e4e442a3e",
+      "build-record.json": "e911360846430b8bc1d35ebd0005c71ee7b4544e858d4b5239058ed8dddbd677",
+      "bundle-manifest.json": "ce64a497c63eb990491eb33fd44b78c6a340634875529fde18c0cda3fadd7c42",
+    },
+    requests: "d6c3a18b7e19b6e4f4bd97343a6b7979240381a186f7811ae2439e4db7be0b72",
+    summary: "3224ccf3065f5c506cbd52fbe75fbcc3400f3603b7f71e11d0de71130c1a1da3",
+    code: 0,
+  },
+  };
+  const BEFORE_UPSTREAM = V12_UPSTREAM_BEFORE_725;
+  /** 要求が変わってよい組（旗 ids と ledger が on の C2 のデータと規則だけ。差が C2 の要求だけであることは run.test.ts が照らす） */
+  const REQUESTS_CHANGED = new Set(["段の走り・ids と ledger が on", "一気通貫・ids と ledger が on"]);
+  /** 変わってよいファイル（申告した 3 つの欄を持つもの：t1-t2 の checkpoint と、それを宣言する記録） */
+  const MAY_CHANGE = new Set([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, BUILD_CLI_RECORD_FILE]);
+
+  it("段の走りと一気通貫の Build の記録の両方で、ids と ledger の on・off に依らず、t1-t2 の ledger_upstream と記録の output_digest だけを旧の値に戻すと直す前とバイト列で同じ。要約・終了コード・納品物・ほかの診断は不変、要求は ids と ledger が on の走りだけ変わる", async () => {
+    const current = await ledgerModule.upstreamLedgerSha256();
+    expect(current).not.toBe(BEFORE_UPSTREAM);
+    expect(Object.keys(BEFORE)).toEqual(SCENARIOS.map((scenario) => scenario.name));
+    for (const [index, scenario] of SCENARIOS.entries()) {
+      const run = await measure(scenario, index);
+      const before = BEFORE[scenario.name]!;
+      expect(run.code, scenario.name).toBe(before.code);
+      expect(run.summary, scenario.name).toBe(before.summary);
+      expect(Object.keys(run.files), scenario.name).toEqual(Object.keys(before.files));
+      if (REQUESTS_CHANGED.has(scenario.name)) expect(run.requests, scenario.name).not.toBe(before.requests);
+      else expect(run.requests, scenario.name).toBe(before.requests);
+      // 変わったファイルは申告した欄を持つものだけ
+      for (const [path, digest] of Object.entries(run.files)) {
+        if (digest !== before.files[path]) expect(MAY_CHANGE.has(path), `${scenario.name}: ${path}`).toBe(true);
+      }
+      // checkpoint の ledger_upstream は今の部分の指紋（t1-t2）か null（t2-b1）。旧の値に戻して出力ダイジェストを計算し直す
+      const reverted: Record<string, string> = {};
+      const digestOf = new Map<string, string>();
+      for (const path of run.written.filter((name) => name.startsWith("stage-checkpoint-"))) {
+        const text = await run.textOf(path);
+        const checkpoint = JSON.parse(text) as Record<string, any>;
+        expect(stageJsonText(checkpoint), path).toBe(text);
+        expect(run.upstream[path], path).toBe(path === stageCheckpointFile("t1-t2") ? current : null);
+        if (checkpoint["versions"]["ledger_upstream"] !== null) checkpoint["versions"]["ledger_upstream"] = BEFORE_UPSTREAM;
+        digestOf.set(path, await stageOutputDigest(checkpoint));
+        reverted[path] = await sha256Hex(stageJsonText(checkpoint));
+      }
+      for (const path of run.written.filter((name) => !name.startsWith("stage-checkpoint-"))) {
+        const text = await run.textOf(path);
+        if (path !== STAGE_RUN_RECORD_FILE && path !== BUILD_CLI_RECORD_FILE) {
+          reverted[path] = await sha256Hex(text);
+          continue;
+        }
+        const record = JSON.parse(text) as Record<string, any>;
+        // 段の走りの記録は字下げつき（stageJsonText）、Build だけの記録は 1 行の JSON。書いた形のまま書き戻す（往復で同じことを確かめる）
+        const serialize = (value: unknown): string =>
+          path === STAGE_RUN_RECORD_FILE ? stageJsonText(value) : `${JSON.stringify(value)}${text.endsWith("\n") ? "\n" : ""}`;
+        expect(serialize(record), path).toBe(text);
+        for (const entry of (record["checkpoints"] ?? []) as { path: string; output_digest: string }[]) {
+          expect(entry.output_digest, path).toBe(await stageOutputDigest(JSON.parse(await run.textOf(entry.path))));
+          entry.output_digest = digestOf.get(entry.path) ?? "";
+        }
+        reverted[path] = await sha256Hex(serialize(record));
+      }
+      expect(reverted, scenario.name).toEqual(before.files);
+      vi.restoreAllMocks();
+    }
+  });
+});
 
 describe("v1.2 の段の走りが ⑦ まで流したとき、判定した宣言を書いて記録で宣言する（工程ごとの評価 U3 の口。Issue #687）", () => {
   const readJson = async (path: string): Promise<Record<string, any>> => JSON.parse(await fs.readFile(path, "utf8")) as Record<string, any>;
