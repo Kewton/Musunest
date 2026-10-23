@@ -94,7 +94,7 @@ import {
 } from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
 import { DEFAULT_VALUE_DETAILS, ENUM_MEMBERSHIP_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
-import { COMPUTATION_AGGREGATE_MESSAGES, nameTableSha256, type NameTable } from "./names.js";
+import { COMPUTATION_AGGREGATE_MESSAGES, nameTableSha256, ownersByRowId, type NameTable } from "./names.js";
 import {
   ALL_CARRIED_OR_NON_REQUIREMENT_PROBLEM,
   ALL_CARRIED_PROBLEM,
@@ -1841,6 +1841,62 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       [await nameTableSha256(MAPPED_IDS), await nameTableSha256(MAPPED_IDS), R3_NORMALIZED],
       [await nameTableSha256(MAPPED_IDS), await nameTableSha256(MAPPED_IDS), R3_NORMALIZED],
     ]);
+    expectNoAcceptanceMaterial(result.diagnostics.map((artifact) => artifact.text));
+  });
+
+  it("(9) 書き直した要件が共有の操作を手放すと、保持した要件の手 2 の可否が変わる：初回は R1 から addItem が外れ、C3 が R3 を拒否して R3 が addItem を手放した 2 回目は、raw の全表の組み直しで保持した R1 に addItem が残る（孤立なし）。2 回目の C3 の対象・table-rounds の表・判定の SHA は組み直した表に一致する（Issue #723 のレビュー R1）", async () => {
+    // 初回：R1 が addItem を dependency、R3 が stated で持つ（R3 の所属に addItem を足す）。手 2 が R1 から addItem を外す
+    const r1Dependency = (entry: Record<string, unknown>) =>
+      entry["requirementId"] === "R1"
+        ? { ...entry, roles: (entry["roles"] as readonly Record<string, unknown>[]).map((role) => (role["id"] === ADD_ITEM ? { id: ADD_ITEM, basis: "dependency", reason: "登録が要る" } : role)) }
+        : entry;
+    const r3Stated = (entry: Record<string, unknown>) =>
+      entry["requirementId"] === "R3" ? { ...entry, roles: [...(entry["roles"] as readonly unknown[]), { id: ADD_ITEM, basis: "stated", reason: null }] } : entry;
+    const firstMapping = { requirements: mappingEntries().map(r1Dependency).map(r3Stated) };
+    // 2 回目：R3 だけを書き直し、addItem を手放す（題材の表の R3 のまま）
+    const rewrittenR3 = { requirements: mappingEntries().filter((entry) => entry["requirementId"] === "R3") };
+    const rejectR3 = judgments(IDS, { R3: REJECT_R3_R4.R3 });
+    const { result, recording } = await runScenario(
+      [...vocabularyCalls(), structured(firstMapping), structured(rejectR3), structured(rewrittenR3), structured(acceptAll()), ...tailFor(IDS)],
+      { flags: IDS_FLAGS, collectBoundaries: true },
+    );
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const roleIdsOf = (table: NameTable, id: string) => table.ownership.find((entry) => entry.requirementId === id)?.roles.map((role) => role.id) ?? [];
+    const withOwnership = (map: (entry: NameTable["ownership"][number]) => NameTable["ownership"][number]): NameTable => ({ ...MAPPED_IDS, ownership: MAPPED_IDS.ownership.map(map) });
+    const asDependency = (entry: NameTable["ownership"][number]) =>
+      entry.requirementId === "R1" ? { ...entry, roles: entry.roles.map((role) => (role.id === ADD_ITEM ? { id: ADD_ITEM, basis: "dependency" as const, reason: "登録が要る" } : role)) } : entry;
+    // 期待する表：初回は R1 から addItem を外し R3 が stated で持つ表、2 回目は R1 が addItem を dependency のまま持つ表
+    const firstTable = withOwnership((entry) =>
+      entry.requirementId === "R1"
+        ? { ...entry, roles: entry.roles.filter((role) => role.id !== ADD_ITEM) }
+        : entry.requirementId === "R3"
+          ? { ...entry, roles: [...entry.roles, { id: ADD_ITEM, basis: "stated" as const, reason: null }] }
+          : entry,
+    );
+    const secondTable = withOwnership(asDependency);
+    const firstSha = await nameTableSha256(firstTable);
+    const secondSha = await nameTableSha256(secondTable);
+    expect(secondSha).not.toBe(firstSha);
+    const rounds = tableRoundsOf(result);
+    expect(rounds.map((round) => [round.round, round.ok, round.table?.table_sha256, round.semantic_check?.["table_sha256"], normalizedOf(round), round.adopted])).toEqual([
+      [1, "ok", firstSha, firstSha, [{ requirement_id: "R1", rule: "N-map-02", target_id: null, removed_row_ids: [ADD_ITEM] }], false],
+      // 2 回目の回では R1 に手 2 の項目が無い（最終の差分。初回の整えた中身を持ち越さない）
+      [2, "ok", secondSha, secondSha, [], true],
+    ]);
+    // 保持した R1 は、2 回目の表で addItem を持ち（初回の整えた表のままではない）、addItem は孤立しない
+    const boundary = result.boundaries?.find((entry) => entry.boundary === "t1-t2");
+    expect(boundary?.table).toEqual(secondTable);
+    expect(boundary?.tableSha256).toBe(secondSha);
+    expect(roleIdsOf(secondTable, "R1")).toContain(ADD_ITEM);
+    expect(ownersByRowId(secondTable).get(ADD_ITEM)).toEqual(["R1"]);
+    expect(artifactOf(result.bundle, "artifacts/name-table.json")["table_sha256"]).toBe(secondSha);
+    // 2 回目の C3 は保持した R1 を含む全要件を対象にし、その表は組み直した表
+    const semanticRequests = requestsOf(recording, SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(semanticRequests.map(semanticTargetsOf)).toEqual([[...IDS], [...IDS]]);
+    expect(rounds[1]?.semantic_check?.["targets"]).toEqual([...IDS]);
+    // 2 回目の C2 の要求の「前回の写像」は整える前の raw（R1 が addItem を dependency で持つ）
+    expect(dataBlockOf(requestsOf(recording, "mapping")[1]?.input ?? "", "前回の写像")).toEqual(firstMapping);
     expectNoAcceptanceMaterial(result.diagnostics.map((artifact) => artifact.text));
   });
 
