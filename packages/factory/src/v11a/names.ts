@@ -1291,10 +1291,18 @@ function checkNameTableWith(
         if (entry.reason.trim() === "") problems.push({ field: `${field}.reason`, message: "構造で確かめる理由が空である" });
         if (kinds.size === 0 && !unknownOwned) problems.push({ field, message: "構造で確かめる要件に所属が無い" });
         if (entry.checks.length === 0) problems.push({ field: `${field}.checks`, message: "構造で確かめる要件に checks が無い" });
-        const seen = new Set<StructuralAssertionKind>();
+        // 重なりの組：検査の対象（`targets`。旗 v12.ids の C2 が組む表）が checks と同じ順・同じ数で並ぶ表は、種類＋targetId（view-shows
+        // は種類＋targetId＋sourceId）が 2 回なら重なり。対象を持たない・checks と並びが合わない表は、今までどおり同じ種類が 2 回なら
+        // 重なり（Issue #724）
+        const targets = entry.targets;
+        const keyed =
+          targets !== undefined && targets.length === entry.checks.length && targets.every((target, tIndex) => target.check === entry.checks[tIndex]);
+        const seen = new Set<string>();
         entry.checks.forEach((check, cIndex) => {
-          if (seen.has(check)) problems.push({ field: `${field}.checks[${cIndex}]`, message: "checks の中身が重なっている" });
-          seen.add(check);
+          const target = keyed ? targets[cIndex] : undefined;
+          const key = target === undefined ? check : JSON.stringify([check, target.targetId, check === "view-shows" ? target.sourceId : null]);
+          if (seen.has(key)) problems.push({ field: `${field}.checks[${cIndex}]`, message: "checks の中身が重なっている" });
+          seen.add(key);
           const want = STRUCTURAL_TARGET_KINDS[check];
           if (want !== undefined && !kinds.has(want)) {
             if (!unknownOwned) {

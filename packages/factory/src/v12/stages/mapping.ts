@@ -26,10 +26,15 @@
 // 足す（basis dependency・reason に検査の種類）。
 //
 // 検査の種類ごとの欄（Issue #682。方法論 03 の H3）：表の契約は「checks は検査の種類の集合」（表の検査が種類の重なりを断る）だが、
-// 並びの schema は重なりを許し、初回の形の落ちの多くが重なりだった。`verification.checks` を検査の種類ごとの欄（全部 required・
-// 各欄は null か `{targetId}`、view-shows だけ `{targetId, sourceId}`）を持つ写像（structural 以外は null）にして、重なりを**出せない
-// 形**にする。復号は欄を種類の固定の順（`STRUCTURAL_ASSERTIONS`）で `[{check, targetId, sourceId}]` に写してから、今の照合と
-// 表の検査（重なり・checks 無し・孤立行・制約 ID）を全部そのまま掛ける（重なりの検査は手で組んだ表・偽物の LLM に効く）。
+// 並びの schema は重なりを許し、初回の形の落ちの多くが重なりだった。`verification.checks` を検査の種類ごとの欄（全部 required）を
+// 持つ写像（structural 以外は null）にする。復号は欄を種類の固定の順（`STRUCTURAL_ASSERTIONS`）で `[{check, targetId, sourceId}]` に
+// 写してから、今の照合と表の検査（重なり・checks 無し・孤立行・制約 ID）を全部そのまま掛ける。
+//
+// 対象の並び（Issue #724。方法論 03 の H2）：1 種類 1 対象では、同じ種類の検査を 2 つ以上の行に掛けて確かめる要件を書けず、
+// fixed-test に寄せると試験 0 本・操作が未検証になる要件があった。各欄を null か対象の写像の並び（1 件以上。view-shows の要素だけ
+// `{targetId, sourceId}`）にし、復号は種類の固定の順・種類の中は応答の順に写す（`checks` は `targets` と同じ順・同じ数で、同じ種類が
+// 複数回並んでよい）。空の並びは形の固定文で断る（schema の minItems に頼らない）。表の検査の重なりは「同じ組が 2 回」の意味になる
+// （`checkMappedTable`。組は種類＋targetId、view-shows は種類＋targetId＋sourceId）。
 //
 // 整える手（Issue #723。方法論 03 の H1・04 §1）：応答から組んで検査の対象の行を所属に足し、一覧の順に並べた表に、C2' の**前**に
 // コードの決まった手順を手 1 → 手 2 の順で 1 回だけ当てる（`normalizeMappedTable`。初回・落ちた要件だけの書き直しの合併・C3 の
@@ -118,12 +123,14 @@ export const MAPPING_REWRITE_MESSAGES = {
 
 /** C2 の固定文（構造の検査の対象の欄の形。要件の欠落・重複・一覧に無い ID は表の検査 `checkMappedTable` の文） */
 export const MAPPING_MESSAGES = {
-  checksShape: `checks は検査の種類（${STRUCTURAL_ASSERTIONS.join("・")}）ごとの欄を全部持つ写像か null で、各欄は null か対象の写像（targetId は空でない文字列。view-shows だけ sourceId も空でない文字列で持ち、ほかの欄は sourceId を持たない）であること`,
+  checksShape: `checks は検査の種類（${STRUCTURAL_ASSERTIONS.join("・")}）ごとの欄を全部持つ写像か null で、各欄は null か対象の写像の並び（各対象の targetId は空でない文字列。view-shows の対象だけ sourceId も空でない文字列で持ち、ほかの欄の対象は sourceId を持たない）であること`,
+  /** 欄が空の並び（Issue #724。使わない種類の欄は null） */
+  checksEmpty: "checks の欄は null か 1 件以上の対象の並びであること（使わない種類の欄は null にする）",
 } as const;
 
 /** 構造の検査の書き方（R-map-03 と台帳の文の頭で同じ文） */
 const STRUCTURAL_RULE_TEXT =
-  "構造で確かめるなら kind を structural にし、reason に理由を書く。checks は検査の種類ごとの欄で、同じ種類の検査は要件ごとに 1 件である。使う種類の欄に targetId で検査が見る行の ID（field-type は項目、action-kind・action-unconditioned・write-anonymous は操作、view-shows は画面、aggregate-no-period は計算）を書き、view-shows の欄は sourceId に画面と同じ entity の項目か計算の行の ID（entity を持たない画面は entity を持たない計算の ID）も書き、使わない種類の欄は null にする。structural は、検査の種類のうち 1 つ以上で確かめられる要件だけである。確かめ方の種類を選ぶ既存の条件（default-value など、専用の種類を指定する文）は今までどおり先に当てる。そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。欄が全部 null の structural は表の検査で断られる。同じ種類の検査を 2 つ以上の行に掛けなければ確かめられない要件（複数の操作・複数の項目・1 つの画面と複数の項目）は structural にせず、kind を fixed-test にしてそれらの行を所属させる。検査の対象の行はコードが所属に足す。";
+  "構造で確かめるなら kind を structural にし、reason に理由を書く。checks は検査の種類ごとの欄で、各欄は検査の対象の並びである。使う種類の欄に、targetId で検査が見る行の ID（field-type は項目、action-kind・action-unconditioned・write-anonymous は操作、view-shows は画面、aggregate-no-period は計算）を書いた対象を並べ、view-shows の対象は sourceId に画面と同じ entity の項目か計算の行の ID（entity を持たない画面は entity を持たない計算の ID）も書き、使わない種類の欄は空の並びにせず null にする。同じ種類の検査を 2 つ以上の行に掛けて確かめる要件は、その種類の欄に行ごとに 1 件ずつ並べる。同じ組（view-shows は画面と表示元の組、ほかは行）を 2 回書かない。structural は、検査の種類のうち 1 つ以上で確かめられる要件だけである。確かめ方の種類を選ぶ既存の条件（default-value など、専用の種類を指定する文）は今までどおり先に当てる。そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。欄が全部 null の structural は表の検査で断られる。検査の対象の行はコードが所属に足す。";
 
 /** 書けない要件の書き方（R-map-03 と台帳の文の頭で同じ文。制約 ID の 1 件以上は Issue #682） */
 const UNRESOLVED_RULE_TEXT =
@@ -148,7 +155,7 @@ export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
     text: `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}${UNRESOLVED_RULE_TEXT}要件の決まりが選択肢の項目の既定値だけなら kind を default-value にし、value にそのキー（その項目の options のキー）を書き、その項目だけを所属させる。使わない欄は null か空の並びにする。`,
     why: "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（T1 の R-nt-08）。構造の検査の対象は規則の文で所属を求めず、応答の欄で行の ID を書かせて対と所属をコードが導く（方法論 03 の F4・H1・H2）",
     since:
-      "Issue #593（構造の検査の対象の欄は Issue #594。検査の種類ごとの欄・同じ種類の検査を 2 つ以上の行に掛ける要件の fixed-test への選び方・未解決の制約 ID の 1 件以上は Issue #682。当たる種類が無い要件を structural にせず fixed-test か unresolved にする選び方は Issue #690）",
+      "Issue #593（構造の検査の対象の欄は Issue #594。検査の種類ごとの欄・同じ種類の検査を 2 つ以上の行に掛ける要件の fixed-test への選び方・未解決の制約 ID の 1 件以上は Issue #682。当たる種類が無い要件を structural にせず fixed-test か unresolved にする選び方は Issue #690。#682 は形の落ち率を理由に 1 種類 1 件とした。fixed-test にすると試験 0 本・操作が未検証になる要件があり（U1 の 30 本の分析）、Issue #724 で契約を対象の並びに広げ、同じ種類の検査を 2 つ以上の行に掛ける要件の fixed-test への選び方を外した）",
   },
   {
     id: "R-map-04",
@@ -201,18 +208,22 @@ export function mappingRewriteRuleDefinitionsOf(ledger?: UpstreamLedgerView): re
 }
 
 /**
- * 検査の種類ごとの欄の schema（Issue #682）。欄は null か対象の写像（view-shows だけ `{targetId, sourceId}`）。nullable は type に
- * object と null の並びで表す（strict の走査は全節に type を求めるので anyOf を使わない）
+ * 検査の種類ごとの欄の schema（Issue #682・#724）。欄は null か対象の写像の並び（view-shows の要素だけ `{targetId, sourceId}`）。
+ * nullable は type に array と null の並びで表す（strict の走査は全節に type を求めるので anyOf を使わない）。空の並びは schema の
+ * minItems に頼らず、復号の形の検査で断る
  */
 function checkFieldSchemaOf(check: (typeof STRUCTURAL_ASSERTIONS)[number]): Record<string, unknown> {
   const paired = check === "view-shows";
   return {
-    type: ["object", "null"],
-    additionalProperties: false,
-    required: paired ? ["targetId", "sourceId"] : ["targetId"],
-    properties: {
-      targetId: { type: "string", description: "検査が見る行の ID" },
-      ...(paired ? { sourceId: { type: "string", description: "画面と組にする行の ID（画面と同じ entity の項目か計算）" } } : {}),
+    type: ["array", "null"],
+    items: {
+      type: "object",
+      additionalProperties: false,
+      required: paired ? ["targetId", "sourceId"] : ["targetId"],
+      properties: {
+        targetId: { type: "string", description: "検査が見る行の ID" },
+        ...(paired ? { sourceId: { type: "string", description: "画面と組にする行の ID（画面と同じ entity の項目か計算）" } } : {}),
+      },
     },
   };
 }
@@ -501,12 +512,20 @@ function skeletonProblems(output: unknown): readonly Problem[] {
   return items.flatMap((item, index) => (isRecord(item) ? [] : [{ field: `requirements[${String(index)}]`, message: "写像（object）であること" }]));
 }
 
-/** 応答の確かめ方の検査の種類ごとの欄のうち、写像の欄（種類の固定の順。写像でない checks は無し） */
+/**
+ * 応答の確かめ方の検査の種類ごとの欄の対象の写像（種類の固定の順・種類の中は並びの順。写像でない checks は無し）。欄が並びなら
+ * 写像の要素を全部、写像なら（形で落ちる応答）その 1 つを数える（Issue #724）
+ */
 const checkFieldsOf = (entry: Record<string, unknown>): readonly Record<string, unknown>[] => {
   const verification = entry["verification"];
   if (!isRecord(verification)) return [];
   const checks = verification["checks"];
-  return isRecord(checks) ? STRUCTURAL_ASSERTIONS.flatMap((check) => (isRecord(checks[check]) ? [checks[check]] : [])) : [];
+  if (!isRecord(checks)) return [];
+  return STRUCTURAL_ASSERTIONS.flatMap((check) => {
+    const field = checks[check];
+    if (Array.isArray(field)) return (field as readonly unknown[]).filter(isRecord);
+    return isRecord(field) ? [field] : [];
+  });
 };
 
 const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
@@ -515,24 +534,30 @@ const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): 
 const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
 /**
- * checks（検査の種類ごとの欄）を、種類の固定の順（`STRUCTURAL_ASSERTIONS`）の検査の対象の並びに写す（Issue #682）。null は空の
- * 並び。欄が欠ける・余る、欄が null でも対象の写像でもない、targetId・view-shows の sourceId が空でない文字列でない、view-shows
- * でない欄が sourceId を持つ、のどれかなら形が合わない（undefined）。重なりは落とさない（欄の写像からは出ない）
+ * checks（検査の種類ごとの欄）を、種類の固定の順（`STRUCTURAL_ASSERTIONS`）・種類の中は応答の順の検査の対象の並びに写す
+ * （Issue #682・#724）。null は空の並び。欄が欠ける・余る、欄が null でも並びでもない、要素が対象の写像でない、targetId・view-shows
+ * の sourceId が空でない文字列でない、view-shows でない欄の要素が sourceId を持つ、のどれかなら形が合わない（`shape`）。欄が空の
+ * 並びなら `empty`。重なり（同じ組が 2 回）は落とさない（表の検査が断る）
  */
-function readCheckFields(checks: unknown): readonly NameTableCheckTarget[] | undefined {
+function readCheckFields(checks: unknown): readonly NameTableCheckTarget[] | "shape" | "empty" {
   if (checks === null) return [];
-  if (!isRecord(checks) || !hasExactKeys(checks, STRUCTURAL_ASSERTIONS)) return undefined;
+  if (!isRecord(checks) || !hasExactKeys(checks, STRUCTURAL_ASSERTIONS)) return "shape";
   const targets: NameTableCheckTarget[] = [];
+  let empty = false;
   for (const check of STRUCTURAL_ASSERTIONS) {
     const field = checks[check];
     if (field === null) continue;
-    if (!isRecord(field)) return undefined;
+    if (!Array.isArray(field)) return "shape";
+    if (field.length === 0) empty = true;
     const paired = check === "view-shows";
-    if (!hasExactKeys(field, paired ? ["targetId", "sourceId"] : ["targetId"]) || !isNonEmptyString(field["targetId"])) return undefined;
-    if (paired && !isNonEmptyString(field["sourceId"])) return undefined;
-    targets.push({ check, targetId: field["targetId"], sourceId: paired ? (field["sourceId"] as string) : null });
+    for (const item of field as readonly unknown[]) {
+      if (!isRecord(item)) return "shape";
+      if (!hasExactKeys(item, paired ? ["targetId", "sourceId"] : ["targetId"]) || !isNonEmptyString(item["targetId"])) return "shape";
+      if (paired && !isNonEmptyString(item["sourceId"])) return "shape";
+      targets.push({ check, targetId: item["targetId"], sourceId: paired ? (item["sourceId"] as string) : null });
+    }
   }
-  return targets;
+  return empty ? "empty" : targets;
 }
 
 /** 応答の参照を数える（純粋。ID の値は数に入れない） */
@@ -587,8 +612,8 @@ function shapeOfEntry(
   if (isRecord(value) && isRecord(value["verification"])) {
     const verification = value["verification"];
     const read = readCheckFields(verification["checks"]);
-    if (read === undefined) {
-      problems.push({ field: `${field}.verification.checks`, message: MAPPING_MESSAGES.checksShape });
+    if (typeof read === "string") {
+      problems.push({ field: `${field}.verification.checks`, message: read === "shape" ? MAPPING_MESSAGES.checksShape : MAPPING_MESSAGES.checksEmpty });
       return undefined;
     }
     targets = read;
