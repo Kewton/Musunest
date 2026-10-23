@@ -1720,6 +1720,106 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(stage.tableRounds?.map((round) => round.adopted)).toEqual([false]);
   });
 
+  // ── C2 が組んだ表を整える手（N-map-01・N-map-02。Issue #723）─────────────────────────
+  //
+  // R3 の所属に、R1 が stated で持つ when 無しの操作（addItem）を dependency で足した応答。手 2 が R3 から外すので、整えた表は
+  // 題材の表（MAPPED_IDS）と同じになる。前回の写像（C2 の 2 回目の要求のデータ）は整える前の raw のまま
+
+  type NormalizedRow = { readonly requirement_id: string; readonly rule: string; readonly target_id: string | null; readonly removed_row_ids: readonly string[] };
+  const ADD_ITEM = CODE_RENAME.get("o.addItem") as string;
+  const R3_NORMALIZED: readonly NormalizedRow[] = [{ requirement_id: "R3", rule: "N-map-02", target_id: null, removed_row_ids: [ADD_ITEM] }];
+  const withSharedAdd = (entry: Record<string, unknown>) =>
+    entry["requirementId"] === "R3" ? { ...entry, roles: [...(entry["roles"] as readonly unknown[]), { id: ADD_ITEM, basis: "dependency", reason: "登録が要る" }] } : entry;
+  const hitMapping = () => ({ requirements: mappingEntries().map(withSharedAdd) });
+  const normalizedOf = (round: TableRound | undefined) => (round as (TableRound & { readonly normalized: readonly NormalizedRow[] | null }) | undefined)?.normalized;
+
+  it("(7)(9) 手が当たる台本（Issue #723）：table-rounds の回に normalized が載り、C3 の対象と判定の表 SHA は整えた表の SHA（＝題材の表）。納品物の表も整えた表で、段の走りの tableRounds と深く等しい", async () => {
+    const calls = [...vocabularyCalls(), structured(hitMapping()), structured(acceptAll())];
+    const { result, recording } = await runScenario([...calls, ...tailFor(IDS)], { flags: IDS_FLAGS, collectBoundaries: true });
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const rounds = tableRoundsOf(result);
+    expect(rounds).toHaveLength(1);
+    expect(normalizedOf(rounds[0])).toEqual(R3_NORMALIZED);
+    const sha = await nameTableSha256(MAPPED_IDS);
+    expect(rounds[0]?.table?.table_sha256).toBe(sha);
+    expect(rounds[0]?.semantic_check?.["table_sha256"]).toBe(sha);
+    expect(artifactOf(result.bundle, "artifacts/name-table.json")["table_sha256"]).toBe(sha);
+    expect(result.boundaries?.find((entry) => entry.boundary === "t1-t2")?.table).toEqual(MAPPED_IDS);
+    // C2 の要求は 1 回（初回は手の当たり方に依らない）。C3 の要求に整える前の所属（R3 の addItem）は載らない
+    expect(requestsOf(recording, "mapping")).toHaveLength(1);
+    const semantic = requestsOf(recording, SEMANTIC_CHECK_SCHEMA_NAME)[0];
+    expect(JSON.stringify(semantic)).toBe(JSON.stringify(requestsOf((await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS })).recording, SEMANTIC_CHECK_SCHEMA_NAME)[0]));
+    const stageRecording = createCheckedRecordingClient(calls);
+    const stage = await runStageRangeV11a({ ...inputOf(stageRecording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "semantic-check" } });
+    expect(stage.tableRounds).toEqual(rounds);
+  });
+
+  it("(7) 当たる要件の無い走りは空の並び、C2 が落ちた回は null、C3 が形で止まった回も表があれば保持（Issue #723）", async () => {
+    const clean = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS });
+    expect(tableRoundsOf(clean.result).map(normalizedOf)).toEqual([[]]);
+    const missing = { requirements: mappingEntries().slice(1) };
+    const failed = await runScenario(
+      [
+        ...vocabularyCalls(),
+        structured(hitMapping()),
+        structured(judgments(IDS, { R3: REJECT_R3_R4.R3 })),
+        structured(missing),
+        structured(renamed(idsT2Response([...r1Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+        structured({ declaration: RUN_YAML }),
+        structured(acceptAll(["R1", "R2", "R4"])),
+      ],
+      { flags: IDS_FLAGS, collectBoundaries: true },
+    );
+    expect(failed.result.stopped).toBeNull();
+    const failedRounds = tableRoundsOf(failed.result);
+    expect(failedRounds.map((round) => [round.ok, normalizedOf(round), round.adopted])).toEqual([
+      ["ok", R3_NORMALIZED, true],
+      ["unmet", null, false],
+    ]);
+    // 2 回目が C2' に落ちたら初回の整えた表とその SHA に戻る
+    const sha = await nameTableSha256(MAPPED_IDS);
+    expect(failed.result.boundaries?.find((entry) => entry.boundary === "t1-t2")?.tableSha256).toBe(sha);
+    expect(artifactOf(failed.result.bundle, "artifacts/name-table.json")["table_sha256"]).toBe(sha);
+    const incomplete = { judgments: IDS.slice(0, 3).map(accept) };
+    const stopped = await runScenario(
+      [...vocabularyCalls(), structured(good().mapping), structured(judgments(IDS, REJECT_R3_R4)), structured({ requirements: [withSharedAdd(mappingEntries()[2] as Record<string, unknown>), mappingEntries()[3]] }), structured(incomplete), structured(incomplete)],
+      { flags: IDS_FLAGS },
+    );
+    expect(stopped.result.stopped).toMatchObject({ stage: "semantic-check", kind: "malformed" });
+    expect(tableRoundsOf(stopped.result).map((round) => [round.table !== null, round.semantic_check !== null, normalizedOf(round)])).toEqual([
+      [true, true, []],
+      [true, false, R3_NORMALIZED],
+    ]);
+  });
+
+  it("(9) C3 の拒否のあと LLM が同じ raw を再提出 → 同じ表 → 拒否が残れば持ち越しで full にならない。2 回目の「前回の写像」は整える前の raw（Issue #723）", async () => {
+    const rejectR3 = judgments(IDS, { R3: REJECT_R3_R4.R3 });
+    const { result, recording } = await runScenario(
+      [
+        ...vocabularyCalls(),
+        structured(hitMapping()),
+        structured(rejectR3),
+        structured({ requirements: hitMapping().requirements.filter((entry) => entry["requirementId"] === "R3") }),
+        structured(rejectR3),
+        ...tailFor(["R1", "R2", "R4"]),
+      ],
+      { flags: IDS_FLAGS },
+    );
+    expect(result.stopped).toBeNull();
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(carryEntriesOf(result.bundle)).toEqual([{ requirementId: "R3", reasons: [{ origin: "semantic-check", reason: "unnecessary-ownership" }] }]);
+    const mappingRequests = requestsOf(recording, "mapping");
+    expect(mappingRequests).toHaveLength(2);
+    expect(dataBlockOf(mappingRequests[1]?.input ?? "", "前回の写像")).toEqual(hitMapping());
+    const rounds = tableRoundsOf(result);
+    expect(rounds.map((round) => [round.table?.table_sha256, round.semantic_check?.["table_sha256"], normalizedOf(round)])).toEqual([
+      [await nameTableSha256(MAPPED_IDS), await nameTableSha256(MAPPED_IDS), R3_NORMALIZED],
+      [await nameTableSha256(MAPPED_IDS), await nameTableSha256(MAPPED_IDS), R3_NORMALIZED],
+    ]);
+    expectNoAcceptanceMaterial(result.diagnostics.map((artifact) => artifact.text));
+  });
+
   /** 文に目印を足す（null は null のまま） */
   const markedText = (text: string | null): string | null => (text === null ? null : `${text}。目印の追記`);
   /** 固定文の欄の全部に目印を足す */

@@ -31,6 +31,13 @@
 // 形**にする。復号は欄を種類の固定の順（`STRUCTURAL_ASSERTIONS`）で `[{check, targetId, sourceId}]` に写してから、今の照合と
 // 表の検査（重なり・checks 無し・孤立行・制約 ID）を全部そのまま掛ける（重なりの検査は手で組んだ表・偽物の LLM に効く）。
 //
+// 整える手（Issue #723。方法論 03 の H1・04 §1）：応答から組んで検査の対象の行を所属に足し、一覧の順に並べた表に、C2' の**前**に
+// コードの決まった手順を手 1 → 手 2 の順で 1 回だけ当てる（`normalizeMappedTable`。初回・落ちた要件だけの書き直しの合併・C3 の
+// 拒否のあとの 2 回目の合併の全部が `inspectMappingSourced` を通るので同じ関数が当たる）。手は表の行（kind・type・refEntity・
+// hasWhen）と basis だけで決まり、規則の文と LLM の要求は変えない。C2' は整えた表に今のまま掛け、表の SHA も整えた表で取る。
+// 前回の写像（C2 の 2 回目の要求のデータ）は整える前の raw のまま（整えた差分を LLM に見せない）。整えた中身は結果の `normalized`
+// で返し、診断の table-rounds にだけ残す。
+//
 // 参照の照合の数（`ReferenceCounts`）：照らした参照＝応答の要件 ID・所属の ID・検査の対象の ID の全部、知らない ID＝一覧に無い
 // 要件 ID・行に無い所属や対象の ID、重複＝同じ要件 2 件・同じ要件の中の同じ行、別の束の ID＝要件 ID の欄に行の ID の形・所属や
 // 対象の欄に一覧の要件 ID。
@@ -61,12 +68,15 @@ import {
   checkCheckTargets,
   checkMappedTable,
   nameTableSha256,
+  ownersByRowId,
   ownershipWithCheckTargets,
   shapeOfMappingEntry,
   type MappingEntry,
   type NameTable,
   type NameTableCheckTarget,
+  type NameTableOwnership,
   type NameTableRow,
+  type NameTableVerification,
 } from "../../v11a/names.js";
 import { planWithoutRequirementKinds, type SemanticRejection } from "../../v11a/stages/name-table.js";
 import type { JudgeAdviceMarkEntry } from "../../v11a/stages/judge-advice.js";
@@ -332,14 +342,156 @@ export interface MappingRewriteCounts {
  */
 export type MappingRejectedCandidate = RejectedCandidate & { readonly rewrite?: MappingRewriteCounts };
 
-/** C2 の結果（表・表の SHA-256・raw の応答）。参照の照合の数は成否によらず返す */
+/** C2 の結果（整えた表・その SHA-256・整える前の raw の応答・整えた中身）。参照の照合の数は成否によらず返す */
 export type MappingOutcome =
   | {
       readonly ok: true;
-      readonly value: { readonly table: NameTable; readonly tableSha256: string; readonly response: unknown };
+      readonly value: {
+        readonly table: NameTable;
+        readonly tableSha256: string;
+        readonly response: unknown;
+        readonly normalized: readonly MappingNormalization[];
+      };
       readonly references: ReferenceCounts;
     }
   | { readonly ok: false; readonly failure: StageFailure; readonly references: ReferenceCounts };
+
+// ── 整える手（Issue #723）──────────────────────────────────────────
+
+/** 整える手の ID */
+export type MappingNormalizationRuleId = "N-map-01" | "N-map-02";
+
+/** 手 1 で structural にした要件の reason（固定文） */
+export const MAPPING_NORMALIZATION_REASON = "参照の項目 1 つの種類と参照先を構造の検査で確かめる（コードが整えた）";
+
+/**
+ * 整える手の定義（LLM には送らない。コードが守ること。`ruleDefinitionDefects` で不備を照らす）。手は表の行（kind・type・
+ * refEntity・hasWhen）と basis だけで決まる（方法論 03 の H1・04 §1「コードが決められる事実を規則で指示しない」）
+ */
+export const MAPPING_NORMALIZATION_DEFINITIONS: readonly (RuleDefinition & { readonly id: MappingNormalizationRuleId })[] = [
+  {
+    id: "N-map-01",
+    text: "確かめ方が fixed-test で、所属（応答の roles に検査の対象を足したもの。導いた entity は含めない）が、type が ref か list で refEntity を持つ項目の行 1 つと、その項目の entity・refEntity の entity の行だけの要件を、kind structural・checks は field-type 1 件・targets はその項目（sourceId null）・reason は固定文にする。所属は変えない。basis は問わない。所属に表に無い ID があれば当てない。",
+    why: "「A が B を指す」だけを求める要件は参照の項目 1 行を所属させ、validate の決まりが無いので固定した試験は在ることしか確かめられない。field-type（期待＝種類・refEntity）は表の行から決定的に導ける（コードが作る構造の検査と同じ導き）。C2 は fixed-test に寄り、fixed-test は対象の行を書かないので所属を絞る錨が無い（U1 の 30 本の採点で、fixed-test → 正解が単一行の structural が 21 件）",
+    since: "Issue #723",
+  },
+  {
+    id: "N-map-02",
+    text: "確かめ方が fixed-test で basis stated の行が 1 つ以上ある要件から、basis dependency・kind operation・hasWhen false の行を外す。その要件の所属に同じ行 ID の重複か表に無い ID があれば当てない。候補の全部を外した表で所属の無い行が新たに出るなら、その行とその行を entity に持つ候補を残して計算し直す。外して 0 行になる要件・全部 dependency の要件は変えない。所属を足さない。",
+    why: "台帳の when の行は when の無い操作に action の試験を作らないので、fixed-test の要件が when の無い操作を dependency で所属させても固定した試験の対象にならず、余計な生成試験と網羅の免除に効く（U1 の 30 本の過剰 75 要件のうち 71 件が fixed-test、余計な行は全部ほかの要件が所属させる行）。門の落ち（重複・表に無い ID・孤立行）は消さない（#627：コードで所属を足さない）",
+    since: "Issue #723",
+  },
+];
+
+/** 整えた中身の 1 件（要件ごと。仮に外した分ではなく、整える前の表との最終の差分） */
+export interface MappingNormalization {
+  readonly requirementId: string;
+  readonly rule: MappingNormalizationRuleId;
+  /** 手 1 の対象の項目の ID（手 2 は null） */
+  readonly targetId: string | null;
+  /** 手 2 で外した行 ID（所属の順。手 1 は空） */
+  readonly removedRowIds: readonly string[];
+}
+
+const isWhenlessOperation = (row: NameTableRow): boolean =>
+  row.kind === "operation" && row.type !== null && typeof row.type === "object" && "hasWhen" in row.type && !row.type.hasWhen;
+
+/** 所属の i 番目と確かめ方の i 番目が同じ要件のときだけ、その組の所属（C2 が組む表は同じ並び） */
+const pairedRoles = (table: NameTable, index: number): NameTableOwnership["roles"] | undefined => {
+  const ownership = table.ownership[index];
+  const verification = table.verification[index];
+  return ownership !== undefined && verification !== undefined && ownership.requirementId === verification.requirementId ? ownership.roles : undefined;
+};
+
+/** 手 1（N-map-01）の対象の項目（当たらなければ undefined） */
+function referenceFieldOf(roles: NameTableOwnership["roles"], rowById: ReadonlyMap<string, NameTableRow>): NameTableRow | undefined {
+  const owned: NameTableRow[] = [];
+  for (const role of roles) {
+    const row = rowById.get(role.id);
+    if (row === undefined) return undefined;
+    owned.push(row);
+  }
+  const fieldIds = new Set(owned.filter((row) => row.kind === "field").map((row) => row.id));
+  if (fieldIds.size !== 1) return undefined;
+  const field = owned.find((row) => row.kind === "field") as NameTableRow;
+  if ((field.type !== "ref" && field.type !== "list") || field.refEntity === null) return undefined;
+  const allowed = owned.every((row) => row.id === field.id || (row.kind === "entity" && (row.id === field.entity || row.id === field.refEntity)));
+  return allowed ? field : undefined;
+}
+
+/**
+ * C2 が組んだ表を整える（純粋。Issue #723）。手 1（N-map-01）→ 手 2（N-map-02）の順に**1 回だけ**当てる（整えた表に再適用しない。
+ * 2 手の合成は冪等でない）。表の行・所属の並びは変えず、所属を足さない。手 2 の結果は候補の集合で決まり、要件・行の順に依らない。
+ * 当たる要件が無ければ同じ表を返す
+ */
+export function normalizeMappedTable(table: NameTable): { readonly table: NameTable; readonly normalized: readonly MappingNormalization[] } {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  // 手 1：参照の項目 1 行の fixed-test → field-type の structural（所属は変えない）
+  const firstTargets = new Map<number, string>();
+  const verification: NameTableVerification[] = table.verification.map((entry, index) => {
+    const roles = pairedRoles(table, index);
+    if (entry.kind !== "fixed-test" || roles === undefined) return entry;
+    const field = referenceFieldOf(roles, rowById);
+    if (field === undefined) return entry;
+    firstTargets.set(index, field.id);
+    return {
+      requirementId: entry.requirementId,
+      kind: "structural",
+      reason: MAPPING_NORMALIZATION_REASON,
+      checks: ["field-type"],
+      targets: [{ check: "field-type", targetId: field.id, sourceId: null }],
+    };
+  });
+  const afterFirst: NameTable = firstTargets.size === 0 ? table : { ...table, verification };
+  // 手 2：stated のある fixed-test から、dependency の when の無い操作を外す候補（要件の添字ごとの行 ID の集合）
+  const candidates = new Map<number, Set<string>>();
+  afterFirst.verification.forEach((entry, index) => {
+    const roles = pairedRoles(afterFirst, index);
+    if (entry.kind !== "fixed-test" || roles === undefined || !roles.some((role) => role.basis === "stated")) return;
+    const ids = roles.map((role) => role.id);
+    if (new Set(ids).size !== ids.length || ids.some((id) => !rowById.has(id))) return;
+    const removable = roles.filter((role) => role.basis === "dependency" && isWhenlessOperation(rowById.get(role.id) as NameTableRow));
+    if (removable.length === 0 || removable.length === roles.length) return;
+    candidates.set(index, new Set(removable.map((role) => role.id)));
+  });
+  const without = (active: ReadonlyMap<number, ReadonlySet<string>>): NameTable => ({
+    ...afterFirst,
+    ownership: afterFirst.ownership.map((entry, index) => {
+      const removed = active.get(index);
+      return removed === undefined ? entry : { requirementId: entry.requirementId, roles: entry.roles.filter((role) => !removed.has(role.id)) };
+    }),
+  });
+  const ownedBefore = new Set(ownersByRowId(afterFirst).keys());
+  let active: Map<number, Set<string>> = candidates;
+  // 孤立行を作らない：新たに所属の無い行が出れば、その行とその行を entity に持つ候補を残して計算し直す（候補が減るだけなので止まる）
+  while (active.size > 0) {
+    const owners = ownersByRowId(without(active));
+    const orphans = new Set([...ownedBefore].filter((id) => !owners.has(id)));
+    if (orphans.size === 0) break;
+    const next = new Map<number, Set<string>>();
+    for (const [index, ids] of active) {
+      const removing = new Set([...ids].filter((id) => !orphans.has(id) && !orphans.has(rowById.get(id)?.entity ?? "")));
+      if (removing.size > 0) next.set(index, removing);
+    }
+    const before = [...active.values()].reduce((sum, ids) => sum + ids.size, 0);
+    const after = [...next.values()].reduce((sum, ids) => sum + ids.size, 0);
+    // 減らなければ外さない（孤立の原因が候補に無い。起こらない前提だが、外し続けない）
+    active = after < before ? next : new Map();
+  }
+  const normalized: MappingNormalization[] = [];
+  afterFirst.verification.forEach((entry, index) => {
+    const target = firstTargets.get(index);
+    if (target !== undefined) {
+      normalized.push({ requirementId: entry.requirementId, rule: "N-map-01", targetId: target, removedRowIds: [] });
+      return;
+    }
+    const removed = active.get(index);
+    if (removed === undefined) return;
+    const roles = afterFirst.ownership[index]?.roles ?? [];
+    normalized.push({ requirementId: entry.requirementId, rule: "N-map-02", targetId: null, removedRowIds: roles.filter((role) => removed.has(role.id)).map((role) => role.id) });
+  });
+  return { table: active.size === 0 ? afterFirst : without(active), normalized };
+}
 
 /** 骨組み（写像・`requirements` が写像の並び） */
 function skeletonProblems(output: unknown): readonly Problem[] {
@@ -455,7 +607,7 @@ export type MappingProblemSource = "response" | "table";
 
 /** C2' の結果に、問題ごとの出どころと検査した表の要件 ID の並びを足したもの（Issue #660。帰属の入力） */
 export type MappingInspection =
-  | { readonly ok: true; readonly table: NameTable }
+  | { readonly ok: true; readonly table: NameTable; readonly normalized: readonly MappingNormalization[] }
   | {
       readonly ok: false;
       readonly problems: readonly Problem[];
@@ -476,7 +628,8 @@ export type MappingInspector = (
 
 /**
  * 応答（骨組みは通った）から表を組み、C2' を掛ける（純粋）。構造の検査の対象を照らして通った対象の行を所属に足し（対象の問題の
- * 位置は応答の `requirements[j]`）、一覧の順に並べた表に C2' を掛ける（表の問題の位置は表の欄。手 3a と同じ）
+ * 位置は応答の `requirements[j]`）、一覧の順に並べた表を整え（`normalizeMappedTable`。Issue #723）、整えた表に C2' を掛ける（表の
+ * 問題の位置は表の欄。手 3a と同じ。整える手は並びを変えない）
  */
 export function inspectMapping(
   list: RequirementList,
@@ -484,7 +637,9 @@ export function inspectMapping(
   output: Record<string, unknown>,
   documents: readonly PromptDocument[],
   ledger?: UpstreamLedgerView,
-): { readonly ok: true; readonly table: NameTable } | { readonly ok: false; readonly problems: readonly Problem[] } {
+):
+  | { readonly ok: true; readonly table: NameTable; readonly normalized: readonly MappingNormalization[] }
+  | { readonly ok: false; readonly problems: readonly Problem[] } {
   const inspected = inspectMappingSourced(list, rows, output, documents, ledger);
   return inspected.ok ? inspected : { ok: false, problems: inspected.problems };
 }
@@ -513,19 +668,21 @@ export function inspectMappingSourced(
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) => (order.get(a.entry.requirementId) ?? list.requirements.length + a.index) - (order.get(b.entry.requirementId) ?? list.requirements.length + b.index) || a.index - b.index)
     .map(({ entry }) => entry);
-  const table: NameTable = {
+  const built: NameTable = {
     rows,
     ownership: sorted.map((entry) => ({ requirementId: entry.requirementId, roles: entry.roles })),
     verification: sorted.map((entry) => ({ ...entry.verification, requirementId: entry.requirementId })),
     classification: sorted.map((entry) => ({ requirementId: entry.requirementId, nature: entry.nature })),
   };
+  // 整える手は C2' の前に、組んだ表へ 1 回だけ当てる（門は整えた表に今のまま掛ける。Issue #723）
+  const { table, normalized } = normalizeMappedTable(built);
   const sources: MappingProblemSource[] = problems.map(() => "response");
   const tableProblems = checkMappedTable(list, table, documents, ledger === undefined ? {} : { ledger });
   problems.push(...tableProblems);
   sources.push(...tableProblems.map((): MappingProblemSource => "table"));
   return problems.length > 0
     ? { ok: false, problems, sources, tableRequirementIds: sorted.map((entry) => entry.requirementId) }
-    : { ok: true, table };
+    : { ok: true, table, normalized };
 }
 
 /** 要件 1 件に帰属した問題（Issue #660） */
@@ -718,7 +875,7 @@ export function rejectedRequirementIds(list: RequirementList, rejections: readon
 
 /** 初回の検査の結果：表、または落ちた要件だけを書き直す予定（Issue #660） */
 type FirstCheck =
-  | { readonly kind: "table"; readonly table: NameTable }
+  | { readonly kind: "table"; readonly table: NameTable; readonly normalized: readonly MappingNormalization[] }
   | { readonly kind: "rewrite"; readonly problems: readonly Problem[]; readonly groups: readonly MappingProblemGroup[] };
 
 /**
@@ -757,7 +914,7 @@ export async function runMapping(input: MappingInput): Promise<MappingOutcome> {
   const firstCheck = (output: unknown): ShapeCheck<FirstCheck> => {
     attempts += 1;
     const inspected = inspectSourced(output);
-    if (inspected.ok) return { ok: true, value: { kind: "table", table: inspected.table } };
+    if (inspected.ok) return { ok: true, value: { kind: "table", table: inspected.table, normalized: inspected.normalized } };
     if (attempts === 1 && !("skeleton" in inspected)) {
       const { groups } = attributeMappingProblems(input.list, output as Record<string, unknown>, inspected);
       if (groups !== null) return { ok: true, value: { kind: "rewrite", problems: inspected.problems, groups } };
@@ -768,7 +925,11 @@ export async function runMapping(input: MappingInput): Promise<MappingOutcome> {
   if (answer.ok) {
     const first = answer.value;
     if (first.kind === "rewrite") return rewriteFailedRequirements(input, request, answer.output as Record<string, unknown>, first, tally);
-    return { ok: true, value: { table: first.table, tableSha256: await nameTableSha256(first.table), response: answer.output }, references: tally.counts };
+    return {
+      ok: true,
+      value: { table: first.table, tableSha256: await nameTableSha256(first.table), response: answer.output, normalized: first.normalized },
+      references: tally.counts,
+    };
   }
   const failure: StageFailure =
     answer.failure.kind === "malformed" && !lastWasSkeleton
@@ -826,7 +987,11 @@ async function rewriteFailedRequirements(
     reject(2, merged, inspected.problems);
     return { ok: false, failure: { kind: "unmet", attempts: STEP_ATTEMPTS, problems: inspected.problems }, references: tally.counts };
   }
-  return { ok: true, value: { table: inspected.table, tableSha256: await nameTableSha256(inspected.table), response: merged }, references: tally.counts };
+  return {
+    ok: true,
+    value: { table: inspected.table, tableSha256: await nameTableSha256(inspected.table), response: merged, normalized: inspected.normalized },
+    references: tally.counts,
+  };
 }
 
 /**
@@ -867,5 +1032,9 @@ async function rewriteRejectedRequirements(
   // 合併した写像に C2' を全部掛ける（孤立行・網羅・重複を含む。初回と同じ検査）
   const inspected = (input.inspect ?? inspectMappingSourced)(input.list, input.rows, merged, input.documents, input.ledger);
   if (!inspected.ok) return unmet(merged, inspected.problems);
-  return { ok: true, value: { table: inspected.table, tableSha256: await nameTableSha256(inspected.table), response: merged }, references: tally.counts };
+  return {
+    ok: true,
+    value: { table: inspected.table, tableSha256: await nameTableSha256(inspected.table), response: merged, normalized: inspected.normalized },
+    references: tally.counts,
+  };
 }

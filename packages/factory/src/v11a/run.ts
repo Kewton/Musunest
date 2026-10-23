@@ -639,6 +639,7 @@ interface MutableTableRound {
   readonly round: number;
   ok: TableRoundRecord["ok"];
   table: TableRoundRecord["table"];
+  normalized: TableRoundRecord["normalized"];
   readonly rewrite: TableRoundRewrite | null;
   semantic_check: TableRoundRecord["semantic_check"];
 }
@@ -1047,6 +1048,7 @@ async function runV11a(
       round: row.round,
       ok: row.ok,
       table: row.table,
+      normalized: row.normalized,
       rewrite: row.rewrite,
       semantic_check: row.semantic_check,
       adopted: !stopped && row.round === adoptedTableRound,
@@ -1247,6 +1249,7 @@ async function runV11a(
           round,
           ok: "failed",
           table: null,
+          normalized: null,
           rewrite:
             rewrittenIds === null
               ? null
@@ -1300,6 +1303,12 @@ async function runV11a(
           verification: output.table.verification,
           classification: output.table.classification,
         };
+        tableRound.normalized = output.normalized.map((entry) => ({
+          requirement_id: entry.requirementId,
+          rule: entry.rule,
+          target_id: entry.targetId,
+          removed_row_ids: entry.removedRowIds,
+        }));
         const { semantic, advice, marks, rejections } = await checkTableRound(round, output);
         tableRound.semantic_check = {
           table_sha256: semantic.tableSha256,
