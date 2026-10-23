@@ -331,6 +331,18 @@ export interface TableRoundRewrite {
   readonly kept: number;
 }
 
+/**
+ * 回ごとの行の、C2 が整えた中身の 1 件（要件ごと。整える前の表との最終の差分。Issue #723）。`rule` は整える手の ID
+ * （`N-map-01`・`N-map-02`）、`target_id` は手 1 の対象の項目の ID（手 2 は null）、`removed_row_ids` は手 2 で外した行 ID
+ * （所属の順。手 1 は空）
+ */
+export interface TableRoundNormalization {
+  readonly requirement_id: string;
+  readonly rule: string;
+  readonly target_id: string | null;
+  readonly removed_row_ids: readonly string[];
+}
+
 /** 回ごとの行の、C3 の判定（一気通貫の C3 の記録の `rounds` と同じ形） */
 export interface TableRoundSemanticCheck {
   readonly table_sha256: string;
@@ -346,6 +358,8 @@ export interface TableRoundRecord {
   /** C2 の成否（`ok`・`unmet`・`failed`。2 回目が C2' に落ちた回は表を持たない） */
   readonly ok: "ok" | "unmet" | "failed";
   readonly table: TableRoundTable | null;
+  /** C2 が整えた中身（表のある回は並び。当たる要件が無ければ空の並び。表の無い回は null。Issue #723） */
+  readonly normalized: readonly TableRoundNormalization[] | null;
   readonly rewrite: TableRoundRewrite | null;
   readonly semantic_check: TableRoundSemanticCheck | null;
   /** その回の表を採用したか（止まった走りは全部 false） */
