@@ -980,17 +980,15 @@ export function withCheckTargets(table: NameTable): NameTable {
 }
 
 /**
- * 検査ごとの対象を、C2 の応答の checks（検査の種類ごとの欄。種類の固定の順で、使わない種類は null。view-shows だけ sourceId を
- * 持つ。Issue #682）にする。同じ種類が 2 件ある対象は欄に書けないので例外にする
+ * 検査ごとの対象を、C2 の応答の checks（検査の種類ごとの欄。種類の固定の順で、使わない種類は null、使う種類は対象の写像の並び
+ * 〔対象の順〕。view-shows の要素だけ sourceId を持つ。Issue #682・#724）にする
  */
 export function checkFieldsResponseOf(targets: readonly NameTableCheckTarget[]): Record<string, unknown> {
   return Object.fromEntries(
     STRUCTURAL_ASSERTIONS.map((check) => {
       const found = targets.filter((target) => target.check === check);
-      if (found.length > 1) throw new Error(`前提が壊れた：${check} の対象が 2 件以上ある`);
-      const target = found[0];
-      if (target === undefined) return [check, null];
-      return [check, check === "view-shows" ? { targetId: target.targetId, sourceId: target.sourceId } : { targetId: target.targetId }];
+      if (found.length === 0) return [check, null];
+      return [check, found.map((target) => (check === "view-shows" ? { targetId: target.targetId, sourceId: target.sourceId } : { targetId: target.targetId }))];
     }),
   );
 }

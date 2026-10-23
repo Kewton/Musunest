@@ -1529,6 +1529,37 @@ describe("旗 v12.ids の検査の口（出典は null。写し・引用の検�
     expect(duplicated).not.toContain("どの要件にも所属しない行がある");
   });
 
+  it("C2'（checkMappedTable）の重なり（Issue #724）：targets を持つ表は同じ組（種類＋targetId、view-shows は＋sourceId）が 2 回で落ち、同じ種類で対象が別なら通る。targets を持たない表は今のまま同じ種類が 2 回で落ちる", () => {
+    const OVERLAP = "checks の中身が重なっている";
+    type Target = { readonly check: "action-kind" | "view-shows"; readonly targetId: string; readonly sourceId: string | null };
+    const structural = (requirementId: string, targets: readonly Target[] | undefined, checks: readonly Target["check"][]): NameTable => ({
+      ...table,
+      ownership: table.ownership.map((entry) => (entry.requirementId === "R3" ? { ...entry, roles: [...entry.roles, { id: "OP1", basis: "dependency" as const, reason: "action-kind" }] } : entry)),
+      verification: table.verification.map((entry) =>
+        entry.requirementId === requirementId ? { requirementId, kind: "structural" as const, reason: "構造だけ", checks, ...(targets === undefined ? {} : { targets }) } : entry,
+      ),
+    });
+    const op = (targetId: string): Target => ({ check: "action-kind", targetId, sourceId: null });
+    const view = (targetId: string, sourceId: string): Target => ({ check: "view-shows", targetId, sourceId });
+    const messages = (target: NameTable) => checkMappedTable(list, target, FIXTURE_DOCUMENTS).map((problem) => problem.message);
+    // 通る：同じ種類・別の対象
+    expect(messages(structural("R3", [op("OP1"), op("OP2")], ["action-kind", "action-kind"]))).toEqual([]);
+    expect(messages(structural("R2", [view("V2", "E1.F1"), view("V2", "C1")], ["view-shows", "view-shows"]))).toEqual([]);
+    // 落ちる：同じ組が 2 回
+    expect(checkMappedTable(list, structural("R3", [op("OP2"), op("OP2")], ["action-kind", "action-kind"]), FIXTURE_DOCUMENTS)).toEqual([
+      { field: "verification[2].checks[1]", message: OVERLAP },
+    ]);
+    expect(messages(structural("R2", [view("V2", "E1.F1"), view("V2", "E1.F1")], ["view-shows", "view-shows"]))).toEqual([OVERLAP]);
+    // targets を持たない表（ids off の T1・手で組んだ旧の形）は、今のまま同じ種類が 2 回で落ちる
+    expect(messages(structural("R3", undefined, ["action-kind", "action-kind"]))).toEqual([OVERLAP]);
+    const t1 = fixtureTable();
+    const t1Duplicated: NameTable = {
+      ...t1,
+      verification: t1.verification.map((entry) => (entry.requirementId === "R2" && entry.kind === "structural" ? { ...entry, checks: ["view-shows", "view-shows"] } : entry)),
+    };
+    expect(checkNameTable(list, t1Duplicated, FIXTURE_DOCUMENTS).map((problem) => problem.message)).toContain(OVERLAP);
+  });
+
   it("C2'（checkMappedTable）：表全体は問題 0。所属の欠落は今の (g) の固定文で落ちる", () => {
     expect(checkMappedTable(list, table, FIXTURE_DOCUMENTS)).toEqual([]);
     const missing = checkMappedTable(list, { ...table, ownership: table.ownership.slice(1) }, FIXTURE_DOCUMENTS).map((problem) => problem.message);

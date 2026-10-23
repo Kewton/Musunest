@@ -33,7 +33,7 @@ import {
 } from "../fixed-test.js";
 import type { RequirementList } from "../pipeline.js";
 import type { Problem } from "../stages/prompt.js";
-import type { ComputationAggregate, ComputationRowType, NameTable, NameTableRow, OperationRowType } from "../v11a/names.js";
+import type { ComputationAggregate, ComputationRowType, NameTable, NameTableCheckTarget, NameTableRow, OperationRowType } from "../v11a/names.js";
 import {
   OWNERSHIP_STRUCTURE_NOT_ALLOWED,
   aggregateStateValueOf,
@@ -434,8 +434,10 @@ export function emptyAggregateCodeTestsOf(
 }
 
 /**
- * 構造で確かめる要件の構造の検査（checks の各項目に 1 本。並びは checks の順）。確かめ方が検査ごとの対象を持たない・数か中身の
- * 順が checks と合わない・対象の行が表に無い・種類が合わないときは、止める固定文を返す（1 本も作らない）。
+ * 構造で確かめる要件の構造の検査（checks の各項目＝対象ごとに 1 本。並びは checks の順。同じ種類の検査が複数の対象に並んでよい。
+ * Issue #724）。確かめ方が検査ごとの対象を持たない・数か中身の順が checks と合わない・対象の行が表に無い・種類が合わないときは、
+ * 止める固定文を返す（1 本も作らない）。試験 ID は種類と対象の行で決まり、同じ要件で同じ種類・同じ対象の行が 2 つ以上並ぶとき
+ * （view-shows で同じ画面・別の表示元）だけ表示元の行の ID を足す（単一対象の ID は今のまま）
  */
 function structureTestsOf(
   requirementId: string,
@@ -452,6 +454,8 @@ function structureTestsOf(
     return GENERATED_STRUCTURE_STOP_MESSAGES.targets;
   }
   const made: { readonly test: FixedTest; readonly observed: string }[] = [];
+  const shared = (target: NameTableCheckTarget): boolean =>
+    targets.filter((other) => other.check === target.check && other.targetId === target.targetId).length > 1;
   for (const target of targets) {
     const row = rowById.get(target.targetId);
     if (row === undefined) return GENERATED_STRUCTURE_STOP_MESSAGES.unknownRow;
@@ -463,7 +467,8 @@ function structureTestsOf(
     }
     const assertion = structureAssertionOf(target.check, row, source);
     if (typeof assertion === "string") return assertion;
-    const id = `${GENERATED_TEST_ID_PREFIX}structure:${requirementId}:${target.check}:${row.id}:normal`;
+    const pair = target.sourceId !== null && shared(target) ? `:${target.sourceId}` : "";
+    const id = `${GENERATED_TEST_ID_PREFIX}structure:${requirementId}:${target.check}:${row.id}${pair}:normal`;
     made.push({
       test: generatedTest(id, requirementId, row.kind, row.id, "normal", "structure", [], true, assertion),
       observed: GENERATED_STRUCTURE_OBSERVES[target.check],

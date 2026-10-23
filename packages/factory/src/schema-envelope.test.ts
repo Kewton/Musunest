@@ -681,7 +681,7 @@ describe("旗 ids on の v1.2 は識別子 v1.2-ids の封筒を全段で送る�
     expect(ENVELOPE_SCHEMA_V12_IDS).not.toEqual(ENVELOPE_SCHEMA_V12);
   });
 
-  it("v1.2-ids の封筒の全枝が strict の走査で問題 0。C2 の枝の checks は 6 欄が全部 required で、各欄と checks が null を許し、view-shows だけ sourceId を持つ", () => {
+  it("v1.2-ids の封筒の全枝が strict の走査で問題 0。C2 の枝の checks は 6 欄が全部 required で、各欄と checks が null を許し、各欄は要素の並び（Issue #724）で、view-shows の要素だけ sourceId を持つ", () => {
     const result = (ENVELOPE_SCHEMA_V12_IDS["properties"] as Record<string, unknown>)[ENVELOPE_RESULT_KEY] as {
       readonly anyOf: readonly Record<string, unknown>[];
     };
@@ -697,8 +697,14 @@ describe("旗 ids on の v1.2 は識別子 v1.2-ids の封筒を全段で送る�
     expect(checks["type"]).toEqual(["object", "null"]);
     expect(checks["required"]).toEqual(["field-type", "action-kind", "action-unconditioned", "view-shows", "aggregate-no-period", "write-anonymous"]);
     for (const [name, field] of Object.entries(checks["properties"] as Record<string, Record<string, unknown>>)) {
-      expect(field["type"], name).toEqual(["object", "null"]);
-      expect(Object.keys(field["properties"] as Record<string, unknown>), name).toEqual(name === "view-shows" ? ["targetId", "sourceId"] : ["targetId"]);
+      // 各欄は null か要素の並び（Issue #724。直す前は null か対象の写像）。minItems は使わない（空の並びは復号の形の検査で断る）
+      expect(field["type"], name).toEqual(["array", "null"]);
+      expect("minItems" in field, name).toBe(false);
+      const item = field["items"] as Record<string, unknown>;
+      expect(item["type"], name).toBe("object");
+      expect(item["additionalProperties"], name).toBe(false);
+      expect(item["required"], name).toEqual(name === "view-shows" ? ["targetId", "sourceId"] : ["targetId"]);
+      expect(Object.keys(item["properties"] as Record<string, unknown>), name).toEqual(name === "view-shows" ? ["targetId", "sourceId"] : ["targetId"]);
     }
     expect(JSON.stringify(mapping).includes('"anyOf"')).toBe(false);
   });

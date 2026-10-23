@@ -123,7 +123,7 @@ import { NAMED_FAILURE_MESSAGES } from "../v12/search-repair.js";
 import { GENERATED_TEST_ID_PREFIX, generateTests, isGeneratedTestId } from "../v12/generated-tests.js";
 import type { FixedTest } from "../fixed-test.js";
 import { constraintIdsIn, ruleTexts, SHAPE_PROBLEMS_DATA_NAME } from "../stages/prompt.js";
-import { MAPPING_REWRITE_MESSAGES } from "../v12/stages/mapping.js";
+import { MAPPING_REWRITE_MESSAGES, MAPPING_SCHEMA_NAME } from "../v12/stages/mapping.js";
 import { FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "../v12/stages/field-repair.js";
 import { natureQuestionName } from "../stages/test-suite.js";
 import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenarios } from "../__tests__/baseline-capture.js";
@@ -1021,7 +1021,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       "5c064c0fca66daff785b9cddf84e051ee45ea3a7bb7471bcd953e8b16bfbb927",
       // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 752a0c66bd0921ddef70aae2a4b6a1c70b012d6003a14dccbd94bd006493e24e、#682 の前 a0093fffd46e0316db7a39788e7bc23cdbd879e9440dc900394944b4634643e3）
       // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 aa61d49da041316d61a2363ad590036a1486361eba20d106a56b7a821b1e83b5）
-      "7672dc5e7cc5bb29c6e9add669a90c45a22da87b4de55a9169aafbfefc45c9fb",
+      // 要求の SHA-256 は Issue #724 で取り直した（C2 の checks の欄を対象の並びにし R-map-03 の文を直したため。旧 7672dc5e7cc5bb29c6e9add669a90c45a22da87b4de55a9169aafbfefc45c9fb）
+      "a0e42ef4f3de48221fad469acf72b29e550d33ad7488101326d496a754a49ac6",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d3d46bd0bae1ed1bce66a419612e4d05b1d6d0cefa9b95072d2af39c8137d700）
       "ef2dc4cd77f101896bc8c4c377efeabe8f621d092497fdef0ee93b69490e031f",
@@ -1032,7 +1033,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       "e2cfd686f2296c3ff2a5f91bb45409dbb6efbc02feb54b7e246af97eaf762089",
       // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 8921cc36209615b5948b4830e79f7b8ed1cab4c38fe1751b1825b28ff2d149e1、#682 の前 6c3f9e9cf8c384b59958beb5300a3fc50847416fbfd411fb63f2c876e239a18d）
       // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 2c75ec3f7e097736f78a181425c7360fab93d01e3571468dbcb793f2b8c60e0a）
-      "5bccc6c03cf22bcd5bd9ce8ee9ddb7ecdc5987f4fa4d3a7d744db156fb7488fc",
+      // 要求の SHA-256 は Issue #724 で取り直した（C2 の checks の欄を対象の並びにし R-map-03 の文を直したため。旧 5bccc6c03cf22bcd5bd9ce8ee9ddb7ecdc5987f4fa4d3a7d744db156fb7488fc）
+      "d6db3501d82e82b7dbe13920732e1c256b53866bca4f79a115719448695213d6",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 c479ec4fc3ac733a9b470499f5d8fc631583a94ca9e4169834ae571ea7499645）
       "a3848402cdf1bbedbdbb51431bd971ccc94a351d6bfb88ae7a9f56054cdec635",
@@ -1045,7 +1047,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 旧 #682 f2f3aa9dc28f4b4fc536c18ea4dfae4e38cda3bfdf07d26524b8526c91674c2d、#682 の前 6af97b9e827e24b9d14505ee677d3b15af2f3e3615d6f448b90f818b8d8e061b）。
       // #661 は C2 の 2 回目の要求（部分専用の規則と「書き直す要件」）だけが変わる。それを外した要求は直す前と同じ（下の試験）
       // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 7aa71911309b5ef91f9c680ac454d31ca2a49fe63156cbbb6f1314476b3b94bd）
-      "dd5f9cf02049d7f833e5a99599915ce35b0b4296b5d512535c641e5d0d71e984",
+      // 要求の SHA-256 は Issue #724 で取り直した（C2 の checks の欄を対象の並びにし R-map-03 の文を直したため。旧 dd5f9cf02049d7f833e5a99599915ce35b0b4296b5d512535c641e5d0d71e984）
+      "351709d5e31e65fc7e15cb2c289bfdb67db83c5d8d4aa1fdb8415153dad8bfd9",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 2f032bbaf50ff8e7c6c0fbe9708107eb043cca23ae2bc5b6b25680e7c2f4151a）
       "f039481b055d8d893ee5535d5b56acc5182d6e5b392c8c4f3a21c4632403f859",
@@ -1054,7 +1057,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       "14927cf4ff8e5b827eb9f11391b5c422f6b789ccb1ff6878608c6cc351fa25c1",
       "62a0d8984a6a06d59674e2a3daf142cbf34425567d43c37c53461d94613f8a8e",
       // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 efcc74edb8bc0ab3a4c540f0d6fe4074f5299cd5cb144f5576c54621df7863a2、#682 の前 0ed4f413a0be74f4140a5d04d48728660796a4de535442589ae78af2b53120ff）
-      "2c5b83f0e36a0e8c094b261f4b27b11de51a3ff4b7b97c9e1eac0eccfc65bd9f",
+      // 要求の SHA-256 は Issue #724 で取り直した（C2 の checks の欄を対象の並びにし R-map-03 の文を直したため。旧 2c5b83f0e36a0e8c094b261f4b27b11de51a3ff4b7b97c9e1eac0eccfc65bd9f）
+      "17aea3149d429ba13dc0352224871fe191084f6459d9a83cc6d355534d6e24bc",
       "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
       "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     ],
@@ -1071,7 +1075,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       "14b868bfb4d6b944e2419cae0411c22b0f983c23a5ef1c7e47fc4424d7e6a298",
       // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 46f31a920a94f54c37b32fedb8e771028ecfa6e6a6b7789133d3c11101c04deb、#682 の前 5b4777c8abe5dcdfa274689e1ff8083e1c610a80180c54792f668d1dda010e1c）
       // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 b05e55ebd15b607f7c856b6fa50c7ff31d54ae87005478ad294c825c14bab561）
-      "9d0407679405956fb7d3d5ba4707f720cde73e174fa2a6c4f9a966c2929c8560",
+      // 要求の SHA-256 は Issue #724 で取り直した（C2 の checks の欄を対象の並びにし R-map-03 の文を直したため。旧 9d0407679405956fb7d3d5ba4707f720cde73e174fa2a6c4f9a966c2929c8560）
+      "d90c255d8438f58a29992f777751860ea34175f12bd2745be699ce7ee1fcba47",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d762715a3037b44cbc202848f40b5fa2cd1551bba549bd418f56fefc0e9def0e）
       "4a2626d7964d9f231142488d8151d75f3c36d8ef216d65f06c6fb63bc8a102ab",
@@ -1087,7 +1092,21 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
    * run.ts に戻した作業木で測った値。新しいコードの出力から作っていない。Issue #661）
    */
   // #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（T2 と B1 の要求が変わるため。v12-h3e の作業木で測った値。旧 cc800c696c72a5ba2708099d2be1125c0238c95dce8fc9d2255975e9c2960f1c）
-  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING = "865603b1b7822c4a8a1e5f9ce348fa1d2ae57f6a29a00270b3893f7740d5cb95";
+  // Issue #724 で取り直した（初回の C2 の要求の規則と schema が変わるため。旧 865603b1b7822c4a8a1e5f9ce348fa1d2ae57f6a29a00270b3893f7740d5cb95）
+  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING = "f557b06dfea31a88264e5db7aacb66068a3f61398e4571fcd760ccfccfe8cb37";
+  /**
+   * 直す前の値：上の台本の要求から C2 の要求（schemaName が mapping のもの）を全部外した残りの SHA-256（base 2c514cf の mapping.ts・
+   * names.ts・generated-tests.ts・fixtures.ts に戻した作業木で測った値。新しいコードの出力から作っていない。Issue #724）。#724 で要求の
+   * SHA-256 を取り直した差が C2 の要求だけ（C1・C3・T2・B1 の要求は同じ）であることを照らす
+   */
+  const BEFORE_REQUESTS_WITHOUT_MAPPING: Readonly<Record<string, string>> = {
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "fc5c8e4b4cf75e0c6a368d5ca88d06d391d6497c7ae4260c5afb5acb79cbadde",
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "bcaf58d13fede8b1dde00b5f8665c75a4fc4a713f016ccbeb243f476cd997fee",
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "ac126b65830f0b1d24d2321bb83a1201e8cf4856f2494fd5026934cb73d3a22f",
+    "(4) C2 が 2 回落ちて止まる": "20058692a49f3b735bbc0bbfb63590e41c9eb4f522d84ec5943238632d4ac8e5",
+    "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+    "(5) 形で 1 度も落ちない": "bcaf58d13fede8b1dde00b5f8665c75a4fc4a713f016ccbeb243f476cd997fee",
+  };
 
   const BEFORE_MATERIALS_DIGESTS: Readonly<Record<string, string>> = {
     "(4) C2 が 2 回落ちて止まる": "a1c6f1158b66a23deb3a2fefe0b0ea6a0c315529a826a9d67b5fad4d8960cf27",
@@ -1097,6 +1116,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
   it("(1)〜(5) の台本の段の記録・要約・LLM への要求・終了コード・納品物は、直す前（a61f2ce で測った SHA-256）と同じ（Issue #657）", async () => {
     const measured: Record<string, readonly string[]> = {};
     const measuredMaterials: Record<string, string> = {};
+    const measuredWithoutMapping: Record<string, string> = {};
     const rejectedSummaries: Record<string, readonly { attempt: number; problem_count: number; messages: readonly { message: string; count: number }[] }[]> = {};
     for (const script of beforeScripts()) {
       const { result, recording } = await runScenario(script.calls, { flags: IDS_FLAGS });
@@ -1108,6 +1128,9 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         measuredMaterials[script.name] = await sha256Hex(JSON.stringify(rest));
         rejectedSummaries[script.name] = rejected ?? [];
       }
+      measuredWithoutMapping[script.name] = await sha256Hex(
+        JSON.stringify({ structured: recording.structured.filter((request) => request.schemaName !== MAPPING_SCHEMA_NAME), tools: recording.tools }),
+      );
       measured[script.name] = await Promise.all(
         [result.record, result.summary, { structured: recording.structured, tools: recording.tools }, result.summary.exit_code, files].map((value) =>
           sha256Hex(JSON.stringify(value)),
@@ -1116,6 +1139,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     }
     expect(measured).toEqual(BEFORE_DIGESTS);
     expect(measuredMaterials).toEqual(BEFORE_MATERIALS_DIGESTS);
+    expect(measuredWithoutMapping).toEqual(BEFORE_REQUESTS_WITHOUT_MAPPING);
     // (3) の要求の SHA-256 を Issue #661 で取り直した差は、C2 の 2 回目の要求（6 本目の構造化の要求）だけ：それを外した要求は直す前と同じ
     const third = beforeScripts().find((script) => script.name === "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す");
     const thirdRun = await runScenario(third?.calls ?? [], { flags: IDS_FLAGS });
