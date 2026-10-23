@@ -28,6 +28,8 @@
 //
 // 境界 t1-t2 までの段が読むものは上流の見方（`UpstreamLedgerView`）に絞り、その見方から部分の指紋（`upstreamLedgerSha256`）を
 // 導く（#712）。全体の指紋 `propertyLedgerSha256` の値と意味は変えない。
+// 上流の見方には未対応の観測（登録済み・未対応の行の ID と固定文）も入れ、見方の版を 2 に上げた（#725。C2 がデータで受け、C2' が
+// unresolved の根拠の ID として受ける）。
 //
 // 台帳は LLM を呼ばず、評価口を import しない（B4 の照合は名前で持ち、評価口が名前 → 関数の表を持つ）。
 import type { AggregateKind } from "@musunest/appspec-schema";
@@ -974,6 +976,11 @@ export interface LedgerView {
   readonly observes: readonly string[];
   /** 未対応の性質（台帳の順） */
   readonly unsupportedObserves: readonly string[];
+  /**
+   * 未対応の観測（登録済み・未対応の行の ID と、落とす固定文 `unsupportedMessage`。台帳の順）。旗 ids と ledger が on の C2 に
+   * データで渡し、C2' が unresolved の根拠の ID として受ける（v1.2 表の契約 A-U。Issue #725）
+   */
+  readonly unsupportedObservations: readonly UnsupportedObservation[];
   /** 評価の方法の表（有効・削る候補の行の組。台帳の順） */
   readonly combinations: readonly LedgerCombination[];
   /** T1 の規則に差し込む文（台帳の順） */
@@ -1017,6 +1024,12 @@ export interface LedgerView {
 
 const isOnlyNormal = (kinds: readonly TestKind[]): boolean => kinds.length === 1 && kinds[0] === "normal";
 
+/** 未対応の観測の 1 件（登録済み・未対応の行の ID と文。Issue #725） */
+export interface UnsupportedObservation {
+  readonly id: string;
+  readonly message: string;
+}
+
 /** 台帳から導く。不備のある台帳は例外で断る（fail-closed。LLM を呼ばない） */
 export function deriveLedgerView(rows: readonly PropertyRow[]): LedgerView {
   const defects = ledgerRowDefects(rows);
@@ -1033,6 +1046,10 @@ export function deriveLedgerView(rows: readonly PropertyRow[]): LedgerView {
     verificationKinds: [...BASE_VERIFICATION_KINDS, ...bound.map((row) => row.t1.kind)],
     observes: observable.map((row) => row.id),
     unsupportedObserves: rows.filter((row) => row.state === "registered-unsupported").map((row) => row.id),
+    // 未対応の行は固定文を持つ（`ledgerRowDefects` が先に断る）
+    unsupportedObservations: rows
+      .filter((row) => row.state === "registered-unsupported")
+      .map((row) => ({ id: row.id, message: row.unsupportedMessage ?? "" })),
     combinations: evaluable.flatMap((row) => row.combinations.map((entry) => ({ ...entry, observes: row.id }))),
     t1RuleTexts: rows.flatMap((row) => (row.rules.t1 === null ? [] : [row.rules.t1])),
     t1AcceptanceTexts: rows.flatMap((row) => (row.rules.t1Acceptance === null ? [] : [row.rules.t1Acceptance])),
@@ -1088,10 +1105,15 @@ export interface UpstreamLedgerView {
   readonly excludedWhenAcceptedKinds: LedgerView["excludedWhenAcceptedKinds"];
   /** 集計の種類（行の状態・集計の試験の型の有無・集計の種類の順から導く。T2 系の欄の名前だけで除かない） */
   readonly aggregateKinds: LedgerView["aggregateKinds"];
+  /** 未対応の観測の ID と文（行の状態から導く。台帳の順。C2 のデータと C2' の根拠の ID。Issue #725） */
+  readonly unsupportedObservations: LedgerView["unsupportedObservations"];
 }
 
-/** 上流の台帳の見方の版（見方の欄・正規化の形を変えたら上げる。部分の指紋の材料） */
-export const UPSTREAM_LEDGER_VIEW_VERSION = 1;
+/**
+ * 上流の台帳の見方の版（見方の欄・正規化の形を変えたら上げる。部分の指紋の材料）。2 は未対応の観測を足した版（Issue #725。
+ * 1 は #712）
+ */
+export const UPSTREAM_LEDGER_VIEW_VERSION = 2;
 
 /** 上流の台帳の見方の境界（部分の指紋の材料。境界 t2-b1 は全体の指紋で照らす） */
 export const UPSTREAM_LEDGER_BOUNDARY = "t1-t2" as const satisfies StageBoundary;
@@ -1105,6 +1127,7 @@ export function upstreamLedgerViewOf(view: UpstreamLedgerView): UpstreamLedgerVi
     rowByVerificationKind: new Map([...view.rowByVerificationKind].map(([kind, entry]) => [kind, { t1: entry.t1 }] as const)),
     excludedWhenAcceptedKinds: view.excludedWhenAcceptedKinds,
     aggregateKinds: view.aggregateKinds,
+    unsupportedObservations: view.unsupportedObservations.map((entry) => ({ id: entry.id, message: entry.message })),
   };
 }
 
@@ -1131,6 +1154,7 @@ export async function upstreamLedgerSha256(rows: readonly PropertyRow[] = PROPER
         rowByVerificationKind: [...view.rowByVerificationKind].map(([kind, entry]) => ({ kind, t1: entry.t1 })),
         excludedWhenAcceptedKinds: view.excludedWhenAcceptedKinds,
         aggregateKinds: view.aggregateKinds,
+        unsupportedObservations: view.unsupportedObservations,
       },
     }),
   );

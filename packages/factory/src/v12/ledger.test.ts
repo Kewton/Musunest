@@ -1099,8 +1099,10 @@ describe("上流の台帳の見方（境界 t1-t2 までの段が読むもの。
     const upstream: UpstreamLedgerView = PROPERTY_LEDGER_VIEW;
     const derived = deriveUpstreamLedgerView(PROPERTY_LEDGER);
     expect(Object.keys(derived).sort()).toEqual(
-      ["aggregateKinds", "excludedWhenAcceptedKinds", "rowByVerificationKind", "t1AcceptanceTexts", "t1RuleTexts", "verificationKinds"].sort(),
+      // 未対応の観測は Issue #725 で足した欄（この一覧の期待を置き換えた）
+      ["aggregateKinds", "excludedWhenAcceptedKinds", "rowByVerificationKind", "t1AcceptanceTexts", "t1RuleTexts", "unsupportedObservations", "verificationKinds"].sort(),
     );
+    expect(derived.unsupportedObservations).toEqual(upstream.unsupportedObservations);
     expect(derived.t1RuleTexts).toEqual(upstream.t1RuleTexts);
     expect(derived.t1AcceptanceTexts).toEqual(upstream.t1AcceptanceTexts);
     expect(derived.verificationKinds).toEqual(upstream.verificationKinds);
@@ -1141,6 +1143,38 @@ describe("上流の台帳の見方（境界 t1-t2 までの段が読むもの。
   });
 });
 
+/** 合成した 2 つ目の未対応の行（state-after-set の写しで ID と文だけ違う。上流の見方では未対応の観測にだけ現れる。Issue #725） */
+const otherUnsupported = (): PropertyRow => ({ ...rowOf("state-after-set"), id: "other-unsupported", unsupportedMessage: "合成した未対応の固定文" });
+
+describe("上流の台帳の見方の未対応の観測（Issue #725）", () => {
+  it("登録済み・未対応の行の ID と固定文を台帳の順に持つ（今の台帳は state-after-set の 1 件）。有効な行・削る候補の行は入らない", () => {
+    const upstream = deriveUpstreamLedgerView(PROPERTY_LEDGER);
+    expect(upstream.unsupportedObservations).toEqual([{ id: "state-after-set", message: rowOf("state-after-set").unsupportedMessage }]);
+    expect(PROPERTY_LEDGER_VIEW.unsupportedObservations.map((entry) => entry.id)).toEqual(PROPERTY_LEDGER_VIEW.unsupportedObserves);
+    for (const entry of upstream.unsupportedObservations) expect(Object.keys(entry)).toEqual(["id", "message"]);
+    // 合成した妥当な台帳：足した行は台帳の順に並び、状態を未対応にした行は入る
+    const added = [...PROPERTY_LEDGER, otherUnsupported()];
+    expect(ledgerRowDefects(added)).toEqual([]);
+    expect(deriveUpstreamLedgerView(added).unsupportedObservations.map((entry) => entry.id)).toEqual(["state-after-set", "other-unsupported"]);
+    const reordered = [otherUnsupported(), ...PROPERTY_LEDGER];
+    expect(deriveUpstreamLedgerView(reordered).unsupportedObservations.map((entry) => entry.id)).toEqual(["other-unsupported", "state-after-set"]);
+    const aggregateUnsupported = withRow("empty-aggregate", (row) => ({ ...row, state: "registered-unsupported", evaluation: null, unsupportedMessage: "未対応の文" }));
+    expect(ledgerRowDefects(aggregateUnsupported)).toEqual([]);
+    expect(deriveUpstreamLedgerView(aggregateUnsupported).unsupportedObservations).toContainEqual({ id: "empty-aggregate", message: "未対応の文" });
+  });
+
+  it("感度：一覧の順だけを変えた妥当な台帳（ほかの上流の値は同じ）でも部分の指紋が変わる", async () => {
+    const added = [...PROPERTY_LEDGER, otherUnsupported()];
+    const reordered = [otherUnsupported(), ...PROPERTY_LEDGER];
+    expect(ledgerRowDefects(reordered)).toEqual([]);
+    const { unsupportedObservations: _a, ...restAdded } = deriveUpstreamLedgerView(added);
+    const { unsupportedObservations: _b, ...restReordered } = deriveUpstreamLedgerView(reordered);
+    expect(restReordered).toEqual(restAdded);
+    expect(await upstreamLedgerSha256(reordered)).not.toBe(await upstreamLedgerSha256(added));
+    expect(await upstreamLedgerSha256(added)).not.toBe(await upstreamLedgerSha256());
+  });
+});
+
 describe("部分の指紋（境界 t1-t2 の上流の台帳の見方。全体の指紋とは別。Issue #712）", () => {
   it("上流の見方を正規化した JSON と見方の版・境界の名前の SHA-256。既定は台帳の正本で、行の鍵の並びには依らない", async () => {
     const fingerprint = await upstreamLedgerSha256();
@@ -1151,15 +1185,17 @@ describe("部分の指紋（境界 t1-t2 の上流の台帳の見方。全体の
     expect(await upstreamLedgerSha256(reordered)).toBe(fingerprint);
     // 材料：キーを並べ替えた JSON（版・境界・見方。引き当てはキーと値の並び）
     const view = PROPERTY_LEDGER_VIEW;
+    // 版 2 で未対応の観測を見方に足した（Issue #725。版と材料の期待を置き換えた。版 1 の材料は下で旧の値として照らす）
     const material = {
       boundary: "t1-t2",
-      version: 1,
+      version: 2,
       view: {
         aggregateKinds: view.aggregateKinds,
         excludedWhenAcceptedKinds: view.excludedWhenAcceptedKinds,
         rowByVerificationKind: [...view.rowByVerificationKind].map(([kind, row]) => ({ kind, t1: row.t1 })),
         t1AcceptanceTexts: view.t1AcceptanceTexts,
         t1RuleTexts: view.t1RuleTexts,
+        unsupportedObservations: view.unsupportedObservations,
         verificationKinds: view.verificationKinds,
       },
     };
@@ -1170,7 +1206,10 @@ describe("部分の指紋（境界 t1-t2 の上流の台帳の見方。全体の
           ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)).map(([key, inner]) => [key, sortKeys(inner)]))
           : value;
     expect(fingerprint).toBe(await sha256Hex(JSON.stringify(sortKeys(material))));
-    expect(UPSTREAM_LEDGER_VIEW_VERSION).toBe(1);
+    // 版 1（#712）の材料の指紋は今の指紋と違う（版 1 の checkpoint の ledger_upstream は今の工場の値と照らして断られる）
+    const { unsupportedObservations: _dropped, ...v1View } = material.view;
+    expect(fingerprint).not.toBe(await sha256Hex(JSON.stringify(sortKeys({ ...material, version: 1, view: v1View }))));
+    expect(UPSTREAM_LEDGER_VIEW_VERSION).toBe(2);
     expect(UPSTREAM_LEDGER_BOUNDARY).toBe("t1-t2");
   });
 
@@ -1252,6 +1291,10 @@ describe("部分の指紋（境界 t1-t2 の上流の台帳の見方。全体の
         rows: PROPERTY_LEDGER.map((row) => (row.id === "default-value" ? ENUM_MEMBERSHIP : row.id === "enum-membership" ? DEFAULT_VALUE : row)),
       },
       { name: "確かめ方の種類を持つ行を除く", rows: PROPERTY_LEDGER.filter((row) => row.id !== "enum-membership") },
+      // 未対応の観測（Issue #725）：ID・文・一覧への出入り
+      { name: "未対応の観測の文", rows: withRow("state-after-set", (row) => ({ ...row, unsupportedMessage: marked(row.unsupportedMessage) })) },
+      { name: "未対応の観測の ID", rows: withRow("state-after-set", (row) => ({ ...row, id: `${row.id}-2` })) },
+      { name: "未対応の観測を足す", rows: [...PROPERTY_LEDGER, otherUnsupported()] },
     ];
   };
 
