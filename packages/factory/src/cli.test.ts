@@ -90,6 +90,8 @@ import {
   withoutWhenAndNonRequirement,
   REQUIRED_VALIDATIONS_BLOCK,
   withoutRequiredValidations,
+  revert735,
+  revertBundleFiles735,
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
 import type { LedgerView } from "./v12/ledger.js";
@@ -1500,6 +1502,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(v12Calls).toEqual({
       real_attempts: { limit: 144, used: 12 },
       judge_branch: { limit: 80, used: 4 },
+      // C3 の束の欄（Issue #735）：対象 4 件で束 1、形のやり直しの予算は要件 5 件で束 1（使わない）
+      semantic_check: { rounds: [{ round: 1, bundles: 1 }], shape_retries: { limit: 1, used: 0, remaining: 1, by: [] } },
       test_spec: { bundles: 1, concurrency: 1, total: t2TotalOf(v12.summary) },
     });
     expect(v11a.summary).not.toHaveProperty("v12_calls");
@@ -1544,6 +1548,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(run.summary["v12_calls"]).toEqual({
       real_attempts: { limit: 144, used: 12 },
       judge_branch: { limit: 80, used: 4 },
+      // C3 の束の欄（Issue #735）：対象 4 件で束 1、形のやり直しの予算は要件 5 件で束 1（使わない）
+      semantic_check: { rounds: [{ round: 1, bundles: 1 }], shape_retries: { limit: 1, used: 0, remaining: 1, by: [] } },
       test_spec: { bundles: 1, concurrency: 1, total: t2TotalOf(run.summary) },
     });
   });
@@ -2218,15 +2224,28 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     // その出力ダイジェストに戻した記録は、直す前（fa21c65）のバイト列と同じ
     const checkpoint = JSON.parse(await fs.readFile(`${dir}/${stageCheckpointFile("t1-t2")}`, "utf8")) as Record<string, any>;
     expect(checkpoint["versions"]["ledger_upstream"]).toBe(await ledgerModule.upstreamLedgerSha256());
+    // Issue #735 で取り直した差は、論理の枠の値（checkpoint の call_limits・条件の記録の v12_call_limits）と記録の v12_calls の C3 の束の欄、
+    // それに由来する記録の出力ダイジェストだけ：欄を旧の値に戻すと #735 の前と同じ。以下の #725・#713 の照合は戻した値で続ける
+    expect(checkpoint["versions"]["call_limits"]["logical_calls"]).toBe(80);
+    revert735(checkpoint);
+    {
+      const revertedRecord = await stageRecordOf(dir);
+      expect((revertedRecord["v12_calls"] as Record<string, unknown>)["semantic_check"]).toEqual({ rounds: [{ round: 1, bundles: 1 }], shape_retries: { limit: 1, used: 0, remaining: 1, by: [] } });
+      revert735(revertedRecord);
+      (revertedRecord["checkpoints"] as { output_digest: string }[])[0]!.output_digest = await stageOutputDigest(checkpoint);
+      expect([await sha256Hex(stageJsonText(revertedRecord)), await sha256Hex(stageJsonText(checkpoint))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_735);
+    }
     // Issue #725 で取り直した差は、checkpoint の ledger_upstream と記録の出力ダイジェストだけ：版 1 の部分の指紋に戻すと #725 の前と同じ
     {
       const reverted = { ...checkpoint, versions: { ...checkpoint["versions"], ledger_upstream: V12_UPSTREAM_BEFORE_725 } };
       const revertedRecord = await stageRecordOf(dir);
+      revert735(revertedRecord);
       (revertedRecord["checkpoints"] as { output_digest: string }[])[0]!.output_digest = await stageOutputDigest(reverted);
       expect([await sha256Hex(stageJsonText(revertedRecord)), await sha256Hex(stageJsonText(reverted))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_725);
     }
     delete checkpoint["versions"]["ledger_upstream"];
     const record = await stageRecordOf(dir);
+    revert735(record);
     const before = record["checkpoints"] as { output_digest: string }[];
     before[0]!.output_digest = await stageOutputDigest(checkpoint);
     expect([await sha256Hex(stageJsonText(record)), await sha256Hex(stageJsonText(checkpoint))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_713);
@@ -2271,8 +2290,15 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
       pipeline: "v1.2",
     });
     expect(run.code).toBe(EXIT_RUN_FAILED);
-    // 直す前（fa21c65）のコードで測った値（記録。境界に届かないので checkpoint は無い。手で直さない）
+    // 記録の SHA-256（境界に届かないので checkpoint は無い。手で直さない）。Issue #735 で取り直した差は論理の枠の値だけで、戻すと直す前
+    // （fa21c65）のコードで測った値と同じ
     expect(await digestsOf(dir, [STAGE_RUN_RECORD_FILE])).toEqual(V12_STAGE_C2_STOP_DIGESTS);
+    {
+      const reverted = await stageRecordOf(dir);
+      expect(reverted["v12_calls"]).not.toHaveProperty("semantic_check");
+      revert735(reverted);
+      expect([await sha256Hex(stageJsonText(reverted))]).toEqual(V12_STAGE_C2_STOP_DIGESTS_BEFORE_735);
+    }
     expect(run.written).toEqual([STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
     const record = await stageRecordOf(dir);
     expect(record["stopped"]).toMatchObject({ stage: "mapping", kind: "unmet" });
@@ -2406,9 +2432,20 @@ const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
   // Issue #725 で取り直した（上流の台帳の見方に未対応の観測を足して版を 2 に上げ、checkpoint の ledger_upstream と、それに由来する
   // 記録の出力ダイジェストが変わったため。旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_725` に残し、2 つの欄を旧の値に戻せば一致する
   // ことを試験で確かめる）
+  // Issue #735 で取り直した（論理の枠 L-v12-01 を 72 → 80 にして checkpoint の版の call_limits・条件の記録の v12_call_limits の
+  // logical_calls が変わり、記録の v12_calls に C3 の束の欄 semantic_check を足したため。旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_735`
+  // に残し、`revert735` で欄を旧の値に戻せば一致することを試験で確かめる。旧 9e94a228cc565b2d77e210828065bfa74cc337bd6c05cab330e8bbdbd5b09a3d・
+  // 8cad6abfb8cd5659407e25934411c26fb9ca537adae3e88a6b4a9cd327258a5a）
+  "c22cffe09c359a3e98eee0885efd47c9c3d2ab2c6158a731442e27f62572fc9b",
+  "3646122573cce8254ad727db2d194021b54e683dbf9f98166cbdd36faadbf92d",
+];
+
+/** Issue #735 の前の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値。#725 で取り直した値） */
+const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_735: readonly string[] = [
   "9e94a228cc565b2d77e210828065bfa74cc337bd6c05cab330e8bbdbd5b09a3d",
   "8cad6abfb8cd5659407e25934411c26fb9ca537adae3e88a6b4a9cd327258a5a",
 ];
+
 
 /** Issue #725 の前の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値。base 354cc49 で測った値） */
 const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_725: readonly string[] = [
@@ -2434,8 +2471,15 @@ const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_713: readonly string[] = [
   "8f0dc33c3bd0682ecfa8f6ef064608099b46acb627cff61977ca6b1d93af7018",
 ];
 
-/** fa21c65（直す前）の段の走り：C2 が 2 回落ちて止まる走りの記録の SHA-256（Issue #683） */
-const V12_STAGE_C2_STOP_DIGESTS: readonly string[] = ["00443168d1b3bc21efa0d78604fe89bcea391c54e545a67db4e1d68f61eb7367"];
+/**
+ * 段の走り：C2 が 2 回落ちて止まる走りの記録の SHA-256（Issue #683）。Issue #735 で取り直した（論理の枠 L-v12-01 を 72 → 80 にして
+ * 条件の記録の v12_call_limits の logical_calls が変わったため。C3 に届かないので v12_calls は変わらない。旧の値は
+ * `V12_STAGE_C2_STOP_DIGESTS_BEFORE_735` に残し、`revert735` で戻せば一致することを試験で確かめる）
+ */
+const V12_STAGE_C2_STOP_DIGESTS: readonly string[] = ["4edd73d295d2105783e7da7cbe36ff0a3aa6c13c32e3b1436ca3ae79caf1ed91"];
+
+/** fa21c65（直す前）の段の走り：C2 が 2 回落ちて止まる走りの記録の SHA-256（Issue #683。Issue #735 の前の値） */
+const V12_STAGE_C2_STOP_DIGESTS_BEFORE_735: readonly string[] = ["00443168d1b3bc21efa0d78604fe89bcea391c54e545a67db4e1d68f61eb7367"];
 
 /** fa21c65（直す前）の v1.1a の段の走り：T1 が形で 1 度落ちてやり直しで通る走りの記録と t1-t2 の checkpoint の SHA-256（Issue #683） */
 const V11A_STAGE_T1_RETRY_DIGESTS: readonly string[] = [
@@ -2541,7 +2585,11 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
         : [...head, structured(v11aJudgments())];
       const run = await runV11aCli({ dir, calls, pipeline: "v1.2" });
       requests = { structured: run.recording.structured.map(withoutC3Reading), tools: run.recording.tools };
-      summary = JSON.stringify(run.summary);
+      // Issue #735：要約の v12_calls の C3 の束の欄を外して照らす（ids on の走りだけが持つ。外した要約は #735 の前と同じ）
+      const revertedSummary = structuredClone(run.summary) as Record<string, any>;
+      expect(revertedSummary["v12_calls"]?.["semantic_check"] !== undefined, scenario.name).toBe(!idsOff);
+      revert735(revertedSummary);
+      summary = JSON.stringify(revertedSummary);
       code = run.code;
       written = run.written;
     }
@@ -2683,8 +2731,19 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
   const BEFORE_UPSTREAM = V12_UPSTREAM_BEFORE_725;
   /** 要求が変わってよい組（旗 ids と ledger が on の C2 のデータと規則だけ。差が C2 の要求だけであることは run.test.ts が照らす） */
   const REQUESTS_CHANGED = new Set(["段の走り・ids と ledger が on", "一気通貫・ids と ledger が on"]);
-  /** 変わってよいファイル（申告した 3 つの欄を持つもの：t1-t2 の checkpoint と、それを宣言する記録） */
-  const MAY_CHANGE = new Set([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, BUILD_CLI_RECORD_FILE]);
+  /**
+   * 変わってよいファイル（申告した 3 つの欄を持つもの：t1-t2 の checkpoint と、それを宣言する記録）。Issue #735 で、版の call_limits の
+   * 論理の枠を持つ t2-b1 の checkpoint、要約の v12_calls の C3 の束の欄を持つ納品物の要約と、その SHA-256 を載せる manifest を足した
+   * （`revert735`・`revertBundleFiles735` で戻して照らす）
+   */
+  const MAY_CHANGE = new Set([
+    stageCheckpointFile("t1-t2"),
+    STAGE_RUN_RECORD_FILE,
+    BUILD_CLI_RECORD_FILE,
+    stageCheckpointFile("t2-b1"),
+    "artifacts/summary.json",
+    BUNDLE_MANIFEST_FILE,
+  ]);
 
   it("段の走りと一気通貫の Build の記録の両方で、ids と ledger の on・off に依らず、t1-t2 の ledger_upstream と記録の output_digest だけを旧の値に戻すと直す前とバイト列で同じ。要約・終了コード・納品物・ほかの診断は不変、要求は ids と ledger が on の走りだけ変わる", async () => {
     const current = await ledgerModule.upstreamLedgerSha256();
@@ -2711,13 +2770,19 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
         expect(stageJsonText(checkpoint), path).toBe(text);
         expect(run.upstream[path], path).toBe(path === stageCheckpointFile("t1-t2") ? current : null);
         if (checkpoint["versions"]["ledger_upstream"] !== null) checkpoint["versions"]["ledger_upstream"] = BEFORE_UPSTREAM;
+        // Issue #735 で変わった論理の枠の値も旧の値に戻す（#725 の前の値と照らすため）
+        revert735(checkpoint);
         digestOf.set(path, await stageOutputDigest(checkpoint));
         reverted[path] = await sha256Hex(stageJsonText(checkpoint));
       }
+      // Issue #735：納品物の要約の C3 の束の欄を外し、manifest のその SHA-256 を計算し直す（ほかのファイルはそのまま）
+      const bundleTexts = new Map(
+        (await revertBundleFiles735(await Promise.all(run.written.map(async (path) => ({ path, text: await run.textOf(path) }))))).map((file) => [file.path, file.text] as const),
+      );
       for (const path of run.written.filter((name) => !name.startsWith("stage-checkpoint-"))) {
         const text = await run.textOf(path);
         if (path !== STAGE_RUN_RECORD_FILE && path !== BUILD_CLI_RECORD_FILE) {
-          reverted[path] = await sha256Hex(text);
+          reverted[path] = await sha256Hex(bundleTexts.get(path) ?? text);
           continue;
         }
         const record = JSON.parse(text) as Record<string, any>;
@@ -2725,6 +2790,8 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
         const serialize = (value: unknown): string =>
           path === STAGE_RUN_RECORD_FILE ? stageJsonText(value) : `${JSON.stringify(value)}${text.endsWith("\n") ? "\n" : ""}`;
         expect(serialize(record), path).toBe(text);
+        // Issue #735 で変わった論理の枠の値と C3 の束の欄も旧の値に戻す（#725 の前の値と照らすため）
+        revert735(record);
         for (const entry of (record["checkpoints"] ?? []) as { path: string; output_digest: string }[]) {
           expect(entry.output_digest, path).toBe(await stageOutputDigest(JSON.parse(await run.textOf(entry.path))));
           entry.output_digest = digestOf.get(entry.path) ?? "";

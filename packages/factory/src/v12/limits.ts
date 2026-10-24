@@ -25,7 +25,7 @@ import { SEARCH_REPAIR_BUDGET } from "./search-repair.js";
 /** 本全体の暫定の上限（最初の 30 本の計測で見直す。値ごとの理由と見直す条件は `V12_CALL_LIMIT_DEFINITIONS`） */
 export const V12_CALL_LIMITS = {
   /** 論理呼び出し（段がコードで組んだ要求の合計）。実行時の門は作らず、契約試験で固定する */
-  logicalCalls: 72,
+  logicalCalls: 80,
   /** 実試行の門（生成と判定で共有する `CallGate` の上限） */
   realAttempts: 144,
   /** 判定の枝（判定だけの実試行の上限。門の中の別枝） */
@@ -52,7 +52,7 @@ export const V12_CALL_LIMIT_DEFINITIONS: readonly V12LimitDefinition[] = [
     limit: "logicalCalls",
     text: `本全体の論理呼び出しは ${String(V12_CALL_LIMITS.logicalCalls)} まで（実行時の門は作らず、段の記録から数えた論理要求の合計で契約試験が固定する）。`,
     why: "08 §4.1 の表の論理の最大 58 に、観測した最大の要件 25 で C2 が束 5 になる分 +6 と余白を足した暫定の値",
-    since: "Issue #592",
+    since: "Issue #592（72 → 80 は Issue #735。C3 を要件 5 件ごとの束にし、表の論理の最大が要件 25 で 73 になった。2026-10-24 所有者の決定）",
     review: "最初の 30 本で門の停止が 1 本以上あれば、上限を上げる前に束の大きさを見直す",
   },
   {
@@ -156,11 +156,12 @@ export const V12_STAGE_FRAMES: readonly V12StageFrame[] = [
     content: { count: 1, unit: "bundle" },
     maxUnits: null,
   },
+  // C3（Issue #735）：束ごとに初回 1・再点検 1、形のやり直しは 2 回の点検を通じて段全体で束の数まで（平均して束ごとに 1）
   {
     stage: "C3",
-    initial: { count: 1, unit: "stage" },
-    shape: { count: 1, unit: "stage" },
-    content: { count: 1, unit: "stage" },
+    initial: { count: 1, unit: "bundle" },
+    shape: { count: 1, unit: "bundle" },
+    content: { count: 1, unit: "bundle" },
     maxUnits: null,
   },
   {
@@ -207,9 +208,9 @@ export const V12_STAGE_FRAME_DEFINITIONS: readonly (RuleDefinition & { readonly 
   {
     id: "F-v12-c3",
     stage: "C3",
-    text: "C3（表の意味の点検）は段全体で初回 1・形のやり直し 1・拒否後の再点検 1。",
-    why: "08 §4.1 の C3 の行（T1'' と同じ）",
-    since: "Issue #592",
+    text: "C3（表の意味の点検）は要件 5 件ごとの束に分けて同時に呼び、束ごとに初回 1・拒否後の再点検 1。形のやり直しは 2 回の点検を通じて段全体で束の数（k）まで、同じ回の 1 つの束につき 1 回まで。論理の最大は 3k。",
+    why: "08 §4.1 の C3 の行（T1'' と同じ）。判定は要件ごとに独立なので、1 回の大きな呼び出しを待たずに束に分ける（方法論 03 の H5）。形のやり直しは T2 と同じく束の数を段全体の予算にする（束に分けても仕事の総量はほぼ同じで、数え方だけが増えるため）",
+    since: "Issue #592（束に分け、形のやり直しを段全体で束の数までにしたのは Issue #735。2026-10-24 所有者の決定）",
   },
   {
     id: "F-v12-c4",
@@ -280,6 +281,15 @@ export const V12_IDS_FRAME_MAP: readonly {
 }[] = [
   { stage: "vocabulary", frame: "C1", rounds: 1, shapeAttempts: 2, units: 3, maxLogical: 6 },
   { stage: "mapping", frame: "C2", rounds: 2, shapeAttempts: 2, units: 1, maxLogical: 3 },
+  // C3（Issue #735）：要件 5 件ごとの束（要件 25 で束 5）。束ごとに初回 1・再点検 1、形のやり直しは段全体で束の数まで。論理の最大 3k
+  {
+    stage: "semantic-check",
+    frame: "C3",
+    rounds: 2,
+    shapeAttempts: 2,
+    units: Math.ceil(25 / V12_T2_BUNDLE.size),
+    maxLogical: 3 * Math.ceil(25 / V12_T2_BUNDLE.size),
+  },
   // T2（手 3f。Issue #626）：要件 5 件ごとの束（観測した最大の要件 25 で束 5）。束ごとに初回 1・形 1（全 round で通算）・中身 1 で総回数 3
   {
     stage: "test-spec",
