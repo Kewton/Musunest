@@ -1,6 +1,6 @@
 // v1.2 の呼び出しの上限の表（08-architecture-v1.2.md §4.1。手 3p・Issue #592）の試験。
 //
-// 固定するもの：本全体の暫定の上限（論理 72・実試行 144・判定 80）と、その定義の `why`・`since`・見直す条件／段ごとの論理の枠が
+// 固定するもの：本全体の暫定の上限（論理 80〔Issue #735 で 72 から〕・実試行 144・判定 80）と、その定義の `why`・`since`・見直す条件／段ごとの論理の枠が
 // §4.1 の列のまま／今の v1.1α の段がそのまま列に写り、その値が段のコードの定数と同じ／v1・v1.1α の上限の表（`AGENT_LIMITS`）の
 // 値と欄が直す前と同じ／表と、手 3p で足した試験・fixture に受入の題材の言葉が無い。外部の API は呼ばない。
 import { describe, expect, it } from "vitest";
@@ -36,9 +36,9 @@ const fs = (await importUntyped("node:fs")) as NodeFileSystem;
 /** 段ごとの論理の枠の行 */
 const frame = (stage: string) => V12_STAGE_FRAMES.find((entry) => entry.stage === stage);
 
-describe("本全体の暫定の上限（論理 72・実試行 144・判定 80）", () => {
+describe("本全体の暫定の上限（論理 80・実試行 144・判定 80）", () => {
   it("値と、値ごとの定義（why・since・見直す条件）。ruleDefinitionDefects で不備 0", () => {
-    expect(V12_CALL_LIMITS).toEqual({ logicalCalls: 72, realAttempts: 144, judgeBranch: 80 });
+    expect(V12_CALL_LIMITS).toEqual({ logicalCalls: 80, realAttempts: 144, judgeBranch: 80 });
     expect(ruleDefinitionDefects(V12_CALL_LIMIT_DEFINITIONS)).toEqual([]);
     expect(V12_CALL_LIMIT_DEFINITIONS.map((definition) => definition.limit)).toEqual(Object.keys(V12_CALL_LIMITS));
     for (const definition of V12_CALL_LIMIT_DEFINITIONS) {
@@ -51,6 +51,15 @@ describe("本全体の暫定の上限（論理 72・実試行 144・判定 80）
     expect(reviews).toContain("束の大きさを見直す");
     expect(reviews).toContain("実試行が論理の 1.2 倍を超えた本があれば通信の再送を調べる");
     expect(reviews).toContain("判定の枝が尽きた本が出れば、J4 を束にするか枝を広げる");
+  });
+
+  it("論理の枠 L-v12-01 は ID と意味（表の論理の最大＋余白）を変えず、値 80 と since に 72 → 80 の履歴を持つ（Issue #735。2026-10-24 所有者の決定）", () => {
+    const logical = V12_CALL_LIMIT_DEFINITIONS.find((definition) => definition.limit === "logicalCalls");
+    expect(logical?.id).toBe("L-v12-01");
+    expect(logical?.text).toContain("本全体の論理呼び出しは 80 まで");
+    expect(logical?.why).toContain("08 §4.1 の表の論理の最大");
+    expect(logical?.since).toContain("Issue #592");
+    expect(logical?.since).toContain("72 → 80 は Issue #735");
   });
 
   it("二点測定：why・since を空にした定義は不備になる", () => {
@@ -96,7 +105,8 @@ describe("段ごとの論理の枠（§4.1 の列のまま）", () => {
     expect(columns).toEqual([
       ["C1", "1/束ごと", "1/束ごと", null, null],
       ["C2", "1/束ごと", "1/束ごと", "1/束ごと", null],
-      ["C3", "1/段全体", "1/段全体", "1/段全体", null],
+      // Issue #735：C3 は束ごとに初回 1・再点検 1、形のやり直しは段全体で束の数まで（論理の最大 3k）
+      ["C3", "1/束ごと", "1/束ごと", "1/束ごと", null],
       // 手 3f（Issue #626）：C4 は束ごとに中身のやり直し 1（合併後の問題が帰属する束だけ）
       ["C4", "1/束ごと", "1/束ごと", "1/束ごと", null],
       ["C6", "1/版ごと", "2/段全体", null, 6],
@@ -126,10 +136,14 @@ describe("段ごとの論理の枠（§4.1 の列のまま）", () => {
       content: { count: 1, unit: "bundle" },
       maxUnits: null,
     });
-    // ほかの行の文は変えない（C4 の行の履歴は手 3f が T2 の束を足したときの追記。#626）
+    // ほかの行の文は変えない（C4 の行の履歴は手 3f が T2 の束を足したときの追記。#626。C3 の行の履歴は C3 の束の追記。#735）
     expect(V12_STAGE_FRAME_DEFINITIONS.filter((definition) => definition.id !== "F-v12-c2").map((definition) => definition.since)).toEqual(
       V12_STAGE_FRAME_DEFINITIONS.filter((definition) => definition.id !== "F-v12-c2").map((definition) =>
-        definition.id === "F-v12-c4" ? "Issue #592（束の形・中身のやり直し・同時は Issue #626）" : "Issue #592",
+        definition.id === "F-v12-c4"
+          ? "Issue #592（束の形・中身のやり直し・同時は Issue #626）"
+          : definition.id === "F-v12-c3"
+            ? "Issue #592（束に分け、形のやり直しを段全体で束の数までにしたのは Issue #735。2026-10-24 所有者の決定）"
+            : "Issue #592",
       ),
     );
   });
@@ -225,7 +239,7 @@ describe("旗 v12.ids の段の枠（手 3a・Issue #593）", () => {
       const perUnit = (frame.initial?.count ?? 0) + (frame.shape?.count ?? 0) + (frame.content?.count ?? 0);
       expect(entry.maxLogical, entry.stage).toBeLessThanOrEqual(perUnit * entry.units);
     }
-    expect(V12_CALL_LIMITS).toEqual({ logicalCalls: 72, realAttempts: 144, judgeBranch: 80 });
+    expect(V12_CALL_LIMITS).toEqual({ logicalCalls: 80, realAttempts: 144, judgeBranch: 80 });
     expect(factory.V12_IDS_FRAME_MAP).toBe(V12_IDS_FRAME_MAP);
   });
 });
@@ -245,7 +259,7 @@ describe("旗 v12.ids の T2 の束の定数（手 3f・Issue #626）", () => {
     expect([TEST_SPEC_ROUNDS, STEP_ATTEMPTS]).toEqual([2, 2]);
   });
 
-  it("論理の最大を要件 25（T2 の束 5）で数え直しても 72 の内側（上限は上げない）", () => {
+  it("論理の最大を要件 25（T2・C3 の束 5）で数え直すと 73 で 80 の内側（72 → 80 は Issue #735。2026-10-24 所有者の決定）", () => {
     const perUnit = (stage: string): number => {
       const row = frame(stage);
       return (row?.initial?.count ?? 0) + (row?.shape?.count ?? 0) + (row?.content?.count ?? 0);
@@ -254,7 +268,7 @@ describe("旗 v12.ids の T2 の束の定数（手 3f・Issue #626）", () => {
     const maximum = {
       C1: ids["vocabulary"] ?? Number.NaN,
       C2: ids["mapping"] ?? Number.NaN,
-      C3: perUnit("C3"),
+      C3: ids["semantic-check"] ?? Number.NaN,
       C4: ids["test-spec"] ?? Number.NaN,
       // C5 は手 6 の段（§4.1 の表の区分 3・区分ごとに初回 1・形 1）
       C5: 6,
@@ -262,9 +276,24 @@ describe("旗 v12.ids の T2 の束の定数（手 3f・Issue #626）", () => {
       loop: perUnit("loop") * (frame("loop")?.maxUnits ?? Number.NaN),
       rewrite: perUnit("rewrite"),
     };
-    expect(maximum).toEqual({ C1: 6, C2: 3, C3: 3, C4: 15, C5: 6, C6: 8, loop: 18, rewrite: 2 });
+    // C3 は束 5 で 3k＝15（Issue #735。直す前の表は段全体で 3）
+    expect(maximum).toEqual({ C1: 6, C2: 3, C3: 15, C4: 15, C5: 6, C6: 8, loop: 18, rewrite: 2 });
     const total = Object.values(maximum).reduce((sum, value) => sum + value, 0);
-    expect(total).toBe(61);
+    expect(total).toBe(73);
     expect(total).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+    // 要件 15（束 3）では C3・C4 とも 3k＝9 で、合計 61
+    const at15 = { ...maximum, C3: 3 * Math.ceil(15 / V12_T2_BUNDLE.size), C4: 3 * Math.ceil(15 / V12_T2_BUNDLE.size) };
+    expect(Object.values(at15).reduce((sum, value) => sum + value, 0)).toBe(61);
+    // Issue #735 の当初の数え方（各回 × 束で初回 1 ＋ 形 1＝2k₁＋2k₂＝20）なら要件 25 で 78（72 を超えたので、所有者が形のやり直しを段全体で k にした）
+    expect(total - maximum.C3 + 4 * Math.ceil(25 / V12_T2_BUNDLE.size)).toBe(78);
+  });
+
+  it("C3 の写しは束 5（要件 25）・論理の最大 3k（初回 k・再点検 k・形のやり直しは段全体で k）で、§4.1 の C3 の行の枠を超えない。回数の定数は変えない（Issue #735）", () => {
+    const semantic = V12_IDS_FRAME_MAP.find((entry) => entry.stage === "semantic-check");
+    expect(semantic).toEqual({ stage: "semantic-check", frame: "C3", rounds: NAME_TABLE_ROUNDS, shapeAttempts: STEP_ATTEMPTS, units: 5, maxLogical: 15 });
+    const c3 = V12_STAGE_FRAME_DEFINITIONS.find((definition) => definition.id === "F-v12-c3");
+    expect(c3?.text).toContain("形のやり直しは 2 回の点検を通じて段全体で束の数（k）まで、同じ回の 1 つの束につき 1 回まで");
+    expect(c3?.text).toContain("論理の最大は 3k");
+    expect(ruleDefinitionDefects(V12_STAGE_FRAME_DEFINITIONS)).toEqual([]);
   });
 });

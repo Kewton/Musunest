@@ -178,7 +178,13 @@ import {
   type NameTablePrevious,
   type SemanticRejection,
 } from "./stages/name-table.js";
-import { runSemanticCheck, semanticCheckTargets, type SemanticCheckOutput } from "./stages/semantic-check.js";
+import {
+  runSemanticCheck,
+  semanticCheckTargets,
+  semanticShapeRetryBudgetOf,
+  type SemanticCheckOutput,
+  type SemanticShapeRetryBudget,
+} from "./stages/semantic-check.js";
 import { runTestSpec, type TestSpecRejectedBundle, type TestSpecValue } from "./stages/test-spec.js";
 import { runWriteV11a } from "./stages/write.js";
 import { ledgerViewOf, resolveV12Flags, toPublicV12Flags, type V12Flags } from "../v12/ledger.js";
@@ -250,6 +256,20 @@ export interface TestSpecBundlesSummary {
   readonly bundles: number;
   readonly concurrency: number;
   readonly total: UsageSnapshot & CallCounts;
+}
+
+/**
+ * 旗 `v12.ids` の C3 の束の要約（`v12_calls.semantic_check`。C3 を呼んだ走りだけ。Issue #735）。点検の回ごとの束の数と、形のやり直しの
+ * 予算（段全体の上限 k・使った数・残り・どの回のどの束〔0 から〕が使ったか）。計量は段の記録（回ごとに 1 つ）にあり、ここでは数えない
+ */
+export interface SemanticCheckBundlesSummary {
+  readonly rounds: readonly { readonly round: number; readonly bundles: number }[];
+  readonly shape_retries: {
+    readonly limit: number;
+    readonly used: number;
+    readonly remaining: number;
+    readonly by: readonly { readonly round: number; readonly bundle: number }[];
+  };
 }
 
 /**
@@ -752,6 +772,20 @@ async function runV11a(
           v12_calls: {
             real_attempts: { limit: callGate.limit, used: callGate.attempts() },
             judge_branch: { limit: callLimits.judgeBranch, used: judgeBudget?.branch?.used ?? 0 },
+            // C3 の回ごとの束の数と形のやり直しの予算（C3 を呼んだ走りだけ。既存の欄は変えずに足す。Issue #735）
+            ...(semanticBundleRounds.length === 0 || semanticShapeRetries === undefined
+              ? {}
+              : {
+                  semantic_check: {
+                    rounds: semanticBundleRounds.slice(),
+                    shape_retries: {
+                      limit: semanticShapeRetries.limit,
+                      used: semanticShapeRetries.used.length,
+                      remaining: semanticShapeRetries.limit - semanticShapeRetries.used.length,
+                      by: semanticShapeRetries.used.slice(),
+                    },
+                  } satisfies SemanticCheckBundlesSummary,
+                }),
             // T2 の束の数・同時数・段全体の計（T2 を呼んだ走りだけ。既存の欄は変えずに足す。Issue #626）
             ...(testSpecBundles === undefined ? {} : { test_spec: testSpecBundles }),
             // 直す段（道具付き）の段ごとの数と合計（直す段を呼んだ走りだけ。既存の欄は変えずに足す。Issue #665）
@@ -768,6 +802,9 @@ async function runV11a(
                 }),
           },
         };
+  // 旗 `v12.ids` の C3 の回ごとの束の数と、2 回の点検で共有する形のやり直しの予算（C3 を呼ぶまで無い。Issue #735）
+  const semanticBundleRounds: { readonly round: number; readonly bundles: number }[] = [];
+  let semanticShapeRetries: SemanticShapeRetryBudget | undefined;
   // 旗 `v12.ids` の T2 の束の要約（T2 を呼ぶまで無い。Issue #626）
   let testSpecBundles: TestSpecBundlesSummary | undefined;
   // 旗 `v12.ids` の直す段の数（呼んだ順。off は積まない。Issue #665）
@@ -1181,6 +1218,12 @@ async function runV11a(
 
       // T1''（完全な結果だけを受ける。表の SHA の合わない結果・判定の欠落は形の落ちとして止める）
       const targets = semanticCheckTargets(list, output.table);
+      // 旗 `v12.ids`：束の数を回ごとに残し、形のやり直しの予算は 2 回の点検で 1 つを共有する（Issue #735）
+      if (flags.ids) {
+        semanticShapeRetries ??= semanticShapeRetryBudgetOf(list);
+        semanticBundleRounds.push({ round, bundles: Math.ceil(targets.length / V12_T2_BUNDLE.size) });
+      }
+      const shapeRetries = semanticShapeRetries;
       const semantic = await runStageOk("semantic-check", async (): Promise<StageOutcome<SemanticCheckOutput>> => {
         const checked = await runSemanticCheck({
           plan: input.plan,
@@ -1191,7 +1234,8 @@ async function runV11a(
           gateway: gateway.forStage("semantic-check"),
           ...withLedger,
           // 旗 `v12.ids`：R-sc-02 に構造の検査の読み方を足す（off は渡さない＝今の文のまま。表の targets の有無で推測しない。Issue #732）
-          ...(flags.ids ? { ids: true } : {}),
+          // 旗 `v12.ids`：対象を束に分けて同時に呼び、形のやり直しは 2 回の点検で共有した予算から使う（Issue #735）
+          ...(flags.ids && shapeRetries !== undefined ? { ids: true, round, shapeRetries } : {}),
         });
         if (!checked.ok) return checked;
         const problems: Problem[] = [];

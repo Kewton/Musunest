@@ -8,7 +8,7 @@
 // 要件の一覧・名前の表・下書き（T1 の応答の形）・文書・宣言（YAML と正規化した JSON）を返す。
 // 受入の題材の言葉は使わない。
 import type { ConfirmedPlan, NormalizedAppSpec } from "@musunest/appspec-schema";
-import { normalizeSpec } from "@musunest/spec-engine";
+import { normalizeSpec, sha256Hex } from "@musunest/spec-engine";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest } from "../../llm.js";
 import { createFakeLlmClient, uncheckedBecause, type RecordedCall, type RecordedStructuredCall } from "../../llm-fake.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
@@ -25,6 +25,7 @@ import {
 } from "../names.js";
 import { STRUCTURAL_ASSERTIONS, STRUCTURAL_TARGET_KINDS, type StructuralAssertionKind } from "../../fixed-test.js";
 import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
+import { V12_CALL_LIMITS } from "../../v12/limits.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
 import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
 import { TEST_SPEC_RETAINED_DATA_NAME, TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
@@ -819,9 +820,12 @@ export const WHEN_NON_REQUIREMENT_REQUEST_DIFF: Readonly<Record<string, readonly
  * `createRecordingClient`（`stages/__tests__/prompt.ts`）と同じ形で、**記録した構造化出力を要求の schema に照らす**
  * 偽物を作る。段の形の検査と schema を組む関数のずれが、手で書いた記録で隠れないようにする。
  * 負例の記録は、`unchecked`（`uncheckedBecause` で理由を付ける）で照合を外す。
+ * `bundledC3` が真なら、記録した C3 の応答を `bundledC3Client` で束ごとに読む（旗 `v12.ids` の C3 の束。Issue #735。省けば今のまま。
+ * 束が 1 つの走りでは、記録を順に読むのと同じ）。記録する要求は、束ごとに口へ届いた要求のまま
  */
-export function createCheckedRecordingClient(recorded: readonly RecordedCall[]): RecordingClient {
-  const inner = createFakeLlmClient(recorded, { validateAgainstSchema: true });
+export function createCheckedRecordingClient(recorded: readonly RecordedCall[], options: { readonly bundledC3?: boolean } = {}): RecordingClient {
+  const fake = createFakeLlmClient(recorded, { validateAgainstSchema: true });
+  const inner = options.bundledC3 === true ? bundledC3Client(fake) : fake;
   const structured: LlmStructuredRequest[] = [];
   const tools: LlmToolRequest[] = [];
   const client: LlmClient = {
@@ -1303,4 +1307,121 @@ export function bundledT2Client(inner: LlmClient, home: readonly (readonly [stri
     },
     callWithTools: (request: LlmToolRequest) => inner.callWithTools(request),
   };
+}
+
+/** C3 の要求のデータの塊「要件の文と引用」の要件 ID（無ければ空。旗 `v12.ids` の C3 の束の要件。Issue #735） */
+export function semanticRequestIds(request: LlmStructuredRequest): readonly string[] {
+  const block = request.input.split('<data name="要件の文と引用">\n')[1]?.split("\n</data>")[0];
+  if (block === undefined) return [];
+  return (JSON.parse(block) as readonly { readonly requirementId: string }[]).map((entry) => entry.requirementId);
+}
+
+/**
+ * 旗 `v12.ids` の C3 の束（Issue #735）の偽物の口。記録した C3 の応答（全対象を書いた 1 本）を「点検の回の位置」の台本として持つ。
+ * 回の中では、束（要求の「要件の文と引用」の先頭の要件 ID で見分ける）ごとの n 回目の呼び出しが、その回の先頭から n 番目の記録を
+ * 読み、**同じ回のほかの束の要件**の判定を除いて返す（**完了の順に依らない**）。C3 でない要求が来たら回の区切りにし、次の回は
+ * 読んだ記録の次から読む。束が 1 つ（対象 5 件以下）なら、記録を順に読むのと同じ（何も除かない）。どの束の要件でもない判定
+ * （わざと入れた未知の要件 ID）と同じ束の要件の重複は除かない。未知の要件 ID を 1 つの束にだけ残すときは `home` に
+ * `[要件 ID, 残す束の先頭の要件 ID]` を挙げる（ほかの束の応答からは除く）。判定の並びでない応答（負例）は絞らずにそのまま返す。
+ * 記録は位置の最大まで順に読む。同時の束の要求は、どの束の応答よりも前に届く（共通の口は呼び出しまで待たない）
+ */
+export function bundledC3Client(inner: LlmClient, home: readonly (readonly [string, string])[] = []): LlmClient {
+  const script: { readonly output: unknown; readonly usage: LlmStructuredResponse<unknown>["usage"] }[] = [];
+  let base = 0;
+  let depths = new Map<string, number>();
+  let roundIds = new Set<string>();
+  let pulling: Promise<void> = Promise.resolve();
+  const boundary = (): void => {
+    if (depths.size === 0) return;
+    base = Math.max(base, ...[...depths.values()].map((depth) => base + depth));
+    depths = new Map();
+    roundIds = new Set();
+  };
+  return {
+    async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+      if (request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME) {
+        boundary();
+        return inner.callStructured<T>(request);
+      }
+      const ids = semanticRequestIds(request);
+      const head = ids[0] ?? "";
+      for (const id of ids) roundIds.add(id);
+      const depth = depths.get(head) ?? 0;
+      depths.set(head, depth + 1);
+      const at = base + depth;
+      const ready = pulling.then(async () => {
+        while (script.length <= at) {
+          const response = await inner.callStructured<unknown>(request);
+          script.push({ output: response.output, usage: response.usage });
+        }
+      });
+      pulling = ready.catch(() => undefined);
+      await ready;
+      const entry = script[at];
+      if (entry === undefined) throw new Error("前提が壊れた：C3 の台本の位置");
+      const output = entry.output;
+      if (typeof output !== "object" || output === null || !Array.isArray((output as { judgments?: unknown }).judgments)) {
+        return { output: output as T, usage: entry.usage };
+      }
+      const homes = new Map(home);
+      const keep = (item: unknown): boolean => {
+        const id = typeof item === "object" && item !== null ? (item as { requirementId?: unknown }).requirementId : undefined;
+        if (typeof id !== "string" || ids.includes(id)) return true;
+        const homeHead = homes.get(id);
+        if (homeHead !== undefined) return homeHead === head;
+        return !roundIds.has(id);
+      };
+      const raw = output as { readonly judgments: readonly unknown[] };
+      return { output: { ...raw, judgments: raw.judgments.filter(keep) } as T, usage: entry.usage };
+    },
+    callWithTools: (request: LlmToolRequest) => {
+      boundary();
+      return inner.callWithTools(request);
+    },
+  };
+}
+
+// ── Issue #735 で変わった欄を旧の値に戻す（固定の SHA-256 の取り直しを照らす）──────────────────────────
+
+/** Issue #735 の前の論理の枠（L-v12-01。2026-10-24 所有者の決定で 72 → 80） */
+export const LOGICAL_CALLS_BEFORE_735 = 72;
+
+/**
+ * Issue #735 で変わった欄を旧の値に戻す（JSON の値をその場で書き換える）：checkpoint の版の `call_limits` と条件の記録の
+ * `v12_call_limits` の `logical_calls` を 72 に、記録・要約の `v12_calls` から C3 の束の欄 `semantic_check` を外す。ほかの欄は触らない
+ * （出力ダイジェスト・manifest の SHA-256 は呼ぶ側が戻した値から計算し直す）
+ */
+export function revert735(value: Record<string, any>): void {
+  for (const limits of [value["versions"]?.["call_limits"], value["conditions"]?.["v12_call_limits"]]) {
+    if (limits !== undefined && limits !== null && limits["logical_calls"] === V12_CALL_LIMITS.logicalCalls) limits["logical_calls"] = LOGICAL_CALLS_BEFORE_735;
+  }
+  if (value["v12_calls"] !== undefined && value["v12_calls"] !== null) delete value["v12_calls"]["semantic_check"];
+}
+
+/**
+ * 納品物のファイルの `artifacts/summary.json` を `revert735` で戻し（字下げ 2・末尾の改行 1 つの形で書き戻す）、`bundle-manifest.json`
+ * のそのファイルの SHA-256 と大きさを戻した本文から計算し直す（Issue #735）。ほかのファイルはそのまま
+ */
+export async function revertBundleFiles735<T extends { readonly path: string; readonly text: string }>(files: readonly T[]): Promise<readonly T[]> {
+  const toJson = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+  const summaryFile = files.find((file) => file.path === "artifacts/summary.json");
+  if (summaryFile === undefined) return files;
+  const summary = JSON.parse(summaryFile.text) as Record<string, any>;
+  if (toJson(summary) !== summaryFile.text) throw new Error("前提が壊れた：要約のファイルの形");
+  revert735(summary);
+  const summaryText = toJson(summary);
+  const summarySha256 = await sha256Hex(summaryText);
+  const summaryBytes = new TextEncoder().encode(summaryText).length;
+  return files.map((file) => {
+    if (file === summaryFile) return { ...file, text: summaryText };
+    if (file.path !== "bundle-manifest.json") return file;
+    const manifest = JSON.parse(file.text) as { files: { path: string; sha256: string; size_bytes: number }[] };
+    if (toJson(manifest) !== file.text) throw new Error("前提が壊れた：manifest の形");
+    for (const entry of manifest.files) {
+      if (entry.path !== "artifacts/summary.json") continue;
+      entry.sha256 = summarySha256;
+      entry.size_bytes = summaryBytes;
+    }
+    return { ...file, text: toJson(manifest) };
+  });
 }
