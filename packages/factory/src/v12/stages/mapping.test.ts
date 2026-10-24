@@ -2,7 +2,15 @@
 import { describe, expect, it } from "vitest";
 import { STRUCTURAL_ASSERTIONS, type StructuralAssertionKind } from "../../fixed-test.js";
 import { validateSchema } from "../../schema-check.js";
-import { PREVIOUS_RESPONSE_DATA_NAME, SHAPE_PROBLEMS_DATA_NAME, constraintIdsIn, ruleDefinitionDefects, ruleTexts } from "../../stages/prompt.js";
+import {
+  PREVIOUS_RESPONSE_DATA_NAME,
+  SHAPE_PROBLEMS_DATA_NAME,
+  callStructuredChecked,
+  constraintIdsIn,
+  ruleDefinitionDefects,
+  ruleTexts,
+  type Problem,
+} from "../../stages/prompt.js";
 import { expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
   FIXTURE_DOCUMENTS,
@@ -19,12 +27,14 @@ import {
   negative,
   planOf,
   recordedStructured,
+  requestListedIds,
   strictDefects,
   withAggregates,
   withCheckTargets,
   withCodeIds,
 } from "../../v11a/__tests__/fixtures.js";
 import { buildSized } from "../../v11a/__tests__/sizes.js";
+import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse } from "../../llm.js";
 import {
   CHECK_TARGET_MESSAGES,
   IDS_NO_SOURCE,
@@ -51,7 +61,15 @@ import {
   MAPPING_REWRITE_DATA_NAMES,
   MAPPING_REWRITE_MESSAGES,
   MAPPING_SCHEMA_NAME,
+  MAPPING_BUNDLE_MESSAGES,
+  MAPPING_BUNDLE_ROLE_SENTENCE,
+  MAPPING_GLOBAL_ROLE_SENTENCE,
   attributeMappingProblems,
+  mappingBundleRuleDefinitionsOf,
+  mappingBundlesOf,
+  mappingWholeRequestOf,
+  mergeMappingBundles,
+  outsideBundleProblems,
   inspectMapping,
   inspectMappingSourced,
   mappingRewriteRuleDefinitionsOf,
@@ -78,7 +96,8 @@ async function run(
   options: { previous?: MappingPrevious; table?: NameTable; list?: RequirementList; ledger?: LedgerView } = {},
 ) {
   const list = options.list ?? LIST;
-  const recording = createCheckedRecordingClient(outputs.map(recordedStructured));
+  // 要件 6 件以上の初回は束ごとに同時に呼ぶので、記録した応答を束ごとに読んで絞る（要件 5 件以下は順に読むのと同じ。Issue #736）
+  const recording = createCheckedRecordingClient(outputs.map(recordedStructured), { bundledC2: true });
   const outcome = await runMapping({
     plan: planOf(list),
     list,
@@ -183,21 +202,411 @@ describe("C2 の規則と schema", () => {
   });
 });
 
-describe("1 回の写像（束に切らない。Issue #627）", () => {
-  it.each([15, 7])("要件 %i でも、初回の要求は 1 本で、データに全要件（一覧・確定した仕様）と C1 の全行がある", async (count) => {
-    const sized = buildSized(count, 3 * count, { ledger: true, searchRepair: true, ids: true });
-    const responses = sized.tableResponses().slice(3);
-    expect(responses).toHaveLength(1);
-    const { outcome, recording } = await run(responses, { list: sized.list, table: sized.table, ledger: PROPERTY_LEDGER_VIEW });
+describe("初回の束（要件 5 件ごと。#627 で戻した束を、束の規則から大域の文を外して作り直す。Issue #736）", () => {
+  const FLAGS = { ledger: true, searchRepair: true, ids: true } as const;
+  /** 要件 n の台帳 on の材料と、その正しい応答（全要件を書いた 1 本） */
+  const sizedOf = (count: number) => {
+    const sized = buildSized(count, 3 * count, FLAGS);
+    return { sized, good: sized.tableResponses().slice(3)[0] as Entry };
+  };
+  const listOfBlock = (input: string | undefined): readonly string[] =>
+    ((blockOf(input, MAPPING_DATA_NAMES.list) as Entry | null)?.["requirements"] as readonly { id: string }[] | undefined)?.map((requirement) => requirement.id) ?? [];
+  /** 束の要件だけを残した応答（`good` の entry を書き換えない） */
+  const ofBundle = (good: Entry, ids: readonly string[]): Entry => withEntries((good["requirements"] as Entry[]).filter((entry) => ids.includes(entry["requirementId"] as string)));
+  /** 台帳 on の段の入力 */
+  const inputOf = (sized: ReturnType<typeof buildSized>, client: LlmClient, extra: Partial<MappingInput> = {}): MappingInput => ({
+    plan: planOf(sized.list),
+    list: sized.list,
+    documents: FIXTURE_DOCUMENTS,
+    gateway: makeGateway(client),
+    rows: sized.table.rows,
+    ledger: PROPERTY_LEDGER_VIEW,
+    ...extra,
+  });
+  /** 届いた要求を積み、要求の要件の一覧から応答を組んですぐ答える偽物の口（束の順・同時数に依らない） */
+  const answerClient = (answer: (request: LlmStructuredRequest, index: number) => unknown) => {
+    const requests: LlmStructuredRequest[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        const index = requests.length;
+        requests.push(request);
+        return { output: answer(request, index) as T, usage: undefined };
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    return { client, requests };
+  };
+  /** 応答を手で返す偽物の口（遅らせた応答）。`release(i)` で i 本目の要求に答える */
+  const delayedClient = (answer: (request: LlmStructuredRequest) => unknown) => {
+    const started: LlmStructuredRequest[] = [];
+    const gates: (() => void)[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        started.push(request);
+        await new Promise<void>((resolve) => gates.push(resolve));
+        return { output: answer(request) as T, usage: undefined };
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    return { client, started, release: (index: number) => gates[index]?.() };
+  };
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const settle = async (done: () => boolean): Promise<void> => {
+    for (let index = 0; index < 50 && !done(); index += 1) await flush();
+    for (let index = 0; index < 3; index += 1) await flush();
+  };
+
+  it("規則：束の版は R-map-02 の大域の文を束の文に置き換えた R-map-02b だけが違い（通常版・台帳版とも）、定義の不備 0。why・since に束の適用範囲がある", () => {
+    for (const ledger of [undefined, PROPERTY_LEDGER_VIEW]) {
+      const whole = mappingRuleDefinitionsOf(ledger);
+      const bundle = mappingBundleRuleDefinitionsOf(ledger);
+      expect(ruleDefinitionDefects(bundle)).toEqual([]);
+      expect(bundle.map((definition) => definition.id)).toEqual(["R-map-01", "R-map-02b", "R-map-03", "R-map-04"]);
+      bundle.forEach((definition, index) => {
+        if (definition.id !== "R-map-02b") expect(definition).toEqual(whole[index]);
+      });
+      const original = whole.find((definition) => definition.id === "R-map-02")?.text ?? "";
+      const replaced = bundle.find((definition) => definition.id === "R-map-02b");
+      expect(original.endsWith(MAPPING_GLOBAL_ROLE_SENTENCE)).toBe(true);
+      // 足すのではなく置き換える：大域の文は無く、束の文が在り、ほかの文（必要性・stated と dependency・根拠・重複）は同じ
+      expect(replaced?.text).toBe(original.replace(MAPPING_GLOBAL_ROLE_SENTENCE, MAPPING_BUNDLE_ROLE_SENTENCE));
+      expect(replaced?.text.includes(MAPPING_GLOBAL_ROLE_SENTENCE)).toBe(false);
+      expect(replaced?.since).toContain("Issue #736");
+      expect(replaced?.since).toContain("初回の束の要求だけ");
+      expect(replaced?.why).toContain("#627");
+    }
+    // 書き直し・2 回目・全体の規則は今のまま（大域の文の扱いは #660 の部分の規則のまま）
+    expect(ruleTexts(mappingRuleDefinitionsOf()).join("\n")).toContain(MAPPING_GLOBAL_ROLE_SENTENCE);
+    expect(ruleTexts(mappingRewriteRuleDefinitionsOf()).join("\n").includes(MAPPING_BUNDLE_ROLE_SENTENCE)).toBe(false);
+    expectNoAcceptanceMaterial([MAPPING_GLOBAL_ROLE_SENTENCE, MAPPING_BUNDLE_ROLE_SENTENCE, ...mappingBundleRuleDefinitionsOf(PROPERTY_LEDGER_VIEW).flatMap((definition) => [definition.text, definition.why, definition.since])]);
+  });
+
+  it("(1) 要件 12：初回の要求は 3 つ（5・5・2 件）。各要求の要件の一覧はその束だけ、確定した仕様・C1 の行・文書・台帳の塊は全部のまま。規則に大域の文が無く束の文が在る。通れば記録 1 回分の口の計で表は全要件の 1 本の応答から組んだ表と同じ", async () => {
+    const { sized, good } = sizedOf(12);
+    const { client, requests } = answerClient((request) => ofBundle(good, requestListedIds(request)));
+    const outcome = await runMapping(inputOf(sized, client));
     expect(outcome.ok).toBe(true);
-    expect(recording.structured).toHaveLength(1);
-    const input = recording.structured[0]?.input ?? "";
-    const block = (name: string) => JSON.parse(input.split(`<data name="${name}">\n`)[1]?.split("\n</data>")[0] ?? "null") as Entry;
-    const ids = sized.list.requirements.map((requirement) => requirement.id);
-    expect((block(MAPPING_DATA_NAMES.list)["requirements"] as readonly { id: string }[]).map((requirement) => requirement.id)).toEqual(ids);
-    expect((block(MAPPING_DATA_NAMES.plan)["requirements"] as readonly { id: string }[]).map((requirement) => requirement.id)).toEqual(ids);
-    expect(block(MAPPING_DATA_NAMES.rows)).toHaveLength(sized.table.rows.length);
-    if (outcome.ok) expect(outcome.value.table).toEqual(withCheckTargets(sized.table));
+    expect(requests.map((request) => listOfBlock(request.input))).toEqual([sized.ids.slice(0, 5), sized.ids.slice(5, 10), sized.ids.slice(10)]);
+    expect(mappingBundlesOf(sized.list)).toEqual([sized.ids.slice(0, 5), sized.ids.slice(5, 10), sized.ids.slice(10)]);
+    const whole = mappingWholeRequestOf(inputOf(sized, client));
+    for (const request of requests) {
+      expect(request.rules).toEqual(ruleTexts(mappingBundleRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)));
+      expect((request.rules ?? []).join("\n").includes(MAPPING_GLOBAL_ROLE_SENTENCE)).toBe(false);
+      expect((request.rules ?? []).join("\n")).toContain(MAPPING_BUNDLE_ROLE_SENTENCE);
+      for (const name of [MAPPING_DATA_NAMES.plan, MAPPING_DATA_NAMES.rows, MAPPING_DATA_NAMES.documents, MAPPING_LEDGER_DATA_NAMES.unsupported]) {
+        expect(blockOf(request.input, name), name).toEqual(blockOf(whole.input, name));
+      }
+      expect(((blockOf(request.input, MAPPING_DATA_NAMES.plan) as Entry)["requirements"] as readonly { id: string }[]).map((requirement) => requirement.id)).toEqual(sized.ids);
+      expect(blockOf(request.input, MAPPING_DATA_NAMES.rows)).toHaveLength(sized.table.rows.length);
+      // 前置き・文書・schema・出力の上限は全要件の要求と同じ
+      expect(request.instructions).toBe(whole.instructions);
+      expect(request.documents).toEqual(whole.documents);
+      expect(request.schema).toEqual(whole.schema);
+      expect(request.maxOutputTokens).toBe(whole.maxOutputTokens);
+    }
+    const direct = inspectMapping(sized.list, sized.table.rows, good, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+    if (!outcome.ok || !direct.ok) throw new Error("前提が壊れた：通ること");
+    expect(outcome.value.table).toEqual(direct.table);
+    expect(outcome.value.tableSha256).toBe(await nameTableSha256(direct.table));
+    expect(outcome.value.response).toEqual(good);
+    expectNoAcceptanceMaterial([JSON.stringify(requests)]);
+  });
+
+  it.each([1, 3, 5])("(1) 要件 %i（束 1 つ）：要求は 1 つで、全要件の 1 回の要求（直す前の要求）とバイト列で同じ", async (count) => {
+    const { sized, good } = sizedOf(count);
+    const { client, requests } = answerClient(() => good);
+    const outcome = await runMapping(inputOf(sized, client));
+    expect(outcome.ok).toBe(true);
+    expect(requests).toHaveLength(1);
+    // 口が足す中断の口（signal）を除いた要求
+    const { signal: _signal, ...sent } = requests[0] as LlmStructuredRequest & { readonly signal?: unknown };
+    expect(JSON.stringify(sent)).toBe(JSON.stringify(mappingWholeRequestOf(inputOf(sized, client))));
+    expect((requests[0]?.rules ?? []).join("\n")).toContain(MAPPING_GLOBAL_ROLE_SENTENCE);
+  });
+
+  it("(2) 偽物の遅延応答で、束の要求はどれも、最初の束が返る前に始まっている。同時数 1 と 5 で表・SHA・応答が同じ", async () => {
+    const { sized, good } = sizedOf(12);
+    const delayed = delayedClient((request) => ofBundle(good, requestListedIds(request)));
+    const pending = runMapping(inputOf(sized, delayed.client));
+    await settle(() => delayed.started.length >= 3);
+    expect(delayed.started).toHaveLength(3);
+    for (const index of [2, 0, 1]) delayed.release(index);
+    const parallel = await pending;
+    const serial = answerClient((request) => ofBundle(good, requestListedIds(request)));
+    const one = await runMapping(inputOf(sized, serial.client, { bundleConcurrency: 1 }));
+    expect(serial.requests.map((request) => JSON.stringify(request))).toEqual(delayed.started.map((request) => JSON.stringify(request)));
+    if (!parallel.ok || !one.ok) throw new Error("前提が壊れた：通ること");
+    expect(one.value).toEqual(parallel.value);
+    expect(one.references).toEqual(parallel.references);
+  });
+
+  it("(2) 同時数 1 では、次の束は前の束が返るまで始まらない（同時数の上限が効く）", async () => {
+    const { sized, good } = sizedOf(12);
+    const delayed = delayedClient((request) => ofBundle(good, requestListedIds(request)));
+    const pending = runMapping(inputOf(sized, delayed.client, { bundleConcurrency: 1 }));
+    await settle(() => delayed.started.length >= 1);
+    expect(delayed.started).toHaveLength(1);
+    delayed.release(0);
+    await settle(() => delayed.started.length >= 2);
+    expect(delayed.started).toHaveLength(2);
+    delayed.release(1);
+    await settle(() => delayed.started.length >= 3);
+    delayed.release(2);
+    expect((await pending).ok).toBe(true);
+  });
+
+  it("(3) 束の順・応答の中の順・完了の順を変えても、合併した表・表の SHA・帰属・normalized が同じ", async () => {
+    const { sized, good } = sizedOf(12);
+    // 帰属できる問題（X の所属に表に無い ID）を 1 件混ぜた台本で、帰属と書き直しの結果も照らす
+    const X = sized.ids[6] as string;
+    const bad = withEntries((good["requirements"] as Entry[]).map((entry) => (entry["requirementId"] === X ? { ...entry, roles: [...(entry["roles"] as Entry[]), { id: "E1.F99", basis: "stated", reason: null }] } : entry)));
+    const fixed = ofBundle(good, [X]);
+    const runWith = async (reverseEntries: boolean, order: readonly number[], concurrency?: number) => {
+      const delayed = delayedClient((request) => {
+        const ids = requestListedIds(request);
+        if (ids.length === sized.ids.length) return fixed;
+        const part = (ofBundle(bad, ids)["requirements"] as Entry[]).slice();
+        return withEntries(reverseEntries ? part.reverse() : part);
+      });
+      const rejected: MappingRejectedCandidate[] = [];
+      const pending = runMapping(inputOf(sized, delayed.client, { onRejected: (candidate) => rejected.push(candidate), ...(concurrency === undefined ? {} : { bundleConcurrency: concurrency }) }));
+      for (const index of order) {
+        await settle(() => delayed.started.length > index);
+        delayed.release(index);
+      }
+      await settle(() => delayed.started.length >= 4);
+      delayed.release(3);
+      const outcome = await pending;
+      return { outcome, rejected, rewrite: blockOf(delayed.started[3]?.input, MAPPING_REWRITE_DATA_NAMES.requirements) };
+    };
+    const base = await runWith(false, [0, 1, 2]);
+    expect(base.rewrite).toEqual([X]);
+    for (const variant of [await runWith(true, [0, 1, 2]), await runWith(false, [2, 1, 0]), await runWith(true, [1, 2, 0]), await runWith(false, [0, 1, 2], 1)]) {
+      if (!variant.outcome.ok || !base.outcome.ok) throw new Error("前提が壊れた：通ること");
+      expect(variant.outcome.value.table).toEqual(base.outcome.value.table);
+      expect(variant.outcome.value.tableSha256).toBe(base.outcome.value.tableSha256);
+      expect(variant.outcome.value.normalized).toEqual(base.outcome.value.normalized);
+      expect(variant.rewrite).toEqual(base.rewrite);
+      expect(variant.rejected.map((candidate) => candidate.rewrite)).toEqual(base.rejected.map((candidate) => candidate.rewrite));
+    }
+    // 帰属（純粋）：合併した候補の順を束ごとに入れ替えても、帰属の組は同じ
+    const merged = mergeMappingBundles(mappingBundlesOf(sized.list).map((ids) => ofBundle(bad, ids))).candidate as Entry;
+    const swapped = mergeMappingBundles(mappingBundlesOf(sized.list).map((ids) => withEntries((ofBundle(bad, ids)["requirements"] as Entry[]).slice().reverse()))).candidate as Entry;
+    const attribution = (output: Entry) => {
+      const inspected = inspectMappingSourced(sized.list, sized.table.rows, output, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+      if (inspected.ok) throw new Error("前提が壊れた：落ちること");
+      return attributeMappingProblems(sized.list, output, inspected).groups;
+    };
+    expect(attribution(swapped)).toEqual(attribution(merged));
+  });
+
+  describe("(4)(5) 合併した候補の状態の決め方（形のやり直しは初回全体で 1 回）", () => {
+    const { sized, good } = sizedOf(12);
+    const X = sized.ids[3] as string;
+    const Y = sized.ids[7] as string;
+    const goodEntries = (): Entry[] => (good["requirements"] as Entry[]).map((entry) => ({ ...entry }));
+    const withUnknownRole = (list: readonly Entry[], ids: readonly string[]): Entry[] =>
+      list.map((entry) => (ids.includes(entry["requirementId"] as string) ? { ...entry, roles: [...(entry["roles"] as Entry[]), { id: "E1.F99", basis: "stated", reason: null }] } : entry));
+    /** 束の応答は `bundle(ids, index)`、全要件の一覧の要求（書き直し・作り直し）は `whole(index)` で答える偽物の口 */
+    const scripted = (bundle: (ids: readonly string[]) => unknown, whole: readonly unknown[]) => {
+      let next = 0;
+      return answerClient((request) => {
+        const ids = requestListedIds(request);
+        if (ids.length < sized.ids.length) return bundle(ids);
+        const output = whole[next];
+        next += 1;
+        if (output === undefined) throw new Error("前提が壊れた：台本に無い要求");
+        return output;
+      });
+    };
+    const runScripted = async (bundle: (ids: readonly string[]) => unknown, whole: readonly unknown[]) => {
+      const { client, requests } = scripted(bundle, whole);
+      const rejected: MappingRejectedCandidate[] = [];
+      const input = inputOf(sized, client, { onRejected: (candidate) => rejected.push(candidate) });
+      const outcome = await runMapping(input);
+      return { outcome, requests, rejected, gateway: input.gateway, whole: mappingWholeRequestOf(input) };
+    };
+    const k = mappingBundlesOf(sized.list).length;
+
+    it("前提：要件 12 で束 3、X と Y は別の束", () => {
+      expect(k).toBe(3);
+      expect(sized.ids.indexOf(X) < 5 && sized.ids.indexOf(Y) >= 5 && sized.ids.indexOf(Y) < 10).toBe(true);
+    });
+
+    it("(4) 2 つの束にまたがる帰属できる問題は、和集合（一覧の順に X・Y）だけを 1 回の部分の書き直しにし、ほかの要件の raw をバイト列で保つ。要求は k＋1", async () => {
+      const bad = withEntries(withUnknownRole(goodEntries(), [Y, X]));
+      const { outcome, requests, rejected, gateway, whole } = await runScripted((ids) => ofBundle(bad, ids), [ofBundle(good, [X, Y])]);
+      expect(requests).toHaveLength(k + 1);
+      expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
+      const rewrite = requests[k];
+      expect(rewrite?.rules).toEqual(ruleTexts(mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)));
+      // 書き直しの要求のデータは全要件の 1 回の要求のデータの後ろに、前回の写像（合併した候補）・書き直す要件・その問題
+      expect(rewrite?.input.startsWith(`${whole.input}\n<data name="${MAPPING_DATA_NAMES.response}">`)).toBe(true);
+      expect(blockOf(rewrite?.input, MAPPING_DATA_NAMES.response)).toEqual(bad);
+      expect(blockOf(rewrite?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual([X, Y]);
+      expect(rewrite?.input.includes(`<data name="${SHAPE_PROBLEMS_DATA_NAME}">`)).toBe(false);
+      if (!outcome.ok) throw new Error("前提が壊れた：通ること");
+      const merged = (outcome.value.response as Entry)["requirements"] as Entry[];
+      merged.forEach((entry, index) => {
+        const want = entry["requirementId"] === X || entry["requirementId"] === Y ? (good["requirements"] as Entry[])[index] : (bad["requirements"] as Entry[])[index];
+        expect(JSON.stringify(entry), String(entry["requirementId"])).toBe(JSON.stringify(want));
+      });
+      const direct = inspectMapping(sized.list, sized.table.rows, good, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+      if (direct.ok) expect(outcome.value.table).toEqual(direct.table);
+      expect(rejected.map((candidate) => [candidate.round, candidate.attempt, candidate.rewrite])).toEqual([[1, 1, { rewritten: 2, kept: 10 }]]);
+    });
+
+    /** 帰属できない混ざり物ごとの束の応答（X の束に混ぜる。束のほかの要件はそのまま） */
+    const mixtures: readonly { readonly label: string; readonly bundle: (ids: readonly string[]) => unknown; readonly message: string | null }[] = [
+      { label: "一覧に無い要件 ID", bundle: (ids) => (ids.includes(X) ? withEntries([...(ofBundle(good, ids)["requirements"] as Entry[]), { ...(goodEntries()[0] as Entry), requirementId: "R99" }]) : ofBundle(good, ids)), message: "一覧に無い要件 ID である" },
+      { label: "要件 ID の重複（別の束の要件を書き、その束も書く）", bundle: (ids) => (ids.includes(X) ? withEntries([...(ofBundle(good, ids)["requirements"] as Entry[]), goodEntries()[sized.ids.indexOf(Y)] as Entry]) : ofBundle(good, ids)), message: "同じ要件の項目が重なっている" },
+      {
+        label: "束のほかの要件を書き、その束が欠いた（合併では揃う）",
+        bundle: (ids) => (ids.includes(X) ? withEntries([...(ofBundle(good, ids)["requirements"] as Entry[]), goodEntries()[sized.ids.indexOf(Y)] as Entry]) : ofBundle(good, ids.filter((id) => id !== Y))),
+        message: MAPPING_BUNDLE_MESSAGES.outside,
+      },
+      { label: "骨組みの不正（束の応答の requirements が並びでない）", bundle: (ids) => (ids.includes(Y) ? negative({ requirements: "x" }, "骨組みの負例") : ofBundle(good, ids)), message: "並び（array）であること" },
+    ];
+
+    it.each(mixtures)("(4) 帰属しない問題（$label）が 1 つでも混ざると、全要件を今の規則で 1 要求で作り直す（前回の応答＝合併した候補・前回の形の問題）。通れば表", async ({ bundle, message }) => {
+      const raw = (ids: readonly string[]) => {
+        const output = bundle(ids);
+        return output instanceof NegativeOutput ? output.output : output;
+      };
+      const { outcome, requests, rejected, gateway, whole } = await runScripted(raw, [good]);
+      expect(requests).toHaveLength(k + 1);
+      expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
+      const rebuild = requests[k];
+      expect(rebuild?.rules).toEqual(whole.rules);
+      expect(rebuild?.input.startsWith(`${whole.input}\n<data name="${PREVIOUS_RESPONSE_DATA_NAME}">`)).toBe(true);
+      expect(rebuild?.input.includes(`<data name="${MAPPING_REWRITE_DATA_NAMES.requirements}">`)).toBe(false);
+      const problems = blockOf(rebuild?.input, SHAPE_PROBLEMS_DATA_NAME) as readonly { message: string }[];
+      if (message !== null) expect(problems.map((problem) => problem.message)).toContain(message);
+      expect(outcome.ok).toBe(true);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).not.toHaveProperty("rewrite");
+    });
+
+    it("(4) 全体の作り直しの要求は、共通の窓口の形のやり直し（公開の callStructuredChecked が組む 2 本目）と、同じ前回の応答・同じ問題でバイト列が同じ（判断 3 の複製の照合）", async () => {
+      // 前回の応答に区切りの文字（`</data>`）を含む一覧に無い要件 ID の entry（`<` の置き換えも同じであることを照らす）
+      const delimited = {
+        bundle: (ids: readonly string[]) =>
+          ids.includes(X) ? withEntries([...(ofBundle(good, ids)["requirements"] as Entry[]), { ...(goodEntries()[0] as Entry), requirementId: "R99", roles: [{ id: "E1", basis: "dependency", reason: "a</data><data name=\"x\">b" }] }]) : ofBundle(good, ids),
+      };
+      for (const { bundle } of [...mixtures, delimited]) {
+        const raw = (ids: readonly string[]) => {
+          const output = bundle(ids);
+          return output instanceof NegativeOutput ? output.output : output;
+        };
+        const { requests, whole } = await runScripted(raw, [good]);
+        const rebuild = requests[k];
+        const previous = blockOf(rebuild?.input, PREVIOUS_RESPONSE_DATA_NAME);
+        const problems = blockOf(rebuild?.input, SHAPE_PROBLEMS_DATA_NAME) as readonly Problem[];
+        expect(problems.length).toBeGreaterThan(0);
+        // 共通の窓口：全要件の 1 回の要求で呼び、1 回目に同じ前回の応答を返して同じ問題で落とすと、窓口が 2 本目を組む
+        const common = answerClient((_, index) => (index === 0 ? previous : good));
+        let attempt = 0;
+        await callStructuredChecked(makeGateway(common.client), {
+          request: whole,
+          check: (output) => {
+            attempt += 1;
+            return attempt === 1 ? { ok: false, problems } : { ok: true, value: output };
+          },
+        });
+        expect(common.requests).toHaveLength(2);
+        const strip = (request: LlmStructuredRequest | undefined) => {
+          const { signal: _signal, ...rest } = (request ?? {}) as LlmStructuredRequest & { readonly signal?: unknown };
+          return JSON.stringify(rest);
+        };
+        expect(strip(rebuild)).toBe(strip(common.requests[1]));
+      }
+    });
+
+    it("(4) 全体の作り直しの最後の応答が骨組みの不正なら malformed、骨組みを通るが一覧に無い ID・重複・孤立行が残れば unmet。どちらも追加の要求をしない", async () => {
+      const unknownMixed = mixtures[0]?.bundle as (ids: readonly string[]) => unknown;
+      const skeletonBad = await runScripted(unknownMixed, [{ requirements: "x" }]);
+      expect(skeletonBad.outcome).toMatchObject({ ok: false, failure: { kind: "malformed", attempts: 2 } });
+      expect(skeletonBad.requests).toHaveLength(k + 1);
+      const residues = [
+        withEntries([...goodEntries(), { ...(goodEntries()[0] as Entry), requirementId: "R99" }]),
+        withEntries([...goodEntries(), goodEntries()[0] as Entry]),
+        withEntries(goodEntries().map((entry, index) => (index === 0 ? { ...entry, roles: [] } : entry))),
+      ];
+      for (const residue of residues) {
+        const result = await runScripted(unknownMixed, [residue]);
+        expect(result.outcome).toMatchObject({ ok: false, failure: { kind: "unmet", attempts: 2 } });
+        expect(result.requests).toHaveLength(k + 1);
+        expect(result.rejected.map((candidate) => candidate.attempt)).toEqual([1, 2]);
+      }
+    });
+
+    it("(4) 帰属できた部分の書き直しの骨組みが不正なら今どおり malformed（追加の要求なし）", async () => {
+      const bad = withEntries(withUnknownRole(goodEntries(), [X]));
+      const result = await runScripted((ids) => ofBundle(bad, ids), [{ requirements: "x" }]);
+      expect(result.outcome).toMatchObject({ ok: false, failure: { kind: "malformed", attempts: 2 } });
+      expect(result.requests).toHaveLength(k + 1);
+    });
+
+    it("(4) 通信や門の失敗で応答が無い束があれば、形の書き直しへ進まず元の失敗の種類で返す（全部の束の終わりを待つ）", async () => {
+      const requests: LlmStructuredRequest[] = [];
+      const client: LlmClient = {
+        async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+          requests.push(request);
+          const ids = requestListedIds(request);
+          if (ids.includes(Y)) throw Object.assign(new Error("fetch が失敗しました"), { kind: "network" });
+          return { output: ofBundle(good, ids) as T, usage: undefined };
+        },
+        async callWithTools() {
+          throw new Error("道具の呼び出しは無い");
+        },
+      };
+      const outcome = await runMapping(inputOf(sized, client, { gateway: makeGateway(client, { maxAttempts: 1 }) }));
+      expect(outcome).toMatchObject({ ok: false, failure: { kind: "network" } });
+      // 束 k 本だけ（書き直し・作り直しの要求は無い）
+      expect(requests).toHaveLength(k);
+      // 予算の門の失敗（予約が残高を超える）も元の種類のまま
+      const poor = answerClient((request) => ofBundle(good, requestListedIds(request)));
+      const budget = await runMapping(inputOf(sized, poor.client, { gateway: makeGateway(poor.client, { budgetUsd: 0 }) }));
+      expect(budget).toMatchObject({ ok: false, failure: { kind: "budget" } });
+      expect(poor.requests).toHaveLength(0);
+    });
+
+    it("(5) 合併後にどの要件にも所属しない行が残る表は、C2' が今の固定文（孤立行）で落とし、全体の作り直しに回る（束の要求は孤立行を見ない）", async () => {
+      const owned = goodEntries();
+      const xRoles = owned[sized.ids.indexOf(X)]?.["roles"] as Entry[];
+      const solo = xRoles.find((role) => owned.filter((entry) => (entry["roles"] as Entry[]).some((other) => other["id"] === role["id"])).length === 1);
+      expect(solo).toBeDefined();
+      const orphaned = withEntries(owned.map((entry) => (entry["requirementId"] === X ? { ...entry, roles: xRoles.filter((role) => role !== solo) } : entry)));
+      const { outcome, requests } = await runScripted((ids) => ofBundle(orphaned, ids), [good]);
+      expect(outcome.ok).toBe(true);
+      expect(requests).toHaveLength(k + 1);
+      const problems = blockOf(requests[k]?.input, SHAPE_PROBLEMS_DATA_NAME) as readonly { message: string }[];
+      expect(problems.map((problem) => problem.message)).toContain("どの要件にも所属しない行がある");
+      // 同じ孤立行が作り直しにも残れば unmet（孤立行を推測で割り当てない）
+      const again = await runScripted((ids) => ofBundle(orphaned, ids), [orphaned]);
+      expect(again.outcome).toMatchObject({ ok: false, failure: { kind: "unmet" } });
+      if (!again.outcome.ok && again.outcome.failure.kind === "unmet") expect(again.outcome.failure.problems.map((problem) => problem.message)).toContain("どの要件にも所属しない行がある");
+    });
+
+    it("合併（純粋）：束の raw を書き換えず・捨てず・補わずに束の順に並べ、出どころを保つ。骨組みの合わない束は束の位置の問題になる", () => {
+      const parts = mappingBundlesOf(sized.list).map((ids) => ofBundle(good, ids));
+      const merged = mergeMappingBundles(parts);
+      expect(merged.skeleton).toEqual([]);
+      expect(JSON.stringify(merged.candidate)).toBe(JSON.stringify(good));
+      expect(merged.origins.slice(4, 7)).toEqual([
+        { bundle: 0, index: 4 },
+        { bundle: 1, index: 0 },
+        { bundle: 1, index: 1 },
+      ]);
+      const broken = mergeMappingBundles([parts[0], "x", { requirements: "x" }, { requirements: [1] }]);
+      const firstLength = ((parts[0] ?? {})["requirements"] as Entry[]).length;
+      expect(broken.skeleton.map((problem) => problem.field)).toEqual(["bundles[1]", "bundles[2].requirements", `requirements[${String(firstLength)}]`]);
+      expect(outsideBundleProblems(sized.list, mappingBundlesOf(sized.list), merged.candidate, merged.origins)).toEqual([]);
+    });
   });
 });
 
@@ -358,8 +767,9 @@ describe("C2' の負例：固定文で落ち、形のやり直し 1 回のあと
     const good = idsResponsesOf(list, table).mapping["requirements"] as Entry[];
     const outside = good.map((entry) => (entry["requirementId"] === "R6" ? { ...entry, verification: { ...(entry["verification"] as Entry), value: "gamma" } } : entry));
     const first = await run([withEntries(outside), rewriteOf(withEntries(outside), ["R6"])], { list, table });
-    expect(first.recording.structured).toHaveLength(2);
-    expect(blockOf(first.recording.structured[1]?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual(["R6"]);
+    // 要件 6 件は初回が束 2（R1〜R5・R6。Issue #736）。書き直しは 3 本目
+    expect(first.recording.structured).toHaveLength(3);
+    expect(blockOf(first.recording.structured[2]?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual(["R6"]);
     expect(messagesOf(first.outcome)).toContain("既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い");
   });
 
@@ -375,14 +785,15 @@ describe("C2' の負例：固定文で落ち、形のやり直し 1 回のあと
     const owned = good.map((entry) => (entry["requirementId"] === "R6" ? { ...entry, roles: [{ id: existing, basis: "stated", reason: null }] } : entry));
     const options = { list, table, ledger: PROPERTY_LEDGER_VIEW };
     const failed = await run([withEntries(owned), rewriteOf(withEntries(owned), ["R6"])], options);
-    expect(failed.recording.structured).toHaveLength(2);
-    expect(blockOf(failed.recording.structured[1]?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual(["R6"]);
+    // 要件 6 件は初回が束 2（Issue #736）。書き直しは 3 本目
+    expect(failed.recording.structured).toHaveLength(3);
+    expect(blockOf(failed.recording.structured[2]?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual(["R6"]);
     expect(failed.outcome.ok).toBe(false);
     if (!failed.outcome.ok) expect(failed.outcome.failure.kind).toBe("unmet");
     expect(messagesOf(failed.outcome)).toContain("要件でない文（non-requirement）には行を所属させないこと");
     const fixed = await run([withEntries(owned), rewriteOf(withEntries(good), ["R6"])], options);
     expect(fixed.outcome.ok).toBe(true);
-    expect(fixed.recording.structured).toHaveLength(2);
+    expect(fixed.recording.structured).toHaveLength(3);
   });
 
   it("写し由来の固定文（長さ・一覧に無い写し・引用が原文に無い）は C2' の落ちに出ない", async () => {
@@ -843,9 +1254,13 @@ describe("初回の形のやり直しを落ちた要件だけの書き直しに�
     const X = "R7";
     const Y = "R12";
     const indexOf = (id: string) => sized.ids.indexOf(id);
-    /** 台帳 on の要件 15 の走り（`buildSized` の ids on の表は台帳の形） */
+    /** 初回の束の数（要件 15 で 3。Issue #736）。書き直し・作り直しの要求は束のあとの k 番目 */
+    const k = mappingBundlesOf(sized.list).length;
+    /** 全要件の 1 回の要求（書き直し・作り直しの要求の頭。Issue #736 で初回は束になった） */
+    const wholeRequest = () => mappingWholeRequestOf({ plan: planOf(sized.list), list: sized.list, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(createCheckedRecordingClient([]).client), rows: sized.table.rows, ledger: PROPERTY_LEDGER_VIEW });
+    /** 台帳 on の要件 15 の走り（`buildSized` の ids on の表は台帳の形。記録した応答は束ごとに読む。Issue #736） */
     const ledgerRun = async (outputs: readonly unknown[]) => {
-      const recording = createCheckedRecordingClient(outputs.map(recordedStructured));
+      const recording = createCheckedRecordingClient(outputs.map(recordedStructured), { bundledC2: true });
       const gateway = makeGateway(recording.client);
       const rejected: MappingRejectedCandidate[] = [];
       const outcome = await runMapping({
@@ -860,14 +1275,15 @@ describe("初回の形のやり直しを落ちた要件だけの書き直しに�
       return { outcome, recording, gateway, rejected };
     };
 
-    it("(1) 要件 X の所属の ID が表に無い応答：2 本目は X だけの書き直しの要求（前回の写像・X・X の問題）。X 以外の 14 件はバイト列で同じまま合併され、採用した表は X を直した応答から組んだ表と深く等しい。要求は 2", async () => {
+    it("(1) 要件 X の所属の ID が表に無い応答：初回の束 k のあとの 1 本は X だけの書き直しの要求（前回の写像・X・X の問題）。X 以外の 14 件はバイト列で同じまま合併され、採用した表は X を直した応答から組んだ表と深く等しい。要求は k＋1（Issue #736）", async () => {
       expect(sized.table.rows.some((row) => row.id === "E1.F99")).toBe(false);
       const bad = withEntries(withUnknownRoleAt(sizedEntries(), [indexOf(X)]));
       const { outcome, recording, gateway, rejected } = await ledgerRun([bad, only(sizedGood, [X])]);
-      expect(recording.structured).toHaveLength(2);
+      expect(recording.structured).toHaveLength(k + 1);
       expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
-      const [first, second] = recording.structured;
-      // 書き直しの要求：前置き・文書・schema・出力の上限は初回と同じ。規則は部分専用、データは初回のデータの後ろに 3 塊
+      const first = wholeRequest();
+      const second = recording.structured[k];
+      // 書き直しの要求：前置き・文書・schema・出力の上限は全要件の 1 回の要求と同じ。規則は部分専用、データはそのデータの後ろに 3 塊
       expect(second?.instructions).toBe(first?.instructions);
       expect(second?.documents).toEqual(first?.documents);
       expect(second?.schema).toEqual(first?.schema);
@@ -905,7 +1321,7 @@ describe("初回の形のやり直しを落ちた要件だけの書き直しに�
     it("(2) X と Y の 2 件が落ちれば、書き直す要件は一覧の順に X・Y", async () => {
       const bad = withEntries(withUnknownRoleAt(sizedEntries(), [indexOf(Y), indexOf(X)]));
       const { outcome, recording, rejected } = await ledgerRun([bad, only(sizedGood, [Y, X])]);
-      expect(blockOf(recording.structured[1]?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual([X, Y]);
+      expect(blockOf(recording.structured[k]?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual([X, Y]);
       expect(outcome.ok).toBe(true);
       expect(rejected[0]?.rewrite).toEqual({ rewritten: 2, kept: 13 });
     });
@@ -920,9 +1336,11 @@ describe("初回の形のやり直しを落ちた要件だけの書き直しに�
       const bad = withEntries(withUnknownRoleAt(orphaned, [indexOf(Y)]));
       const { outcome, recording, gateway, rejected } = await ledgerRun([bad, sizedGood]);
       expect(outcome.ok).toBe(true);
-      expect(recording.structured).toHaveLength(2);
+      expect(recording.structured).toHaveLength(k + 1);
       expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
-      const [first, second] = recording.structured;
+      // 全体の作り直しは全要件の 1 回の要求に前回の応答（合併した候補）・前回の形の問題を足したもの（Issue #736）
+      const first = wholeRequest();
+      const second = recording.structured[k];
       expect(second?.rules).toEqual(first?.rules);
       expect(second?.input.startsWith(`${first?.input ?? ""}\n<data name="${PREVIOUS_RESPONSE_DATA_NAME}">`)).toBe(true);
       expect(blockOf(second?.input, PREVIOUS_RESPONSE_DATA_NAME)).toEqual(bad);
@@ -1093,12 +1511,9 @@ describe("C3 の拒否のあとの 2 回目を拒否された要件だけの書�
     });
     return { outcome, recording, gateway, rejected };
   };
-  /** 初回の要求（2 回目の要求の頭と照らす） */
-  const firstRequest = async () => {
-    const recording = createCheckedRecordingClient([sizedGood].map(recordedStructured));
-    await runMapping({ plan: planOf(sized.list), list: sized.list, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(recording.client), rows: sized.table.rows, ledger: PROPERTY_LEDGER_VIEW });
-    return recording.structured[0];
-  };
+  /** 全要件の 1 回の要求（2 回目の要求の頭と照らす。要件 15 の初回は束になったので、束の前の全要件の要求。Issue #736） */
+  const firstRequest = async () =>
+    mappingWholeRequestOf({ plan: planOf(sized.list), list: sized.list, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(createCheckedRecordingClient([]).client), rows: sized.table.rows, ledger: PROPERTY_LEDGER_VIEW });
 
   it("書き直す要件は C3 が拒否した要件 ID の集合（拒否の種類に依らず全部・重複なし・一覧の順）。同じ入力から同じ", () => {
     const rejections = [rejectionOf(Y, "unnecessary-ownership"), rejectionOf(X, "missing-target"), rejectionOf(Y, "weak-verification")] as unknown as MappingPrevious["rejections"];

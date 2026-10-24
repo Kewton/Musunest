@@ -231,7 +231,8 @@ describe("旗 v12.ids の段の枠（手 3a・Issue #593）", () => {
     const vocabulary = V12_IDS_FRAME_MAP.find((entry) => entry.stage === "vocabulary");
     const mapping = V12_IDS_FRAME_MAP.find((entry) => entry.stage === "mapping");
     expect(vocabulary).toEqual({ stage: "vocabulary", frame: "C1", rounds: 1, shapeAttempts: STEP_ATTEMPTS, units: VOCABULARY_BUNDLES.length, maxLogical: VOCABULARY_BUNDLES.length * STEP_ATTEMPTS });
-    expect(mapping).toEqual({ stage: "mapping", frame: "C2", rounds: MAPPING_ROUNDS, shapeAttempts: STEP_ATTEMPTS, units: 1, maxLogical: STEP_ATTEMPTS + 1 });
+    // C2 の初回は要件 5 件ごとの束（要件 25 で束 5）。初回 k・形 1・中身 1 で論理の最大 k＋2（Issue #736。直す前は束 1・3）
+    expect(mapping).toEqual({ stage: "mapping", frame: "C2", rounds: MAPPING_ROUNDS, shapeAttempts: STEP_ATTEMPTS, units: 5, maxLogical: 5 + (STEP_ATTEMPTS - 1) + (MAPPING_ROUNDS - 1) });
     for (const entry of V12_IDS_FRAME_MAP) {
       const frame = V12_STAGE_FRAMES.find((candidate) => candidate.stage === entry.frame);
       expect(frame, entry.frame).toBeDefined();
@@ -259,7 +260,7 @@ describe("旗 v12.ids の T2 の束の定数（手 3f・Issue #626）", () => {
     expect([TEST_SPEC_ROUNDS, STEP_ATTEMPTS]).toEqual([2, 2]);
   });
 
-  it("論理の最大を要件 25（T2・C3 の束 5）で数え直すと 73 で 80 の内側（72 → 80 は Issue #735。2026-10-24 所有者の決定）", () => {
+  it("論理の最大を要件 25（T2・C3・C2 の束 5）で数え直すと 77 で 80 の内側（72 → 80 は Issue #735。2026-10-24 所有者の決定。C2 の束は Issue #736）", () => {
     const perUnit = (stage: string): number => {
       const row = frame(stage);
       return (row?.initial?.count ?? 0) + (row?.shape?.count ?? 0) + (row?.content?.count ?? 0);
@@ -276,16 +277,35 @@ describe("旗 v12.ids の T2 の束の定数（手 3f・Issue #626）", () => {
       loop: perUnit("loop") * (frame("loop")?.maxUnits ?? Number.NaN),
       rewrite: perUnit("rewrite"),
     };
-    // C3 は束 5 で 3k＝15（Issue #735。直す前の表は段全体で 3）
-    expect(maximum).toEqual({ C1: 6, C2: 3, C3: 15, C4: 15, C5: 6, C6: 8, loop: 18, rewrite: 2 });
+    // C3 は束 5 で 3k＝15（Issue #735。直す前の表は段全体で 3）。C2 は束 5 で k＋2＝7（Issue #736。直す前は 3）
+    expect(maximum).toEqual({ C1: 6, C2: 7, C3: 15, C4: 15, C5: 6, C6: 8, loop: 18, rewrite: 2 });
     const total = Object.values(maximum).reduce((sum, value) => sum + value, 0);
-    expect(total).toBe(73);
+    expect(total).toBe(77);
     expect(total).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
-    // 要件 15（束 3）では C3・C4 とも 3k＝9 で、合計 61
-    const at15 = { ...maximum, C3: 3 * Math.ceil(15 / V12_T2_BUNDLE.size), C4: 3 * Math.ceil(15 / V12_T2_BUNDLE.size) };
-    expect(Object.values(at15).reduce((sum, value) => sum + value, 0)).toBe(61);
-    // Issue #735 の当初の数え方（各回 × 束で初回 1 ＋ 形 1＝2k₁＋2k₂＝20）なら要件 25 で 78（72 を超えたので、所有者が形のやり直しを段全体で k にした）
-    expect(total - maximum.C3 + 4 * Math.ceil(25 / V12_T2_BUNDLE.size)).toBe(78);
+    // Issue #736 の前（C2 は束 1 で 3）の合計は 73（Issue #735 の値）
+    const c2Before736 = STEP_ATTEMPTS + 1;
+    expect(total - maximum.C2 + c2Before736).toBe(73);
+    // 要件 15（束 3）では C3・C4 とも 3k＝9、C2 は k＋2＝5 で、合計 63（Issue #736 の前は 61）
+    const k15 = Math.ceil(15 / V12_T2_BUNDLE.size);
+    const at15 = { ...maximum, C2: k15 + 2, C3: 3 * k15, C4: 3 * k15 };
+    expect(Object.values(at15).reduce((sum, value) => sum + value, 0)).toBe(63);
+    expect(Object.values({ ...at15, C2: c2Before736 }).reduce((sum, value) => sum + value, 0)).toBe(61);
+    // Issue #735 の当初の数え方（各回 × 束で初回 1 ＋ 形 1＝2k₁＋2k₂＝20）なら、#736 の前の C2 で要件 25 で 78（72 を超えたので、所有者が形のやり直しを段全体で k にした）
+    expect(total - maximum.C2 + c2Before736 - maximum.C3 + 4 * Math.ceil(25 / V12_T2_BUNDLE.size)).toBe(78);
+  });
+
+  it("C2 の行の文は、初回を要件 5 件ごとの束に分けて形・中身のやり直しが段全体でそれぞれ 1（論理の最大 k＋2）であることを履歴つきで書く。§4.1 の C2 の行の枠（束ごと 1・1・1）を超えない（Issue #736）", () => {
+    const c2 = V12_STAGE_FRAME_DEFINITIONS.find((definition) => definition.id === "F-v12-c2");
+    expect(c2?.text).toContain("初回は要件 5 件ごとの束（k）に分けて同時に呼び");
+    expect(c2?.text).toContain("束ごとに形のやり直しをしない");
+    expect(c2?.text).toContain("論理の最大は k＋2");
+    expect(c2?.why).toContain("#627");
+    expect(c2?.since).toContain("Issue #736");
+    for (const requirements of [1, 5, 6, 15, 25]) {
+      const k = Math.ceil(requirements / V12_T2_BUNDLE.size);
+      expect(k + 2, String(requirements)).toBeLessThanOrEqual(3 * k);
+    }
+    expect(ruleDefinitionDefects(V12_STAGE_FRAME_DEFINITIONS)).toEqual([]);
   });
 
   it("C3 の写しは束 5（要件 25）・論理の最大 3k（初回 k・再点検 k・形のやり直しは段全体で k）で、§4.1 の C3 の行の枠を超えない。回数の定数は変えない（Issue #735）", () => {
