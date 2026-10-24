@@ -8,6 +8,10 @@
 // 台帳の行から台帳の順で組む（default-value の文は今の文とバイト列で同じ）。拒否の種類・schema・完全性と引用の検査・
 // 対象・データは変えない。off は今の定数のまま。
 //
+// 旗 `v12.ids` が on の走り（`ids` を渡したとき。Issue #732）は、R-sc-02 の 3 つの観点の文のあとに、構造の検査の種類の意味と
+// targets の読み方の文（`v12/structural-meanings.ts` の表から組む）を置く。組む順は 3 つの観点 → 種類の意味 → 受理条件の文
+// （台帳 on なら台帳の文）。拒否の種類・schema・完全性と引用の検査・対象・データは変えない。ids off は今の文とバイト列で同じ。
+//
 // **完全性と引用の実在はコードが形として確かめる**（`checkJudgmentsShape`。B3' と共有）：対象の全要件に
 // ちょうど 1 判定。欠落・重複・未知の要件 ID・確定した仕様にも要件の文にも見つからない引用・引用の無い拒否は
 // 形の落ちで、共通の窓口が 1 回やり直し、2 回続けば `malformed`（点検していない状態で先へ進まない）。
@@ -35,6 +39,7 @@ import type { SemanticCheckResult, SemanticJudgment } from "../carry-over.js";
 import { nameTableSha256, type NameTable } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 import type { UpstreamLedgerView } from "../../v12/ledger.js";
+import { STRUCTURAL_MEANINGS, structuralReadingText, type StructuralMeaningTable } from "../../v12/structural-meanings.js";
 
 /** T1'' の JSON Schema の名前 */
 export const SEMANTIC_CHECK_SCHEMA_NAME = "semantic-check";
@@ -86,16 +91,35 @@ export const SEMANTIC_CHECK_LEDGER_RULE_ID = "R-sc-02";
 const SEMANTIC_CHECK_LEDGER_RULE_HEAD =
   "要件ごとに 3 つを見る：(1) 所属の各行は、この要件を満たすのに必要か（unnecessary-ownership）。(2) この要件を満たすのに必要な対象（項目・計算・集計・操作・画面）が表に無いか（missing-target）。(3) 確かめ方の種類と checks は、要件の決まりを確かめられるか。決まりを含む要件を、在ることだけを見る構造の検査で確かめていれば弱い（weak-verification）。";
 
+/** R-sc-02 の、3 つの観点の文のあとの受理条件の文（台帳 off の定数の文。default-value の受理条件） */
+const SEMANTIC_CHECK_ACCEPTANCE_TAIL = (() => {
+  const text = SEMANTIC_CHECK_RULE_DEFINITIONS.find((definition) => definition.id === SEMANTIC_CHECK_LEDGER_RULE_ID)?.text ?? "";
+  if (!text.startsWith(SEMANTIC_CHECK_LEDGER_RULE_HEAD)) throw new Error("R-sc-02 の文が 3 つの観点の文で始まらない");
+  return text.slice(SEMANTIC_CHECK_LEDGER_RULE_HEAD.length);
+})();
+
 /**
- * T1'' の規則の定義（旗 on なら台帳から組む。Issue #548）。省けば今の定数をそのまま返す。渡せば R-sc-02 の文を、
- * 3 つの観点の文 → 台帳の行の受理条件の文（台帳の順）で組み直す（ID・why・since は変えない）。台帳が default-value の
- * 行だけなら off の定数とバイト列で同じになる。
+ * T1'' の規則の定義（旗 on なら台帳から組む。Issue #548）。台帳を省き ids も off なら今の定数をそのまま返す。台帳を渡せば
+ * R-sc-02 の文を、3 つの観点の文 → 台帳の行の受理条件の文（台帳の順）で組み直す（ID・why・since は変えない）。台帳が
+ * default-value の行だけなら off の定数とバイト列で同じになる。
+ * `ids` が真なら（旗 `v12.ids`。Issue #732）、3 つの観点の文のあとに構造の検査の読み方の文（`meanings` の表から組む）を
+ * 置き、そのあとに受理条件の文（台帳を渡せば台帳の文、省けば今の default-value の文）を続ける。
  */
-export function semanticCheckRuleDefinitionsOf(ledger?: UpstreamLedgerView): readonly RuleDefinition[] {
-  if (ledger === undefined) return SEMANTIC_CHECK_RULE_DEFINITIONS;
+export function semanticCheckRuleDefinitionsOf(
+  ledger?: UpstreamLedgerView,
+  ids = false,
+  meanings: StructuralMeaningTable = STRUCTURAL_MEANINGS,
+): readonly RuleDefinition[] {
+  if (ledger === undefined && !ids) return SEMANTIC_CHECK_RULE_DEFINITIONS;
+  const reading = ids ? structuralReadingText(meanings) : "";
+  const acceptance = ledger === undefined ? SEMANTIC_CHECK_ACCEPTANCE_TAIL : ledger.t1AcceptanceTexts.join("");
   return SEMANTIC_CHECK_RULE_DEFINITIONS.map((definition) =>
     definition.id === SEMANTIC_CHECK_LEDGER_RULE_ID
-      ? { ...definition, text: `${SEMANTIC_CHECK_LEDGER_RULE_HEAD}${ledger.t1AcceptanceTexts.join("")}` }
+      ? {
+          ...definition,
+          text: `${SEMANTIC_CHECK_LEDGER_RULE_HEAD}${reading}${acceptance}`,
+          ...(ids ? { since: `${definition.since}。旗 v12.ids の走りの構造の検査の読み方は #732 で足した` } : {}),
+        }
       : definition,
   );
 }
@@ -226,6 +250,8 @@ export interface SemanticCheckInput {
   readonly gateway: CallGateway;
   /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の定数。Issue #548） */
   readonly ledger?: UpstreamLedgerView;
+  /** 構造の検査の読み方を R-sc-02 に足す（旗 `v12.ids` が on の走りだけが真で渡す。省けば今の文。Issue #732） */
+  readonly ids?: boolean;
 }
 
 /** T1'' の結果（表の SHA-256 に結ぶ完全な結果と、点検の対象の要件 ID） */
@@ -253,7 +279,10 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
   const ofTargets = <T extends { readonly requirementId: string }>(entries: readonly T[]): readonly T[] =>
     entries.filter((entry) => targetSet.has(entry.requirementId));
   const request = buildStructuredRequest({
-    rules: input.ledger === undefined ? SEMANTIC_CHECK_RULES : ruleTexts(semanticCheckRuleDefinitionsOf(input.ledger)),
+    rules:
+      input.ledger === undefined && input.ids !== true
+        ? SEMANTIC_CHECK_RULES
+        : ruleTexts(semanticCheckRuleDefinitionsOf(input.ledger, input.ids === true)),
     documents: input.documents,
     data: [
       {

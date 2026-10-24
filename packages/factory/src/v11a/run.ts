@@ -1184,6 +1184,8 @@ async function runV11a(
           documents: input.documents,
           gateway,
           ...withLedger,
+          // 旗 `v12.ids`：R-sc-02 に構造の検査の読み方を足す（off は渡さない＝今の文のまま。表の targets の有無で推測しない。Issue #732）
+          ...(flags.ids ? { ids: true } : {}),
         });
         if (!checked.ok) return checked;
         const problems: Problem[] = [];

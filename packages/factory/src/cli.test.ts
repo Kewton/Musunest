@@ -101,6 +101,8 @@ import {
   testSpecSchemaOf,
 } from "./v11a/stages/test-spec.js";
 import * as testSpecModule from "./v11a/stages/test-spec.js";
+import { SEMANTIC_CHECK_SCHEMA_NAME, semanticCheckRuleDefinitionsOf } from "./v11a/stages/semantic-check.js";
+import { structuralReadingText } from "./v12/structural-meanings.js";
 import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
 import type { NameTable } from "./v11a/names.js";
@@ -1283,12 +1285,19 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
   const withoutIdsGenerated = (requests: readonly unknown[], ledger: LedgerView = PROPERTY_LEDGER_VIEW, generated = true): unknown[] => {
     const idsRules = ruleTexts(testSpecRuleDefinitionsOf(ledger, true));
     const offRules = ruleTexts(testSpecRuleDefinitionsOf(ledger));
+    const idsSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(ledger, true));
+    const offSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(ledger));
     const [, , testsName] = WRITE_V11A_DATA_NAMES;
     const testsBlock = new RegExp(`(<data name="${testsName}">\\n)([\\s\\S]*?)(\\n</data>)`);
     return requests.map((value) => {
       const request = value as LlmStructuredRequest;
       if (request.schemaName === TEST_SPEC_SCHEMA_NAME) {
         return { ...request, rules: (request.rules ?? []).map((text) => { const at = idsRules.indexOf(text); return at < 0 ? text : (offRules[at] ?? text); }) };
+      }
+      if (request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME) {
+        // Issue #732：旗 ids の C3 の R-sc-02 は構造の検査の読み方の文を持つ。在ることを確かめてから旗 ids off の文に戻す
+        expect(request.rules).toEqual(idsSemanticRules);
+        return { ...request, rules: offSemanticRules };
       }
       if (request.schemaName === WRITE_V11A_SCHEMA_NAME) {
         // 手 4d（#666）：旗 ids の B1 は「要る検査の骨組み」の塊と R-w11-07 の旗 ids の文を持つ。塊が在ることを確かめてから元に戻す
@@ -2431,6 +2440,43 @@ const V11A_STAGE_RUN_DIGESTS: readonly string[] = [
   "0d3d1378e80402c9f7e6625191e1e9b4821b1a75a4872b62716bbc0e125eecb2",
 ];
 
+describe("旗 v12.ids の C3 の構造の検査の読み方（Issue #732）：一気通貫と段の走りの C3 の要求が同じ文を持ち、ids off の走りには無い", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const rsc02Of = (requests: readonly LlmStructuredRequest[]): readonly string[] =>
+    requests.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME).map((request) => request.rules?.[1] ?? "");
+
+  it("(4) 一気通貫（旗 ids on）と段の走り（name-table..semantic-check・ids on）の C3 の R-sc-02 は同じで読み方の文を含む。ids off の一気通貫・段の走りには無い", async () => {
+    const whole = await runV11aCli({ dir: `${directory}/v12-ids-reading-whole`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    const stage = await runStageCli({ dir: `${directory}/v12-ids-reading-stage`, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: v12Head().slice(0, 5), pipeline: "v1.2" });
+    expect(whole.code).toBe(EXIT_OK);
+    expect(stage.code).toBe(EXIT_OK);
+    const wholeRules = rsc02Of(whole.recording.structured);
+    const stageRules = rsc02Of(stage.requests.map((text) => JSON.parse(text) as LlmStructuredRequest));
+    expect(wholeRules).toHaveLength(1);
+    expect(stageRules).toEqual(wholeRules);
+    expect(wholeRules[0]).toContain(structuralReadingText());
+    expect(wholeRules[0]).toBe(ruleTexts(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true))[1]);
+    // ids off（台帳と探索は on）の走りは読み方の文を持たない
+    const flags = { ledger: true, searchRepair: true, ids: false };
+    vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => flags);
+    const wholeOff = await runV11aCli({
+      dir: `${directory}/v12-ids-reading-whole-off`,
+      calls: [structured(v11aT1(true)), structured(v11aJudgments()), structured(v11aTestSpec()), structured({ declaration: V11A_YAML }), structured(v11aJudgments())],
+      pipeline: "v1.2",
+    });
+    const stageOff = await runStageCli({ dir: `${directory}/v12-ids-reading-stage-off`, args: ["--stage-end", "semantic-check"], calls: [structured(v11aT1(true)), structured(v11aJudgments())], pipeline: "v1.2" });
+    const offRules = [...rsc02Of(wholeOff.recording.structured), ...rsc02Of(stageOff.requests.map((text) => JSON.parse(text) as LlmStructuredRequest))];
+    expect(offRules).toHaveLength(2);
+    for (const rule of offRules) {
+      expect(rule).not.toContain(structuralReadingText());
+      expect(rule).toBe(ruleTexts(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW))[1]);
+    }
+  });
+});
+
 describe("部分の指紋の版 2（台帳の未対応の観測を上流の見方に足した。Issue #725）：記録と checkpoint の差は申告した 3 つの欄だけ", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -2455,6 +2501,16 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
     }
     const dir = `${directory}/v12-upstream-v2-${String(index)}`;
     const idsOff = scenario.flags?.ids === false;
+    // Issue #732：ids on の C3 の要求は R-sc-02 に構造の検査の読み方の文を持ち、ids off は持たない。在る・無いを確かめてから外して照らす
+    // （外した要求は #732 の前の要求とバイト列で同じ＝下の BEFORE の requests のまま）
+    let semanticRequests = 0;
+    const withoutC3Reading = (request: LlmStructuredRequest): LlmStructuredRequest => {
+      if (request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME) return request;
+      semanticRequests += 1;
+      const rules = request.rules ?? [];
+      expect(rules.some((text) => text.includes(structuralReadingText())), scenario.name).toBe(!idsOff);
+      return { ...request, rules: rules.map((text) => text.replace(structuralReadingText(), "")) };
+    };
     // ledger off の C1 の schema は計算の行に集計の欄を持たない（応答も持たせない）
     const head = scenario.flags?.ledger === false ? v12Head({ ...ledgerModule.PROPERTY_LEDGER_VIEW, aggregateKinds: [] }) : v12Head();
     let requests: unknown;
@@ -2465,7 +2521,7 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
       const run = idsOff
         ? await runStageCli({ dir, args: ["--stage-end", "semantic-check"], calls: [structured(v11aT1(true)), structured(v11aJudgments())], pipeline: "v1.2" })
         : await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: head.slice(0, 5), pipeline: "v1.2" });
-      requests = run.requests;
+      requests = run.requests.map((text) => JSON.stringify(withoutC3Reading(JSON.parse(text) as LlmStructuredRequest)));
       summary = run.lines.at(-1) ?? "";
       code = run.code;
       written = run.written;
@@ -2474,11 +2530,12 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
         ? [structured(v11aT1(true)), structured(v11aJudgments()), structured(v11aTestSpec()), structured({ declaration: V11A_YAML }), structured(v11aJudgments())]
         : [...head, structured(v11aJudgments())];
       const run = await runV11aCli({ dir, calls, pipeline: "v1.2" });
-      requests = { structured: run.recording.structured, tools: run.recording.tools };
+      requests = { structured: run.recording.structured.map(withoutC3Reading), tools: run.recording.tools };
       summary = JSON.stringify(run.summary);
       code = run.code;
       written = run.written;
     }
+    expect(semanticRequests, scenario.name).toBeGreaterThan(0);
     // manifest の storage_unit は出力の場所（試験ごとの一時の場所）なので、目印に置き換えて照らす
     const textOf = async (path: string): Promise<string> => {
       const text = await fs.readFile(`${dir}/${path}`, "utf8");
