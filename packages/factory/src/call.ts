@@ -18,6 +18,10 @@
 //      だけをやり直し、4xx・残高切れ・拒否・未完了・形の誤り・分類できない例外はやり直さない。
 //      **「拒否」はモデルが拒否したとき（`refusal`）だけ**にする（timeout を拒否にしない）。
 //
+// 段ごとの effort（`stageEfforts`。Issue #664）を受けた口は、`forStage(段)` で**その段の effort を持つ薄い見方**を返す。
+// 出力の上限・呼び出しごとの timeout の基準・要求の effort の 3 つを**同じ段の同じ effort**から引く（3 か所を別々に引くと、
+// 「検査は通るのに店頭で切れる」ずれになる）。指定の無い段は元の口そのもので、要求のバイト列は今と同じ。
+//
 // 費用の予約そのものは budget.ts（`JobBudget`）が持つ。ここは「呼ぶ前に予約し、呼んだ後で精算する」
 // 順番と、回数の集計と、締切と timeout を引き受ける。単価はコードに埋め込まない（引数で受け取る）。
 import { estimateMaxCostUsd, type JobBudget, type TokenRates } from "./budget.js";
@@ -28,6 +32,9 @@ import {
   type AgentLimits,
   type LimitName,
   type OutputStage,
+  type ReasoningEffort,
+  type StageEfforts,
+  type StageEffortStage,
 } from "./limits.js";
 import type {
   LlmClient,
@@ -275,6 +282,50 @@ export interface CallGatewayOptions {
    * `#calls` だけを上限に照らす（従来どおり）。
    */
   readonly gate?: CallGate;
+  /**
+   * 段ごとの effort の組（Issue #664）。`forStage` で段の名前で引いた口が、その段の effort で出力の上限と timeout の基準を
+   * 引き、構造化の要求に effort を載せる。省けば、どの段の口も今の口と同じ。
+   */
+  readonly stageEfforts?: StageEfforts;
+}
+
+/** 口の計（試行・再試行・道具の数。段の名前で引いた口と共有する。Issue #446・#664） */
+interface GatewayCounters {
+  calls: number;
+  toolCalls: number;
+  retries: number;
+  // 試行の終端の計（Issue #446）。**1 つの開始につき 1 度だけ**数える。
+  attemptsStarted: number;
+  attemptsResponded: number;
+  attemptsErrors: number;
+  attemptsCancelledDeadline: number;
+  attemptsCancelledTimeout: number;
+  notStartedDeadline: number;
+  notStartedBudget: number;
+  notStartedLimit: number;
+  notStartedTimeout: number;
+  // 形・中身の再試行（段が告げる。Issue #446）
+  retriesShape: number;
+  retriesContent: number;
+}
+
+function newGatewayCounters(): GatewayCounters {
+  return {
+    calls: 0,
+    toolCalls: 0,
+    retries: 0,
+    attemptsStarted: 0,
+    attemptsResponded: 0,
+    attemptsErrors: 0,
+    attemptsCancelledDeadline: 0,
+    attemptsCancelledTimeout: 0,
+    notStartedDeadline: 0,
+    notStartedBudget: 0,
+    notStartedLimit: 0,
+    notStartedTimeout: 0,
+    retriesShape: 0,
+    retriesContent: 0,
+  };
 }
 
 /**
@@ -467,22 +518,16 @@ export class CallGateway {
   readonly #callTimeoutMs: number;
   /** 生成と判定で共有する実試行の門（無ければ、この口の `#calls` だけを上限に照らす。Issue #432） */
   readonly #gate: CallGate | undefined;
-  #calls = 0;
-  #toolCalls = 0;
-  #retries = 0;
-  // 試行の終端の計（Issue #446）。**1 つの開始につき 1 度だけ**数える。
-  #attemptsStarted = 0;
-  #attemptsResponded = 0;
-  #attemptsErrors = 0;
-  #attemptsCancelledDeadline = 0;
-  #attemptsCancelledTimeout = 0;
-  #notStartedDeadline = 0;
-  #notStartedBudget = 0;
-  #notStartedLimit = 0;
-  #notStartedTimeout = 0;
-  // 形・中身の再試行（段が告げる。Issue #446）
-  #retriesShape = 0;
-  #retriesContent = 0;
+  /** 呼ぶ側が指定した timeout の基準（指定が無ければ undefined。段の名前で引いた口へ引き継ぐ。Issue #664） */
+  readonly #explicitCallTimeoutMs: number | undefined;
+  /** 段ごとの effort の組（段の名前で引いた口の出所。Issue #664） */
+  readonly #stageEfforts: StageEfforts;
+  /** 段の名前で引いた口の元の口（元の口では自分自身。Issue #664） */
+  #root: CallGateway = this;
+  /** 要求に載せる effort（段の名前で引いた口だけが持つ。無ければ載せない＝今の要求。Issue #664） */
+  #requestEffort: ReasoningEffort | undefined;
+  /** 口の計（段の名前で引いた口は、元の口と同じ計を共有する。Issue #664） */
+  #counts: GatewayCounters = newGatewayCounters();
 
   constructor(options: CallGatewayOptions) {
     const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
@@ -503,11 +548,47 @@ export class CallGateway {
     this.#maxAttempts = maxAttempts;
     this.#callTimeoutMs = callTimeoutMs;
     this.#gate = options.gate;
+    this.#explicitCallTimeoutMs = options.callTimeoutMs;
+    this.#stageEfforts = options.stageEfforts ?? {};
   }
 
   /** 推論の effort（段の出力の上限の出所。§2） */
   get effort(): string {
     return this.#effort;
+  }
+
+  /** 呼び出し 1 回ごとの timeout の基準（ミリ秒。やり直しで伸ばす前の値。§1.5・#302・Issue #664） */
+  get callTimeoutMs(): number {
+    return this.#callTimeoutMs;
+  }
+
+  /**
+   * 段の名前で引いた口（Issue #664）。その段に effort の指定があれば、**その段の effort を持つ薄い見方**を返す——
+   * 出力の上限（`maxOutputTokens`）と呼び出しごとの timeout の基準をその effort から引き、構造化の要求に effort を載せる。
+   * 予算・門・締切・時計・単価・上限・試行の回数と**口の計は元の口と共有する**（段の前後の差の取り方は変わらない）。
+   * 呼ぶ側が timeout の基準を指定した口では、その指定を引き継ぐ（呼ぶ側の指定が effort の基準に勝つのは今と同じ）。
+   * 指定の無い段は**元の口そのもの**を返す（上限・timeout・要求は今と同じ）。
+   */
+  forStage(stage: StageEffortStage): CallGateway {
+    const root = this.#root;
+    const effort = root.#stageEfforts[stage];
+    if (effort === undefined) return root;
+    const view = new CallGateway({
+      client: root.#client,
+      budget: root.#budget,
+      rates: root.#rates,
+      now: root.#now,
+      deadline: root.#deadline,
+      limits: root.#limits,
+      maxAttempts: root.#maxAttempts,
+      effort,
+      ...(root.#explicitCallTimeoutMs === undefined ? {} : { callTimeoutMs: root.#explicitCallTimeoutMs }),
+      ...(root.#gate === undefined ? {} : { gate: root.#gate }),
+    });
+    view.#root = root;
+    view.#requestEffort = effort;
+    view.#counts = root.#counts;
+    return view;
   }
 
   /**
@@ -520,39 +601,39 @@ export class CallGateway {
 
   /** LLM 呼び出しの回数（再試行と例外も数える。§1.5） */
   get calls(): number {
-    return this.#calls;
+    return this.#counts.calls;
   }
 
   /** 道具の呼び出しの回数（§1.5「⑥ の中の道具の呼び出しも数える」） */
   get toolCalls(): number {
-    return this.#toolCalls;
+    return this.#counts.toolCalls;
   }
 
   /** 再試行の回数（§2.2。**通信**の再試行＝口が自分で行う 2 回目以降） */
   get retries(): number {
-    return this.#retries;
+    return this.#counts.retries;
   }
 
   /** 試行の終端の計（いまの計。段の前後で差を取る。Issue #446） */
   get attempts(): AttemptCounts {
     return {
-      started: this.#attemptsStarted,
-      responded: this.#attemptsResponded,
-      errors: this.#attemptsErrors,
-      cancelled_deadline: this.#attemptsCancelledDeadline,
-      cancelled_timeout: this.#attemptsCancelledTimeout,
+      started: this.#counts.attemptsStarted,
+      responded: this.#counts.attemptsResponded,
+      errors: this.#counts.attemptsErrors,
+      cancelled_deadline: this.#counts.attemptsCancelledDeadline,
+      cancelled_timeout: this.#counts.attemptsCancelledTimeout,
       not_started: {
-        deadline: this.#notStartedDeadline,
-        budget: this.#notStartedBudget,
-        limit: this.#notStartedLimit,
-        timeout: this.#notStartedTimeout,
+        deadline: this.#counts.notStartedDeadline,
+        budget: this.#counts.notStartedBudget,
+        limit: this.#counts.notStartedLimit,
+        timeout: this.#counts.notStartedTimeout,
       },
     };
   }
 
   /** 再試行の数の計（種類別。いまの計。段の前後で差を取る。Issue #446） */
   get retryCounts(): RetryCounts {
-    return { communication: this.#retries, shape: this.#retriesShape, content: this.#retriesContent };
+    return { communication: this.#counts.retries, shape: this.#counts.retriesShape, content: this.#counts.retriesContent };
   }
 
   /** 共通の口の計（試行の終端と再試行。`UsageMeter.snapshot` と同じく 2 時点の差を取れる。Issue #446） */
@@ -571,14 +652,16 @@ export class CallGateway {
    * 1 増える（実開始数は増えない）。
    */
   noteRetry(kind: RetryKind): void {
-    if (kind === "shape") this.#retriesShape += 1;
-    else this.#retriesContent += 1;
+    if (kind === "shape") this.#counts.retriesShape += 1;
+    else this.#counts.retriesContent += 1;
   }
 
   /** 構造化出力（①'・②'・⑤a・⑥'）を共通の口を通して呼ぶ */
   async callStructured<T>(request: LlmStructuredRequest): Promise<CallResult<LlmStructuredResponse<T>>> {
-    return this.#run(structuredInputParts(request), request.maxOutputTokens, async (signal) => {
-      const response = await this.#client.callStructured<T>({ ...request, signal });
+    // 段の名前で引いた口だけ、要求に段の effort を載せる（指定の無い口の要求は今と同じ。Issue #664）
+    const sent: LlmStructuredRequest = this.#requestEffort === undefined ? request : { ...request, effort: this.#requestEffort };
+    return this.#run(structuredInputParts(sent), sent.maxOutputTokens, async (signal) => {
+      const response = await this.#client.callStructured<T>({ ...sent, signal });
       return { value: response, usage: response.usage };
     });
   }
@@ -587,7 +670,7 @@ export class CallGateway {
   async callWithTools(request: LlmToolRequest): Promise<CallResult<LlmToolResponse>> {
     return this.#run(toolInputParts(request), request.maxOutputTokens, async (signal) => {
       const response = await this.#client.callWithTools({ ...request, signal });
-      if (response.kind === "toolCalls") this.#toolCalls += response.toolCalls.length;
+      if (response.kind === "toolCalls") this.#counts.toolCalls += response.toolCalls.length;
       return { value: response, usage: response.usage };
     });
   }
@@ -606,7 +689,7 @@ export class CallGateway {
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
       const remaining = this.#deadline - this.#now();
       if (remaining <= 0) {
-        this.#notStartedDeadline += 1;
+        this.#counts.notStartedDeadline += 1;
         return { kind: "deadlineExceeded" };
       }
       // 総呼び出し数の門。**共有の門があれば、生成の呼び出し・その再試行・判定の呼び出し・切り替え・
@@ -614,43 +697,43 @@ export class CallGateway {
       if (this.#gate !== undefined) {
         const begun = this.#gate.begin();
         if (begun === "deadline") {
-          this.#notStartedDeadline += 1;
+          this.#counts.notStartedDeadline += 1;
           return { kind: "deadlineExceeded" };
         }
         if (begun === "limit") {
-          this.#notStartedLimit += 1;
+          this.#counts.notStartedLimit += 1;
           return { kind: "limitExceeded", limit: "callCount", max: this.#gate.limit, actual: this.#gate.attempts() };
         }
-      } else if (this.#calls >= this.#limits.callCount) {
-        this.#notStartedLimit += 1;
-        return { kind: "limitExceeded", limit: "callCount", max: this.#limits.callCount, actual: this.#calls };
+      } else if (this.#counts.calls >= this.#limits.callCount) {
+        this.#counts.notStartedLimit += 1;
+        return { kind: "limitExceeded", limit: "callCount", max: this.#limits.callCount, actual: this.#counts.calls };
       }
       // 呼び出しごとの timeout は、effort の基準をやり直しごとに倍へ伸ばし、締切の残りで頭を打つ
       // （#302）。**同じ timeout ではやり直さない**——伸ばせないなら、次の試行はせずに止める。
       const timeoutMs = Math.min(this.#callTimeoutMs * 2 ** (attempt - 1), remaining);
       if (attempt > 1 && previousTimeoutMs !== undefined && timeoutMs <= previousTimeoutMs) {
-        this.#notStartedTimeout += 1;
+        this.#counts.notStartedTimeout += 1;
         break;
       }
       const reserved = this.#budget.reserve(maxCostUsd);
       if (!reserved.reserved) {
-        this.#notStartedBudget += 1;
+        this.#counts.notStartedBudget += 1;
         return { kind: "budgetExceeded", maxCostUsd, remainingUsd: reserved.remainingUsd };
       }
-      this.#calls += 1;
-      this.#attemptsStarted += 1;
-      if (attempt > 1) this.#retries += 1;
+      this.#counts.calls += 1;
+      this.#counts.attemptsStarted += 1;
+      if (attempt > 1) this.#counts.retries += 1;
       attempts = attempt;
       try {
         const outcome = await this.#attempt(invoke, timeoutMs, remaining);
         if (outcome.kind === "deadline") {
-          this.#attemptsCancelledDeadline += 1;
+          this.#counts.attemptsCancelledDeadline += 1;
           return { kind: "deadlineExceeded" };
         }
         if (outcome.kind === "timeout") {
           // 呼び出しごとの timeout。usage は分からないので予約は残し、**拒否ではなく** `timeout` として
           // 扱い、やり直してよい誤りに入れる（伸ばせなければ、次の周で止まる。§2.2・#302）。
-          this.#attemptsCancelledTimeout += 1;
+          this.#counts.attemptsCancelledTimeout += 1;
           lastKind = "timeout";
           lastStatus = undefined;
           previousTimeoutMs = timeoutMs;
@@ -659,7 +742,7 @@ export class CallGateway {
         if (outcome.result.usage !== undefined) {
           this.#budget.settle(reserved.reservation, outcome.result.usage, this.#rates);
         }
-        this.#attemptsResponded += 1;
+        this.#counts.attemptsResponded += 1;
         return { kind: "ok", value: outcome.result.value };
       } catch (error) {
         // 未完了の応答は拒否と分け、**同じ要求のままやり直さない**（同じ上限ではまた切れる。§2.2）。
@@ -669,13 +752,13 @@ export class CallGateway {
             this.#budget.settle(reserved.reservation, error.usage, this.#rates);
           }
           // 未完了は usage の有無によらず**応答**として数える（誤りではない。Issue #446）
-          this.#attemptsResponded += 1;
+          this.#counts.attemptsResponded += 1;
           return { kind: "incomplete", reason: error.reason, usage: error.usage };
         }
         // 要求そのものが不正な誤り（HTTP 400 など）は、拒否と分け、**同じ要求のままやり直さない**
         // ——やり直しても通らない（§2.2）。誤りの種類（code）だけを返し、本文の全文は残さない。
         if (isInvalidRequestError(error)) {
-          this.#attemptsErrors += 1;
+          this.#counts.attemptsErrors += 1;
           return { kind: "invalidRequest", code: error.code };
         }
         // adapter の誤りを種類ごとに分類する（#302）。**「拒否」は拒否のときだけ**にする。
@@ -685,7 +768,7 @@ export class CallGateway {
         lastStatus = classified.status;
         // この試行の終端は**誤り**である——やり直してよい誤りでも、この試行は誤りで終わっている
         // （Issue #446）。やり直すのは次の試行からで、そちらも別に数える。
-        this.#attemptsErrors += 1;
+        this.#counts.attemptsErrors += 1;
         if (!isRetryableCallError(classified)) {
           return {
             kind: "failed",

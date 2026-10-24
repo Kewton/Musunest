@@ -39,6 +39,11 @@
 // 段の入力の照合は、前の走りの記録として段の走りの記録が無ければ、checkpoint を 1 つ以上宣言した Build だけの記録を読む
 // （Issue #636）。`v1`・`v1.1a`・ids off の v1.2 の走りは何も足さない。
 //
+// `--stage-effort <段>=<値>`（繰り返し可）は `--pipeline v1.2` と一緒にだけ受ける（一気通貫と段の走りの両方。Issue #664）。段は
+// 配線する段の集合（`STAGE_EFFORT_STAGES`）、値は推論の effort の集合（`REASONING_EFFORTS`）で、知らない段・値・同じ段の重複・
+// v1.2 以外との組は使い方の誤り（終了コード 2・API を呼ばない）。段の口の出力の上限・timeout の基準・要求の effort をその値から
+// 引き、条件の記録（Build だけの記録と段の走りの記録の conditions）に `stage_efforts` を足す。付けなければ今と同じ。
+//
 // `node:fs` は**動的**に読む（Worker が根（index.ts）から import しても、この経路は呼ばれない限り動かない。
 // appspec-schema の contract.ts と同じやり方）。
 import { planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
@@ -71,7 +76,16 @@ import {
 import { createFallbackJudge, type Judge } from "./judge.js";
 import { createJevJudge } from "./judge-jev.js";
 import { createLlmJudge } from "./judge-llm.js";
-import type { AgentLimits } from "./limits.js";
+import {
+  isReasoningEffort,
+  isStageEffortStage,
+  REASONING_EFFORTS,
+  STAGE_EFFORT_STAGES,
+  type AgentLimits,
+  type ReasoningEffort,
+  type StageEfforts,
+  type StageEffortStage,
+} from "./limits.js";
 import type { LlmClient } from "./llm.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL } from "./openai.js";
 import type { EnvelopeId } from "./schema-envelope.js";
@@ -188,6 +202,9 @@ export const USAGE =
 export const STAGE_USAGE =
   "段の走り: factory:run -- <依頼文のファイル> --out <ディレクトリ> --pipeline v1.1a|v1.2 --plan-file <ファイル> [--stage-start name-table|test-spec|write（v1.2 は vocabulary も。name-table の別名）] [--stage-end semantic-check|test-spec|judge] [--stage-input <前の段の走りの checkpoint>]";
 
+/** 段ごとの effort の口の使い方（`--stage-effort` の誤りのときだけ、`USAGE` のあとに出す。Issue #664） */
+export const STAGE_EFFORT_USAGE = `段ごとの effort: factory:run -- ... --pipeline v1.2 --plan-file <ファイル> [--stage-effort <段>=<値>]...（段は ${STAGE_EFFORT_STAGES.join("・")}、値は ${REASONING_EFFORTS.join("・")}。同じ段は 1 回まで）`;
+
 /** 手元の入口が受け取る引数 */
 export interface CliArguments {
   readonly requestFile: string;
@@ -235,6 +252,45 @@ export interface CliArguments {
   readonly stageRange?: StageRange;
   /** 再開の入力（前の段の走りが書いた、開始の段の直前の境界の checkpoint のファイル） */
   readonly stageInput?: string;
+  /**
+   * 段ごとの effort（`--stage-effort <段>=<値>` を付けたときだけ持つ。付けた順。Issue #664）。`--pipeline v1.2` と一緒にだけ受ける
+   * （一気通貫と段の走りの両方）。省けば今と同じ
+   */
+  readonly stageEfforts?: StageEfforts;
+}
+
+/** `--stage-effort` の使い方の誤りの説明（符号のあとに添える。Issue #664） */
+const STAGE_EFFORT_USAGE_MESSAGES = {
+  "stage-effort:pipeline": "--stage-effort は --pipeline v1.2 と一緒に指定してください",
+  "stage-effort:missing": "--stage-effort には <段>=<値> を指定してください",
+  "stage-effort:format": "--stage-effort は <段>=<値> の形で指定してください",
+  "stage-effort:stage": `段は ${STAGE_EFFORT_STAGES.join("・")} から選んでください`,
+  "stage-effort:value": `値は ${REASONING_EFFORTS.join("・")} から選んでください`,
+  "stage-effort:duplicate": "同じ段の --stage-effort は 1 回だけ指定してください",
+} as const;
+
+/** `--stage-effort` の誤りの符号 */
+export type StageEffortErrorCode = keyof typeof STAGE_EFFORT_USAGE_MESSAGES;
+
+/**
+ * `--stage-effort` の値の並び（付けた順）を、段 → 推論の effort の組に読む（Issue #664）。知らない段・配線していない段・知らない値・
+ * 同じ段の重複・`<段>=<値>` でない形は誤り（**既定へ黙って倒さない**）。計測の道具も、この関数で子を起こす前に確かめる
+ */
+export function parseStageEfforts(
+  values: readonly string[],
+): { readonly stageEfforts: StageEfforts } | { readonly code: StageEffortErrorCode } {
+  const stageEfforts: Partial<Record<StageEffortStage, ReasoningEffort>> = {};
+  for (const value of values) {
+    const at = value.indexOf("=");
+    if (at <= 0) return { code: "stage-effort:format" };
+    const stage = value.slice(0, at);
+    const effort = value.slice(at + 1);
+    if (!isStageEffortStage(stage)) return { code: "stage-effort:stage" };
+    if (!isReasoningEffort(effort)) return { code: "stage-effort:value" };
+    if (stage in stageEfforts) return { code: "stage-effort:duplicate" };
+    stageEfforts[stage] = effort;
+  }
+  return { stageEfforts };
 }
 
 function isPipeline(value: string): value is Pipeline {
@@ -295,6 +351,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   let stageEnd: string | undefined;
   let stageInput: string | undefined;
   let stageFlag = false;
+  const stageEffortValues: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === undefined) continue;
@@ -332,6 +389,13 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
       if (arg === "--stage-start") stageStart = raw;
       else if (arg === "--stage-end") stageEnd = raw;
       else stageInput = raw;
+      continue;
+    }
+    if (arg === "--stage-effort") {
+      const raw = args[index + 1];
+      index += 1;
+      if (raw === undefined) return { error: `stage-effort:missing（${STAGE_EFFORT_USAGE_MESSAGES["stage-effort:missing"]}）` };
+      stageEffortValues.push(raw);
       continue;
     }
     if (arg === "--answers") {
@@ -453,6 +517,13 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     if ("code" in resolved) return { error: `${resolved.code}（${STAGE_RANGE_USAGE_MESSAGES[resolved.code]}）` };
     stageRange = resolved;
   }
+  let stageEfforts: StageEfforts | undefined;
+  if (stageEffortValues.length > 0) {
+    if (pipeline !== "v1.2") return { error: `stage-effort:pipeline（${STAGE_EFFORT_USAGE_MESSAGES["stage-effort:pipeline"]}）` };
+    const read = parseStageEfforts(stageEffortValues);
+    if ("code" in read) return { error: `${read.code}（${STAGE_EFFORT_USAGE_MESSAGES[read.code]}）` };
+    stageEfforts = read.stageEfforts;
+  }
   return {
     requestFile,
     outDir,
@@ -469,6 +540,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     ...(pipeline === undefined ? {} : { pipeline }),
     ...(stageRange === undefined ? {} : { stageRange }),
     ...(stageInput === undefined ? {} : { stageInput }),
+    ...(stageEfforts === undefined ? {} : { stageEfforts }),
   };
 }
 
@@ -578,6 +650,8 @@ interface BuildJob {
   readonly timeoutMs?: number;
   /** 経路（省けば v1。v1.1α は確定した仕様と組んでだけ流れる。Issue #511） */
   readonly pipeline?: Pipeline;
+  /** 段ごとの effort（`--pipeline v1.2` で `--stage-effort` を付けたときだけ。Issue #664） */
+  readonly stageEfforts?: StageEfforts;
 }
 
 /**
@@ -611,6 +685,7 @@ async function runBuild(
           ...input,
           plan: v11aPlan,
           ...(flags === undefined ? {} : { flags, recordV12Flags: true, ...(flags.ids ? { collectBoundaries: true } : {}) }),
+          ...(job.stageEfforts === undefined ? {} : { stageEfforts: job.stageEfforts }),
         });
   const written = await writeBuildRun(deps, job, run, log);
   return run.boundaries === undefined || flags === undefined ? written : { ...written, boundaries: run.boundaries, flags };
@@ -947,6 +1022,7 @@ async function runBuildFromPlanFile(
     now: ctx.now,
     ...(parsed.timeoutMs === undefined ? {} : { timeoutMs: parsed.timeoutMs }),
     ...(parsed.pipeline === undefined ? {} : { pipeline: parsed.pipeline }),
+    ...(parsed.stageEfforts === undefined ? {} : { stageEfforts: parsed.stageEfforts }),
   };
   const build = await runBuild(deps, { ...job, plan: validation.plan }, log);
   await deps.makeDirectory(job.outDir);
@@ -1154,6 +1230,7 @@ async function runStageFromPlanFile(
     range,
     ...(resume === undefined ? {} : { resume }),
     ...(flags === undefined ? {} : { flags }),
+    ...(parsed.stageEfforts === undefined ? {} : { stageEfforts: parsed.stageEfforts }),
   });
 
   await deps.makeDirectory(job.outDir);
@@ -1191,6 +1268,8 @@ async function runStageFromPlanFile(
     ...(flags === undefined
       ? {}
       : { pipeline: "v1.2", v12_flags: toPublicV12Flags(flags), ...(flags.ids ? { v12_call_limits: v12CallLimitsRecord() } : {}) }),
+    // `--stage-effort` を付けた v1.2 の段の走りだけ：段 → 推論の effort（付けた順。付けなければ欄を出さない。Issue #664）
+    ...(parsed.stageEfforts === undefined ? {} : { stage_efforts: parsed.stageEfforts }),
   };
   const record = buildStageRunRecord({
     range,
@@ -1251,7 +1330,8 @@ export async function runCli(deps: CliDeps): Promise<number> {
   if ("error" in parsed) {
     log(`使い方の誤り: ${parsed.error}`);
     log(USAGE);
-    if (parsed.error.startsWith("stage-")) log(STAGE_USAGE);
+    if (parsed.error.startsWith("stage-effort:")) log(STAGE_EFFORT_USAGE);
+    else if (parsed.error.startsWith("stage-")) log(STAGE_USAGE);
     return EXIT_USAGE;
   }
   const now = deps.now ?? ((): number => Date.now());
@@ -1280,7 +1360,10 @@ export async function runCli(deps: CliDeps): Promise<number> {
           v12_flags: v12Flags,
           ...(v12Flags.ids ? { v12_call_limits: v12CallLimitsRecord() } : {}),
         };
-  const recordConditions: PlanCliConditions = v12Conditions === undefined ? conditions : { ...conditions, ...v12Conditions };
+  // `--stage-effort` を付けた v1.2 の走りだけ、段 → 推論の effort を末尾に足す（付けなければ欄を出さない。Issue #664）
+  const stageEffortConditions = parsed.stageEfforts === undefined ? {} : { stage_efforts: parsed.stageEfforts };
+  const recordConditions: PlanCliConditions =
+    v12Conditions === undefined ? conditions : { ...conditions, ...v12Conditions, ...stageEffortConditions };
 
   // `--plan-file`：包みを検査してから client を作る（検査で断れば API を呼ばない。Issue #495）
   if (parsed.planFile !== undefined) {

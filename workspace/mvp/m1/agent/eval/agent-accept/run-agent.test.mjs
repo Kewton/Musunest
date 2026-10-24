@@ -2768,3 +2768,180 @@ test("#713 (d) 実の工場の dist の値の受け渡し：package の入口を
     for (const v of readLog(vlogB)) assert.deepEqual(v, { ledger: realLedger, flags });
   });
 });
+
+// ── #664：段ごとの effort の口（--stage-effort <段>=<値>。繰り返し可）。段と値の集合は工場の dist の package の入口の parseStageEfforts が持つ。
+// 偽物の dist は合成の段・値（s-one・s-two・s-three と lo・hi）で、道具がその名前を知らなくても通ることを確かめる
+const fakeParse664 = String.raw`export function parseStageEfforts(values) {
+  const S = ["s-one", "s-two", "s-three"], V = ["lo", "hi"], out = {};
+  for (const v of values) {
+    const i = v.indexOf("=");
+    if (i <= 0) return { code: "stage-effort:format" };
+    const s = v.slice(0, i), e = v.slice(i + 1);
+    if (!S.includes(s)) return { code: "stage-effort:stage" };
+    if (!V.includes(e)) return { code: "stage-effort:value" };
+    if (s in out) return { code: "stage-effort:duplicate" };
+    out[s] = e;
+  }
+  return { stageEfforts: out };
+}
+`;
+const EFFORT_ARGS664 = ["--stage-effort", "s-two=lo", "--stage-effort", "s-one=hi"];
+/** 子の引数から段ごとの effort の旗の組を除く（群・計測の違いの照合用） */
+const withoutEffortArgs = (argv) => argv.filter((a, i, all) => !(a === "--stage-effort" || all[i - 1] === "--stage-effort"));
+
+test("#664 (7) v1.2 の一気通貫：--stage-effort を 2 つ付けると子の引数の末尾に同じ順で渡り、条件の params.stage_efforts が段 → 値（付けた順）で署名に入る。付けなければ欄が無く、欄と旗を除けば条件と子の引数は同じ", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "a"), { index: v12Index(FLAGS557) + fakeParse664 }), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const run = (name, extra) => {
+      const out = join(base, name), r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2", ...extra], { FAKE_SPAWN_LOG: log });
+      assert.equal(r.status, 0, r.stderr);
+      return { out, cond: readJson(join(out, "conditions.json")), argv: readJson(join(out, "P1-r1", "received-argv.json")) };
+    };
+    const plain = run("out-plain", []), tuned = run("out-tuned", EFFORT_ARGS664);
+    assert.deepEqual(tuned.argv.slice(-6), ["--pipeline", "v1.2", ...EFFORT_ARGS664]);
+    assert.deepEqual(withoutEffortArgs(tuned.argv).map((a) => a.replace(tuned.out, plain.out)), plain.argv, "ほかの引数は付けない走りと同じ");
+    assert.equal(tuned.cond.schema, V7);
+    assert.deepEqual(tuned.cond.params.stage_efforts, { "s-two": "lo", "s-one": "hi" });
+    assert.deepEqual(Object.keys(tuned.cond.params.stage_efforts), ["s-two", "s-one"], "付けた順");
+    assert.ok(!("stage_efforts" in plain.cond.params), "付けなければ欄が無い");
+    assert.equal(tuned.cond.signature, conditionsSignature(tuned.cond));
+    const { stage_efforts: _e, ...tunedParams } = tuned.cond.params;
+    assert.deepEqual(tunedParams, plain.cond.params, "欄を除けば params は同じ");
+    assert.deepEqual(Object.keys(plain.cond.params), Object.keys(tunedParams));
+    const unsigned = { ...tuned.cond, params: tunedParams, measurement_id: plain.cond.measurement_id, child_args: tuned.cond.child_args.map((x) => ({ ...x, argv: withoutEffortArgs(x.argv).map((a) => a.replace(tuned.out, plain.out)) })) };
+    assert.equal(conditionsSignature(unsigned), plain.cond.signature, "欄と旗を除けば署名は付けない走りと同じ（付けない条件のバイト列は今のまま）");
+    assert.ok(!readFileSync(runAgentFile, "utf8").includes("s-one"), "道具に段の名前を書かない");
+  });
+});
+
+test("#664 (7) 組めない指定と断り：v1・v1.1α・経路の省略との組と値の無い旗は flags:conflict、工場の関数が断った段・値・重複・形は工場の符号、関数の無い dist は stage-effort:unavailable。どれも exit 3・子 0 本・何も書かない", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "b"), { index: v12Index(FLAGS557) + fakeParse664 }), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const bare = makeV12Repo(join(base, "b-bare")), fzBare = frozen557(base, bare, "fz-bare");
+    const cases = [
+      [repo, fz, ["--pipeline", "v1.1a", "--stage-effort", "s-one=lo"], "flags:conflict", "v1.1a"],
+      [repo, fz, ["--pipeline", "v1", "--stage-effort", "s-one=lo"], "flags:conflict", "v1"],
+      [repo, fz, ["--stage-effort", "s-one=lo"], "flags:conflict", "経路の省略"],
+      [repo, fz, ["--pipeline", "v1.2", "--stage-effort"], "flags:conflict", "値の無い旗"],
+      [repo, fz, ["--pipeline", "v1.2", "--stage-effort", "--runs"], "flags:conflict", "値が旗"],
+      [repo, fz, ["--pipeline", "v1.2", "--stage-effort", "s-nine=lo"], "stage-effort:stage", "知らない段"],
+      [repo, fz, ["--pipeline", "v1.2", "--stage-effort", "s-one=mid"], "stage-effort:value", "知らない値"],
+      [repo, fz, ["--pipeline", "v1.2", "--stage-effort", "s-one=lo", "--stage-effort", "s-one=hi"], "stage-effort:duplicate", "重複"],
+      [repo, fz, ["--pipeline", "v1.2", "--stage-effort", "s-one"], "stage-effort:format", "形"],
+      [bare, fzBare, ["--pipeline", "v1.2", "--stage-effort", "s-one=lo"], "stage-effort:unavailable", "関数の無い dist"],
+    ];
+    for (const [r0, f, extra, code, label] of cases) {
+      const out = join(base, `out-${label}`), n0 = spawnCount(log);
+      const r = runAgent(r0, out, ["--only", "P1", "--runs", "1", "--build-from", f, ...extra], { FAKE_SPAWN_LOG: log });
+      assertRefused(r, code, log, n0, label);
+      assertNothingWritten(out, label);
+    }
+    // 段の旗との組でも v1.1α は組めない
+    const stage = makeStageRepo638(base, "stage-b");
+    writeFileSync(join(stage, "packages/factory/dist/index.js"), v12Index638() + fakeParse664);
+    const fzs = frozen545(base, stage), n1 = spawnCount(log), o = join(base, "out-stage-v11a");
+    assertRefused(runAgent(stage, o, stageArgs638(fzs, ["--stage-start", "name-table", "--stage-end", "test-spec", "--stage-effort", "s-one=lo"], "v1.1a"), { FAKE_SPAWN_LOG: log }), "flags:conflict", log, n1, "v1.1α の段の走り");
+    assertNothingWritten(o, "v1.1α の段の走り");
+  });
+});
+
+test("#664 (7'') 再開：同じ stage_efforts の --resume は残りだけを起こし、値・順・有無を変えた --resume は resume:signature で断る（子 0・出力先は変わらない）", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "c"), { index: v12Index(FLAGS557) + fakeParse664 }), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const out = join(base, "out-r"), args = ["--only", "P1", "--runs", "3", "--concurrency", "1", "--build-from", fz, "--pipeline", "v1.2"];
+    assert.equal(runAgent(repo, out, [...args, ...EFFORT_ARGS664], { FAKE_SPAWN_LOG: log }).status, 0);
+    rmSync(join(out, "P1-r3"), { recursive: true, force: true });
+    const before = treeOf(out), n0 = spawnCount(log);
+    for (const [extra, label] of [[["--stage-effort", "s-two=hi", "--stage-effort", "s-one=hi"], "値"], [["--stage-effort", "s-one=hi", "--stage-effort", "s-two=lo"], "順"], [[], "有無"]]) {
+      assertRefused(runAgent(repo, out, [...args, ...extra, "--resume"], { FAKE_SPAWN_LOG: log }), "resume:signature", log, n0, label);
+      assert.deepEqual(treeOf(out), before, label);
+    }
+    const rr = runAgent(repo, out, [...args, ...EFFORT_ARGS664, "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(rr.status, 0, rr.stderr);
+    assert.equal(spawnCount(log), n0 + 1);
+    assert.deepEqual(readJson(join(out, "P1-r3", "received-argv.json")).slice(-4), EFFORT_ARGS664);
+  });
+});
+
+test("#664 (7') v1.2 の段の旗との組：子の引数の末尾は段の旗のあとに --stage-effort（付けた順）、条件 v8 の params.stage_efforts に載る。--compare の段だけの対の比較では after（候補）の子にだけ渡し、両群の条件の照合は通り、比較の記録の群に両群の値（before は null）を並べる", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo638(base, "cand"), baseline = makeStageRepo638(base, "base"), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    writeFileSync(join(repo, "packages/factory/dist/index.js"), v12Index638() + fakeParse664);
+    const out1 = join(base, "o1"), r1 = runAgent(repo, out1, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "name-table", "--stage-end", "test-spec", ...EFFORT_ARGS664], { FAKE_SPAWN_LOG: log });
+    assert.equal(r1.status, 0, r1.stderr);
+    const c1 = readJson(join(out1, "conditions.json"));
+    assert.equal(c1.schema, V8);
+    assert.deepEqual(c1.params.stage_efforts, { "s-two": "lo", "s-one": "hi" });
+    assert.equal(c1.signature, conditionsSignature(c1));
+    assert.deepEqual(readJson(join(out1, "P1-r1", "received-argv.json")).slice(-10), ["--pipeline", "v1.2", "--stage-start", "name-table", "--stage-end", "test-spec", ...EFFORT_ARGS664]);
+    // 段だけの対の比較（開始 B1）：対のファイルは付けても付けなくても同じバイト列
+    const up = runUpstream638(repo, join(base, "up"), fz, log);
+    const pairsPath = join(base, "pairs.json"), pairsTuned = join(base, "pairs-tuned.json");
+    const mpArgs = (p, extra) => ["--make-pairs", p, "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "write", "--stage-from", up, "--runs", "3", ...extra];
+    assert.equal(runAgent(repo, join(base, "unused"), mpArgs(pairsPath, [])).status, 0);
+    assert.equal(runAgent(repo, join(base, "unused2"), mpArgs(pairsTuned, EFFORT_ARGS664)).status, 0);
+    assert.equal(readFileSync(pairsTuned, "utf8"), readFileSync(pairsPath, "utf8"));
+    const cmpArgs = (extra) => ["--compare", "--baseline", baseline, "--pairs", pairsPath, "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "write", "--stage-from", up, "--budget-usd", "10", "--concurrency", "4", ...extra];
+    const out = join(base, "cmp"), n0 = spawnCount(log);
+    const r = runAgent(repo, out, cmpArgs(EFFORT_ARGS664), { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(spawnCount(log) - n0, 30);
+    const pv = readJson(pairsPath), id = `${pv.pairs[0].pid}-r${pv.pairs[0].r}`;
+    const before = readJson(join(out, "before", id, "received-argv.json")), after = readJson(join(out, "after", id, "received-argv.json"));
+    assert.deepEqual(after.slice(-4), EFFORT_ARGS664);
+    assert.ok(!before.includes("--stage-effort"), "比較元の群の子には付けない");
+    assert.deepEqual(withoutEffortArgs(after).slice(1).map((a) => a.replace(join(out, "after"), "<g>")), before.slice(1).map((a) => a.replace(join(out, "before"), "<g>")), "群の子の引数の違いは入口（群の checkout）と段ごとの effort だけ");
+    const cb = readJson(join(out, "before", "conditions.json")), ca = readJson(join(out, "after", "conditions.json"));
+    assert.ok(!("stage_efforts" in cb.params));
+    assert.deepEqual(ca.params.stage_efforts, { "s-two": "lo", "s-one": "hi" });
+    for (const c of [cb, ca]) assert.equal(c.signature, conditionsSignature(c));
+    const rec = readJson(join(out, "comparison.json"));
+    assert.deepEqual([rec.groups.before.stage_efforts, rec.groups.after.stage_efforts], [null, { "s-two": "lo", "s-one": "hi" }]);
+    // 付けない比較の記録の群には欄が無い（今のまま）
+    const outPlain = join(base, "cmp-plain");
+    assert.equal(runAgent(repo, outPlain, cmpArgs([]), { FAKE_SPAWN_LOG: log }).status, 0);
+    const recPlain = readJson(join(outPlain, "comparison.json"));
+    for (const g of ["before", "after"]) assert.ok(!("stage_efforts" in recPlain.groups[g]), g);
+  });
+});
+
+test("#664 (7'') 群の組 v1.1a,v1.2 の比較：--stage-effort は候補の群（v1.2）の子にだけ渡り、比較元（v1.1a）の子と条件には無い。比較の記録の群に両群の値（v1.1a は null）。候補が v1.2 でない組（省略の v1,v1.1a）は flags:conflict", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "e"), { index: v12Index(FLAGS557) + fakeParse664 }), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const pairs = join(base, "pairs-e.json");
+    assert.equal(runAgent(repo, join(base, "unused"), ["--make-pairs", pairs, "--build-from", fz, "--runs", "1", "--compare-pipelines", "v1.1a,v1.2", ...EFFORT_ARGS664]).status, 0);
+    const out = join(base, "out-e");
+    const r = runAgent(repo, out, ["--compare", "--baseline", repo, "--pairs", pairs, "--build-from", fz, "--budget-usd", "100", "--concurrency", "4", "--compare-pipelines", "v1.1a,v1.2", ...EFFORT_ARGS664], { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    const a1 = readJson(join(out, "v1.1a", "P1-r1", "received-argv.json")), a2 = readJson(join(out, "v1.2", "P1-r1", "received-argv.json"));
+    assert.deepEqual(a2.slice(-6), ["--pipeline", "v1.2", ...EFFORT_ARGS664]);
+    assert.deepEqual(a1.slice(-2), ["--pipeline", "v1.1a"]);
+    const c1 = readJson(join(out, "v1.1a", "conditions.json")), c2 = readJson(join(out, "v1.2", "conditions.json"));
+    assert.ok(!("stage_efforts" in c1.params));
+    assert.deepEqual(c2.params.stage_efforts, { "s-two": "lo", "s-one": "hi" });
+    const rec = readJson(join(out, "comparison.json"));
+    assert.deepEqual([rec.groups["v1.1a"].stage_efforts, rec.groups["v1.2"].stage_efforts], [null, { "s-two": "lo", "s-one": "hi" }]);
+    const n0 = spawnCount(log), o = join(base, "out-v1");
+    const p1 = join(base, "pairs-v1.json");
+    assert.equal(runAgent(repo, join(base, "unused-v1"), ["--make-pairs", p1, "--build-from", fz, "--runs", "1"]).status, 0);
+    assertRefused(runAgent(repo, o, ["--compare", "--baseline", repo, "--pairs", p1, "--build-from", fz, "--budget-usd", "100", ...EFFORT_ARGS664], { FAKE_SPAWN_LOG: log }), "flags:conflict", log, n0, "候補が v1.1a");
+    assertNothingWritten(o, "候補が v1.1a");
+  });
+});
+
+test("#664 実の工場の dist の段と値：package の入口を実の dist（pnpm build の出力）にすると、実の段の名前と値の --stage-effort を受けて条件に写し、配線していない段は工場の符号で断る（子 0 本）", async () => {
+  const realIndex = resolve(here, "../../../../../../packages/factory/dist/index.js");
+  assert.ok(existsSync(realIndex), "実の工場の dist が無い（先に pnpm build）");
+  const real = await import(pathToFileURL(realIndex).href);
+  assert.equal(typeof real.parseStageEfforts, "function");
+  const [stage] = real.STAGE_EFFORT_STAGES, [value] = real.REASONING_EFFORTS;
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "real"), { index: `export * from ${JSON.stringify(pathToFileURL(realIndex).href)};\n` }), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const out = join(base, "out"), r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--stage-effort", `${stage}=${value}`], { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readJson(join(out, "conditions.json")).params.stage_efforts, { [stage]: value });
+    const n0 = spawnCount(log), o = join(base, "out-bad");
+    assertRefused(runAgent(repo, o, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--stage-effort", `repair=${value}`], { FAKE_SPAWN_LOG: log }), "stage-effort:stage", log, n0, "配線していない段");
+    assertNothingWritten(o, "配線していない段");
+  });
+});

@@ -78,6 +78,9 @@
 //   条件の版 v8（v6 の段の欄に params.pipeline v1.2・v12_flags・v12_call_limits を足した）。段の走りの記録（bundle/stage-run.json）の conditions.v12_flags を
 //   条件の組と照らし、1 本でも合わなければ照合は未照合（v12-flags）。next_stage … 1 段先の副指標（範囲が test-spec を含む走りの T2' の通過と、T2 が落とした
 //   試験の数 test_spec.dropped_tests の合計と中央値。範囲が test-spec を含まなければ null と理由）。--compare は v1.2 の段だけの対の比較も受け、群ごとに同じ欄を出す
+// #664 で足したもの（条件の読み取りだけ。採点の規則・既存の欄・値・並びは変えない）：
+//   条件の params.stage_efforts（段ごとの effort。v7・v8 の計測で --stage-effort を付けたときだけ）は署名に入る（conditionsSignature は params を丸ごと入れる）。
+//   --compare は両群に同じ値を求めず（群の params の照合から外す）、どちらかの群が持つときだけ群ごとの欄 stage_efforts に両群の値を並べる（持たない群は null）
 // run-agent.mjs は、ここから指紋の関数と定義ファイルの読み込みを import して条件のファイルに書く（道具は 2 本で 1 組。入口として起動したときだけ採点する）
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -2102,7 +2105,10 @@ export function groupConditionsProblem(cond, group) {
   return cond.schema === CONDITIONS_V5 && cond.params.pipeline === group && !("v12_flags" in cond.params) ? null : "compare:conditions-version";
 }
 /** 群の params の共通の比較の形：経路・v1.1α の上限の欄・旗の組（意図した差）を除く */
-export const comparableParams = (p) => { if (!isObj(p)) return null; const { pipeline: _p, stage_output_limits_v11a: _l, v12_flags: _f, ...rest } = p; return rest; };
+// #664：段ごとの effort（params.stage_efforts）も群の違いとして外す（両群に同じ値を求めない。値は比較の記録と採点の群の欄に並べる）
+export const comparableParams = (p) => { if (!isObj(p)) return null; const { pipeline: _p, stage_output_limits_v11a: _l, v12_flags: _f, stage_efforts: _e, ...rest } = p; return rest; };
+/** 群の段ごとの effort（#664。条件の params.stage_efforts。どちらかの群が持つときだけ、両群の採点の欄に並べる。持たない群は null） */
+const stageEffortsOf = (cond) => (isObj(cond?.params?.stage_efforts) ? cond.params.stage_efforts : null);
 
 /** 全体の予算の打ち切り（D17）：済みの額＋走行中の本の予約＋新しく起こす 1 本の予約 ≤ 上限のときだけ起こす（等しければ起こす）。小数の誤差を避けて 100 万分の 1 USD の整数で比べる */
 const microUsd = (x) => Math.round(x * 1e6);
@@ -2354,6 +2360,8 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
       cost_per_pass: full.cost_per_pass, stage_usage: full.stage_usage,
       // 最後に通った段 → 止まった値の遷移表と最初の上流の落ちの内訳（#633。群ごとの採点の出力の欄そのまま）
       transitions: full.transitions, first_upstream_failures: full.first_upstream_failures, // #633
+      // 段ごとの effort（#664）：どちらかの群の条件が持つときだけ、両群の値を並べる（違いを隠さない。持たない群は null）
+      ...(GROUPS.some((x) => stageEffortsOf(groups[x].cond) !== null) ? { stage_efforts: stageEffortsOf(groups[g].cond) } : {}),
     };
   }
   // 段の役割ごとの対の差（#539。README §5.10.3）：両側で指標が定義されている対だけを n に入れる。片側だけ・欠測・適用外は差 null で理由を残す
@@ -3006,7 +3014,8 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
   if (groups[before].cond.signature === groups[after].cond.signature) throw mismatch("両群の条件の署名が同じ");
   if (groups[before].cond.schema !== groups[after].cond.schema) throw mismatch("群の条件の版");
   // 両群の params（範囲・上流の条件の指紋・本ごとの上流の入力の SHA を含む）と入力なしの本が同じ（上流を固定して効果を局所化する前提）
-  const core = (p) => { if (!isObj(p)) return null; const { stage_output_limits_v11a: _l, ...rest } = p; return JSON.stringify(rest); };
+  // 段ごとの effort（#664）は群の違いとして外す（両群に同じ値を求めない。値は採点の群の欄に並べる）
+  const core = (p) => { if (!isObj(p)) return null; const { stage_output_limits_v11a: _l, stage_efforts: _e, ...rest } = p; return JSON.stringify(rest); };
   if (core(groups[before].cond.params) === null || core(groups[before].cond.params) !== core(groups[after].cond.params)) throw mismatch("群の params");
   if (JSON.stringify(groups[before].cond.stage_input_absent) !== JSON.stringify(groups[after].cond.stage_input_absent)) throw mismatch("群の入力なしの本");
   const plannedIds = pv.pairs.map((p) => `${p.pid}-r${p.r}`);
@@ -3034,6 +3043,8 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
       // v1.2 の段の走りの群（v8。#638）：旗の組の照合と 1 段先の副指標
       ...(isObj(full.evaluation?.v12_flags) ? { v12_flags: full.evaluation.v12_flags } : {}), ...(isObj(full.next_stage) ? { next_stage: full.next_stage } : {}),
       ...(isObj(full.stage_external) ? { stage_external: full.stage_external, stage_verification: full.stage_verification, stage_agreement: full.stage_agreement } : {}), // #687
+      // 段ごとの effort（#664）：どちらかの群の条件が持つときだけ、両群の値を並べる（持たない群は null）
+      ...(STAGE_COMPARE_GROUPS.some((x) => stageEffortsOf(groups[x].cond) !== null) ? { stage_efforts: stageEffortsOf(groups[g].cond) } : {}),
     }];
   }));
   // 照合：(i) 未照合（群の照合・指紋）＞ (ii) 完了（全対が両方観測・両群が完了・予算の停止の記録なし）＞ (iii) 未完了

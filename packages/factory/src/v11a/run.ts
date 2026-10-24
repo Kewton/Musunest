@@ -84,7 +84,7 @@ import {
 import { CallGateway, callCountsDelta, createCallGate, type CallCounts, type CallGate } from "../call.js";
 import type { TestSuite } from "../fixed-test.js";
 import { createBudgetedJudge, type BudgetedJudge } from "../judge-budget.js";
-import { AGENT_LIMITS } from "../limits.js";
+import { AGENT_LIMITS, type StageEfforts } from "../limits.js";
 import { decideOutcome, type Outcome } from "../outcome.js";
 import {
   requirementsFromPlan,
@@ -228,6 +228,11 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
    * の走りが checkpoint を書くため。省けば集めず、結果に欄を置かない。Issue #636）
    */
   readonly collectBoundaries?: boolean;
+  /**
+   * 段ごとの effort（`--pipeline v1.2` の `--stage-effort`。Issue #664）。共通の口に渡し、C1・C2・C3・T2（束の口を含む）・B1・B3' の
+   * 要求をその段の名前で引いた口で呼ぶ。省けば、どの段の口も今の口と同じ（要求・記録・要約は今と同じ）。
+   */
+  readonly stageEfforts?: StageEfforts;
 }
 
 /** v1.1α の 1 回の生成の結果（v1 の結果に、境界の材料を任意の欄で足したもの。Issue #636） */
@@ -726,6 +731,7 @@ async function runV11a(
     effort: input.effort,
     ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
     ...(callGate === undefined ? {} : { gate: callGate }),
+    ...(input.stageEfforts === undefined ? {} : { stageEfforts: input.stageEfforts }),
   });
   // 判定の口（渡されたときだけ）を、この生成の予算に結び付けた包みで包む（v1 と同じ）。J4・J2 に渡す。旗 `v12.ids` の走りは
   // 共有の門と判定の枝も渡す
@@ -1182,7 +1188,7 @@ async function runV11a(
           table: output.table,
           advice: marks,
           documents: input.documents,
-          gateway,
+          gateway: gateway.forStage("semantic-check"),
           ...withLedger,
           // 旗 `v12.ids`：R-sc-02 に構造の検査の読み方を足す（off は渡さない＝今の文のまま。表の targets の有無で推測しない。Issue #732）
           ...(flags.ids ? { ids: true } : {}),
@@ -1223,7 +1229,7 @@ async function runV11a(
             plan: input.plan,
             list,
             documents: input.documents,
-            gateway,
+            gateway: gateway.forStage("vocabulary"),
             rows,
             onRejected: rejectionSink("vocabulary", index + 1),
             ...withLedger,
@@ -1273,7 +1279,7 @@ async function runV11a(
             plan: input.plan,
             list,
             documents: input.documents,
-            gateway,
+            gateway: gateway.forStage("mapping"),
             rows,
             ...(retry === undefined ? {} : { previous: retry }),
             onRejected: rejectionSink("mapping", round),
@@ -1450,6 +1456,7 @@ async function runV11a(
             }
           },
         };
+        // 束の口も T2 の段の名前で引く（段ごとの effort が無ければ束の口そのもの。Issue #664）
         const bundleGatewayOf = new CallGateway({
           client: timed,
           budget,
@@ -1460,7 +1467,8 @@ async function runV11a(
           effort: input.effort,
           ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
           ...(callGate === undefined ? {} : { gate: callGate }),
-        });
+          ...(input.stageEfforts === undefined ? {} : { stageEfforts: input.stageEfforts }),
+        }).forStage("test-spec");
         runs[bundle] = { gateway: bundleGatewayOf, meter: bundleMeter, start, end: () => end };
         return bundleGatewayOf;
       };
@@ -1498,7 +1506,7 @@ async function runV11a(
         table,
         carryOver: carry,
         documents: input.documents,
-        gateway,
+        gateway: gateway.forStage("test-spec"),
         ...(judgeBudget === undefined ? {} : { judge: judgeBudget }),
         onDropped: (dropped) => {
           for (const entry of dropped) droppedTests.push(entry);
@@ -1547,7 +1555,7 @@ async function runV11a(
         suite: testSpec.suite,
         observes: testSpec.observes,
         documents: input.documents,
-        gateway,
+        gateway: gateway.forStage("write"),
         ...withLedger,
         ...requiredValidationsFor({ tests: testSpec.suite.tests.filter((test) => remainingNow.has(test.target.requirementId)) }),
       }),
@@ -1648,7 +1656,7 @@ async function runV11a(
               declaration,
               app,
               documents: input.documents,
-              gateway,
+              gateway: gateway.forStage("decl-check"),
             });
             if (!checked.ok) return checked;
             const problems: Problem[] = [];
@@ -1955,7 +1963,7 @@ async function runV11a(
               suite: testSpec.suite,
               observes: testSpec.observes,
               documents: input.documents,
-              gateway,
+              gateway: gateway.forStage("write"),
               ...withLedger,
               rewrite: { failures },
               ...requiredValidationsFor(contextNow().suite),

@@ -28,7 +28,15 @@ import {
   type CallResult,
   type LlmInputParts,
 } from "./call.js";
-import { AGENT_LIMITS, maxOutputTokensForEffort } from "./limits.js";
+import {
+  AGENT_LIMITS,
+  CALL_TIMEOUT_BY_EFFORT,
+  OUTPUT_STAGES,
+  STAGE_EFFORT_STAGES,
+  STAGE_MAX_OUTPUT_TOKENS,
+  callTimeoutMsForEffort,
+  maxOutputTokensForEffort,
+} from "./limits.js";
 import { OpenAiIncompleteError } from "./openai.js";
 import type {
   LlmClient,
@@ -1402,5 +1410,141 @@ describe("試行の終端と再試行の数を、理由別に分けて数える�
       retries: { communication: 0, shape: 0, content: 0 },
     });
     expect(callCountsDelta(before, after).attempts.started).toBe(2);
+  });
+});
+
+// ── 段の名前で引いた口（段ごとの effort。Issue #664）──────────────────────────
+//
+// 段ごとの effort を受けた口は、`forStage(段)` でその段の effort を持つ薄い見方を返す。出力の上限・呼び出しごとの timeout の
+// 基準・要求の effort の 3 つが、**同じ段の同じ effort**から出ることを 1 つの試験で照らす。指定の無い段は元の口そのもの。
+
+/** 要求から打ち切りの合図を除く（Issue #664） */
+const withoutSignal = ({ signal: _signal, ...rest }: LlmStructuredRequest): Omit<LlmStructuredRequest, "signal"> => rest;
+
+describe("段の名前で引いた口（段ごとの effort。Issue #664）", () => {
+  /** 受けた要求を記録し、打ち切りの合図で打ち切られたことを数える偽物（`hang` の要求だけ返らない） */
+  const recordingHanging = (hang: (request: LlmStructuredRequest) => boolean) => {
+    const requests: LlmStructuredRequest[] = [];
+    const aborted: LlmStructuredRequest[] = [];
+    const client: LlmClient = {
+      callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        requests.push(request);
+        if (!hang(request)) return Promise.resolve({ output: {} as T, usage: USAGE });
+        return new Promise<never>(() => {
+          request.signal?.addEventListener("abort", () => {
+            aborted.push(request);
+          });
+        });
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    return { client, requests, aborted };
+  };
+
+  it("(3) C3 に low を指定した口：C3 の要求の max_output_tokens・effort・呼び出しごとの timeout の基準が low の値で、ほかの段は high のまま。計は元の口と共有する", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const recording = recordingHanging((request) => request.schemaName === "hang");
+      const gateway = new CallGateway({
+        client: recording.client,
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => Date.now(),
+        deadline: 600_000,
+        effort: "high",
+        maxAttempts: 1,
+        stageEfforts: { "semantic-check": "low" },
+      });
+      const c3 = gateway.forStage("semantic-check");
+      const others = STAGE_EFFORT_STAGES.filter((stage) => stage !== "semantic-check").map((stage) => gateway.forStage(stage));
+      // 上限と timeout の基準：C3 は low の値、ほかは元の口（high）のまま
+      expect(c3).not.toBe(gateway);
+      expect(c3.effort).toBe("low");
+      expect(c3.maxOutputTokens("semantic-check")).toBe(STAGE_MAX_OUTPUT_TOKENS.low["semantic-check"]);
+      expect(c3.callTimeoutMs).toBe(CALL_TIMEOUT_BY_EFFORT.low);
+      for (const other of others) {
+        expect(other).toBe(gateway);
+        expect(other.effort).toBe("high");
+        expect(other.callTimeoutMs).toBe(CALL_TIMEOUT_BY_EFFORT.high);
+      }
+      // 要求：C3 の要求にだけ effort low が載り、上限は段の口が引いた値。ほかの段の要求は今の要求のまま（effort の欄が無い）
+      await c3.callStructured({ ...STRUCTURED_REQUEST, maxOutputTokens: c3.maxOutputTokens("semantic-check") });
+      await gateway.forStage("write").callStructured({ ...STRUCTURED_REQUEST, maxOutputTokens: gateway.maxOutputTokens("write") });
+      expect(recording.requests[0]?.effort).toBe("low");
+      expect(recording.requests[0]?.maxOutputTokens).toBe(STAGE_MAX_OUTPUT_TOKENS.low["semantic-check"]);
+      expect("effort" in (recording.requests[1] ?? {})).toBe(false);
+      expect(withoutSignal(recording.requests[1] as LlmStructuredRequest)).toEqual({ ...STRUCTURED_REQUEST, maxOutputTokens: STAGE_MAX_OUTPUT_TOKENS.high.write });
+      // 実際の打ち切り：C3 の口は low の 60 秒で、元の口は high の 300 秒で打ち切る（同じ時計）
+      const c3Pending = c3.callStructured({ ...STRUCTURED_REQUEST, schemaName: "hang" });
+      const basePending = gateway.callStructured({ ...STRUCTURED_REQUEST, schemaName: "hang" });
+      await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_BY_EFFORT.low - 1);
+      expect(recording.aborted).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(recording.aborted.map((request) => request.effort)).toEqual(["low"]);
+      await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_BY_EFFORT.high - CALL_TIMEOUT_BY_EFFORT.low - 1);
+      expect(recording.aborted).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(recording.aborted).toHaveLength(2);
+      expect((await c3Pending).kind).toBe("failed");
+      expect((await basePending).kind).toBe("failed");
+      // 計は共有：どちらの口から見ても 4 回の開始・2 回の timeout の打ち切り
+      expect(gateway.calls).toBe(4);
+      expect(c3.calls).toBe(4);
+      expect(c3.counts).toEqual(gateway.counts);
+      expect(gateway.attempts.cancelled_timeout).toBe(2);
+      // 段の口から段の口を引いても、元の口の組から引く
+      expect(c3.forStage("write")).toBe(gateway);
+      expect(c3.forStage("semantic-check").effort).toBe("low");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("(4) 指定の無い段の口（組を渡さない口・組に無い段）は元の口そのもので、上限・timeout・effort・要求が今の口と同じ", async () => {
+    const recording = recordingHanging(() => false);
+    const plain = new CallGateway({ client: recording.client, budget: new JobBudget(1_000_000), rates: RATES, now: () => 0, deadline: 600_000, effort: "medium" });
+    const partial = new CallGateway({
+      client: recording.client,
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "medium",
+      stageEfforts: { "decl-check": "low" },
+    });
+    for (const stage of STAGE_EFFORT_STAGES) {
+      const view = plain.forStage(stage);
+      expect(view).toBe(plain);
+      expect(view.effort).toBe("medium");
+      expect(view.callTimeoutMs).toBe(callTimeoutMsForEffort("medium"));
+      for (const output of OUTPUT_STAGES) expect(view.maxOutputTokens(output)).toBe(maxOutputTokensForEffort("medium", output));
+      if (stage !== "decl-check") expect(partial.forStage(stage)).toBe(partial);
+    }
+    await plain.forStage("semantic-check").callStructured(STRUCTURED_REQUEST);
+    await partial.forStage("semantic-check").callStructured(STRUCTURED_REQUEST);
+    for (const request of recording.requests) {
+      expect(withoutSignal(request)).toEqual(STRUCTURED_REQUEST);
+      expect(Object.keys(request)).toEqual([...Object.keys(STRUCTURED_REQUEST), "signal"]);
+    }
+  });
+
+  it("呼ぶ側が timeout の基準を指定した口では、段の口もその指定を引き継ぐ（上限と要求の effort は段の値）", () => {
+    const gateway = new CallGateway({
+      client: spyClient(() => {}),
+      budget: new JobBudget(1),
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "high",
+      callTimeoutMs: 90_000,
+      stageEfforts: { mapping: "low" },
+    });
+    const view = gateway.forStage("mapping");
+    expect(view.callTimeoutMs).toBe(90_000);
+    expect(view.effort).toBe("low");
+    expect(view.maxOutputTokens("name-table")).toBe(STAGE_MAX_OUTPUT_TOKENS.low["name-table"]);
   });
 });
