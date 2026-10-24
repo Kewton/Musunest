@@ -1422,4 +1422,101 @@ describe("旗 ids on：束が 2 つ以上の C3 の要求に、束の外の対�
       expectNoAcceptanceMaterial([fs.readFileSync(new URL(file, import.meta.url), "utf8")]);
     }
   });
+
+  /**
+   * 反例の対（PR #742 のレビューの R1）：X（R1）の引用は共通、Y（R6）の確かめ方は view-shows で targets は両入力とも項目 A（題名）だけ。
+   * X の指定は A＝項目 A、B＝項目 A と項目 B（金額）。`textOnly` なら X の所属は A のまま、文だけを B の文にする（(1') の対）
+   */
+  const PAIR_X_TEXT = { A: "R1 は、項目の題名を指定する。", B: "R1 は、項目の題名と金額を指定する。" } as const;
+  const PAIR_X_OWNERSHIP = { A: ["f.item.title"], B: ["f.item.title", "f.item.amount"] } as const;
+  const PAIR_X_QUOTE = "依頼の一つ目：指定した項目";
+  const PAIR_Y_TARGETS = [{ check: "view-shows" as const, targetId: "s.items", sourceId: "f.item.title" }];
+  function pairOf(variant: "A" | "B", textOnly = false) {
+    const owned = textOnly ? PAIR_X_OWNERSHIP.A : PAIR_X_OWNERSHIP[variant];
+    const list: RequirementList = {
+      requirements: [
+        requirementOf("R1", PAIR_X_TEXT[variant], PAIR_X_QUOTE),
+        ...["R2", "R3", "R4", "R5"].map((id) => requirementOf(id, `${id} の項目を一覧で見られる。`)),
+        requirementOf("R6", Y_TEXT),
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const base = fixtureTable();
+    const ids = list.requirements.map((requirement) => requirement.id);
+    const table: NameTable = {
+      rows: base.rows,
+      ownership: ids.map((requirementId) => ({
+        requirementId,
+        roles: requirementId === "R1" ? owned.map(stated) : requirementId === "R6" ? ["s.items", "f.item.title"].map(stated) : [stated("s.items")],
+      })),
+      verification: ids.map((requirementId) =>
+        requirementId === "R6"
+          ? { requirementId, kind: "structural" as const, reason: "画面に出ることを見る", checks: ["view-shows" as const], targets: PAIR_Y_TARGETS }
+          : { requirementId, kind: "fixed-test" as const },
+      ),
+      classification: ids.map((requirementId) => ({ requirementId, nature: requirementId === "R6" ? ("existence-only" as const) : ("ruled" as const) })),
+    };
+    return { list, table, plan: planOf(list) };
+  }
+  /** Y の対象の欠落（X が所属に持つ項目のうち、Y の view-shows の targets に無いもの） */
+  const yMissingOf = (table: NameTable): readonly string[] => {
+    const fields = new Set(table.rows.filter((row) => row.kind === "field").map((row) => row.id));
+    const specified = (table.ownership.find((entry) => entry.requirementId === "R1")?.roles ?? []).map((role) => role.id).filter((id) => fields.has(id));
+    const y = table.verification.find((entry) => entry.requirementId === "R6");
+    const shown = new Set(y?.kind === "structural" ? (y.targets ?? []).filter((target) => target.check === "view-shows").map((target) => target.sourceId) : []);
+    return specified.filter((id) => !shown.has(id));
+  };
+  /**
+   * 4a61133 の段のコード（`semantic-check.ts` を 4a61133 の版に置き戻し、この対を流して取った実測）の束 2 の要求の SHA-256
+   * （`JSON.stringify` の要求）。A・B で同じ、A・C（文だけの対）で同じだった
+   */
+  const BEFORE_741_PAIR = {
+    bundle2: "4d2b839a8cd0ea46701925fc1210d8c51773b8e473b4e2265f8fbf341e1b03f4",
+    textOnly: "4d2b839a8cd0ea46701925fc1210d8c51773b8e473b4e2265f8fbf341e1b03f4",
+  } as const;
+
+  it("(1) 反例の対：X の引用は共通、Y の targets は両入力とも項目 A だけ、X の指定は A＝項目 A・B＝項目 A と B。Y の欠落は A で 0・B で 1。旧コードの束 2 の要求は A・B で同じ（旧の実測の SHA）、新コードは異なり、参照の塊にそれぞれの X の文と所属が入る", async () => {
+    const [a, b] = [pairOf("A"), pairOf("B")];
+    // 前提：Y 自身の文・引用・所属・確かめ方と表の行は同じ。X の引用も同じ。Y の欠落は A で 0、B で 1
+    expect(a.list.requirements.slice(1)).toEqual(b.list.requirements.slice(1));
+    expect(a.list.requirements[0]?.quote).toBe(b.list.requirements[0]?.quote);
+    expect(a.table.rows).toEqual(b.table.rows);
+    expect(a.table.ownership.slice(1)).toEqual(b.table.ownership.slice(1));
+    expect(a.table.verification).toEqual(b.table.verification);
+    expect(yMissingOf(a.table)).toEqual([]);
+    expect(yMissingOf(b.table)).toEqual(["f.item.amount"]);
+    const onA = await requestsOf(a);
+    const onB = await requestsOf(b);
+    expect(onA.requests.map(semanticRequestIds)).toEqual([["R1", "R2", "R3", "R4", "R5"], ["R6"]]);
+    expect(onB.requests.map(semanticRequestIds)).toEqual([["R1", "R2", "R3", "R4", "R5"], ["R6"]]);
+    // 旧コード：束 2 の要求は A・B で同じ（旧の実測の SHA）。新コードの要求の差は追加分だけ
+    expect(await shaOf(revert741(onA.requests[1] as LlmStructuredRequest))).toBe(BEFORE_741_PAIR.bundle2);
+    expect(await shaOf(revert741(onB.requests[1] as LlmStructuredRequest))).toBe(BEFORE_741_PAIR.bundle2);
+    // 新コード：A・B で要求が異なり、参照の塊にそれぞれの X の文と所属が入る
+    expect(JSON.stringify(onA.requests[1])).not.toBe(JSON.stringify(onB.requests[1]));
+    for (const [run, variant] of [
+      [onA, "A"],
+      [onB, "B"],
+    ] as const) {
+      const reference = referenceOf(run.requests[1]) as { readonly 要件の文と引用: readonly unknown[]; readonly 要件ごとの所属: readonly unknown[] };
+      expect(reference.要件の文と引用[0]).toEqual({ requirementId: "R1", text: PAIR_X_TEXT[variant], quote: PAIR_X_QUOTE });
+      expect(reference.要件ごとの所属[0]).toEqual({ requirementId: "R1", roles: PAIR_X_OWNERSHIP[variant].map(stated) });
+    }
+  });
+
+  it("(1') 文だけの対：X の引用・所属と表を固定し、X の文だけを変える。旧コードの束 2 の要求は同じ（旧の実測の SHA）、新コードは異なる", async () => {
+    const [a, c] = [pairOf("A"), pairOf("B", true)];
+    expect(a.table).toEqual(c.table);
+    expect(a.list.requirements.slice(1)).toEqual(c.list.requirements.slice(1));
+    expect(a.list.requirements[0]?.quote).toBe(c.list.requirements[0]?.quote);
+    expect(a.list.requirements[0]?.text).not.toBe(c.list.requirements[0]?.text);
+    const onA = await requestsOf(a);
+    const onC = await requestsOf(c);
+    expect(await shaOf(revert741(onA.requests[1] as LlmStructuredRequest))).toBe(BEFORE_741_PAIR.textOnly);
+    expect(await shaOf(revert741(onC.requests[1] as LlmStructuredRequest))).toBe(BEFORE_741_PAIR.textOnly);
+    expect(JSON.stringify(onA.requests[1])).not.toBe(JSON.stringify(onC.requests[1]));
+    const reference = referenceOf(onC.requests[1]) as { readonly 要件の文と引用: readonly unknown[] };
+    expect(reference.要件の文と引用[0]).toEqual({ requirementId: "R1", text: PAIR_X_TEXT.B, quote: PAIR_X_QUOTE });
+  });
 });
