@@ -30,7 +30,7 @@ import {
   parseStageEfforts,
   runCli,
 } from "./cli.js";
-import { maxOutputTokensForEffort } from "./limits.js";
+import { AGENT_LIMITS, maxOutputTokensForEffort } from "./limits.js";
 import { BUILD_CLI_RECORD_FILE, PLAN_ONLY_RESULT_SCHEMA } from "./cli-plan.js";
 import * as factory from "./index.js";
 import { createFakeJudge } from "./judge-fake.js";
@@ -970,6 +970,9 @@ function v11aTestSpec(): Record<string, unknown> {
   };
 }
 
+/** Issue #663 で旗 ids の走りだけ T2 の R-tsp-02 の末尾に足した、要件ごとの試験の上限の文（値は限度の表の定数から組む） */
+const T2_IDS_LIMIT_TEXT = `要件ごとの試験は、コードが作った分を含めて ${String(AGENT_LIMITS.testsPerRequirement)} 本まで。必要な試験の枠の残る本数（remaining）を超えて場合を書かない。`;
+
 /** 手 3e（#625）で旗 ids の走りだけ場合の形に差し替えた、欄の名前を指す T2 の規則 */
 const CASE_FORM_RULE_IDS: readonly string[] = ["R-tsp-07", "R-tsp-09", "R-tsp-11", "R-tsp-12", "R-tsp-13", "R-tsp-14"];
 
@@ -1297,6 +1300,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     return requests.map((value) => {
       const request = value as LlmStructuredRequest;
       if (request.schemaName === TEST_SPEC_SCHEMA_NAME) {
+        // Issue #663：旗 ids の R-tsp-02 は末尾に要件ごとの試験の上限の文（限度の表の定数）を持つ。在ることを確かめてから旗 off の文に戻す
+        expect((request.rules ?? []).filter((text) => text.endsWith(T2_IDS_LIMIT_TEXT))).toHaveLength(1);
         return { ...request, rules: (request.rules ?? []).map((text) => { const at = idsRules.indexOf(text); return at < 0 ? text : (offRules[at] ?? text); }) };
       }
       if (request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME) {
