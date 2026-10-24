@@ -260,6 +260,24 @@ export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage
   },
 };
 
+// ── 段ごとの effort（`--pipeline v1.2` の `--stage-effort`。Issue #664）────────────
+
+/**
+ * 段ごとに effort を指定できる段（`--stage-effort <段>=<値>`。Issue #664）。**実際に配線する段だけ**を置く——
+ * C1 語彙・C2 要件の写像・C3 表の意味の点検・T2 試験の仕様（束の口を含む）・B1 書く・B3' 宣言の意味の点検。
+ * ここに無い段は入口で断る（既定へ黙って倒さない）。段の口は共通の口（`CallGateway.forStage`）が引く。
+ */
+export const STAGE_EFFORT_STAGES = ["vocabulary", "mapping", "semantic-check", "test-spec", "write", "decl-check"] as const;
+export type StageEffortStage = (typeof STAGE_EFFORT_STAGES)[number];
+
+/** 段ごとの effort の組（段 → 値。指定の無い段は口の 1 つの effort のまま。Issue #664） */
+export type StageEfforts = Readonly<Partial<Record<StageEffortStage, ReasoningEffort>>>;
+
+/** effort を指定できる段か（Issue #664） */
+export function isStageEffortStage(value: string): value is StageEffortStage {
+  return (STAGE_EFFORT_STAGES as readonly string[]).includes(value);
+}
+
 /**
  * 申告の仕分け・裏付けの**確信度の閾値**（§4・Issue #332）。判定の口（Jev・LLM）が返す確信度が
  * これより低い答えは、コードがそのまま使わない——申告は**印つきで残す**（捨てない）。値はここ 1 か所に置く。

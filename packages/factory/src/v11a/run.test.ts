@@ -26,6 +26,7 @@ import type { Judge, JudgeAnswer } from "../judge.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { RecordedCall } from "../llm-fake.js";
 import type { LlmStructuredRequest, LlmToolRequest, LlmUsage } from "../llm.js";
+import { STAGE_EFFORT_STAGES, maxOutputTokensForEffort } from "../limits.js";
 import { requirementsFromPlan, type RequirementList, type TestSuite } from "../pipeline.js";
 import * as bindModule from "../stages/bind.js";
 import * as correspondenceStage from "../stages/correspondence.js";
@@ -675,6 +676,9 @@ describe("(b) T1' に 2 回落ちる", () => {
   });
 });
 
+/** 要求から段ごとの effort と打ち切りの合図を除く（口なしの走りの要求と比べる。Issue #664） */
+const withoutEffort664 = ({ effort: _effort, signal: _signal, ...rest }: LlmStructuredRequest) => rest;
+
 describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3（Issue #593）", () => {
   const IDS_FLAGS = { ledger: true, searchRepair: true, ids: true };
   const responses = () => idsResponsesOf(LIST, TABLE_IDS, PROPERTY_LEDGER_VIEW);
@@ -714,6 +718,61 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       expect(JSON.stringify(request).includes('\\"copy\\"')).toBe(false);
       expect(JSON.stringify(request).includes("requestQuote")).toBe(false);
     }
+  });
+
+  it("段ごとの effort（Issue #664）(6)：C1・C2・C3・T2 の束・B1・B3' に違う effort を指定した走りで、各要求の effort と上限がその段の指定から出る。effort の欄を除いた要求・段の記録・要約・納品物・診断は口なしの走りと深く等しい", async () => {
+    const efforts = { vocabulary: "low", mapping: "medium", "semantic-check": "low", "test-spec": "medium", write: "low", "decl-check": "medium" } as const;
+    // 要求の schema の名前 → 段（C1 は束ごとの名前、B1 は v1.1α の宣言の名前）と、その段が引く出力の上限の段
+    const stageOf = (schemaName: string): keyof typeof efforts | undefined =>
+      schemaName.startsWith("vocabulary-")
+        ? "vocabulary"
+        : (({ [MAPPING_SCHEMA_NAME]: "mapping", [SEMANTIC_CHECK_SCHEMA_NAME]: "semantic-check", [TEST_SPEC_SCHEMA_NAME]: "test-spec", "declaration-v11a": "write", [DECL_CHECK_SCHEMA_NAME]: "decl-check" }) as Record<string, keyof typeof efforts>)[schemaName];
+    const outputStageOf = { vocabulary: "name-table", mapping: "name-table", "semantic-check": "semantic-check", "test-spec": "test-spec", write: "write", "decl-check": "decl-check" } as const;
+    const calls = [...idsHead(), structured(acceptAll())];
+    const plain = await runScenario(calls, { flags: IDS_FLAGS });
+    const tuned = await runScenario(calls, { flags: IDS_FLAGS, stageEfforts: efforts });
+    expect(tuned.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const seen = new Set<string>();
+    for (const request of tuned.recording.structured) {
+      const stage = stageOf(request.schemaName);
+      if (stage === undefined) {
+        expect("effort" in request, request.schemaName).toBe(false);
+        continue;
+      }
+      seen.add(stage);
+      expect(request.effort, request.schemaName).toBe(efforts[stage]);
+      expect(request.maxOutputTokens, request.schemaName).toBe(maxOutputTokensForEffort(efforts[stage], outputStageOf[stage]));
+    }
+    expect(seen).toEqual(new Set(STAGE_EFFORT_STAGES));
+    // T2 は束の口で呼ぶ（旗 ids の T2 は束ごとに 1 記録）。束の口の要求も T2 の段の effort を持つ
+    expect(countStage(tuned.result, "test-spec")).toBeGreaterThan(0);
+    expect(tuned.recording.structured.filter((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME).every((request) => request.effort === "medium")).toBe(true);
+    // 口なしの走りの要求に effort の欄は無い。effort の欄を除けば、口を付けた走りの要求と同じ
+    expect(plain.recording.structured.some((request) => "effort" in request)).toBe(false);
+    expect(tuned.recording.structured.map(withoutEffort664)).toEqual(plain.recording.structured.map(withoutEffort664));
+    expect(tuned.recording.tools).toEqual(plain.recording.tools);
+    // effort は記録の値を変えない（段の記録・要約・納品物・診断・終了コード）
+    expect(tuned.result).toEqual(plain.result);
+    expectNoAcceptanceMaterial(tuned.recording.structured.map((request) => JSON.stringify(request)));
+  });
+
+  it("段ごとの effort（Issue #664）(2')：段の走り（name-table..semantic-check）で C3 に low を付けると、C3 の要求だけ effort low・上限は low の C3 の値で、C1・C2 の要求は今のまま（effort の欄が無い）。段の走りの結果は口なしと深く等しい", async () => {
+    const calls = [...idsHead(), structured(acceptAll())];
+    const run = async (overrides: Partial<GenerationInputV11a>) => {
+      const recording = createCheckedRecordingClient(calls);
+      const outcome = await runStageRangeV11a({ ...inputOf(recording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "semantic-check" }, ...overrides });
+      return { outcome, recording };
+    };
+    const plain = await run({});
+    const tuned = await run({ stageEfforts: { "semantic-check": "low" } });
+    const c3 = tuned.recording.structured.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(c3.length).toBeGreaterThan(0);
+    for (const request of c3) {
+      expect(request.effort).toBe("low");
+      expect(request.maxOutputTokens).toBe(maxOutputTokensForEffort("low", "semantic-check"));
+    }
+    expect(tuned.recording.structured.filter((request) => request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME).some((request) => "effort" in request)).toBe(false);
+    expect(tuned.outcome).toEqual(plain.outcome);
   });
 
   it("C1' の負例：束 2 の知らない ID が 2 回続けば段 vocabulary・unmet で止まる（終了コード 1・納品物無し）。束 1 は 1 回だけ呼ぶ", async () => {

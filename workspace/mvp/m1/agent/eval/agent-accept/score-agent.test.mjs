@@ -3949,12 +3949,12 @@ const sl557 = (summary, v12) => { const o = JSON.parse(sl513(summary)); if (v12 
 /** v1.1α の段の名前の段の記録（v1.1a・v1.2 の群の要約） */
 const STAGES557 = [{ stage: "name-table", status: "ok", calls: 1, retries: { communication: 0, shape: 0, content: 0 } }, { stage: "test-spec", status: "ok", calls: 1 }, { stage: "write", status: "ok", calls: 1 }, { stage: "judge", status: "ok", calls: 0 }];
 /** 条件 1 つ（run-agent.mjs と同じ形。g は経路。v1.2 は v7 と旗の組、それ以外は v5） */
-function cond557({ name, g, ids, pids, repoDir = repo, frozenPath, frozenSha, comparison = null, extra = {} }) {
+function cond557({ name, g, ids, pids, repoDir = repo, frozenPath, frozenSha, comparison = null, extra = {}, paramsExtra = {} }) {
   const evDir = join(repoDir, "workspace/mvp/m1/agent/eval"), set = loadEvalSet(join(repoDir, DEFAULT_SET_PATH));
   const cond = {
     schema: g === V12_PIPELINE ? CONDITIONS_V7 : CONDITIONS_V5, measurement_id: name, source: { commit: null, dirty: null }, factory: { fingerprint: sha256(`factory-${g}`) }, spec_engine: { fingerprint: fingerprintDir(join(repoDir, "packages/spec-engine/dist")).fingerprint },
     set: { path: DEFAULT_SET_PATH, sha256: set.sha256 }, scripts: { mode: "post-hoc", fingerprint: scriptsFingerprint(set.scripts).fingerprint }, scoring: { fingerprint: scoringFingerprint(evDir, scoreFile, set.definitions).fingerprint }, judge: { configuration: "llm-only" },
-    params: { ...paramsFor(ids), mode: "build-from", plan: false, effort: "high", pipeline: g, stage_output_limits_v11a: g === "v1" ? null : APPROVED513, ...(g === V12_PIPELINE ? { v12_flags: FLAGS557 } : {}) },
+    params: { ...paramsFor(ids), mode: "build-from", plan: false, effort: "high", pipeline: g, stage_output_limits_v11a: g === "v1" ? null : APPROVED513, ...(g === V12_PIPELINE ? { v12_flags: FLAGS557 } : {}), ...paramsExtra },
     child_args: ids.map((id) => ({ id, argv: [] })),
     frozen: { path: frozenPath, sha256: frozenSha, id: "t", version: 1, origin: "frozen-plan", author: null, adopted: pids.map((p) => ({ pattern: p, plan_sha256: PSHA513(p), source_sha256: SSHA513(p), envelope_sha256: sha256(p) })), missing: [] },
     comparison, ...extra,
@@ -3984,7 +3984,7 @@ function single557(base, name, { pids = ["P1", "P2"], runs = 3, runOf = () => ({
   return { out, ids };
 }
 /** 比較の出力先（run-agent.mjs --compare --compare-pipelines と同じ形）。groups ＝ [比較元, 候補] */
-function compareFixture557(base, name, { groups, pids = ["P1", "P2"], runs = 3, runOf = () => ({}), groupsExtra = {}, profile = "diagnostic", mismatches = ["deadline_min", "pipelines"], recordGroups = true } = {}) {
+function compareFixture557(base, name, { groups, pids = ["P1", "P2"], runs = 3, runOf = () => ({}), groupsExtra = {}, profile = "diagnostic", mismatches = ["deadline_min", "pipelines"], recordGroups = true, paramsExtra = {} } = {}) {
   const out = join(base, name);
   mkdirSync(out, { recursive: true });
   const fz = frozen557(base, name, pids);
@@ -3995,7 +3995,7 @@ function compareFixture557(base, name, { groups, pids = ["P1", "P2"], runs = 3, 
   for (const g of groups) {
     const dir = join(out, g);
     mkdirSync(dir, { recursive: true });
-    const cond = cond557({ name, g, ids, pids, ...fz, comparison: { pairs_sha256: pairsSha, group: g, role: roles[g], profile }, extra: groupsExtra[g] ?? {} });
+    const cond = cond557({ name, g, ids, pids, ...fz, comparison: { pairs_sha256: pairsSha, group: g, role: roles[g], profile }, extra: groupsExtra[g] ?? {}, paramsExtra: paramsExtra[g] ?? {} });
     rec[g] = { role: roles[g], pipeline: g, factory: { fingerprint: cond.factory.fingerprint }, conditions_signature: cond.signature, ...(g === V12_PIPELINE ? { v12_flags: FLAGS557 } : {}) };
     writeFileSync(join(dir, "conditions.json"), JSON.stringify(cond));
     for (const id of ids) run557(dir, id, g, runOf(g, id));
@@ -4949,7 +4949,7 @@ const stageRecord638 = (id, { kind = "t2-pass", dropped = 0, end = "test-spec", 
   });
 };
 /** 段単位の v1.2 の計測の出力先（条件 v8・開始 T1・終了 end）。runOf(id) ＝ 記録の文字列｜"missing"（読めない記録）｜"unlaunched" */
-function stageFixture638(out, { ids = IDS545, end = "test-spec", runOf, frozenPath, group = null, pairsSha = null, factoryFp = sha256("factory-638"), flags = FLAGS638, pending = [] }) {
+function stageFixture638(out, { ids = IDS545, end = "test-spec", runOf, frozenPath, group = null, pairsSha = null, factoryFp = sha256("factory-638"), flags = FLAGS638, pending = [], efforts = null }) {
   mkdirSync(out, { recursive: true });
   const set = loadEvalSet(join(repo, DEFAULT_SET_PATH)), evDir = join(repo, "workspace/mvp/m1/agent/eval");
   const pids = [...new Set(ids.map((id) => id.split("-")[0]))];
@@ -4959,6 +4959,7 @@ function stageFixture638(out, { ids = IDS545, end = "test-spec", runOf, frozenPa
     params: {
       ...paramsFor(ids), mode: STAGE_RUN_MODE, plan: false, effort: "high", pipeline: "v1.2", stage_output_limits_v11a: APPROVED513, v12_flags: flags,
       ...(group === null ? { v12_call_limits: { logical_calls: 7, real_attempts: 11, judge_branch: 5 } } : {}),
+      ...(efforts === null ? {} : { stage_efforts: efforts }),
       stage_start: "name-table", stage_end: end, budget_scope: "stage-run", stage_from: null, stage_inputs: [],
     },
     child_args: ids.map((id) => ({ id, argv: ["cli.js", id] })),
@@ -5099,7 +5100,7 @@ test("#638 匿名の口：v8 の段単位の採点の --anonymous に経路・�
 });
 
 /** 段だけの対の比較（v1.2 の群）の出力先：両群とも条件 v8・開始 T1・終了 T2'。passOf(群, 本) ＝ 真なら T2' まで通る */
-function stageCompareFixture638(base, name, { passOf, flagsOf = () => FLAGS638 }) {
+function stageCompareFixture638(base, name, { passOf, flagsOf = () => FLAGS638, effortsOf = () => null }) {
   const out = join(base, name), fzp = frozenFile545(base);
   mkdirSync(out, { recursive: true });
   const stage = { start: "name-table", end: "test-spec", stage_from_sha256: null };
@@ -5107,7 +5108,7 @@ function stageCompareFixture638(base, name, { passOf, flagsOf = () => FLAGS638 }
   writeFileSync(join(out, "pairs.json"), pairsText);
   const pairsSha = sha256(pairsText), groups = {};
   for (const g of ["before", "after"]) {
-    const cond = stageFixture638(join(out, g), { runOf: (id) => stageRecord638(id, { kind: passOf(g, id) ? "t2-pass" : "t2-fail", dropped: 2, flags: flagsOf(g) }), group: g, pairsSha, frozenPath: fzp, factoryFp: sha256(`factory-638-${g}`), flags: flagsOf(g) });
+    const cond = stageFixture638(join(out, g), { runOf: (id) => stageRecord638(id, { kind: passOf(g, id) ? "t2-pass" : "t2-fail", dropped: 2, flags: flagsOf(g) }), group: g, pairsSha, frozenPath: fzp, factoryFp: sha256(`factory-638-${g}`), flags: flagsOf(g), efforts: effortsOf(g) });
     groups[g] = { role: g === "before" ? "baseline" : "candidate", pipeline: "v1.2", factory: { fingerprint: cond.factory.fingerprint }, conditions_signature: cond.signature };
   }
   writeFileSync(join(out, "comparison.json"), JSON.stringify({ schema: "musunest-eval/stage-compare-record/v1", stage: { ...stage, input_absent: 0 }, pairs: { sha256: pairsSha }, groups, scoring_cost_usd: 0 }));
@@ -5517,4 +5518,68 @@ test("#687 README：§10.8.3 の後ろ（末尾）の小節 §10.8.4 に定義�
     assert.doesNotMatch(t, /[¥￥]\s?\d|\d\s?円/, `${name}: 価格の表記`);
   }
   assert.doesNotMatch(sec, /\$\d/, "README §10.8.4: 価格の表記");
+});
+
+// ── #664：段ごとの effort の口（条件の params.stage_efforts）。採点の道具は条件の読み取り（署名・比較の照合・比較の記録の群の欄）だけ
+import { comparableParams } from "./score-agent.mjs";
+const EFFORTS664 = { "semantic-check": "low" };
+
+test("#664 署名と比較の照合：params.stage_efforts は署名に入り（値が変われば署名が変わる）、比較の群の params の照合からは外す（両群に同じ値を求めない）", () => {
+  const cond = { schema: CONDITIONS_V7, params: { effort: "high", pipeline: V12_PIPELINE, budget_usd: 1 }, scoring: {}, scripts: { mode: "post-hoc" } };
+  const withEfforts = { ...cond, params: { ...cond.params, stage_efforts: EFFORTS664 } };
+  const otherEfforts = { ...cond, params: { ...cond.params, stage_efforts: { "semantic-check": "medium" } } };
+  assert.notEqual(conditionsSignature(withEfforts), conditionsSignature(cond));
+  assert.notEqual(conditionsSignature(withEfforts), conditionsSignature(otherEfforts));
+  assert.deepEqual(comparableParams(withEfforts.params), comparableParams(cond.params));
+  assert.deepEqual(comparableParams(otherEfforts.params), comparableParams(cond.params));
+  assert.deepEqual(Object.keys(comparableParams(cond.params)), ["effort", "budget_usd"], "今の欄の外し方は変えない");
+});
+
+test("#664 比較の採点 v1.1a,v1.2：候補の群（v1.2）だけが stage_efforts を持つ比較は断らずに採点し、群ごとの欄 stage_efforts に両群の値（持たない群は null）を並べる。持たない比較の群の欄は今のまま（欄が無い）", async () => {
+  await withOut(async (base) => {
+    const groups = ["v1.1a", "v1.2"];
+    const plain = compareFixture557(base, "c664-plain", { groups, pids: PIDS557, runOf: runOf557 });
+    const tuned = compareFixture557(base, "c664-tuned", { groups, pids: PIDS557, runOf: runOf557, paramsExtra: { "v1.2": { stage_efforts: EFFORTS664 } } });
+    for (const f of [plain, tuned]) assert.equal(scoreCompareRun(f.out).status, 0);
+    const p = readCompare(plain.out), t = readCompare(tuned.out);
+    for (const g of groups) assert.ok(!("stage_efforts" in p.groups[g]), `${g}: 持たない比較に欄を足さない`);
+    assert.deepEqual([t.groups["v1.1a"].stage_efforts, t.groups["v1.2"].stage_efforts], [null, EFFORTS664]);
+    assert.deepEqual(Object.keys(t.groups["v1.2"]).at(-1), "stage_efforts", "群の欄の末尾に足す");
+    // 欄を除けば同じ採点
+    for (const g of groups) { const { stage_efforts: _e, ...rest } = t.groups[g]; assert.deepEqual(rest, p.groups[g], g); }
+    assert.deepEqual(t.pairs, p.pairs);
+  });
+});
+
+test("#664 段だけの対の比較（v1.2）：after だけ・両群で違う値の stage_efforts を持つ比較を断らずに採点し、群ごとの欄に両群の値を並べる。持たない比較は欄が無い", async () => {
+  await withOut(async (base) => {
+    const passOf = (g, id) => !id.startsWith("P10-");
+    const plain = stageCompareFixture638(base, "s664-plain", { passOf });
+    const after = stageCompareFixture638(base, "s664-after", { passOf, effortsOf: (g) => (g === "after" ? EFFORTS664 : null) });
+    const both = stageCompareFixture638(base, "s664-both", { passOf, effortsOf: (g) => (g === "after" ? EFFORTS664 : { "semantic-check": "high" }) });
+    for (const out of [plain, after, both]) { const r = spawnSync(process.execPath, [scoreFile, repo, out, "--compare"], { encoding: "utf8" }); assert.equal(r.status, 0, r.stderr); }
+    const p = readCompare(plain), a = readCompare(after), b = readCompare(both);
+    for (const g of ["before", "after"]) assert.ok(!("stage_efforts" in p.groups[g]), g);
+    assert.deepEqual([a.groups.before.stage_efforts, a.groups.after.stage_efforts], [null, EFFORTS664]);
+    assert.deepEqual([b.groups.before.stage_efforts, b.groups.after.stage_efforts], [{ "semantic-check": "high" }, EFFORTS664]);
+    assert.deepEqual(a.pairs, p.pairs);
+    // 段ごとの effort の外の params の違いは今までどおり断る（旗の組の違い）
+    const bad = stageCompareFixture638(base, "s664-flags", { passOf, flagsOf: (g) => (g === "before" ? { ledger: true, ids: false } : FLAGS638), effortsOf: (g) => (g === "after" ? EFFORTS664 : null) });
+    const rb = spawnSync(process.execPath, [scoreFile, repo, bad, "--compare"], { encoding: "utf8" });
+    assert.equal(rb.status, 3, rb.stderr);
+    assert.ok(rb.stderr.includes("群の params"), rb.stderr);
+  });
+});
+
+test("#664 の対象のファイル（工場の 16 本・計測の道具の 4 本）に題材の言葉と価格の表記が無い", () => {
+  // 語は符号の列で持つ（この試験のファイル自身に書かない。#687 の走査と同じ語）
+  const words = [[0x6301, 0x3061, 0x5bc4, 0x308a], [0x5f53, 0x756a, 0x8868], [0x4f1a, 0x8cbb], [0x51fa, 0x6b20], [0x8cb8, 0x3057, 0x51fa, 0x3057]].map((cs) => String.fromCodePoint(...cs));
+  const factoryFiles = ["llm.ts", "call.ts", "call.test.ts", "limits.ts", "limits.test.ts", "openai.ts", "openai.test.ts", "cli.ts", "cli.test.ts", "v11a/run.ts", "v11a/run.test.ts", "v11a/bundle-v11a.ts", "v11a/bundle-v11a.test.ts", "v11a/stage-range.test.ts", "run-wiring.test.ts", "index.ts"].map((f) => `packages/factory/src/${f}`);
+  const toolFiles = ["run-agent.mjs", "run-agent.test.mjs", "score-agent.mjs", "score-agent.test.mjs"].map((f) => `workspace/mvp/m1/agent/eval/agent-accept/${f}`);
+  const scanned = (t) => t.split("\n").filter((l) => !/for \(const (word|w) of \[/.test(l)).join("\n");
+  for (const f of [...factoryFiles, ...toolFiles]) {
+    const t = scanned(readFileSync(join(repo, f), "utf8"));
+    for (const w of words) assert.ok(!t.includes(w), `${f}: 題材の言葉`);
+    assert.doesNotMatch(t, /[¥￥]\s?\d|\d\s?円/, `${f}: 価格の表記`);
+  }
 });

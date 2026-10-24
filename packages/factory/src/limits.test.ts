@@ -11,6 +11,7 @@ import {
   LIMIT_GUARDS,
   OUTPUT_STAGES,
   PLAN_CHOICES_MIN,
+  STAGE_EFFORT_STAGES,
   STAGE_MAX_OUTPUT_TOKENS,
   callTimeoutMsForEffort,
   checkDeclarationBytes,
@@ -20,6 +21,7 @@ import {
   checkRequestText,
   effectiveCallTimeoutMs,
   isReasoningEffort,
+  isStageEffortStage,
   maxOutputTokensForEffort,
   type LimitName,
 } from "./limits.js";
@@ -294,5 +296,15 @@ describe("v1.1α の上限と段は、v1 の値を変えずに足す（07 §3・
         expect(STAGE_MAX_OUTPUT_TOKENS[effort][stage as keyof typeof V11A_STAGE_TABLE], `${effort}/${stage}`).toBe(value);
       }
     }
+  });
+});
+
+describe("段ごとの effort を指定できる段（Issue #664）", () => {
+  it("配線する段の集合は C1・C2・C3・T2・B1・B3' の 6 つで、ほかの段（name-table・repair など）は入らない。上限・timeout の表の値は変えない", () => {
+    expect(STAGE_EFFORT_STAGES).toEqual(["vocabulary", "mapping", "semantic-check", "test-spec", "write", "decl-check"]);
+    for (const stage of STAGE_EFFORT_STAGES) expect(isStageEffortStage(stage)).toBe(true);
+    for (const stage of ["name-table", "repair", "arbitration", "requirements", "C3", "", "judge"]) expect(isStageEffortStage(stage)).toBe(false);
+    expect(CALL_TIMEOUT_BY_EFFORT).toEqual({ low: 60_000, medium: 120_000, high: 300_000 });
+    expect(AGENT_LIMITS.testsPerRequirement).toBe(16);
   });
 });
