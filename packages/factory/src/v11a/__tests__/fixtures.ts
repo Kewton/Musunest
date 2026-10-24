@@ -26,6 +26,7 @@ import {
 import { STRUCTURAL_ASSERTIONS, STRUCTURAL_TARGET_KINDS, type StructuralAssertionKind } from "../../fixed-test.js";
 import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
 import { V12_CALL_LIMITS } from "../../v12/limits.js";
+import { MAPPING_SCHEMA_NAME } from "../../v12/stages/mapping.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
 import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
 import { TEST_SPEC_RETAINED_DATA_NAME, TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
@@ -821,11 +822,17 @@ export const WHEN_NON_REQUIREMENT_REQUEST_DIFF: Readonly<Record<string, readonly
  * 偽物を作る。段の形の検査と schema を組む関数のずれが、手で書いた記録で隠れないようにする。
  * 負例の記録は、`unchecked`（`uncheckedBecause` で理由を付ける）で照合を外す。
  * `bundledC3` が真なら、記録した C3 の応答を `bundledC3Client` で束ごとに読む（旗 `v12.ids` の C3 の束。Issue #735。省けば今のまま。
- * 束が 1 つの走りでは、記録を順に読むのと同じ）。記録する要求は、束ごとに口へ届いた要求のまま
+ * 束が 1 つの走りでは、記録を順に読むのと同じ）。記録する要求は、束ごとに口へ届いた要求のまま。`bundledC2` が真なら、記録した C2 の
+ * 応答を `bundledC2Client` で束ごとに読む（旗 `v12.ids` の C2 の初回の束。Issue #736。省けば今のまま。要件 5 件以下では記録を順に
+ * 読むのと同じ）
  */
-export function createCheckedRecordingClient(recorded: readonly RecordedCall[], options: { readonly bundledC3?: boolean } = {}): RecordingClient {
+export function createCheckedRecordingClient(
+  recorded: readonly RecordedCall[],
+  options: { readonly bundledC3?: boolean; readonly bundledC2?: boolean } = {},
+): RecordingClient {
   const fake = createFakeLlmClient(recorded, { validateAgainstSchema: true });
-  const inner = options.bundledC3 === true ? bundledC3Client(fake) : fake;
+  const c3 = options.bundledC3 === true ? bundledC3Client(fake) : fake;
+  const inner = options.bundledC2 === true ? bundledC2Client(c3) : c3;
   const structured: LlmStructuredRequest[] = [];
   const tools: LlmToolRequest[] = [];
   const client: LlmClient = {
@@ -1373,6 +1380,76 @@ export function bundledC3Client(inner: LlmClient, home: readonly (readonly [stri
       };
       const raw = output as { readonly judgments: readonly unknown[] };
       return { output: { ...raw, judgments: raw.judgments.filter(keep) } as T, usage: entry.usage };
+    },
+    callWithTools: (request: LlmToolRequest) => {
+      boundary();
+      return inner.callWithTools(request);
+    },
+  };
+}
+
+/** C2 の要求のデータの塊「確定した仕様」の要件 ID（無ければ空。旗 `v12.ids` の C2 の束の要求も全要件を持つ。Issue #736） */
+export function requestPlanIds(request: LlmStructuredRequest): readonly string[] {
+  const block = request.input.split('<data name="確定した仕様">\n')[1]?.split("\n</data>")[0];
+  if (block === undefined) return [];
+  return ((JSON.parse(block) as { readonly requirements?: readonly { readonly id: string }[] }).requirements ?? []).map((requirement) => requirement.id);
+}
+
+/**
+ * 旗 `v12.ids` の C2 の初回の束（Issue #736）の偽物の口。記録した C2 の応答（全要件を書いた 1 本）を「回の位置」の台本として持つ。
+ * 回の中では、要求（「要件の一覧」の先頭の要件 ID で見分ける）ごとの n 回目の呼び出しが、その回の先頭から n 番目の記録を読み、
+ * **確定した仕様にあってその要求の一覧に無い要件**（ほかの束の要件）の entry を除いて返す（**完了の順・同時数に依らない**）。初回の
+ * 束のあとの書き直し・全体の作り直しの要求は一覧が全要件で先頭が最初の束と同じなので、同じ回の 2 番目の記録を読み、何も除かない。
+ * C2 でない要求が来たら回の区切りにする。要件が 5 件以下（束 1 つ）なら、記録を順に読むのと同じ（何も除かない）。確定した仕様に
+ * 無い要件 ID（わざと入れた未知の ID）の entry と同じ束の要件の重複は除かない。未知の ID を 1 つの束にだけ残すときは `home` に
+ * `[要件 ID, 残す束の先頭の要件 ID]` を挙げる。写像の並びでない応答（負例）は絞らずにそのまま返す。記録は位置の最大まで順に読む
+ */
+export function bundledC2Client(inner: LlmClient, home: readonly (readonly [string, string])[] = []): LlmClient {
+  const script: { readonly output: unknown; readonly usage: LlmStructuredResponse<unknown>["usage"] }[] = [];
+  let base = 0;
+  let depths = new Map<string, number>();
+  let pulling: Promise<void> = Promise.resolve();
+  const boundary = (): void => {
+    if (depths.size === 0) return;
+    base = Math.max(base, ...[...depths.values()].map((depth) => base + depth));
+    depths = new Map();
+  };
+  return {
+    async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+      if (request.schemaName !== MAPPING_SCHEMA_NAME) {
+        boundary();
+        return inner.callStructured<T>(request);
+      }
+      const ids = requestListedIds(request);
+      const planned = new Set(requestPlanIds(request));
+      const head = ids[0] ?? "";
+      const depth = depths.get(head) ?? 0;
+      depths.set(head, depth + 1);
+      const at = base + depth;
+      const ready = pulling.then(async () => {
+        while (script.length <= at) {
+          const response = await inner.callStructured<unknown>(request);
+          script.push({ output: response.output, usage: response.usage });
+        }
+      });
+      pulling = ready.catch(() => undefined);
+      await ready;
+      const entry = script[at];
+      if (entry === undefined) throw new Error("前提が壊れた：C2 の台本の位置");
+      const output = entry.output;
+      if (typeof output !== "object" || output === null || !Array.isArray((output as { requirements?: unknown }).requirements)) {
+        return { output: output as T, usage: entry.usage };
+      }
+      const homes = new Map(home);
+      const keep = (item: unknown): boolean => {
+        const id = typeof item === "object" && item !== null ? (item as { requirementId?: unknown }).requirementId : undefined;
+        if (typeof id !== "string" || ids.includes(id)) return true;
+        const homeHead = homes.get(id);
+        if (homeHead !== undefined) return homeHead === head;
+        return !planned.has(id);
+      };
+      const raw = output as { readonly requirements: readonly unknown[] };
+      return { output: { ...raw, requirements: raw.requirements.filter(keep) } as T, usage: entry.usage };
     },
     callWithTools: (request: LlmToolRequest) => {
       boundary();

@@ -37,6 +37,9 @@ import * as staticCheckStage from "../stages/static-check.js";
 import * as triageStage from "../stages/unwritable-triage.js";
 import { makeRunInput, structured as plainStructured } from "../__tests__/run.js";
 import {
+  bundledC2Client,
+  bundledC3Client,
+  bundledT2Client,
   createCheckedRecordingClient,
   DEFAULT_VALUE_REQUIREMENT_TEXT,
   ENUM_MEMBERSHIP_REQUEST_DIFF,
@@ -505,8 +508,9 @@ function inputOf(client: GenerationInputV11a["client"], overrides: Partial<Gener
 }
 
 async function runScenario(calls: readonly RecordedCall[], overrides: Partial<GenerationInputV11a> = {}) {
-  // 旗 v12.ids の走りは C3 を束ごとに同時に呼ぶので、記録した C3 の応答を束ごとに読む（束 1 つなら今と同じ。Issue #735）
-  const recording = createCheckedRecordingClient(calls, { bundledC3: overrides.flags?.ids === true });
+  // 旗 v12.ids の走りは C3 を束ごとに同時に呼ぶので、記録した C3 の応答を束ごとに読む（束 1 つなら今と同じ。Issue #735）。
+  // C2 の初回も要件 6 件以上なら束ごとに読む（要件 5 件以下は今と同じ。Issue #736）
+  const recording = createCheckedRecordingClient(calls, { bundledC3: overrides.flags?.ids === true, bundledC2: overrides.flags?.ids === true });
   const result = await runGenerationV11a(inputOf(recording.client, overrides));
   return { result, recording };
 }
@@ -1460,7 +1464,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expectNoAcceptanceMaterial([...recording.structured.map((request) => JSON.stringify(request)), ...result.diagnostics.map((artifact) => artifact.text)]);
   });
 
-  it("既定値の value が options の外の要件（R6）は、C2 の形のやり直し 1 回（要求 2 本はどちらも全要件の一覧。2 本目は R6 だけの書き直し）で直り、表が組まれ C3 へ進む（Issue #594・#627・#660）", async () => {
+  it("既定値の value が options の外の要件（R6）は、C2 の形のやり直し 1 回（初回は要件 6 件で束 2〔Issue #736〕。3 本目は全要件の一覧で R6 だけの書き直し）で直り、表が組まれ C3 へ進む（Issue #594・#627・#660）", async () => {
     const list = fixtureDefaultValueList();
     const table = withCodeIds(withAggregates(fixtureDefaultValueTable()));
     const good = idsResponsesOf(list, table, PROPERTY_LEDGER_VIEW);
@@ -1477,7 +1481,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 問題は R6 に帰属するので、2 回目の応答は R6 だけ（Issue #660）
       structured({ requirements: (good.mapping["requirements"] as readonly Record<string, unknown>[]).filter((entry) => entry["requirementId"] === "R6") }),
       structured(acceptAll(["R1", "R2", "R3", "R4", "R6"])),
-    ]);
+    ], { bundledC2: true, bundledC3: true });
     const outcome = await runStageRangeV11a({
       ...inputOf(recording.client, { plan: planOf(list) }),
       flags: IDS_FLAGS,
@@ -1488,9 +1492,9 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const listed = (request: LlmStructuredRequest) =>
       ((dataBlockOf(request.input, "要件の一覧") as { requirements: readonly { id: string }[] }).requirements).map((requirement) => requirement.id);
     const all = ["R1", "R2", "R3", "R4", "R5", "R6"];
-    expect(mappingRequests.map(listed)).toEqual([all, all]);
-    expect(mappingRequests[1]?.input).toContain("既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い");
-    expect(dataBlockOf(mappingRequests[1]?.input ?? "", "書き直す要件")).toEqual(["R6"]);
+    expect(mappingRequests.map(listed)).toEqual([all.slice(0, 5), all.slice(5), all]);
+    expect(mappingRequests[2]?.input).toContain("既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い");
+    expect(dataBlockOf(mappingRequests[2]?.input ?? "", "書き直す要件")).toEqual(["R6"]);
     const records = outcome.stages.filter((record) => record.stage === "mapping");
     expect(records.map((record) => [record.status, record.retries.shape])).toEqual([["ok", 1]]);
     expect(schemaNames(recording.structured).at(-1)).toBe(SEMANTIC_CHECK_SCHEMA_NAME);
@@ -6492,5 +6496,95 @@ describe("旗 v12.ids：要求する検査が宣言に無い失敗を追加の�
     );
     expect(roundsOf(second.result.bundle)).toEqual(roundsOf(first.result.bundle));
     expect(second.result.bundle?.artifacts).toEqual(first.result.bundle?.artifacts);
+  });
+});
+
+describe("旗 v12.ids の C2 の初回の束（Issue #736）：C3 の拒否のあとの 2 回目が落ちれば、採らなかった部分の結果は checkpoint と納品物に混ざらない", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+  type Entry = Record<string, unknown>;
+  const runSized = async (materials: SizedMaterials, calls: readonly RecordedCall[]) => {
+    // 束 2 つ以上の C2 の初回・C3・T2 は束ごとに同時に呼ぶので、記録した応答を束ごとに読む（calls.test.ts の偽物の口と同じ重ね方）
+    const structuredRequests: LlmStructuredRequest[] = [];
+    const inner = bundledC2Client(bundledC3Client(bundledT2Client(createFakeLlmClient(calls, { validateAgainstSchema: true }))));
+    const client: GenerationInputV11a["client"] = {
+      async callStructured(request) {
+        structuredRequests.push(request);
+        return inner.callStructured(request);
+      },
+      callWithTools: (request) => inner.callWithTools(request),
+    };
+    const recording = { structured: structuredRequests };
+    const result = await runGenerationV11a({
+      ...inputOf(client, { source: materials.source, plan: materials.plan, judge: createFakeJudge(materials.adviceAnswers()), budgetUsd: 1_000, deadline: 86_400_000 }),
+      flags: ALL_ON,
+      collectBoundaries: true,
+    });
+    return { result, recording };
+  };
+
+  it("(7) 要件 15（束 3）：C3 が束 1 の X と束 3 の Y を拒否し、2 回目（X・Y だけの 1 要求）が C2' に落ちると、初回の表と初回の拒否で持ち越し、2 回目の部分の結果（X の分類の入れ替え・Y の表に無い所属）は t1-t2 の checkpoint と納品物に無い", async () => {
+    const materials = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, ALL_ON);
+    const [entities, fields, behaviors, mapping] = materials.tableResponses() as readonly Record<string, readonly Entry[]>[];
+    if (entities === undefined || fields === undefined || behaviors === undefined || mapping === undefined) throw new Error("前提が壊れた：C1・C2 の応答が 4 つでない");
+    const X = materials.ids[1] as string;
+    const Y = materials.ids[11] as string;
+    const head = [structured(entities), structured(fields), structured(behaviors), structured(mapping)];
+    const tailWithout = (excluded: readonly string[]) => {
+      const t2 = materials.testSpecCasesResponse();
+      return [
+        structured({
+          classifications: (t2.classifications as readonly { requirementId: string }[]).filter((entry) => !excluded.includes(entry.requirementId)),
+          cases: t2.cases.filter((entry) => !excluded.includes(String(entry["requirementId"]))),
+        }),
+        structured({ declaration: materials.declaration() }),
+        structured({ judgments: (materials.judgments().judgments as readonly { requirementId: string }[]).filter((entry) => !excluded.includes(entry.requirementId)) }),
+      ];
+    };
+    const entryOf = (id: string) => (mapping["requirements"] ?? []).find((entry) => entry["requirementId"] === id) as Entry;
+    const flippedX = { ...entryOf(X), nature: entryOf(X)["nature"] === "ruled" ? "existence-only" : "ruled" };
+    const brokenY = { ...entryOf(Y), roles: [...(entryOf(Y)["roles"] as readonly Entry[]), { id: "E1.F99", basis: "stated", reason: null }] };
+    const firstJudgments = materials.judgments({ [X]: ["unnecessary-ownership", materials.textOf(X)], [Y]: ["weak-verification", materials.textOf(Y)] });
+    const { result, recording } = await runSized(materials, [...head, structured(firstJudgments), structured({ requirements: [flippedX, brokenY] }), ...tailWithout([X, Y])]);
+    // 初回の表の基準：同じ C2 の応答で C3 が全部受理する走り
+    const clean = await runSized(materials, [...head, structured(materials.judgments()), ...tailWithout([])]);
+    expect(clean.result.stopped, JSON.stringify(clean.result.stopped)).toBeNull();
+    expect(clean.result.outcome).toEqual({ result: "pass", verdict: "full" });
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome.verdict).toBe("partial");
+    const k = Math.ceil(MEDIAN_SIZE.requirements / 5);
+    const mappingRequests = recording.structured.filter((request) => request.schemaName === MAPPING_SCHEMA_NAME);
+    // 初回の束 k と 2 回目 1（X・Y だけ。形の再試行なし）。C3 の再点検は呼ばない（1 回目の束 k だけ）
+    expect(mappingRequests).toHaveLength(k + 1);
+    expect(dataBlockOf(mappingRequests[k]?.input ?? "", "書き直す要件")).toEqual([X, Y]);
+    expect(recording.structured.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME)).toHaveLength(k);
+    expect(result.record.stages.filter((record) => record.stage === "mapping").map((record) => [record.status, record.failure_kind])).toEqual([
+      ["ok", null],
+      ["failed", "unmet"],
+    ]);
+    // 持ち越しは初回の拒否のまま（一覧の順）
+    expect(carryEntriesOf(result.bundle)).toEqual([
+      { requirementId: X, reasons: [{ origin: "semantic-check", reason: "unnecessary-ownership" }] },
+      { requirementId: Y, reasons: [{ origin: "semantic-check", reason: "weak-verification" }] },
+    ]);
+    // 納品物の表は初回の表（2 回目の X の分類の入れ替えは混ざらない）
+    const table = artifactOf(result.bundle, "artifacts/name-table.json") as { readonly table_sha256: string; readonly classification: readonly { requirementId: string; nature: string }[] };
+    const cleanTable = artifactOf(clean.result.bundle, "artifacts/name-table.json") as typeof table;
+    expect(table.table_sha256).toBe(cleanTable.table_sha256);
+    expect(table.classification.find((entry) => entry.requirementId === X)?.nature).toBe(entryOf(X)["nature"]);
+    // t1-t2 の checkpoint は初回の表・初回の判定・初回の拒否の持ち越し
+    const boundary = result.boundaries?.find((entry) => entry.boundary === "t1-t2");
+    const cleanBoundary = clean.result.boundaries?.find((entry) => entry.boundary === "t1-t2");
+    expect(boundary?.table).toEqual(cleanBoundary?.table);
+    expect(boundary?.semanticCheck.tableSha256).toBe(cleanTable.table_sha256);
+    expect(boundary?.semanticCheck.judgments.map((judgment) => [judgment.requirementId, judgment.verdict])).toEqual(
+      (firstJudgments.judgments as readonly { requirementId: string; verdict: string }[]).map((judgment) => [judgment.requirementId, judgment.verdict]),
+    );
+    expect(boundary?.carryOver.entries.map((entry) => entry.requirementId)).toEqual([X, Y]);
+    expect(JSON.stringify(boundary).includes("E1.F99")).toBe(false);
+    // 納品物（診断を除く）に 2 回目の部分の印（E1.F99）が無い
+    const files = result.bundle === null ? [] : bundleFiles(result.bundle);
+    expect(files.length).toBeGreaterThan(0);
+    expect(files.some((file) => file.text.includes("E1.F99"))).toBe(false);
   });
 });
