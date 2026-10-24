@@ -11,6 +11,7 @@
 // 次のターン → 宣言の確定（終わりの合図）、という往復になる。`LlmToolResponse` は「続く（道具の
 // 呼び出し）」か「終わる（宣言の確定）」のどちらかである。**会話の状態はこちらで組み立てて毎回送る**
 // （`store: false`。§2 の「会話の状態」）。だから要求は `turns`（これまでの往復）を持つ。
+import type { ReasoningEffort } from "./limits.js";
 
 /**
  * LLM が返すトークンの数（§1.5）。入力・キャッシュに当たった入力・出力・推論の 4 つを持つ。
@@ -75,6 +76,11 @@ export interface LlmStructuredRequest {
   readonly schema: unknown;
   /** 出力トークンの上限。推論のトークンも含めて上限に入れる（§1.5） */
   readonly maxOutputTokens: number;
+  /**
+   * 推論の effort（段の名前で引いた口が載せる。Issue #664）。adapter は、あればこれを、無ければ adapter の設定の値を送る。
+   * 段ごとに指定しない走りの要求には載らない（要求のバイト列は今と同じ）。
+   */
+  readonly effort?: ReasoningEffort;
   /** 締切までの残り時間で実呼び出しを打ち切るための合図（共通の口が付ける。§1.5） */
   readonly signal?: AbortSignal;
 }

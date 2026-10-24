@@ -22,12 +22,15 @@ import {
   CONTRACT_VERSION,
   PROMPT_VERSION_V11A,
   PROMPT_VERSION_V12,
+  STAGE_EFFORT_USAGE,
   STAGE_USAGE,
   VOCABULARY_VERSION,
   USAGE,
   parseCliArguments,
+  parseStageEfforts,
   runCli,
 } from "./cli.js";
+import { AGENT_LIMITS, maxOutputTokensForEffort } from "./limits.js";
 import { BUILD_CLI_RECORD_FILE, PLAN_ONLY_RESULT_SCHEMA } from "./cli-plan.js";
 import * as factory from "./index.js";
 import { createFakeJudge } from "./judge-fake.js";
@@ -101,6 +104,8 @@ import {
   testSpecSchemaOf,
 } from "./v11a/stages/test-spec.js";
 import * as testSpecModule from "./v11a/stages/test-spec.js";
+import { SEMANTIC_CHECK_SCHEMA_NAME, semanticCheckRuleDefinitionsOf } from "./v11a/stages/semantic-check.js";
+import { structuralReadingText } from "./v12/structural-meanings.js";
 import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
 import type { NameTable } from "./v11a/names.js";
@@ -965,6 +970,9 @@ function v11aTestSpec(): Record<string, unknown> {
   };
 }
 
+/** Issue #663 で旗 ids の走りだけ T2 の R-tsp-02 の末尾に足した、要件ごとの試験の上限の文（値は限度の表の定数から組む） */
+const T2_IDS_LIMIT_TEXT = `要件ごとの試験は、コードが作った分を含めて ${String(AGENT_LIMITS.testsPerRequirement)} 本まで。必要な試験の枠の残る本数（remaining）を超えて場合を書かない。`;
+
 /** 手 3e（#625）で旗 ids の走りだけ場合の形に差し替えた、欄の名前を指す T2 の規則 */
 const CASE_FORM_RULE_IDS: readonly string[] = ["R-tsp-07", "R-tsp-09", "R-tsp-11", "R-tsp-12", "R-tsp-13", "R-tsp-14"];
 
@@ -1083,6 +1091,8 @@ async function runV11aCli(input: {
   readonly dir: string;
   readonly calls: readonly RecordedCall[];
   readonly pipeline?: "v1.1a" | "v1.2";
+  /** 末尾に足す引数（`--stage-effort` など。省けば今の引数。Issue #664） */
+  readonly args?: readonly string[];
 }) {
   const planPath = `${input.dir}-plan.json`;
   const planText = JSON.stringify(await v11aEnvelope());
@@ -1091,7 +1101,7 @@ async function runV11aCli(input: {
   const lines: string[] = [];
   const written: string[] = [];
   const code = await runCli({
-    argv: ["--", "request.txt", "--out", input.dir, "--pipeline", input.pipeline ?? "v1.1a", "--plan-file", planPath],
+    argv: ["--", "request.txt", "--out", input.dir, "--pipeline", input.pipeline ?? "v1.1a", "--plan-file", planPath, ...(input.args ?? [])],
     env: { [API_KEY_ENV]: "sk-FAKE" },
     readFile: async (path) => (path === planPath ? planText : V11A_SOURCE),
     writeFile: async (path, text) => {
@@ -1283,12 +1293,21 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
   const withoutIdsGenerated = (requests: readonly unknown[], ledger: LedgerView = PROPERTY_LEDGER_VIEW, generated = true): unknown[] => {
     const idsRules = ruleTexts(testSpecRuleDefinitionsOf(ledger, true));
     const offRules = ruleTexts(testSpecRuleDefinitionsOf(ledger));
+    const idsSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(ledger, true));
+    const offSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(ledger));
     const [, , testsName] = WRITE_V11A_DATA_NAMES;
     const testsBlock = new RegExp(`(<data name="${testsName}">\\n)([\\s\\S]*?)(\\n</data>)`);
     return requests.map((value) => {
       const request = value as LlmStructuredRequest;
       if (request.schemaName === TEST_SPEC_SCHEMA_NAME) {
+        // Issue #663：旗 ids の R-tsp-02 は末尾に要件ごとの試験の上限の文（限度の表の定数）を持つ。在ることを確かめてから旗 off の文に戻す
+        expect((request.rules ?? []).filter((text) => text.endsWith(T2_IDS_LIMIT_TEXT))).toHaveLength(1);
         return { ...request, rules: (request.rules ?? []).map((text) => { const at = idsRules.indexOf(text); return at < 0 ? text : (offRules[at] ?? text); }) };
+      }
+      if (request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME) {
+        // Issue #732：旗 ids の C3 の R-sc-02 は構造の検査の読み方の文を持つ。在ることを確かめてから旗 ids off の文に戻す
+        expect(request.rules).toEqual(idsSemanticRules);
+        return { ...request, rules: offSemanticRules };
       }
       if (request.schemaName === WRITE_V11A_SCHEMA_NAME) {
         // 手 4d（#666）：旗 ids の B1 は「要る検査の骨組み」の塊と R-w11-07 の旗 ids の文を持つ。塊が在ることを確かめてから元に戻す
@@ -2431,6 +2450,43 @@ const V11A_STAGE_RUN_DIGESTS: readonly string[] = [
   "0d3d1378e80402c9f7e6625191e1e9b4821b1a75a4872b62716bbc0e125eecb2",
 ];
 
+describe("旗 v12.ids の C3 の構造の検査の読み方（Issue #732）：一気通貫と段の走りの C3 の要求が同じ文を持ち、ids off の走りには無い", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const rsc02Of = (requests: readonly LlmStructuredRequest[]): readonly string[] =>
+    requests.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME).map((request) => request.rules?.[1] ?? "");
+
+  it("(4) 一気通貫（旗 ids on）と段の走り（name-table..semantic-check・ids on）の C3 の R-sc-02 は同じで読み方の文を含む。ids off の一気通貫・段の走りには無い", async () => {
+    const whole = await runV11aCli({ dir: `${directory}/v12-ids-reading-whole`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    const stage = await runStageCli({ dir: `${directory}/v12-ids-reading-stage`, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: v12Head().slice(0, 5), pipeline: "v1.2" });
+    expect(whole.code).toBe(EXIT_OK);
+    expect(stage.code).toBe(EXIT_OK);
+    const wholeRules = rsc02Of(whole.recording.structured);
+    const stageRules = rsc02Of(stage.requests.map((text) => JSON.parse(text) as LlmStructuredRequest));
+    expect(wholeRules).toHaveLength(1);
+    expect(stageRules).toEqual(wholeRules);
+    expect(wholeRules[0]).toContain(structuralReadingText());
+    expect(wholeRules[0]).toBe(ruleTexts(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true))[1]);
+    // ids off（台帳と探索は on）の走りは読み方の文を持たない
+    const flags = { ledger: true, searchRepair: true, ids: false };
+    vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => flags);
+    const wholeOff = await runV11aCli({
+      dir: `${directory}/v12-ids-reading-whole-off`,
+      calls: [structured(v11aT1(true)), structured(v11aJudgments()), structured(v11aTestSpec()), structured({ declaration: V11A_YAML }), structured(v11aJudgments())],
+      pipeline: "v1.2",
+    });
+    const stageOff = await runStageCli({ dir: `${directory}/v12-ids-reading-stage-off`, args: ["--stage-end", "semantic-check"], calls: [structured(v11aT1(true)), structured(v11aJudgments())], pipeline: "v1.2" });
+    const offRules = [...rsc02Of(wholeOff.recording.structured), ...rsc02Of(stageOff.requests.map((text) => JSON.parse(text) as LlmStructuredRequest))];
+    expect(offRules).toHaveLength(2);
+    for (const rule of offRules) {
+      expect(rule).not.toContain(structuralReadingText());
+      expect(rule).toBe(ruleTexts(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW))[1]);
+    }
+  });
+});
+
 describe("部分の指紋の版 2（台帳の未対応の観測を上流の見方に足した。Issue #725）：記録と checkpoint の差は申告した 3 つの欄だけ", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -2455,6 +2511,16 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
     }
     const dir = `${directory}/v12-upstream-v2-${String(index)}`;
     const idsOff = scenario.flags?.ids === false;
+    // Issue #732：ids on の C3 の要求は R-sc-02 に構造の検査の読み方の文を持ち、ids off は持たない。在る・無いを確かめてから外して照らす
+    // （外した要求は #732 の前の要求とバイト列で同じ＝下の BEFORE の requests のまま）
+    let semanticRequests = 0;
+    const withoutC3Reading = (request: LlmStructuredRequest): LlmStructuredRequest => {
+      if (request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME) return request;
+      semanticRequests += 1;
+      const rules = request.rules ?? [];
+      expect(rules.some((text) => text.includes(structuralReadingText())), scenario.name).toBe(!idsOff);
+      return { ...request, rules: rules.map((text) => text.replace(structuralReadingText(), "")) };
+    };
     // ledger off の C1 の schema は計算の行に集計の欄を持たない（応答も持たせない）
     const head = scenario.flags?.ledger === false ? v12Head({ ...ledgerModule.PROPERTY_LEDGER_VIEW, aggregateKinds: [] }) : v12Head();
     let requests: unknown;
@@ -2465,7 +2531,7 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
       const run = idsOff
         ? await runStageCli({ dir, args: ["--stage-end", "semantic-check"], calls: [structured(v11aT1(true)), structured(v11aJudgments())], pipeline: "v1.2" })
         : await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: head.slice(0, 5), pipeline: "v1.2" });
-      requests = run.requests;
+      requests = run.requests.map((text) => JSON.stringify(withoutC3Reading(JSON.parse(text) as LlmStructuredRequest)));
       summary = run.lines.at(-1) ?? "";
       code = run.code;
       written = run.written;
@@ -2474,11 +2540,12 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
         ? [structured(v11aT1(true)), structured(v11aJudgments()), structured(v11aTestSpec()), structured({ declaration: V11A_YAML }), structured(v11aJudgments())]
         : [...head, structured(v11aJudgments())];
       const run = await runV11aCli({ dir, calls, pipeline: "v1.2" });
-      requests = { structured: run.recording.structured, tools: run.recording.tools };
+      requests = { structured: run.recording.structured.map(withoutC3Reading), tools: run.recording.tools };
       summary = JSON.stringify(run.summary);
       code = run.code;
       written = run.written;
     }
+    expect(semanticRequests, scenario.name).toBeGreaterThan(0);
     // manifest の storage_unit は出力の場所（試験ごとの一時の場所）なので、目印に置き換えて照らす
     const textOf = async (path: string): Promise<string> => {
       const text = await fs.readFile(`${dir}/${path}`, "utf8");
@@ -3373,10 +3440,12 @@ async function runStageCli(input: {
   const planText = JSON.stringify(input.envelope ?? (await v11aEnvelope()));
   const recording = createCheckedRecordingClient(input.calls);
   const order: string[] = [];
+  const structuredRequests: LlmStructuredRequest[] = [];
   const clientErrors: unknown[] = [];
   const client: LlmClient = {
     async callStructured<T>(request: LlmStructuredRequest) {
       order.push(requestText(request));
+      structuredRequests.push(request);
       return keepingErrors(clientErrors, () => recording.client.callStructured<T>(request));
     },
     async callWithTools(request) {
@@ -3412,7 +3481,7 @@ async function runStageCli(input: {
     log: (line) => lines.push(line),
     logError: (line) => errors.push(line),
   });
-  return { code, lines, errors, written, directories, makeClient, requests: order, clientErrors };
+  return { code, lines, errors, written, directories, makeClient, requests: order, structuredRequests, clientErrors };
 }
 
 /** 段の走りの記録を読む */
@@ -3874,3 +3943,142 @@ function t2TotalOf(summary: Record<string, unknown>): unknown {
     retries: row.retries,
   };
 }
+
+/** 要求から段ごとの effort と打ち切りの合図を除く（口なしの走りの要求と比べる。Issue #664） */
+const withoutEffort = ({ effort: _effort, signal: _signal, ...rest }: LlmStructuredRequest) => rest;
+/** 条件の記録から段ごとの effort の欄を除く（Issue #664） */
+const withoutStageEfforts = (text: string): string => {
+  const value = JSON.parse(text) as { conditions: Record<string, unknown> };
+  const { stage_efforts: _stageEfforts, ...conditions } = value.conditions;
+  return JSON.stringify({ ...value, conditions });
+};
+
+describe("段ごとの effort の口（`--pipeline v1.2` の `--stage-effort`。Issue #664）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+
+  it("(1) 一気通貫：--stage-effort semantic-check=low を付けた v1.2 の走りの条件の記録の末尾に stage_efforts が段 → 値で載り、C3 の要求だけ effort low。付けない走りには欄が無く、欄と effort を除けば記録・要約・要求・納品物が同じ", async () => {
+    const calls = (): RecordedCall[] => [...v12Head(), structured(v11aJudgments())];
+    const plainDir = `${directory}/v12-stage-effort-plain`;
+    const tunedDir = `${directory}/v12-stage-effort-tuned`;
+    const plain = await runV11aCli({ dir: plainDir, calls: calls(), pipeline: "v1.2" });
+    const tuned = await runV11aCli({ dir: tunedDir, calls: calls(), pipeline: "v1.2", args: ["--stage-effort", "semantic-check=low"] });
+    expect(tuned.code).toBe(plain.code);
+    expect(plain.record.conditions).not.toHaveProperty("stage_efforts");
+    expect(tuned.record.conditions["stage_efforts"]).toEqual({ "semantic-check": "low" });
+    expect(Object.keys(tuned.record.conditions).at(-1)).toBe("stage_efforts");
+    // adapter の設定（effort・封筒）は今のまま。段の effort は要求で渡す
+    expect(tuned.makeClient.mock.calls).toEqual(plain.makeClient.mock.calls);
+    const c3 = tuned.recording.structured.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(c3.length).toBeGreaterThan(0);
+    for (const request of c3) {
+      expect(request.effort).toBe("low");
+      expect(request.maxOutputTokens).toBe(maxOutputTokensForEffort("low", "semantic-check"));
+    }
+    expect(tuned.recording.structured.filter((request) => request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME).some((request) => "effort" in request)).toBe(false);
+    expect(plain.recording.structured.some((request) => "effort" in request)).toBe(false);
+    expect(tuned.recording.structured.map(withoutEffort)).toEqual(plain.recording.structured.map(withoutEffort));
+    expect(tuned.summary).toEqual(plain.summary);
+    expect(tuned.written).toEqual(plain.written);
+    for (const path of plain.written) {
+      const plainText = await fs.readFile(`${plainDir}/${path}`, "utf8");
+      // 出力の場所（納品物の storage_unit）だけは走りごとに違うので、比較元の場所に読み替えて比べる
+      const tunedText = (await fs.readFile(`${tunedDir}/${path}`, "utf8")).replaceAll(tunedDir, plainDir);
+      expect(path === BUILD_CLI_RECORD_FILE ? withoutStageEfforts(tunedText) : tunedText, path).toBe(plainText);
+    }
+    expectNoAcceptanceMaterial(tuned.recording.structured.map((request) => JSON.stringify(request)));
+  });
+
+  it("(2') 段の走り（v1.2・vocabulary..semantic-check）：段の走りの記録の conditions の末尾に stage_efforts が載り、C3 の要求の effort と上限が low でほかは今のまま。付けなければ段の走りの記録はバイト列で同じ（欄を除けば同じ）", async () => {
+    const segment0 = (): RecordedCall[] => v12Head().slice(0, 5);
+    const plainDir = `${directory}/v12-stage-effort-segment0-plain`;
+    const tunedDir = `${directory}/v12-stage-effort-segment0-tuned`;
+    const args = ["--stage-start", "vocabulary", "--stage-end", "semantic-check"];
+    const plain = await runStageCli({ dir: plainDir, args, calls: segment0(), pipeline: "v1.2" });
+    const tuned = await runStageCli({ dir: tunedDir, args: [...args, "--stage-effort", "semantic-check=low"], calls: segment0(), pipeline: "v1.2" });
+    expect(tuned.code).toBe(EXIT_OK);
+    expect(plain.code).toBe(EXIT_OK);
+    const plainRecord = await stageRecordOf(plainDir);
+    const tunedRecord = await stageRecordOf(tunedDir);
+    expect(plainRecord["conditions"]).not.toHaveProperty("stage_efforts");
+    const conditions = tunedRecord["conditions"] as Record<string, unknown>;
+    expect(conditions["stage_efforts"]).toEqual({ "semantic-check": "low" });
+    expect(Object.keys(conditions).at(-1)).toBe("stage_efforts");
+    const c3 = tuned.structuredRequests.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(c3.length).toBeGreaterThan(0);
+    for (const request of c3) {
+      expect(request.effort).toBe("low");
+      expect(request.maxOutputTokens).toBe(maxOutputTokensForEffort("low", "semantic-check"));
+    }
+    expect(tuned.structuredRequests.filter((request) => request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME).some((request) => "effort" in request)).toBe(false);
+    expect(tuned.structuredRequests.map(withoutEffort)).toEqual(plain.structuredRequests.map(withoutEffort));
+    expect(tuned.written).toEqual(plain.written);
+    for (const path of plain.written) {
+      const plainText = await fs.readFile(`${plainDir}/${path}`, "utf8");
+      const tunedText = await fs.readFile(`${tunedDir}/${path}`, "utf8");
+      expect(path === STAGE_RUN_RECORD_FILE ? stageJsonText(JSON.parse(withoutStageEfforts(tunedText))) : tunedText, path).toBe(plainText);
+    }
+    expect(tuned.lines).toEqual(plain.lines);
+  });
+
+  it("引数：繰り返しを付けた順に段 → 値で読み、省けば欄が無い。一気通貫と段の走りの両方で受ける", () => {
+    const base = ["--", "request.txt", "--out", "out", "--pipeline", "v1.2", "--plan-file", "plan.json"];
+    const parsed = parseCliArguments([...base, "--stage-effort", "write=medium", "--stage-effort", "vocabulary=low"]);
+    expect("error" in parsed ? parsed.error : parsed.stageEfforts).toEqual({ write: "medium", vocabulary: "low" });
+    expect(Object.keys("error" in parsed ? {} : (parsed.stageEfforts ?? {}))).toEqual(["write", "vocabulary"]);
+    const staged = parseCliArguments([...base, "--stage-end", "semantic-check", "--stage-effort", "semantic-check=low"]);
+    expect("error" in staged ? staged.error : [staged.stageRange, staged.stageEfforts]).toEqual([{ start: "name-table", end: "semantic-check" }, { "semantic-check": "low" }]);
+    expect(parseCliArguments(base)).not.toHaveProperty("stageEfforts");
+    expect(parseStageEfforts([])).toEqual({ stageEfforts: {} });
+  });
+
+  const usageCases: readonly { readonly name: string; readonly argv: readonly string[]; readonly code: string }[] = [
+    { name: "知らない段", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "unknown-stage=low"], code: "stage-effort:stage" },
+    { name: "配線していない段（name-table）", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "name-table=low"], code: "stage-effort:stage" },
+    { name: "配線していない段（repair）", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "repair=low"], code: "stage-effort:stage" },
+    { name: "知らない値", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "semantic-check=extreme"], code: "stage-effort:value" },
+    { name: "空の値", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "semantic-check="], code: "stage-effort:value" },
+    {
+      name: "同じ段の重複",
+      argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "mapping=low", "--stage-effort", "mapping=low"],
+      code: "stage-effort:duplicate",
+    },
+    { name: "= の無い形", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "semantic-check"], code: "stage-effort:format" },
+    { name: "段の無い形", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "=low"], code: "stage-effort:format" },
+    { name: "値の無い旗", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort"], code: "stage-effort:missing" },
+    { name: "--pipeline v1.1a との組", argv: ["--pipeline", "v1.1a", "--plan-file", "plan.json", "--stage-effort", "semantic-check=low"], code: "stage-effort:pipeline" },
+    { name: "--pipeline v1 との組", argv: ["--pipeline", "v1", "--plan-file", "plan.json", "--stage-effort", "semantic-check=low"], code: "stage-effort:pipeline" },
+    { name: "--pipeline の省略", argv: ["--stage-effort", "semantic-check=low"], code: "stage-effort:pipeline" },
+    {
+      name: "v1.1a の段の走りとの組",
+      argv: ["--pipeline", "v1.1a", "--plan-file", "plan.json", "--stage-end", "semantic-check", "--stage-effort", "semantic-check=low"],
+      code: "stage-effort:pipeline",
+    },
+  ];
+  it.each(usageCases)("(2) $name → $code（終了コード 2・API を呼ばない・何も書かない）", async (example) => {
+    const makeClient = vi.fn();
+    const writeFile = vi.fn(async () => {});
+    const makeDirectory = vi.fn(async () => {});
+    const readFile = vi.fn(async () => V11A_SOURCE);
+    const lines: string[] = [];
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", "out", ...example.argv],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile,
+      writeFile,
+      makeDirectory,
+      loadDocuments: async () => [],
+      makeClient,
+      log: (line) => lines.push(line),
+    });
+    expect(code).toBe(EXIT_USAGE);
+    expect(lines[0]).toContain(`使い方の誤り: ${example.code}（`);
+    expect(lines.slice(1)).toEqual([USAGE, STAGE_EFFORT_USAGE]);
+    expect(makeClient).not.toHaveBeenCalled();
+    expect(readFile).not.toHaveBeenCalled();
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(makeDirectory).not.toHaveBeenCalled();
+  });
+});

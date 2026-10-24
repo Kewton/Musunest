@@ -26,6 +26,7 @@ import type { Judge, JudgeAnswer } from "../judge.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { RecordedCall } from "../llm-fake.js";
 import type { LlmStructuredRequest, LlmToolRequest, LlmUsage } from "../llm.js";
+import { AGENT_LIMITS, STAGE_EFFORT_STAGES, maxOutputTokensForEffort } from "../limits.js";
 import { requirementsFromPlan, type RequirementList, type TestSuite } from "../pipeline.js";
 import * as bindModule from "../stages/bind.js";
 import * as correspondenceStage from "../stages/correspondence.js";
@@ -124,6 +125,7 @@ import { GENERATED_TEST_ID_PREFIX, generateTests, isGeneratedTestId } from "../v
 import type { FixedTest } from "../fixed-test.js";
 import { constraintIdsIn, ruleTexts, SHAPE_PROBLEMS_DATA_NAME } from "../stages/prompt.js";
 import { MAPPING_LEDGER_DATA_NAMES, MAPPING_REWRITE_MESSAGES, MAPPING_SCHEMA_NAME } from "../v12/stages/mapping.js";
+import { structuralReadingText } from "../v12/structural-meanings.js";
 import { FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "../v12/stages/field-repair.js";
 import { natureQuestionName } from "../stages/test-suite.js";
 import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenarios } from "../__tests__/baseline-capture.js";
@@ -149,6 +151,33 @@ import {
 import * as ledgerModule from "../v12/ledger.js";
 import { V12_CALL_LIMITS } from "../v12/limits.js";
 import { buildSized, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
+
+/**
+ * 旗 ids on の C3 の要求の R-sc-02 から、構造の検査の読み方の文（Issue #732 で足した）を外した要求（#732 の前の要求と照らす。
+ * ほかの段の要求はそのまま）
+ */
+function withoutIdsReading(requests: readonly LlmStructuredRequest[]): readonly LlmStructuredRequest[] {
+  return requests.map((request) =>
+    request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME && request.rules !== undefined
+      ? { ...request, rules: request.rules.map((text) => text.replace(structuralReadingText(), "")) }
+      : request,
+  );
+}
+
+/** Issue #663 で旗 ids の T2 の R-tsp-02 の末尾に足した、要件ごとの試験の上限の文（値は限度の表の定数から組む） */
+const T2_IDS_LIMIT_TEXT = `要件ごとの試験は、コードが作った分を含めて ${String(AGENT_LIMITS.testsPerRequirement)} 本まで。必要な試験の枠の残る本数（remaining）を超えて場合を書かない。`;
+
+/**
+ * 旗 ids on の T2 の要求の R-tsp-02 から、要件ごとの試験の上限の文（Issue #663 で足した）を外した要求（#663 の前の要求と照らす。
+ * 外す前に、T2 の要求ごとに上限の文がちょうど 1 つ在ることを確かめる。ほかの段の要求はそのまま）
+ */
+function withoutIdsLimit(requests: readonly LlmStructuredRequest[]): readonly LlmStructuredRequest[] {
+  return requests.map((request) => {
+    if (request.schemaName !== TEST_SPEC_SCHEMA_NAME) return request;
+    expect((request.rules ?? []).filter((text) => text.endsWith(T2_IDS_LIMIT_TEXT))).toHaveLength(1);
+    return { ...request, rules: (request.rules ?? []).map((text) => (text.endsWith(T2_IDS_LIMIT_TEXT) ? text.slice(0, text.length - T2_IDS_LIMIT_TEXT.length) : text)) };
+  });
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -662,6 +691,9 @@ describe("(b) T1' に 2 回落ちる", () => {
   });
 });
 
+/** 要求から段ごとの effort と打ち切りの合図を除く（口なしの走りの要求と比べる。Issue #664） */
+const withoutEffort664 = ({ effort: _effort, signal: _signal, ...rest }: LlmStructuredRequest) => rest;
+
 describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3（Issue #593）", () => {
   const IDS_FLAGS = { ledger: true, searchRepair: true, ids: true };
   const responses = () => idsResponsesOf(LIST, TABLE_IDS, PROPERTY_LEDGER_VIEW);
@@ -701,6 +733,61 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       expect(JSON.stringify(request).includes('\\"copy\\"')).toBe(false);
       expect(JSON.stringify(request).includes("requestQuote")).toBe(false);
     }
+  });
+
+  it("段ごとの effort（Issue #664）(6)：C1・C2・C3・T2 の束・B1・B3' に違う effort を指定した走りで、各要求の effort と上限がその段の指定から出る。effort の欄を除いた要求・段の記録・要約・納品物・診断は口なしの走りと深く等しい", async () => {
+    const efforts = { vocabulary: "low", mapping: "medium", "semantic-check": "low", "test-spec": "medium", write: "low", "decl-check": "medium" } as const;
+    // 要求の schema の名前 → 段（C1 は束ごとの名前、B1 は v1.1α の宣言の名前）と、その段が引く出力の上限の段
+    const stageOf = (schemaName: string): keyof typeof efforts | undefined =>
+      schemaName.startsWith("vocabulary-")
+        ? "vocabulary"
+        : (({ [MAPPING_SCHEMA_NAME]: "mapping", [SEMANTIC_CHECK_SCHEMA_NAME]: "semantic-check", [TEST_SPEC_SCHEMA_NAME]: "test-spec", "declaration-v11a": "write", [DECL_CHECK_SCHEMA_NAME]: "decl-check" }) as Record<string, keyof typeof efforts>)[schemaName];
+    const outputStageOf = { vocabulary: "name-table", mapping: "name-table", "semantic-check": "semantic-check", "test-spec": "test-spec", write: "write", "decl-check": "decl-check" } as const;
+    const calls = [...idsHead(), structured(acceptAll())];
+    const plain = await runScenario(calls, { flags: IDS_FLAGS });
+    const tuned = await runScenario(calls, { flags: IDS_FLAGS, stageEfforts: efforts });
+    expect(tuned.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const seen = new Set<string>();
+    for (const request of tuned.recording.structured) {
+      const stage = stageOf(request.schemaName);
+      if (stage === undefined) {
+        expect("effort" in request, request.schemaName).toBe(false);
+        continue;
+      }
+      seen.add(stage);
+      expect(request.effort, request.schemaName).toBe(efforts[stage]);
+      expect(request.maxOutputTokens, request.schemaName).toBe(maxOutputTokensForEffort(efforts[stage], outputStageOf[stage]));
+    }
+    expect(seen).toEqual(new Set(STAGE_EFFORT_STAGES));
+    // T2 は束の口で呼ぶ（旗 ids の T2 は束ごとに 1 記録）。束の口の要求も T2 の段の effort を持つ
+    expect(countStage(tuned.result, "test-spec")).toBeGreaterThan(0);
+    expect(tuned.recording.structured.filter((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME).every((request) => request.effort === "medium")).toBe(true);
+    // 口なしの走りの要求に effort の欄は無い。effort の欄を除けば、口を付けた走りの要求と同じ
+    expect(plain.recording.structured.some((request) => "effort" in request)).toBe(false);
+    expect(tuned.recording.structured.map(withoutEffort664)).toEqual(plain.recording.structured.map(withoutEffort664));
+    expect(tuned.recording.tools).toEqual(plain.recording.tools);
+    // effort は記録の値を変えない（段の記録・要約・納品物・診断・終了コード）
+    expect(tuned.result).toEqual(plain.result);
+    expectNoAcceptanceMaterial(tuned.recording.structured.map((request) => JSON.stringify(request)));
+  });
+
+  it("段ごとの effort（Issue #664）(2')：段の走り（name-table..semantic-check）で C3 に low を付けると、C3 の要求だけ effort low・上限は low の C3 の値で、C1・C2 の要求は今のまま（effort の欄が無い）。段の走りの結果は口なしと深く等しい", async () => {
+    const calls = [...idsHead(), structured(acceptAll())];
+    const run = async (overrides: Partial<GenerationInputV11a>) => {
+      const recording = createCheckedRecordingClient(calls);
+      const outcome = await runStageRangeV11a({ ...inputOf(recording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "semantic-check" }, ...overrides });
+      return { outcome, recording };
+    };
+    const plain = await run({});
+    const tuned = await run({ stageEfforts: { "semantic-check": "low" } });
+    const c3 = tuned.recording.structured.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(c3.length).toBeGreaterThan(0);
+    for (const request of c3) {
+      expect(request.effort).toBe("low");
+      expect(request.maxOutputTokens).toBe(maxOutputTokensForEffort("low", "semantic-check"));
+    }
+    expect(tuned.recording.structured.filter((request) => request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME).some((request) => "effort" in request)).toBe(false);
+    expect(tuned.outcome).toEqual(plain.outcome);
   });
 
   it("C1' の負例：束 2 の知らない ID が 2 回続けば段 vocabulary・unmet で止まる（終了コード 1・納品物無し）。束 1 は 1 回だけ呼ぶ", async () => {
@@ -1023,7 +1110,9 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 aa61d49da041316d61a2363ad590036a1486361eba20d106a56b7a821b1e83b5）
       // 要求の SHA-256 は Issue #724 で取り直した（C2 の checks の欄を対象の並びにし R-map-03 の文を直したため。旧 7672dc5e7cc5bb29c6e9add669a90c45a22da87b4de55a9169aafbfefc45c9fb）
       // 要求の SHA-256 は Issue #725 で取り直した（旗 ids と ledger が on の C2 のデータに台帳の未対応の観測の塊を足し、台帳版の R-map-03 の文を直したため。旧 a0e42ef4f3de48221fad469acf72b29e550d33ad7488101326d496a754a49ac6）
-      "75f57eff2d977c6b6c8b71930987722c5e26076cc8d5d0dae2a06a4868e911a4",
+      // 要求の SHA-256 は Issue #732 で取り直した（旗 ids on の C3 の R-sc-02 に構造の検査の読み方の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_732_REQUESTS`。旧 75f57eff2d977c6b6c8b71930987722c5e26076cc8d5d0dae2a06a4868e911a4）
+      // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 11ca852ea32e6f3085c5cf91987ba986e9561aea6a442458ea408d2ce851de80）
+      "23e96f59c9b15af3b01e23a7b81c879a139b7776c1e0e6a823739e637b1c0852",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d3d46bd0bae1ed1bce66a419612e4d05b1d6d0cefa9b95072d2af39c8137d700）
       "ef2dc4cd77f101896bc8c4c377efeabe8f621d092497fdef0ee93b69490e031f",
@@ -1036,7 +1125,9 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 2c75ec3f7e097736f78a181425c7360fab93d01e3571468dbcb793f2b8c60e0a）
       // 要求の SHA-256 は Issue #724 で取り直した（C2 の checks の欄を対象の並びにし R-map-03 の文を直したため。旧 5bccc6c03cf22bcd5bd9ce8ee9ddb7ecdc5987f4fa4d3a7d744db156fb7488fc）
       // 要求の SHA-256 は Issue #725 で取り直した（旗 ids と ledger が on の C2 のデータに台帳の未対応の観測の塊を足し、台帳版の R-map-03 の文を直したため。旧 d6db3501d82e82b7dbe13920732e1c256b53866bca4f79a115719448695213d6）
-      "9e19ad5d99fa79745564a69adff2c76e4f54b63e940f2bede3a2a614824c775b",
+      // 要求の SHA-256 は Issue #732 で取り直した（旗 ids on の C3 の R-sc-02 に構造の検査の読み方の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_732_REQUESTS`。旧 9e19ad5d99fa79745564a69adff2c76e4f54b63e940f2bede3a2a614824c775b）
+      // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 a61b8eb44bff4d25b0770176166625d28060dfa421594be3033ff047f10b3634）
+      "fca5a4eeaad8ab62b049891ea21784f097cc9f715f7ffe27fdf3fa46f2f84179",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 c479ec4fc3ac733a9b470499f5d8fc631583a94ca9e4169834ae571ea7499645）
       "a3848402cdf1bbedbdbb51431bd971ccc94a351d6bfb88ae7a9f56054cdec635",
@@ -1051,7 +1142,9 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 7aa71911309b5ef91f9c680ac454d31ca2a49fe63156cbbb6f1314476b3b94bd）
       // 要求の SHA-256 は Issue #724 で取り直した（C2 の checks の欄を対象の並びにし R-map-03 の文を直したため。旧 dd5f9cf02049d7f833e5a99599915ce35b0b4296b5d512535c641e5d0d71e984）
       // 要求の SHA-256 は Issue #725 で取り直した（旗 ids と ledger が on の C2 のデータに台帳の未対応の観測の塊を足し、台帳版の R-map-03 の文を直したため。旧 351709d5e31e65fc7e15cb2c289bfdb67db83c5d8d4aa1fdb8415153dad8bfd9）
-      "298a1512256d852b1a484e660db51a2d58e39922bc0e9d9a1dd1bbe7acb25f21",
+      // 要求の SHA-256 は Issue #732 で取り直した（旗 ids on の C3 の R-sc-02 に構造の検査の読み方の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_732_REQUESTS`。旧 298a1512256d852b1a484e660db51a2d58e39922bc0e9d9a1dd1bbe7acb25f21）
+      // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 37d215a03b3d1fb251479e18ff68b18cba8c3ba4bb473c2667e0bd44e480192c）
+      "c71bc450115d4e4bcefe329eac1ef6280b6f20fc155782ab881cda8368fe8b9d",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 2f032bbaf50ff8e7c6c0fbe9708107eb043cca23ae2bc5b6b25680e7c2f4151a）
       "f039481b055d8d893ee5535d5b56acc5182d6e5b392c8c4f3a21c4632403f859",
@@ -1081,7 +1174,9 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 b05e55ebd15b607f7c856b6fa50c7ff31d54ae87005478ad294c825c14bab561）
       // 要求の SHA-256 は Issue #724 で取り直した（C2 の checks の欄を対象の並びにし R-map-03 の文を直したため。旧 9d0407679405956fb7d3d5ba4707f720cde73e174fa2a6c4f9a966c2929c8560）
       // 要求の SHA-256 は Issue #725 で取り直した（旗 ids と ledger が on の C2 のデータに台帳の未対応の観測の塊を足し、台帳版の R-map-03 の文を直したため。旧 d90c255d8438f58a29992f777751860ea34175f12bd2745be699ce7ee1fcba47）
-      "700a9fd50ba0cbe0641af1e0bbb175347a6fc7042917a733be759068ec318cae",
+      // 要求の SHA-256 は Issue #732 で取り直した（旗 ids on の C3 の R-sc-02 に構造の検査の読み方の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_732_REQUESTS`。旧 700a9fd50ba0cbe0641af1e0bbb175347a6fc7042917a733be759068ec318cae）
+      // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 a8445592525ce05b953014bcc300b19b10bd6e4a8361d10c34ec79d20412452d）
+      "f194a77e72fc71d29fb2d45966a2934dd85d47c7f74c7ad597811208892ee273",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d762715a3037b44cbc202848f40b5fa2cd1551bba549bd418f56fefc0e9def0e）
       "4a2626d7964d9f231142488d8151d75f3c36d8ef216d65f06c6fb63bc8a102ab",
@@ -1114,6 +1209,32 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     "(5) 形で 1 度も落ちない": "bcaf58d13fede8b1dde00b5f8665c75a4fc4a713f016ccbeb243f476cd997fee",
   };
 
+  /**
+   * Issue #732 の前の値：上の台本の LLM への要求の SHA-256（`BEFORE_DIGESTS` の 3 番目を #732 で取り直す前の値。#725 の値）。
+   * #732 の要求から C3 の R-sc-02 の構造の検査の読み方の文（`withoutIdsReading`）を外すとこの値に戻ることを照らす
+   */
+  const BEFORE_732_REQUESTS: Readonly<Record<string, string>> = {
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "75f57eff2d977c6b6c8b71930987722c5e26076cc8d5d0dae2a06a4868e911a4",
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "9e19ad5d99fa79745564a69adff2c76e4f54b63e940f2bede3a2a614824c775b",
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "298a1512256d852b1a484e660db51a2d58e39922bc0e9d9a1dd1bbe7acb25f21",
+    "(4) C2 が 2 回落ちて止まる": "f82fa77127b88ffcb12ca79f150cbe0d16438e055cc543503e8f44b8c83181f5",
+    "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+    "(5) 形で 1 度も落ちない": "700a9fd50ba0cbe0641af1e0bbb175347a6fc7042917a733be759068ec318cae",
+  };
+
+  /**
+   * Issue #663 の前の要求の SHA-256（旧の値。#732 で取り直した値）。#663 の要求から T2 の R-tsp-02 の要件ごとの試験の上限の文
+   * （`withoutIdsLimit`）を外すとこの値に戻ることを照らす。T2 に届かない (4) の 2 台本は今の値と同じ
+   */
+  const BEFORE_663_REQUESTS: Readonly<Record<string, string>> = {
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "11ca852ea32e6f3085c5cf91987ba986e9561aea6a442458ea408d2ce851de80",
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "a61b8eb44bff4d25b0770176166625d28060dfa421594be3033ff047f10b3634",
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "37d215a03b3d1fb251479e18ff68b18cba8c3ba4bb473c2667e0bd44e480192c",
+    "(4) C2 が 2 回落ちて止まる": "f82fa77127b88ffcb12ca79f150cbe0d16438e055cc543503e8f44b8c83181f5",
+    "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+    "(5) 形で 1 度も落ちない": "a8445592525ce05b953014bcc300b19b10bd6e4a8361d10c34ec79d20412452d",
+  };
+
   const BEFORE_MATERIALS_DIGESTS: Readonly<Record<string, string>> = {
     "(4) C2 が 2 回落ちて止まる": "a1c6f1158b66a23deb3a2fefe0b0ea6a0c315529a826a9d67b5fad4d8960cf27",
     "(4) C1 の束 2 が 2 回落ちて止まる": "2c99823924cadb18d40b4ee932938aa9349c60dbc058806d3d9fb1258b8a61c6",
@@ -1123,6 +1244,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const measured: Record<string, readonly string[]> = {};
     const measuredMaterials: Record<string, string> = {};
     const measuredWithoutMapping: Record<string, string> = {};
+    const measuredWithoutReading: Record<string, string> = {};
+    const measuredWithoutLimit: Record<string, string> = {};
     const rejectedSummaries: Record<string, readonly { attempt: number; problem_count: number; messages: readonly { message: string; count: number }[] }[]> = {};
     for (const script of beforeScripts()) {
       const { result, recording } = await runScenario(script.calls, { flags: IDS_FLAGS });
@@ -1135,15 +1258,31 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         rejectedSummaries[script.name] = rejected ?? [];
       }
       measuredWithoutMapping[script.name] = await sha256Hex(
-        JSON.stringify({ structured: recording.structured.filter((request) => request.schemaName !== MAPPING_SCHEMA_NAME), tools: recording.tools }),
+        JSON.stringify({ structured: withoutIdsReading(withoutIdsLimit(recording.structured)).filter((request) => request.schemaName !== MAPPING_SCHEMA_NAME), tools: recording.tools }),
       );
       measured[script.name] = await Promise.all(
         [result.record, result.summary, { structured: recording.structured, tools: recording.tools }, result.summary.exit_code, files].map((value) =>
           sha256Hex(JSON.stringify(value)),
         ),
       );
+      // Issue #732：C3 の R-sc-02 から構造の検査の読み方の文を外した要求は、#732 の前の要求の SHA-256 と同じ（差はその文だけ）
+      measuredWithoutReading[script.name] = await sha256Hex(
+        JSON.stringify({ structured: withoutIdsReading(withoutIdsLimit(recording.structured)), tools: recording.tools }),
+      );
+      // Issue #663：T2 の R-tsp-02 から要件ごとの試験の上限の文を外した要求は、#663 の前の要求の SHA-256 と同じ（差はその文だけ）
+      measuredWithoutLimit[script.name] = await sha256Hex(JSON.stringify({ structured: withoutIdsLimit(recording.structured), tools: recording.tools }));
+      if (recording.structured.some((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME)) {
+        expect(
+          recording.structured.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME).every((request) =>
+            (request.rules ?? []).some((text) => text.includes(structuralReadingText())),
+          ),
+          script.name,
+        ).toBe(true);
+      }
     }
     expect(measured).toEqual(BEFORE_DIGESTS);
+    expect(measuredWithoutReading).toEqual(BEFORE_732_REQUESTS);
+    expect(measuredWithoutLimit).toEqual(BEFORE_663_REQUESTS);
     expect(measuredMaterials).toEqual(BEFORE_MATERIALS_DIGESTS);
     expect(measuredWithoutMapping).toEqual(BEFORE_REQUESTS_WITHOUT_MAPPING);
     // Issue #725 で取り直した要求の差は、旗 ids と ledger が on の C2 の要求のデータの台帳の未対応の観測の塊（文書の塊の直後）と規則の文
@@ -1156,7 +1295,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const third = beforeScripts().find((script) => script.name === "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す");
     const thirdRun = await runScenario(third?.calls ?? [], { flags: IDS_FLAGS });
     expect(thirdRun.recording.structured[5]?.schemaName).toBe("mapping");
-    expect(await sha256Hex(JSON.stringify({ structured: thirdRun.recording.structured.filter((_, index) => index !== 5), tools: thirdRun.recording.tools }))).toBe(
+    expect(await sha256Hex(JSON.stringify({ structured: withoutIdsReading(withoutIdsLimit(thirdRun.recording.structured)).filter((_, index) => index !== 5), tools: thirdRun.recording.tools }))).toBe(
       BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING,
     );
     // rejected は、形の試行ごとの候補 2 件（attempt 1・2 の順）で、それぞれ問題の一覧（problem_count と固定文）を持つ
@@ -5208,6 +5347,10 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     expect(stageIds(prior.result)).toContain("name-table");
     expect(stageIds(prior.result).some((stage) => stage === "vocabulary" || stage === "mapping")).toBe(false);
     expect(artifactOf(prior.result.bundle, "artifacts/summary.json")).not.toHaveProperty("v12_calls");
+    // ids off の C3 の R-sc-02 は構造の検査の読み方の文を持たない（Issue #732）
+    const semantic = prior.recording.structured.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(semantic.length).toBeGreaterThan(0);
+    expect(semantic.every((request) => !(request.rules ?? []).some((text) => text.includes(structuralReadingText())))).toBe(true);
   });
 
   /**
@@ -5259,13 +5402,25 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     // ids on の T2 の R-tsp-16 は台帳の旗 ids の文（Issue #595）。その 1 文を ids off の文に戻して比べる
     const idsRules = ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true));
     const offRules = ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW));
-    const withOffRules = (request: LlmStructuredRequest): LlmStructuredRequest =>
-      request.schemaName !== TEST_SPEC_SCHEMA_NAME
-        ? request
-        : { ...request, rules: (request.rules ?? []).map((text) => { const at = idsRules.indexOf(text); return at < 0 ? text : (offRules[at] ?? text); }) };
+    // ids on の C3 の R-sc-02 は構造の検査の読み方の文を持つ（Issue #732）。その 1 文を ids off の文に戻して比べる
+    const idsSemanticRules = ruleTexts(semanticCheckStage.semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true));
+    const offSemanticRules = ruleTexts(semanticCheckStage.semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW));
+    const withOffRules = (request: LlmStructuredRequest): LlmStructuredRequest => {
+      const [from, to] =
+        request.schemaName === TEST_SPEC_SCHEMA_NAME
+          ? [idsRules, offRules]
+          : request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME
+            ? [idsSemanticRules, offSemanticRules]
+            : [undefined, undefined];
+      if (from === undefined) return request;
+      return { ...request, rules: (request.rules ?? []).map((text) => { const at = from.indexOf(text); return at < 0 ? text : (to[at] ?? text); }) };
+    };
     expect(onLater.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)?.rules).not.toEqual(
       offLater.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)?.rules,
     );
+    expect(onLater.find((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME)?.rules).toEqual(idsSemanticRules);
+    expect(offLater.find((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME)?.rules).toEqual(offSemanticRules);
+    expect(idsSemanticRules).not.toEqual(offSemanticRules);
     // T2 の要求は、手 3d（#624）で要件の一覧・確かめ方・所属から構造の要件 R2 を除き、schema の operation・assertion を封じたので、
     // T2 を除いた C3・B1・B3' を比べる（T2 の差は下で名指しで照らす）
     const notT2 = (requests: readonly LlmStructuredRequest[]) => requests.filter((request) => request.schemaName !== TEST_SPEC_SCHEMA_NAME);

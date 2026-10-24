@@ -199,6 +199,38 @@ describe("要求の組み立て（02 §2・§2.2）", () => {
     expect(body.reasoning).toEqual({ effort: "high" });
   });
 
+  it("段ごとの effort（Issue #664）：要求に effort があれば reasoning はその値、無ければ設定の値。要求に無ければ body はバイト列で今と同じ。道具の要求の body は不変", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+    );
+    const client = createOpenAiLlmClient({ apiKey: "test-key", effort: "high", fetch });
+
+    await client.callStructured(STRUCTURED_REQUEST);
+    await client.callStructured({ ...STRUCTURED_REQUEST, effort: "low" });
+    await client.callStructured(STRUCTURED_REQUEST);
+    expect(bodyOf(captured, 0).reasoning).toEqual({ effort: "high" });
+    expect(bodyOf(captured, 1).reasoning).toEqual({ effort: "low" });
+    // 要求の effort は reasoning にだけ現れ、ほかの欄・並びは同じ（effort の欄を body に写さない）
+    const { reasoning: _low, ...withLow } = bodyOf(captured, 1);
+    const { reasoning: _high, ...withHigh } = bodyOf(captured, 0);
+    expect(JSON.stringify(withLow)).toBe(JSON.stringify(withHigh));
+    expect(JSON.stringify(bodyOf(captured, 2))).toBe(JSON.stringify(bodyOf(captured, 0)));
+    expect(Object.keys(bodyOf(captured, 1))).toEqual(Object.keys(bodyOf(captured, 0)));
+
+    // adapter に effort の設定が無くても、要求の effort は送る
+    const bare = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)));
+    const bareClient = createOpenAiLlmClient({ apiKey: "test-key", fetch: bare.fetch });
+    await bareClient.callStructured(STRUCTURED_REQUEST);
+    await bareClient.callStructured({ ...STRUCTURED_REQUEST, effort: "medium" });
+    expect(bodyOf(bare.captured, 0).reasoning).toBeUndefined();
+    expect(bodyOf(bare.captured, 1).reasoning).toEqual({ effort: "medium" });
+
+    // 道具の要求は今の設定の値のまま（要求の型に effort の欄は無い）
+    const tools = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ entity: "item" })), USAGE_WIRE)));
+    await createOpenAiLlmClient({ apiKey: "test-key", effort: "high", fetch: tools.fetch }).callWithTools(TOOL_REQUEST);
+    expect(bodyOf(tools.captured).reasoning).toEqual({ effort: "high" });
+  });
+
   it("道具付きの要求に、store: false・max_output_tokens・instructions・tools が入る", async () => {
     const { fetch, captured } = recordingFetch(() =>
       jsonResponse(completed(outputText(JSON.stringify({ entity: "item" })), USAGE_WIRE)),
