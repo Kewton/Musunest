@@ -7,7 +7,10 @@
 //   4. `unresolved` の要件は対象にも応答の必須にも無い
 //   5. 旗 v12.ids の束（Issue #735）：要件 5 件ごとの束に分けて同時に呼び、束ごとに形を確かめ、合併して全体の完全性を確かめる。
 //      形のやり直しは 2 回の点検を通じて段全体で束の数まで。偽物の LLM・遅らせた偽物の応答で閉じる
+//   6. 旗 v12.ids の束が 2 つ以上の要求（Issue #741）：束の外の対象を「参照のみ」の塊で渡し、その読み方の規則を末尾に 1 つ足す。
+//      判定の対象・形の検査は変えない。束が 1 つの要求は直す前とバイト列で同じ
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
+import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import type { RequirementList } from "../../pipeline.js";
 import { ruleDefinitionDefects, ruleTexts, type RuleDefinition } from "../../stages/prompt.js";
@@ -20,6 +23,7 @@ import {
   createCheckedRecordingClient,
   negative,
   recordedStructured,
+  FIXTURE_CONSTRAINT_ID,
   FIXTURE_DOCUMENTS,
   fixtureDefaultValueList,
   fixtureDefaultValueTable,
@@ -50,6 +54,8 @@ import { STRUCTURAL_ASSERTIONS } from "../../fixed-test.js";
 import { STRUCTURAL_MEANINGS, structuralReadingText, type StructuralMeaningTable } from "../../v12/structural-meanings.js";
 import {
   SEMANTIC_CHECK_LEDGER_RULE_ID,
+  SEMANTIC_CHECK_REFERENCE_DATA_NAME,
+  SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION,
   SEMANTIC_CHECK_RULE_DEFINITIONS,
   SEMANTIC_CHECK_RULES,
   SEMANTIC_CHECK_SCHEMA,
@@ -1133,5 +1139,287 @@ describe("旗 ids on：C3 を要件 5 件ごとの束に分けて同時に呼び
     }
     const [word] = ACCEPTANCE_MATERIAL_WORDS;
     expect(() => expectNoAcceptanceMaterial([`束 ${word ?? ""}`])).toThrow();
+  });
+});
+
+describe("旗 ids on：束が 2 つ以上の C3 の要求に、束の外の対象の要件を「参照のみ（判定しない）」の塊で渡し、その読み方の規則を 1 つ足す（Issue #741）", () => {
+  interface NodeFileSystem {
+    readFileSync(path: URL, encoding: "utf8"): string;
+  }
+  const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
+  const requirementOf = (id: string, text: string, quote: string = text) => ({ id, text, quote, position: { start: 0, end: quote.length } });
+  const REFERENCE_RULE = ruleTexts([SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION])[0] as string;
+
+  /**
+   * 要件 6 件（束 2 つ）：束 2 の要件 Y（R6）が束 1 の要件 X（R1）の指定した項目を参照する。`variant` で X の文と所属だけを変える
+   * （A：題名と金額・所属も 2 つ、B：題名だけ・所属も 1 つ、C：B の文で所属は A のまま）。Y の文・引用・所属・確かめ方と表の行は同じ
+   */
+  const X_TEXT = { A: "R1 は、項目の題名と金額を指定する。", B: "R1 は、項目の題名だけを指定する。" } as const;
+  const X_OWNERSHIP = { A: ["f.item.title", "f.item.amount"], B: ["f.item.title"] } as const;
+  const Y_TEXT = "R6 は、R1 が指定した項目を全部、一覧の画面に出す。";
+  function referringOf(variant: "A" | "B" | "C") {
+    const text = variant === "A" ? X_TEXT.A : X_TEXT.B;
+    const owned = variant === "B" ? X_OWNERSHIP.B : X_OWNERSHIP.A;
+    const list: RequirementList = {
+      requirements: [
+        requirementOf("R1", text),
+        ...["R2", "R3", "R4", "R5"].map((id) => requirementOf(id, `${id} の項目を一覧で見られる。`)),
+        requirementOf("R6", Y_TEXT),
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const base = fixtureTable();
+    const ids = list.requirements.map((requirement) => requirement.id);
+    const table: NameTable = {
+      rows: base.rows,
+      ownership: ids.map((requirementId) => ({
+        requirementId,
+        roles: requirementId === "R1" ? owned.map(stated) : requirementId === "R6" ? ["f.item.title", "f.item.amount", "s.items"].map(stated) : [stated("s.items")],
+      })),
+      verification: ids.map((requirementId) =>
+        requirementId === "R6"
+          ? { requirementId, kind: "structural" as const, reason: "画面に出ることを見る", checks: ["view-shows" as const] }
+          : { requirementId, kind: "fixed-test" as const },
+      ),
+      classification: ids.map((requirementId) => ({ requirementId, nature: requirementId === "R6" ? ("existence-only" as const) : ("ruled" as const) })),
+    };
+    return { list, table, plan: planOf(list) };
+  }
+  const acceptAllOf = (request: LlmStructuredRequest) => ({ judgments: semanticRequestIds(request).map(accept) });
+  /** 偽物の口（届いた要求を積み、要求の束の要件を全部受理する） */
+  async function requestsOf(materials: { readonly list: RequirementList; readonly table: NameTable; readonly plan: ConfirmedPlan }, extra: Partial<SemanticCheckInput> = {}) {
+    const requests: LlmStructuredRequest[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        requests.push(request);
+        return { output: acceptAllOf(request) as T, usage: undefined };
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    const outcome = await runSemanticCheck({
+      plan: materials.plan,
+      list: materials.list,
+      table: materials.table,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(client),
+      ids: true,
+      bundleConcurrency: 1,
+      ...extra,
+    });
+    return { outcome, requests };
+  }
+  const referenceOf = (request: LlmStructuredRequest | undefined): unknown => {
+    const block = dataBlocks(request?.input ?? "").find((entry) => entry.name === SEMANTIC_CHECK_REFERENCE_DATA_NAME);
+    return block === undefined ? undefined : (JSON.parse(block.text) as unknown);
+  };
+  /** 直す前の要求（参照の塊と、末尾に足した規則を外す。Issue #741 の前の段のコードが作った要求の形） */
+  const revert741 = (request: LlmStructuredRequest): LlmStructuredRequest => {
+    const rules = request.rules ?? [];
+    if (rules.at(-1) !== REFERENCE_RULE) throw new Error("前提が壊れた：末尾に参照の規則が無い");
+    const input = request.input.replace(/\n<data name="ほかの要件（参照のみ。判定しない）">\n[\s\S]*?\n<\/data>$/, "");
+    if (input === request.input) throw new Error("前提が壊れた：参照の塊が無い");
+    return { ...request, rules: rules.slice(0, -1), input };
+  };
+  const shaOf = async (request: LlmStructuredRequest | undefined): Promise<string> => sha256Hex(JSON.stringify(request));
+  /**
+   * 直す前（4a61133 の段のコード）が作った要求の SHA-256（`JSON.stringify` の要求）。束 2 の要求は A・B で同じだった（材料の欠け）。
+   * 境界は (2') の一覧 8 件・対象 5 件の要求
+   */
+  const BEFORE_741 = {
+    bundle2: "ee59539510d24961acfb76e0923751020a2ce841d52f88fc9bdd9ec4eb363a9d",
+    boundary: "d536022664f4a4ad50969bdca2c01b11f5f8fa1b1ec00e085356ba001c5d025a",
+  } as const;
+
+  it("(1) 束 2 の Y が束 1 の X を参照する対 A・B：直す前は束 2 の要求が A・B で同じで、全対象を 1 要求で渡す経路（ids off）は異なる。直した後は束 2 の参照の塊に A・B それぞれの X の文と所属が入り、要求が異なる", async () => {
+    const [a, b] = [referringOf("A"), referringOf("B")];
+    // 前提：Y 自身の文・引用・所属・確かめ方と表の行は A・B で同じで、X の文と所属だけが違う
+    expect(a.list.requirements.slice(1)).toEqual(b.list.requirements.slice(1));
+    expect(a.table.rows).toEqual(b.table.rows);
+    expect(a.table.ownership.slice(1)).toEqual(b.table.ownership.slice(1));
+    expect(a.table.verification).toEqual(b.table.verification);
+    const onA = await requestsOf(a);
+    const onB = await requestsOf(b);
+    expect(onA.requests.map(semanticRequestIds)).toEqual([["R1", "R2", "R3", "R4", "R5"], ["R6"]]);
+    expect(onB.requests.map(semanticRequestIds)).toEqual([["R1", "R2", "R3", "R4", "R5"], ["R6"]]);
+    // 直す前の挙動：束 2 の要求は A・B でバイト列が同じ（4a61133 の段のコードの SHA とも一致）
+    const [beforeA, beforeB] = [revert741(onA.requests[1] as LlmStructuredRequest), revert741(onB.requests[1] as LlmStructuredRequest)];
+    expect(JSON.stringify(beforeA)).toBe(JSON.stringify(beforeB));
+    expect(await shaOf(beforeA)).toBe(BEFORE_741.bundle2);
+    // 全対象を 1 要求で渡す経路では A・B の要求は異なる
+    const offA = await requestsOf(a, { ids: false });
+    const offB = await requestsOf(b, { ids: false });
+    expect(offA.requests).toHaveLength(1);
+    expect(JSON.stringify(offA.requests[0])).not.toBe(JSON.stringify(offB.requests[0]));
+    // 直した後：束 2 の参照の塊に、それぞれの X の文と所属が入り、要求が異なる
+    for (const [run, variant] of [
+      [onA, "A"],
+      [onB, "B"],
+    ] as const) {
+      const reference = referenceOf(run.requests[1]) as { readonly 要件の文と引用: readonly unknown[]; readonly 要件ごとの所属: readonly unknown[] };
+      expect(reference.要件の文と引用[0]).toEqual({ requirementId: "R1", text: X_TEXT[variant], quote: X_TEXT[variant] });
+      expect(reference.要件ごとの所属[0]).toEqual({ requirementId: "R1", roles: X_OWNERSHIP[variant].map(stated) });
+    }
+    expect(JSON.stringify(onA.requests[1])).not.toBe(JSON.stringify(onB.requests[1]));
+    expect(onA.outcome.ok && onB.outcome.ok).toBe(true);
+  });
+
+  it("(1') X の文だけを変え、所属は同じにした対（A・C）でも、直した後の束 2 の要求は異なる（直す前は同じ）", async () => {
+    const [a, c] = [referringOf("A"), referringOf("C")];
+    expect(a.table).toEqual(c.table);
+    const onA = await requestsOf(a);
+    const onC = await requestsOf(c);
+    expect(JSON.stringify(revert741(onA.requests[1] as LlmStructuredRequest))).toBe(JSON.stringify(revert741(onC.requests[1] as LlmStructuredRequest)));
+    expect(JSON.stringify(onA.requests[1])).not.toBe(JSON.stringify(onC.requests[1]));
+    const reference = referenceOf(onC.requests[1]) as { readonly 要件の文と引用: readonly unknown[] };
+    expect(reference.要件の文と引用[0]).toEqual({ requirementId: "R1", text: X_TEXT.B, quote: X_TEXT.B });
+  });
+
+  /** 要件 12 件（R4・R9 は unresolved）。引用は文と別の文字列、所属・確かめ方・助言の印は要件ごとに違う値 */
+  function mixedOf() {
+    const ids = Array.from({ length: 12 }, (_, index) => `R${String(index + 1)}`);
+    const list: RequirementList = {
+      requirements: ids.map((id) => requirementOf(id, `${id} の値を一覧で見られる。`, `依頼の ${id} の文`)),
+      decisions: [],
+      unresolved: [],
+    };
+    const base = fixtureTable();
+    const rowIds = base.rows.map((row) => row.id);
+    const table: NameTable = {
+      rows: base.rows,
+      ownership: ids.map((requirementId, index) => ({ requirementId, roles: [stated(rowIds[index % rowIds.length] as string)] })),
+      verification: ids.map((requirementId, index) =>
+        requirementId === "R4" || requirementId === "R9"
+          ? { requirementId, kind: "unresolved" as const, reason: "宣言で書けない", constraintIds: [FIXTURE_CONSTRAINT_ID] }
+          : index % 2 === 0
+            ? { requirementId, kind: "fixed-test" as const }
+            : { requirementId, kind: "structural" as const, reason: `${requirementId} の画面に出ることを見る`, checks: ["view-shows" as const] },
+      ),
+      classification: ids.map((requirementId) => ({ requirementId, nature: "ruled" as const })),
+    };
+    const advice: readonly JudgeAdviceMarkEntry[] = [
+      { requirementId: "R2", id: "s.items", mark: "suspect-unnecessary" },
+      { requirementId: "R8", id: "f.item.amount", mark: "llm-unknown-confidence" },
+      { requirementId: "R9", id: "f.item.day", mark: "undetermined" },
+    ];
+    return { list, table, plan: planOf(list), advice };
+  }
+
+  it("(2) 参照の塊は、判定の対象のうち束の外のものをちょうど 1 回ずつ一覧の順で持ち、束の要件と unresolved を含まない。文・引用・所属・確かめ方・助言の印の値が元の入力どおり", async () => {
+    const mixed = mixedOf();
+    const targets = semanticCheckTargets(mixed.list, mixed.table);
+    expect(targets).toEqual(["R1", "R2", "R3", "R5", "R6", "R7", "R8", "R10", "R11", "R12"]);
+    const { outcome, requests } = await requestsOf(mixed, { advice: mixed.advice });
+    expect(outcome.ok).toBe(true);
+    const bundles = [targets.slice(0, 5), targets.slice(5)];
+    expect(requests.map(semanticRequestIds)).toEqual(bundles);
+    const expected = (ids: readonly string[]) => ({
+      要件の文と引用: ids.map((id) => {
+        const found = mixed.list.requirements.find((requirement) => requirement.id === id);
+        return { requirementId: id, text: found?.text, quote: found?.quote };
+      }),
+      要件ごとの所属: ids.map((id) => mixed.table.ownership.find((entry) => entry.requirementId === id)),
+      確かめ方: ids.map((id) => mixed.table.verification.find((entry) => entry.requirementId === id)),
+      助言の印: mixed.advice.filter((entry) => ids.includes(entry.requirementId)),
+    });
+    for (const [index, request] of requests.entries()) {
+      const others = targets.filter((id) => !(bundles[index] ?? []).includes(id));
+      const reference = referenceOf(request) as Record<string, readonly { readonly requirementId: string }[]>;
+      expect(reference).toEqual(expected(others));
+      for (const name of ["要件の文と引用", "要件ごとの所属", "確かめ方"]) {
+        expect((reference[name] ?? []).map((entry) => entry.requirementId)).toEqual(others);
+      }
+      // 参照の塊は末尾に 1 つだけ。主の塊は今のまま束の要件だけ
+      expect(dataBlocks(request.input).map((block) => block.name)).toEqual(["要件の文と引用", "表の行", "要件ごとの所属", "確かめ方", "助言の印", SEMANTIC_CHECK_REFERENCE_DATA_NAME]);
+      // 名前・試験・期待・合否を渡さない
+      expect(hasKey(reference, "name")).toBe(false);
+    }
+    // 値は手で書いた期待とも一致する（実装と同じ組み方だけで通る形を防ぐ）
+    const first = referenceOf(requests[0]) as Record<string, readonly unknown[]>;
+    expect(first["要件の文と引用"]?.[0]).toEqual({ requirementId: "R7", text: "R7 の値を一覧で見られる。", quote: "依頼の R7 の文" });
+    expect(first["確かめ方"]?.[0]).toEqual({ requirementId: "R7", kind: "fixed-test" });
+    expect(first["助言の印"]).toEqual([{ requirementId: "R8", id: "f.item.amount", mark: "llm-unknown-confidence" }]);
+    const second = referenceOf(requests[1]) as Record<string, readonly unknown[]>;
+    expect(second["確かめ方"]?.[1]).toEqual({ requirementId: "R2", kind: "structural", reason: "R2 の画面に出ることを見る", checks: ["view-shows"] });
+    expect(second["助言の印"]).toEqual([{ requirementId: "R2", id: "s.items", mark: "suspect-unnecessary" }]);
+  });
+
+  it("(2') 境界：一覧が 8 件でも判定の対象が 5 件（unresolved を除く）なら、参照の塊も追加の規則も無く、要求は直す前とバイト列で同じ。対象 0 件なら呼ばない", async () => {
+    const mixed = mixedOf();
+    const list: RequirementList = { ...mixed.list, requirements: mixed.list.requirements.slice(0, 8) };
+    const keep = (entry: { readonly requirementId: string }) => list.requirements.some((requirement) => requirement.id === entry.requirementId);
+    const unresolvedOf = (requirementId: string) => ({ requirementId, kind: "unresolved" as const, reason: "宣言で書けない", constraintIds: [FIXTURE_CONSTRAINT_ID] });
+    const table: NameTable = {
+      rows: mixed.table.rows,
+      ownership: mixed.table.ownership.filter(keep),
+      verification: mixed.table.verification.filter(keep).map((entry) => (["R4", "R7", "R8"].includes(entry.requirementId) ? unresolvedOf(entry.requirementId) : entry)),
+      classification: mixed.table.classification.filter(keep),
+    };
+    expect(semanticCheckTargets(list, table)).toEqual(["R1", "R2", "R3", "R5", "R6"]);
+    const materials = { list, table, plan: planOf(list) };
+    const { requests } = await requestsOf(materials, { advice: mixed.advice });
+    expect(requests).toHaveLength(1);
+    expect(referenceOf(requests[0])).toBeUndefined();
+    expect(requests[0]?.rules).not.toContain(REFERENCE_RULE);
+    expect(requests[0]?.rules).toEqual(ruleTexts(semanticCheckRuleDefinitionsOf(undefined, true)));
+    expect(await shaOf(requests[0])).toBe(BEFORE_741.boundary);
+    const none = await requestsOf(materials, { table: { ...table, verification: table.verification.map((entry) => unresolvedOf(entry.requirementId)) } });
+    expect(none.requests).toHaveLength(0);
+  });
+
+  it("(2'') 追加の規則の定義は不備 0 で、R-sc-01〜05 の共通の定義に無い。束が 2 つ以上の要求にだけ末尾に入り、束が 1 つの要求と旗 off の要求に入らない", async () => {
+    expect(ruleDefinitionDefects([...semanticCheckRuleDefinitionsOf(undefined, true), SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION])).toEqual([]);
+    expect(ruleDefinitionDefects([...semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true), SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION])).toEqual([]);
+    expect(SEMANTIC_CHECK_RULE_DEFINITIONS.map((definition) => definition.id)).toEqual(["R-sc-01", "R-sc-02", "R-sc-03", "R-sc-04", "R-sc-05"]);
+    expect(SEMANTIC_CHECK_RULES).not.toContain(REFERENCE_RULE);
+    for (const ledger of [undefined, PROPERTY_LEDGER_VIEW]) {
+      expect(semanticCheckRuleDefinitionsOf(ledger, true).map((definition) => definition.id)).not.toContain(SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION.id);
+    }
+    const mixed = mixedOf();
+    const on = await requestsOf(mixed);
+    expect(on.requests).toHaveLength(2);
+    for (const request of on.requests) expect(request.rules).toEqual([...ruleTexts(semanticCheckRuleDefinitionsOf(undefined, true)), REFERENCE_RULE]);
+    const off = await requestsOf(mixed, { ids: false });
+    expect(off.requests).toHaveLength(1);
+    expect(off.requests[0]?.rules).not.toContain(REFERENCE_RULE);
+    expect(referenceOf(off.requests[0])).toBeUndefined();
+    const single = await requestsOf({ ...mixed, list: { ...mixed.list, requirements: mixed.list.requirements.slice(0, 5) } });
+    expect(single.requests).toHaveLength(1);
+    expect(single.requests[0]?.rules).not.toContain(REFERENCE_RULE);
+  });
+
+  it("(3) 参照の塊にある束の外の要件の判定を返した応答は、その束の形の落ち（2 回で malformed。形の検査は変えない）", async () => {
+    const materials = referringOf("A");
+    const requests: LlmStructuredRequest[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        requests.push(request);
+        const ids = semanticRequestIds(request);
+        // 束 2 は、参照のみの X（R1）の判定も返す
+        const output = ids[0] === "R6" ? { judgments: [accept("R6"), accept("R1")] } : { judgments: ids.map(accept) };
+        return { output: output as T, usage: undefined };
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    const outcome = await runSemanticCheck({ ...materials, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(client), ids: true, bundleConcurrency: 1 });
+    if (outcome.ok) throw new Error("通らないはず");
+    expect(outcome.failure.kind).toBe("malformed");
+    if (outcome.failure.kind !== "malformed") return;
+    expect(outcome.failure.problems.map((problem) => problem.message)).toContain("要件 ID が点検の対象に無い");
+    expect(requests.map((request) => semanticRequestIds(request)[0])).toEqual(["R1", "R6", "R6"]);
+    expect((referenceOf(requests[1]) as { readonly 要件の文と引用: readonly { readonly requirementId: string }[] }).要件の文と引用.map((entry) => entry.requirementId)).toEqual(["R1", "R2", "R3", "R4", "R5"]);
+  });
+
+  it("要求・この試験・段のファイルに受入の題材の言葉が無い", async () => {
+    const runs = [await requestsOf(referringOf("A")), await requestsOf(referringOf("B")), await requestsOf(mixedOf(), { advice: mixedOf().advice })];
+    expectNoAcceptanceMaterial(runs.flatMap((run) => run.requests.map((request) => JSON.stringify(request))));
+    const fs = (await import(/* @vite-ignore */ "node:fs")) as NodeFileSystem;
+    for (const file of ["./semantic-check.ts", "./semantic-check.test.ts"]) {
+      expectNoAcceptanceMaterial([fs.readFileSync(new URL(file, import.meta.url), "utf8")]);
+    }
   });
 });

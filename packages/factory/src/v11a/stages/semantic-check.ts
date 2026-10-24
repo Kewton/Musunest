@@ -17,6 +17,11 @@
 // 束ごとに今の形の検査を掛け、合併した判定に全体の完全性を掛ける。形のやり直しは 2 回の点検を通じて段全体で束の数（k）まで
 // （2026-10-24 所有者の決定）。ids off は今の 1 回の呼び出しのまま。
 //
+// 束が 2 つ以上の要求は、束の外の対象の要件（文と引用・所属・確かめ方・助言の印）を「参照のみ」の塊で渡し、その読み方の規則
+// （`SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION`）を 1 つ足す（Issue #741）。ある要件の判定にほかの要件の文・所属が要ることがあり、
+// 束に絞ると材料が欠けるため。関係する要件だけをコードで選ぶと取りこぼすので、束の外の対象を全部渡す。判定の対象・形の検査は
+// 変えない（束の外の要件の判定は今の束の形の検査で落ちる）。束が 1 つの要求は今とバイト列で同じ。
+//
 // **完全性と引用の実在はコードが形として確かめる**（`checkJudgmentsShape`。B3' と共有）：対象の全要件に
 // ちょうど 1 判定。欠落・重複・未知の要件 ID・確定した仕様にも要件の文にも見つからない引用・引用の無い拒否は
 // 形の落ちで、共通の窓口が 1 回やり直し、2 回続けば `malformed`（点検していない状態で先へ進まない）。
@@ -89,6 +94,20 @@ export const SEMANTIC_CHECK_RULE_DEFINITIONS: readonly RuleDefinition[] = [
     since: "Issue #507",
   },
 ];
+
+/**
+ * 旗 `v12.ids` の束が 2 つ以上の要求にだけ足す規則（Issue #741）。R-sc-01〜05 の共通の定義には入れない（束が 1 つの要求と旗 off の
+ * 要求の規則は今のまま）
+ */
+export const SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION: RuleDefinition = {
+  id: "R-sc-06",
+  text: "データの「ほかの要件（参照のみ。判定しない）」の要件は、判定の材料（必要な対象が表に揃っているか・所属が正しいかを見るための、ほかの要件の文と所属）に使ってよいが、その要件の判定を返さない。判定の対象は、データの「要件の文と引用」の要件だけである。",
+  why: "C3 を束に分けると、束の外の要件を参照する要件の判定の材料が欠ける。束の外の対象を参照のみで渡し、判定の対象は束の要件のまま保つ（方法論 03 の H3）",
+  since: "Issue #741",
+};
+
+/** 束の外の対象を渡すデータの塊の名前（旗 `v12.ids` の束が 2 つ以上の要求だけ。Issue #741） */
+export const SEMANTIC_CHECK_REFERENCE_DATA_NAME = "ほかの要件（参照のみ。判定しない）";
 
 /** T1'' に足す規則（定義の `text` から組む） */
 export const SEMANTIC_CHECK_RULES: readonly string[] = ruleTexts(SEMANTIC_CHECK_RULE_DEFINITIONS);
@@ -372,6 +391,8 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
   const round = input.round ?? 1;
   const shapeRetries = input.shapeRetries ?? semanticShapeRetryBudgetOf(input.list);
   const bundles = bundleRequirementIds(targets, V12_T2_BUNDLE.size);
+  // 束が 2 つ以上なら、束の外の対象を参照のみで渡し、その読み方の規則を足す（Issue #741。束が 1 つなら今の要求のまま）
+  const bundleRules = bundles.length > 1 ? [...rules, ...ruleTexts([SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION])] : rules;
   const callBundle = async (bundle: number): Promise<SemanticBundleResult> => {
     const bundleTargets = bundles[bundle] ?? [];
     let attempt = 0;
@@ -388,7 +409,11 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
       refused = checked.problems;
       return { ok: true, value: [] };
     };
-    const answer = await callStructuredChecked(input.gateway, { request: semanticCheckRequest(input, rules, bundleTargets), check });
+    const references = bundles.length > 1 ? targets.filter((id) => !bundleTargets.includes(id)) : undefined;
+    const answer = await callStructuredChecked(input.gateway, {
+      request: semanticCheckRequest(input, bundleRules, bundleTargets, references),
+      check,
+    });
     if (!answer.ok) return { kind: "failed", failure: answer.failure };
     if (refused !== undefined) return { kind: "failed", failure: { kind: "malformed", attempts: 1, problems: refused } };
     return { kind: "ok", judgments: answer.value };
@@ -425,23 +450,45 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
   return { ok: true, value: { tableSha256, judgments: merged.value, targets } };
 }
 
-/** T1'' の要求（`targets` の要件だけのデータ。表の行は全行。旗 off と対象 5 件以下の ids on は今の要求とバイト列で同じ） */
-function semanticCheckRequest(input: SemanticCheckInput, rules: readonly string[], targets: readonly string[]) {
+/**
+ * T1'' の要求（`targets` の要件だけのデータ。表の行は全行。旗 off と対象 5 件以下の ids on は今の要求とバイト列で同じ）。
+ * `references` を渡せば（旗 `v12.ids` の束が 2 つ以上。Issue #741）、その要件の文と引用・所属・確かめ方・助言の印を、束の塊と同じ形・
+ * 一覧の順で「参照のみ」の塊 1 つにまとめて末尾に足す
+ */
+function semanticCheckRequest(
+  input: SemanticCheckInput,
+  rules: readonly string[],
+  targets: readonly string[],
+  references?: readonly string[],
+) {
+  const requirementsOf = (ids: ReadonlySet<string>) =>
+    input.list.requirements
+      .filter((requirement) => ids.has(requirement.id))
+      .map((requirement) => ({ requirementId: requirement.id, text: requirement.text, quote: requirement.quote }));
+  const entriesOf = <T extends { readonly requirementId: string }>(ids: ReadonlySet<string>, entries: readonly T[]): readonly T[] =>
+    entries.filter((entry) => ids.has(entry.requirementId));
   const targetSet = new Set(targets);
-  const ofTargets = <T extends { readonly requirementId: string }>(entries: readonly T[]): readonly T[] =>
-    entries.filter((entry) => targetSet.has(entry.requirementId));
+  const ofTargets = <T extends { readonly requirementId: string }>(entries: readonly T[]): readonly T[] => entriesOf(targetSet, entries);
+  const referenceSet = new Set(references ?? []);
+  const referenceData =
+    references === undefined
+      ? []
+      : [
+          {
+            name: SEMANTIC_CHECK_REFERENCE_DATA_NAME,
+            text: serializeJson({
+              要件の文と引用: requirementsOf(referenceSet),
+              要件ごとの所属: entriesOf(referenceSet, input.table.ownership),
+              確かめ方: entriesOf(referenceSet, input.table.verification),
+              助言の印: entriesOf(referenceSet, input.advice ?? []),
+            }),
+          },
+        ];
   return buildStructuredRequest({
     rules,
     documents: input.documents,
     data: [
-      {
-        name: "要件の文と引用",
-        text: serializeJson(
-          input.list.requirements
-            .filter((requirement) => targetSet.has(requirement.id))
-            .map((requirement) => ({ requirementId: requirement.id, text: requirement.text, quote: requirement.quote })),
-        ),
-      },
+      { name: "要件の文と引用", text: serializeJson(requirementsOf(targetSet)) },
       {
         name: "表の行",
         text: serializeJson(
@@ -460,6 +507,7 @@ function semanticCheckRequest(input: SemanticCheckInput, rules: readonly string[
       { name: "要件ごとの所属", text: serializeJson(ofTargets(input.table.ownership)) },
       { name: "確かめ方", text: serializeJson(ofTargets(input.table.verification)) },
       { name: "助言の印", text: serializeJson(ofTargets(input.advice ?? [])) },
+      ...referenceData,
     ],
     schemaName: SEMANTIC_CHECK_SCHEMA_NAME,
     schema: SEMANTIC_CHECK_SCHEMA,
