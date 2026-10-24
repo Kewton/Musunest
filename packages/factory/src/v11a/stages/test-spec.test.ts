@@ -3064,6 +3064,46 @@ describe("旗 v12.ids：構造の検査と画面・在ることの構造の確�
   const idsOk = (extra: readonly Record<string, unknown>[] = [], natures: readonly NatureRow[] = NATURES_D) => response([...idsTests(), ...extra], natures);
   const LLM_COUNT = 12;
 
+  /** R2 の view-shows を、同じ画面 s.members に表示元 2 つ（f.member.title・c.itemCount）を掛けた表（対象の並び。Issue #724） */
+  const twoSourcesTable = (table: NameTable): NameTable => ({
+    ...table,
+    verification: table.verification.map((entry) =>
+      entry.requirementId === "R2" && entry.kind === "structural"
+        ? {
+            ...entry,
+            checks: ["view-shows", "view-shows"] as const,
+            targets: [
+              { check: "view-shows" as const, targetId: "s.members", sourceId: "f.member.title" },
+              { check: "view-shows" as const, targetId: "s.members", sourceId: "c.itemCount" },
+            ],
+          }
+        : entry,
+    ),
+  });
+
+  it("(3') 対象の並び（Issue #724。ids と ledger が on）：同じ画面に表示元 2 つの view-shows の要件に、コードが構造の試験を 2 本（ID が一意・それぞれの assertion）作り、T2 は通る", async () => {
+    const table = twoSourcesTable(DTABLE);
+    const { outcome } = await runD([idsOk()], true, table);
+    if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
+    const r2 = outcome.value.suite.tests.filter((test) => test.target.requirementId === "R2");
+    expect(r2.map((test) => [test.id, test.target.roleId, test.operation, test.assertion])).toEqual([
+      [`${GENERATED_TEST_ID_PREFIX}structure:R2:view-shows:s.members:f.member.title:normal`, "s.members", "structure", { check: "view-shows", role: "f.member.title" }],
+      [`${GENERATED_TEST_ID_PREFIX}structure:R2:view-shows:s.members:c.itemCount:normal`, "s.members", "structure", { check: "view-shows", role: "c.itemCount" }],
+    ]);
+    expect(new Set(outcome.value.suite.tests.map((test) => test.id)).size).toBe(outcome.value.suite.tests.length);
+  });
+
+  it("(4') 対象の並び（Issue #724。ids on・ledger off）：複数対象の表を受けても T2 の経路で落ちず、今の扱いのまま（旗 ids の有無で同じ結果・同じ要求）", async () => {
+    const table = twoSourcesTable(withCheckTargets(fixtureTable()));
+    const plain = await run([passing()], { ids: true, table });
+    const off = await run([passing()], { table });
+    expect(plain.outcome.ok).toBe(true);
+    expect(plain.outcome).toEqual(off.outcome);
+    expect(JSON.stringify(plain.recording.structured)).toBe(JSON.stringify(off.recording.structured));
+    // 要求の確かめ方のデータは、checks と検査ごとの対象を表のまま渡す（今の扱い）
+    expect(plain.recording.structured[0]?.input).toMatch(/"sourceId": ?"c\.itemCount"/);
+  });
+
   it("(1) 要求：要件の一覧・確かめ方・所属に構造の要件 R2 が無く、画面の要件 R6・R7 はある。規則の文の「作らない」は構造の検査と screen 操作だけ。schema の operation の enum に structure が無く assertion は null だけ。題材の言葉は無い", async () => {
     const { outcome, recording } = await runD([idsOk()]);
     expect(outcome.ok).toBe(true);

@@ -967,6 +967,11 @@ interface TableCheckOptions {
   readonly sourceless?: boolean;
   /** 行の検査（(b)(c)(d)）だけを掛け、所属・確かめ方・分類（(e)(g)）と孤立した行を見ない（C1'。Issue #593） */
   readonly rowsOnly?: boolean;
+  /**
+   * unresolved の根拠として文書の制約 ID に加えて受ける ID（台帳の未対応の観測の ID。台帳を受けた C2' だけが渡す。T1・T1' は
+   * 渡さない。Issue #725）
+   */
+  readonly ledgerConstraintIds?: ReadonlySet<string>;
 }
 
 function checkNameTableWith(
@@ -1291,10 +1296,18 @@ function checkNameTableWith(
         if (entry.reason.trim() === "") problems.push({ field: `${field}.reason`, message: "構造で確かめる理由が空である" });
         if (kinds.size === 0 && !unknownOwned) problems.push({ field, message: "構造で確かめる要件に所属が無い" });
         if (entry.checks.length === 0) problems.push({ field: `${field}.checks`, message: "構造で確かめる要件に checks が無い" });
-        const seen = new Set<StructuralAssertionKind>();
+        // 重なりの組：検査の対象（`targets`。旗 v12.ids の C2 が組む表）が checks と同じ順・同じ数で並ぶ表は、種類＋targetId（view-shows
+        // は種類＋targetId＋sourceId）が 2 回なら重なり。対象を持たない・checks と並びが合わない表は、今までどおり同じ種類が 2 回なら
+        // 重なり（Issue #724）
+        const targets = entry.targets;
+        const keyed =
+          targets !== undefined && targets.length === entry.checks.length && targets.every((target, tIndex) => target.check === entry.checks[tIndex]);
+        const seen = new Set<string>();
         entry.checks.forEach((check, cIndex) => {
-          if (seen.has(check)) problems.push({ field: `${field}.checks[${cIndex}]`, message: "checks の中身が重なっている" });
-          seen.add(check);
+          const target = keyed ? targets[cIndex] : undefined;
+          const key = target === undefined ? check : JSON.stringify([check, target.targetId, check === "view-shows" ? target.sourceId : null]);
+          if (seen.has(key)) problems.push({ field: `${field}.checks[${cIndex}]`, message: "checks の中身が重なっている" });
+          seen.add(key);
           const want = STRUCTURAL_TARGET_KINDS[check];
           if (want !== undefined && !kinds.has(want)) {
             if (!unknownOwned) {
@@ -1316,7 +1329,8 @@ function checkNameTableWith(
           problems.push({ field: `${field}.constraintIds`, message: "未解決の要件に制約 ID が無い" });
         }
         entry.constraintIds.forEach((id, cIndex) => {
-          if (!constraintIds.has(normalizeConstraintId(id))) {
+          const normalized = normalizeConstraintId(id);
+          if (!constraintIds.has(normalized) && options.ledgerConstraintIds?.has(normalized) !== true) {
             problems.push({ field: `${field}.constraintIds[${cIndex}]`, message: "制約 ID が文書に無い" });
           }
         });
@@ -1524,7 +1538,11 @@ export function checkVocabularyRows(
   );
 }
 
-/** C2'：C1 の行と写像で組んだ表に (b)〜(g) を掛ける（出典は null を受ける。写し・引用・位置の検査は無い） */
+/**
+ * C2'：C1 の行と写像で組んだ表に (b)〜(g) を掛ける（出典は null を受ける。写し・引用・位置の検査は無い）。台帳を受けたときだけ、
+ * unresolved の constraintIds の各要素を文書の制約 ID か台帳の未対応の観測の ID で受ける（有効な観測の ID は受けない。1 件以上・
+ * 空の理由・文書に無い ID の固定文は同じ。Issue #725）
+ */
 export function checkMappedTable(
   list: RequirementList,
   table: NameTable,
@@ -1533,7 +1551,9 @@ export function checkMappedTable(
 ): readonly Problem[] {
   return checkNameTableWith(list, table, documents, {
     sourceless: true,
-    ...(options.ledger === undefined ? {} : { ledger: options.ledger }),
+    ...(options.ledger === undefined
+      ? {}
+      : { ledger: options.ledger, ledgerConstraintIds: new Set(options.ledger.unsupportedObservations.map((entry) => entry.id)) }),
   });
 }
 

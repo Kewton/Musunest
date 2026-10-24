@@ -25,14 +25,28 @@ import {
   withCodeIds,
 } from "../../v11a/__tests__/fixtures.js";
 import { buildSized } from "../../v11a/__tests__/sizes.js";
-import { CHECK_TARGET_MESSAGES, checkMappedTable, nameTableSha256, type NameTable } from "../../v11a/names.js";
+import {
+  CHECK_TARGET_MESSAGES,
+  IDS_NO_SOURCE,
+  checkMappedTable,
+  nameTableSha256,
+  ownersByRowId,
+  type NameTable,
+  type NameTableDraftVerification,
+  type NameTableRow,
+  type NameTableVerification,
+} from "../../v11a/names.js";
+import { generateTests } from "../generated-tests.js";
 import type { RequirementList } from "../../pipeline.js";
 import { semanticCheckTargets } from "../../v11a/stages/semantic-check.js";
 import { PROPERTY_LEDGER_VIEW, type LedgerView, type UpstreamLedgerView } from "../ledger.js";
 import type { ReferenceCounts } from "../ids.js";
 import {
   MAPPING_DATA_NAMES,
+  MAPPING_LEDGER_DATA_NAMES,
   MAPPING_MESSAGES,
+  MAPPING_NORMALIZATION_DEFINITIONS,
+  MAPPING_NORMALIZATION_REASON,
   MAPPING_RULE_DEFINITIONS,
   MAPPING_REWRITE_DATA_NAMES,
   MAPPING_REWRITE_MESSAGES,
@@ -44,6 +58,7 @@ import {
   legacyMappingSchemaOf,
   mappingRuleDefinitionsOf,
   mappingSchemaOf,
+  normalizeMappedTable,
   rejectedRequirementIds,
   runMapping,
   type MappingInspector,
@@ -81,9 +96,20 @@ const entries = (): Entry[] => (GOOD["requirements"] as Entry[]).map((entry) => 
 const withEntries = (list: readonly Entry[]) => ({ requirements: list });
 const messagesOf = (outcome: Awaited<ReturnType<typeof runMapping>>): readonly string[] =>
   outcome.ok || outcome.failure.kind !== "unmet" ? [] : outcome.failure.problems.map((problem) => problem.message);
-/** C2 の応答の checks（検査の種類ごとの欄）：渡した欄のほかは null（Issue #682） */
-const fields = (set: Partial<Record<StructuralAssertionKind, unknown>> = {}): Entry =>
+/** C2 の応答の checks（検査の種類ごとの欄）を、渡した値のまま組む：渡した欄のほかは null（Issue #682。直す前の写像の欄も組める） */
+const rawFields = (set: Partial<Record<StructuralAssertionKind, unknown>> = {}): Entry =>
   Object.fromEntries(STRUCTURAL_ASSERTIONS.map((check) => [check, set[check] ?? null]));
+/**
+ * C2 の応答の checks（検査の種類ごとの欄。各欄は null か対象の並び。Issue #724）：渡した欄のほかは null。写像 1 つを渡した欄は
+ * その 1 件の並びにする（並びはそのまま）
+ */
+const fields = (set: Partial<Record<StructuralAssertionKind, unknown>> = {}): Entry =>
+  Object.fromEntries(
+    STRUCTURAL_ASSERTIONS.map((check) => {
+      const value = set[check] ?? null;
+      return [check, value !== null && typeof value === "object" && !Array.isArray(value) ? [value] : value];
+    }),
+  );
 /** 要件 index の確かめ方の checks だけを差し替えた応答 */
 const withChecksAt = (at: number, checks: unknown) =>
   withEntries(entries().map((entry, index) => (index === at ? { ...entry, verification: { ...(entry["verification"] as Entry), checks } } : entry)));
@@ -103,7 +129,7 @@ const blockOf = (input: string | undefined, name: string): unknown => {
 };
 
 describe("C2 の規則と schema", () => {
-  it("規則の定義に why・since があり不備 0（台帳の文で組み直しても）。schema は strict で写し・出典の欄が無く、checks は検査の種類ごとの欄（Issue #682）", () => {
+  it("規則の定義に why・since があり不備 0（台帳の文で組み直しても）。schema は strict で写し・出典の欄が無く、checks は検査の種類ごとの欄（Issue #682）で、各欄は null か対象の写像の並び（Issue #724）", () => {
     expect(ruleDefinitionDefects(MAPPING_RULE_DEFINITIONS)).toEqual([]);
     expect(ruleDefinitionDefects(mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW))).toEqual([]);
     for (const ledger of [undefined, PROPERTY_LEDGER_VIEW]) {
@@ -120,12 +146,16 @@ describe("C2 の規則と schema", () => {
       expect(Object.keys(checks["properties"] as Entry)).toEqual([...STRUCTURAL_ASSERTIONS]);
       for (const check of STRUCTURAL_ASSERTIONS) {
         const field = (checks["properties"] as Entry)[check] as Entry;
-        // 各欄は null か対象の写像。view-shows だけ sourceId（文字列）を持つ
-        expect(field["type"], check).toEqual(["object", "null"]);
-        expect(field["additionalProperties"], check).toBe(false);
-        expect(field["required"], check).toEqual(check === "view-shows" ? ["targetId", "sourceId"] : ["targetId"]);
-        expect(((field["properties"] as Entry)["targetId"] as Entry)["type"], check).toBe("string");
-        if (check === "view-shows") expect(((field["properties"] as Entry)["sourceId"] as Entry)["type"]).toBe("string");
+        // 各欄は null か対象の写像の並び（Issue #724。直す前は null か対象の写像）。view-shows の要素だけ sourceId（文字列）を持つ。
+        // 空の並びは schema の minItems に頼らず復号の形の検査で断る
+        expect(field["type"], check).toEqual(["array", "null"]);
+        expect("minItems" in field, check).toBe(false);
+        const item = field["items"] as Entry;
+        expect(item["type"], check).toBe("object");
+        expect(item["additionalProperties"], check).toBe(false);
+        expect(item["required"], check).toEqual(check === "view-shows" ? ["targetId", "sourceId"] : ["targetId"]);
+        expect(((item["properties"] as Entry)["targetId"] as Entry)["type"], check).toBe("string");
+        if (check === "view-shows") expect(((item["properties"] as Entry)["sourceId"] as Entry)["type"]).toBe("string");
       }
       // 旧の schema（識別子 v1.2 の封筒の枝を保つためだけのもの）は checks だけが違う
       const legacy = legacyMappingSchemaOf(ledger);
@@ -450,7 +480,7 @@ describe("検査の種類ごとの欄（Issue #682）", () => {
     ),
   };
 
-  it("二点測定 (1)：同じ要件に同じ種類の検査を 2 行に書いた応答は、直す前の形（並び）なら表の検査の固定文で落ちたが、欄の写像では書けない（schema の不一致・形の固定文）", async () => {
+  it("二点測定 (1)：同じ要件に同じ種類の検査を 2 行に書いた応答は、直す前の形（並び）なら表の検査の固定文で落ちた。その形は今の schema に合わない（形の固定文）。同じ内容は欄の対象の並びに書ける（Issue #724）", async () => {
     // 直す前：並びの形は同じ種類を 2 行に書けて、組んだ表は表の検査の今の固定文で落ちた
     const duplicated: NameTable = {
       ...TABLE,
@@ -471,11 +501,13 @@ describe("検査の種類ごとの欄（Issue #682）", () => {
     // 直した後：同じ内容は今の schema に合わない（偽物の LLM・adapter が共有する検査で不一致）
     expect(validateSchema(mappingSchemaOf(), legacyResponse)).toBeDefined();
     expect(validateSchema(mappingSchemaOf(PROPERTY_LEDGER_VIEW), legacyResponse)).toBeDefined();
-    // 欄は種類ごとに 1 つなので、同じ種類の 2 件目は書く場所が無い（欄の写像に 2 件は置けない）
-    expect(() => checkFieldsResponseOf([
+    // Issue #724：同じ内容は欄の対象の並び（view-shows の欄に 2 件）に書け、今の schema に合う（#682 では欄の写像に 2 件目を書く場所が無かった）
+    const listed = withChecksAt(1, checkFieldsResponseOf([
       { check: "view-shows", targetId: "V2", sourceId: "E1.F1" },
       { check: "view-shows", targetId: "V1", sourceId: "E2.F1" },
-    ])).toThrow();
+    ]));
+    expect(validateSchema(mappingSchemaOf(), listed)).toBeUndefined();
+    expect(validateSchema(mappingSchemaOf(PROPERTY_LEDGER_VIEW), listed)).toBeUndefined();
     // 照合を外して流しても、形の固定文で 2 回落ちて unmet
     const { outcome } = await run([negative(legacyResponse, "並びの checks は schema では出ない"), negative(legacyResponse, "同上")]);
     expect(outcome.ok).toBe(false);
@@ -596,7 +628,7 @@ describe("検査の種類ごとの欄（Issue #682）", () => {
     const r2 = (entries()[1] as Entry)["verification"] as Entry;
     const viaCheck = withEntries(
       (orphan["requirements"] as Entry[]).map((entry, index) =>
-        index === 1 ? { ...entry, verification: { ...r2, checks: { ...(r2["checks"] as Entry), "aggregate-no-period": { targetId: "C2" } } } } : entry,
+        index === 1 ? { ...entry, verification: { ...r2, checks: { ...(r2["checks"] as Entry), "aggregate-no-period": [{ targetId: "C2" }] } } } : entry,
       ),
     );
     const derived = inspectMapping(LIST, TABLE.rows, viaCheck, FIXTURE_DOCUMENTS);
@@ -610,26 +642,39 @@ describe("検査の種類ごとの欄（Issue #682）", () => {
     expect(outcome.references).toEqual({ checked: LIST.requirements.length + roles + 3, unknown: 0, duplicate: 0, crossBundle: 0 });
   });
 
-  it("要求：R-map-03 の新しい文（種類ごと 1 件・fixed-test への選び方・当たる種類が無い要件の選び方・制約 ID 1 件以上）があり、ほかの規則の文・順・データの塊の名前は直す前と同じ", () => {
+  it("要求：R-map-03 の新しい文（対象の並び・同じ組を 2 回書かない〔Issue #724〕・当たる種類が無い要件の選び方・制約 ID 1 件以上）があり、ほかの規則の文・順・データの塊の名前は直す前と同じ", () => {
     for (const definitions of [MAPPING_RULE_DEFINITIONS, mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)]) {
       expect(definitions.map((definition) => definition.id)).toEqual(["R-map-01", "R-map-02", "R-map-03", "R-map-04"]);
       const r3 = definitions.find((definition) => definition.id === "R-map-03")?.text ?? "";
       for (const phrase of [
-        "checks は検査の種類ごとの欄で、同じ種類の検査は要件ごとに 1 件である。",
-        "view-shows の欄は sourceId に画面と同じ entity の項目か計算の行の ID",
-        "使わない種類の欄は null にする。",
+        "checks は検査の種類ごとの欄で、各欄は検査の対象の並びである。",
+        "view-shows の対象は sourceId に画面と同じ entity の項目か計算の行の ID",
+        "使わない種類の欄は空の並びにせず null にする。",
+        "同じ種類の検査を 2 つ以上の行に掛けて確かめる要件は、その種類の欄に行ごとに 1 件ずつ並べる。同じ組（view-shows は画面と表示元の組、ほかは行）を 2 回書かない。",
         "structural は、検査の種類のうち 1 つ以上で確かめられる要件だけである。",
         "確かめ方の種類を選ぶ既存の条件（default-value など、専用の種類を指定する文）は今までどおり先に当てる。",
-        "そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。",
         "欄が全部 null の structural は表の検査で断られる。",
-        "同じ種類の検査を 2 つ以上の行に掛けなければ確かめられない要件（複数の操作・複数の項目・1 つの画面と複数の項目）は structural にせず、kind を fixed-test にしてそれらの行を所属させる。",
-        "constraintIds に書けない根拠となる文書の制約 ID を 1 件以上（文書の制約 ID の一覧にあるものだけ）書く。",
-        "根拠となる制約 ID を一覧から挙げられない要件は unresolved にしない。",
         "使わない欄は null か空の並びにする。",
       ]) {
         expect(r3, phrase).toContain(phrase);
       }
-      expect(r3).not.toContain("1 件ずつ並べる");
+      // unresolved の根拠の文：台帳を受けない版は文書の制約 ID だけ（直す前と同じ文）、台帳を受けた版は台帳の未対応の観測を足した
+      // 文（構造の文の中の誘導も同じ条件。Issue #725。台帳版の期待をこの節で置き換えた）
+      const documentOnly = [
+        "そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。",
+        "constraintIds に書けない根拠となる文書の制約 ID を 1 件以上（文書の制約 ID の一覧にあるものだけ）書く。",
+        "根拠となる制約 ID を一覧から挙げられない要件は unresolved にしない。",
+      ];
+      const withLedger = [
+        "そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、宣言で書けないか台帳が未対応とする観測でしか確かめられず、根拠の ID を文書の制約 ID の一覧か台帳の未対応の観測の一覧から 1 件以上挙げられるなら unresolved にする。",
+        "宣言で書けない、または台帳が未対応とする観測でしか確かめられない要件は kind を unresolved にし、reason に理由を書き、constraintIds に根拠の ID を 1 件以上（文書の制約 ID の一覧か台帳の未対応の観測の一覧にあるものだけ）書く。根拠を一覧から挙げられない要件は unresolved にしない。",
+      ];
+      const [present, absent] = definitions === MAPPING_RULE_DEFINITIONS ? [documentOnly, withLedger] : [withLedger, documentOnly];
+      for (const phrase of present) expect(r3, phrase).toContain(phrase);
+      for (const phrase of absent) expect(r3, phrase).not.toContain(phrase);
+      // Issue #724 で外した文（#682 の 1 種類 1 件と、2 つ以上の行に掛ける要件の fixed-test への選び方）
+      expect(r3).not.toContain("同じ種類の検査は要件ごとに 1 件である");
+      expect(r3).not.toContain("2 つ以上の行に掛けなければ確かめられない要件");
       expectNoAcceptanceMaterial([...definitions.map((definition) => JSON.stringify(definition)), JSON.stringify(mappingSchemaOf(PROPERTY_LEDGER_VIEW)), MAPPING_MESSAGES.checksShape]);
     }
     // ほかの規則の文は直す前（d38e132）と同じ固定文
@@ -647,11 +692,22 @@ describe("検査の種類ごとの欄（Issue #682）", () => {
       rejections: "表の点検の拒否",
       advice: "助言の印",
     });
-    // 台帳の文で組み直す版は R-map-03 の頭が同じ（台帳の文の前に構造・未解決の文が来る）
+    // 台帳の文で組み直す版は R-map-03 の頭が、unresolved の 2 文（構造の文の中の誘導と未解決の文）だけを台帳の版に差し替えた
+    // 通常版の頭と同じ（台帳の文の前に構造・未解決の文が来る。Issue #725 で startsWith の期待をこの差し替えの一致に置き換えた）
     const plain = MAPPING_RULE_DEFINITIONS.find((definition) => definition.id === "R-map-03")?.text ?? "";
     const ledger = mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW).find((definition) => definition.id === "R-map-03")?.text ?? "";
     const head = plain.slice(0, plain.indexOf("要件の決まりが"));
-    expect(ledger.startsWith(head)).toBe(true);
+    const ledgerHead = head
+      .replace(
+        "宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。",
+        "宣言で書けないか台帳が未対応とする観測でしか確かめられず、根拠の ID を文書の制約 ID の一覧か台帳の未対応の観測の一覧から 1 件以上挙げられるなら unresolved にする。",
+      )
+      .replace(
+        "宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に書けない根拠となる文書の制約 ID を 1 件以上（文書の制約 ID の一覧にあるものだけ）書く。根拠となる制約 ID を一覧から挙げられない要件は unresolved にしない。",
+        "宣言で書けない、または台帳が未対応とする観測でしか確かめられない要件は kind を unresolved にし、reason に理由を書き、constraintIds に根拠の ID を 1 件以上（文書の制約 ID の一覧か台帳の未対応の観測の一覧にあるものだけ）書く。根拠を一覧から挙げられない要件は unresolved にしない。",
+      );
+    expect(ledgerHead).not.toBe(head);
+    expect(ledger.startsWith(ledgerHead)).toBe(true);
   });
 });
 
@@ -1205,5 +1261,831 @@ describe("読み漏れの検出：C2・C2'・C2 の書き直しは台帳を上�
     void ledger.rowByVerificationKind.get("default-value")?.t2;
     expect(same).toHaveLength(8);
     expect(ledger.t1RuleTexts).toEqual(PROPERTY_LEDGER_VIEW.t1RuleTexts);
+  });
+});
+
+describe("C2 が組んだ表を整える手（N-map-01・N-map-02。Issue #723）", () => {
+  // 行（コードの形の ID・出典なし）。E1 の項目：F1 文字列・F2 参照（→E2）・F3 参照の並び（→E2）・F4 参照先の無い並び。E2 の項目：
+  // F1 文字列・F2 選択肢。操作：OP1（when 無し・E1）・OP2（when 付き・E1）・OP3（when 無し・E2）。画面：V1（E1）
+  const rowOf = (
+    id: string,
+    kind: NameTableRow["kind"],
+    entity: string | null,
+    name: string,
+    type: NameTableRow["type"],
+    extra: Partial<Pick<NameTableRow, "options" | "refEntity">> = {},
+  ): NameTableRow => ({
+    id,
+    kind,
+    entity,
+    name,
+    role: `${id} の役割`,
+    source: IDS_NO_SOURCE,
+    type,
+    options: extra.options ?? null,
+    groupBy: null,
+    refEntity: extra.refEntity ?? null,
+  });
+  const ROWS: readonly NameTableRow[] = [
+    rowOf("E1", "entity", null, "alpha", null),
+    rowOf("E2", "entity", null, "beta", null),
+    rowOf("E1.F1", "field", "E1", "label", "string"),
+    rowOf("E1.F2", "field", "E1", "target", "ref", { refEntity: "E2" }),
+    rowOf("E1.F3", "field", "E1", "targets", "list", { refEntity: "E2" }),
+    rowOf("E1.F4", "field", "E1", "notes", "list"),
+    rowOf("E2.F1", "field", "E2", "label", "string"),
+    rowOf("E2.F2", "field", "E2", "grade", "enum", { options: ["a", "b"] }),
+    rowOf("OP1", "operation", "E1", "addAlpha", { action: "create", hasWhen: false }),
+    rowOf("OP2", "operation", "E1", "markAlpha", { action: "update", hasWhen: true }),
+    rowOf("OP3", "operation", "E2", "dropBeta", { action: "delete", hasWhen: false }),
+    rowOf("V1", "screen", "E1", "alphas", { view: "table" }),
+  ];
+  const ALL_IDS = ROWS.map((row) => row.id);
+  /** 要件の仕様：所属は `s:ID`（stated）か `d:ID`（dependency）。確かめ方の既定は fixed-test */
+  type Spec = { readonly id: string; readonly roles: readonly string[]; readonly verification?: NameTableDraftVerification };
+  const roleOf = (text: string) =>
+    text.startsWith("s:") ? { id: text.slice(2), basis: "stated" as const, reason: null } : { id: text.slice(2), basis: "dependency" as const, reason: "実現に要る" };
+  /** 表の残りの行を全部 stated で持つ要件（`except` の行は持たない。手の当たらない fixed-test） */
+  const cover = (except: readonly string[] = []): Spec => ({ id: "R9", roles: ALL_IDS.filter((id) => !except.includes(id)).map((id) => `s:${id}`) });
+  const listOf = (specs: readonly Spec[]): RequirementList => ({
+    requirements: specs.map((spec) => {
+      const text = `要件 ${spec.id} の文。`;
+      return { id: spec.id, text, quote: text, position: { start: 0, end: text.length } };
+    }),
+    decisions: [],
+    unresolved: [],
+  });
+  const tableOf = (specs: readonly Spec[]): NameTable => ({
+    rows: ROWS,
+    ownership: specs.map((spec) => ({ requirementId: spec.id, roles: spec.roles.map(roleOf) })),
+    verification: specs.map((spec) => ({ ...(spec.verification ?? { kind: "fixed-test" as const }), requirementId: spec.id }) as NameTableVerification),
+    classification: specs.map((spec) => ({ requirementId: spec.id, nature: "ruled" as const })),
+  });
+  /** 表を C2 の応答の形（検査の種類ごとの欄）に戻す */
+  const responseOf = (table: NameTable): Entry => ({
+    requirements: table.verification.map((verification, index) => {
+      const { requirementId, ...rest } = verification;
+      const { targets: _targets, ...withoutTargets } = rest as typeof rest & { readonly targets?: unknown };
+      return {
+        requirementId,
+        roles: table.ownership[index]?.roles ?? [],
+        verification: {
+          value: null,
+          reason: null,
+          constraintIds: [],
+          ...withoutTargets,
+          checks: verification.kind === "structural" ? checkFieldsResponseOf(verification.targets ?? []) : null,
+        },
+        nature: table.classification[index]?.nature,
+      };
+    }),
+  });
+  const FIELD_TYPE_OF = (requirementId: string, targetId: string): NameTableVerification => ({
+    requirementId,
+    kind: "structural",
+    reason: MAPPING_NORMALIZATION_REASON,
+    checks: ["field-type"],
+    targets: [{ check: "field-type", targetId, sourceId: null }],
+  });
+  const messagesOfProblems = (problems: readonly { readonly field: string; readonly message: string }[]) => problems.map((problem) => `${problem.field}:${problem.message}`);
+  /** 当たった要件と外した行の集合（要件 ID で対応づける。順に依らない比較用） */
+  const hitsOf = (normalized: ReturnType<typeof normalizeMappedTable>["normalized"]) =>
+    Object.fromEntries(normalized.map((entry) => [entry.requirementId, { rule: entry.rule, targetId: entry.targetId, removed: [...entry.removedRowIds].sort() }]));
+  const deepFreeze = <T,>(value: T): T => {
+    if (value !== null && typeof value === "object") {
+      for (const inner of Object.values(value as Record<string, unknown>)) deepFreeze(inner);
+      Object.freeze(value);
+    }
+    return value;
+  };
+
+  it("手の定義に why・since があり不備 0。ID は N-map-01・N-map-02 の 2 つ（規則の文の定義とは別。LLM に送らない）", () => {
+    expect(ruleDefinitionDefects(MAPPING_NORMALIZATION_DEFINITIONS)).toEqual([]);
+    expect(MAPPING_NORMALIZATION_DEFINITIONS.map((definition) => definition.id)).toEqual(["N-map-01", "N-map-02"]);
+    for (const definition of MAPPING_NORMALIZATION_DEFINITIONS) {
+      expect(definition.why.trim()).not.toBe("");
+      expect(definition.since).toBe("Issue #723");
+    }
+    const sent = ruleTexts(mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)).join("\n");
+    for (const definition of MAPPING_NORMALIZATION_DEFINITIONS) expect(sent.includes(definition.text)).toBe(false);
+    expectNoAcceptanceMaterial([...MAPPING_NORMALIZATION_DEFINITIONS.flatMap((definition) => [definition.text, definition.why]), MAPPING_NORMALIZATION_REASON]);
+  });
+
+  describe("(1) 手 1 の正例", () => {
+    const specs: readonly Spec[] = [
+      { id: "R1", roles: ["s:E1.F2"] },
+      { id: "R2", roles: ["s:E1.F2", "d:E1", "d:E2"] },
+      { id: "R3", roles: ["s:E1.F3", "d:E2"] },
+      cover(),
+    ];
+    const raw = tableOf(specs);
+
+    it("参照の項目 1 行（とその entity・参照先の entity）だけの fixed-test は structural・field-type 1 件・targets はその項目・reason は固定文。並びの項目も同じ。所属は変えない", () => {
+      const { table, normalized } = normalizeMappedTable(raw);
+      expect(table.verification).toEqual([FIELD_TYPE_OF("R1", "E1.F2"), FIELD_TYPE_OF("R2", "E1.F2"), FIELD_TYPE_OF("R3", "E1.F3"), raw.verification[3]]);
+      expect(table.ownership).toEqual(raw.ownership);
+      expect(table.rows).toBe(raw.rows);
+      expect(table.classification).toEqual(raw.classification);
+      expect(normalized).toEqual([
+        { requirementId: "R1", rule: "N-map-01", targetId: "E1.F2", removedRowIds: [] },
+        { requirementId: "R2", rule: "N-map-01", targetId: "E1.F2", removedRowIds: [] },
+        { requirementId: "R3", rule: "N-map-01", targetId: "E1.F3", removedRowIds: [] },
+      ]);
+      // 応答から組む段の口（C2'）でも同じ表になり、C2' を通る
+      const inspected = inspectMappingSourced(listOf(specs), ROWS, responseOf(raw), FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+      expect(inspected.ok).toBe(true);
+      if (inspected.ok) {
+        expect(inspected.table).toEqual(table);
+        expect(inspected.normalized).toEqual(normalized);
+      }
+    });
+
+    it("整えた表から generateTests は、その要件に構造の検査 1 本（期待は種類と参照先）を作り、画面・在ることの試験を作らない（整える前は在ることの試験を作る）", () => {
+      const list = listOf(specs);
+      const { table } = normalizeMappedTable(raw);
+      const made = generateTests({ table, ledger: PROPERTY_LEDGER_VIEW, list });
+      expect(made.stopped).toEqual([]);
+      const testsOf = (tests: typeof made.tests, id: string) => tests.filter((test) => test.target.requirementId === id);
+      for (const [id, target, expected] of [
+        ["R1", "E1.F2", "ref"],
+        ["R3", "E1.F3", "list"],
+      ] as const) {
+        const tests = testsOf(made.tests, id);
+        expect(tests).toHaveLength(1);
+        expect(tests[0]?.target).toMatchObject({ kind: "field", roleId: target });
+        expect(tests[0]?.assertion).toEqual({ check: "field-type", expected, refEntity: "E2" });
+        expect(made.excludedRequirementIds).toContain(id);
+      }
+      const before = generateTests({ table: raw, ledger: PROPERTY_LEDGER_VIEW, list });
+      expect(testsOf(before.tests, "R1").some((test) => test.assertion === undefined)).toBe(true);
+      expect(before.excludedRequirementIds).not.toContain("R1");
+    });
+  });
+
+  it("(2) 手 1 の負例：項目 2 行・ref でない項目・参照先の無い並び・操作か画面を含む・structural／unresolved／default-value・所属に表に無い ID は当てない", () => {
+    const negatives: readonly Spec[] = [
+      { id: "R1", roles: ["s:E1.F2", "s:E1.F3"] },
+      { id: "R2", roles: ["s:E1.F1"] },
+      { id: "R3", roles: ["s:E1.F4"] },
+      { id: "R4", roles: ["s:E1.F2", "s:OP2"] },
+      { id: "R5", roles: ["s:E1.F2", "s:V1"] },
+      {
+        id: "R6",
+        roles: ["s:E1.F2"],
+        verification: { kind: "structural", reason: "構造で確かめる", checks: ["field-type"], targets: [{ check: "field-type", targetId: "E1.F2", sourceId: null }] },
+      },
+      { id: "R7", roles: ["s:E1.F2"], verification: { kind: "unresolved", reason: "書けない", constraintIds: [constraintIdsIn(FIXTURE_DOCUMENTS).values().next().value as string] } },
+      { id: "R8", roles: ["s:E2.F2"], verification: { kind: "default-value", value: "a" } },
+      { id: "R10", roles: ["s:E1.F2", "s:E9"] },
+      cover(),
+    ];
+    const raw = tableOf(negatives);
+    const { table, normalized } = normalizeMappedTable(raw);
+    expect(normalized).toEqual([]);
+    expect(table).toBe(raw);
+  });
+
+  it("(3) 手 2 の正例：stated の項目と dependency の when 無しの操作（ほかの要件も所属させる）→ 外れ、外した行 ID が結果に載る。when 付きの操作・stated の操作・dependency の項目・画面は残る", () => {
+    const specs: readonly Spec[] = [{ id: "R1", roles: ["s:E1.F1", "s:OP3", "d:OP1", "d:OP2", "d:E2.F1", "d:V1"] }, cover()];
+    const raw = tableOf(specs);
+    const { table, normalized } = normalizeMappedTable(raw);
+    expect(normalized).toEqual([{ requirementId: "R1", rule: "N-map-02", targetId: null, removedRowIds: ["OP1"] }]);
+    expect(table.ownership[0]?.roles.map((role) => role.id)).toEqual(["E1.F1", "OP3", "OP2", "E2.F1", "V1"]);
+    expect(table.ownership[1]).toEqual(raw.ownership[1]);
+    expect(table.verification).toEqual(raw.verification);
+    expect(checkMappedTable(listOf(specs), raw, FIXTURE_DOCUMENTS)).toEqual([]);
+    expect(checkMappedTable(listOf(specs), table, FIXTURE_DOCUMENTS)).toEqual([]);
+  });
+
+  describe("(4) 手 2 の負例と、結果が候補の集合で決まること", () => {
+    it("全部 dependency／その操作をほかの要件が持たない／操作の entity をほかに持たない → 残る（所属の無い行は増えない）", () => {
+      const cases: readonly (readonly Spec[])[] = [
+        [{ id: "R1", roles: ["d:E1.F1", "d:OP1"] }, cover()],
+        [{ id: "R1", roles: ["s:E1.F1", "d:OP1"] }, cover(["OP1"])],
+        [{ id: "R1", roles: ["s:E1.F1", "d:OP3"] }, cover(["OP3", "E2", "E2.F1", "E2.F2"])],
+      ];
+      for (const specs of cases) {
+        const raw = tableOf(specs);
+        const { table, normalized } = normalizeMappedTable(raw);
+        expect(normalized).toEqual([]);
+        expect(table).toBe(raw);
+        expect([...ownersByRowId(table).keys()].sort()).toEqual([...ownersByRowId(raw).keys()].sort());
+      }
+    });
+
+    it("共有の操作を 2 つの要件がともに dependency で持ち、ほかに持ち主が無い → 両方残る。片方が stated で持つ対照では他方から外れる", () => {
+      const both = tableOf([{ id: "R1", roles: ["s:E1.F1", "d:OP1"] }, { id: "R2", roles: ["s:E2.F1", "d:OP1"] }, cover(["OP1"])]);
+      expect(normalizeMappedTable(both).normalized).toEqual([]);
+      const control = tableOf([{ id: "R1", roles: ["s:E1.F1", "d:OP1"] }, { id: "R2", roles: ["s:E2.F1", "s:OP1"] }, cover(["OP1"])]);
+      const { table, normalized } = normalizeMappedTable(control);
+      expect(normalized).toEqual([{ requirementId: "R1", rule: "N-map-02", targetId: null, removedRowIds: ["OP1"] }]);
+      expect(table.ownership[1]).toEqual(control.ownership[1]);
+    });
+
+    it("normalized は仮に外した分でなく最終の差分（孤立で戻した候補は載らない）", () => {
+      // 全部外すと OP1 が孤立するので OP1 の候補を戻す。OP3 は R9 が持つので R1 から外れたまま
+      const raw = tableOf([{ id: "R1", roles: ["s:E1.F1", "d:OP1", "d:OP3"] }, { id: "R2", roles: ["s:E2.F1", "d:OP1"] }, cover(["OP1"])]);
+      const { table, normalized } = normalizeMappedTable(raw);
+      expect(normalized).toEqual([{ requirementId: "R1", rule: "N-map-02", targetId: null, removedRowIds: ["OP3"] }]);
+      expect(table.ownership.map((entry) => entry.roles.map((role) => role.id))).toEqual([["E1.F1", "OP1"], ["E2.F1", "OP1"], raw.ownership[2]?.roles.map((role) => role.id)]);
+    });
+
+    it("所属に同じ行 ID の重複か表に無い ID がある要件には当てない", () => {
+      for (const roles of [["s:E1.F1", "d:OP1", "d:OP1"], ["s:E1.F1", "d:OP1", "s:E9"]]) {
+        const raw = tableOf([{ id: "R1", roles }, cover()]);
+        expect(normalizeMappedTable(raw).normalized).toEqual([]);
+      }
+    });
+
+    it("並べ替えた入力（要件の順・所属の順）の間で、要件 ID・行 ID で対応づけた結果が同じ。同じ入力からは順序・表・SHA が同じ", async () => {
+      const specs: readonly Spec[] = [
+        { id: "R1", roles: ["s:E1.F1", "d:OP1", "d:OP3"] },
+        { id: "R2", roles: ["s:E2.F1", "d:OP1"] },
+        { id: "R3", roles: ["s:E1.F2", "d:E2"] },
+        { id: "R4", roles: ["s:E1.F3", "d:OP3"] },
+        cover(["OP1"]),
+      ];
+      const permuted = [...specs].reverse().map((spec) => ({ ...spec, roles: [...spec.roles].reverse() }));
+      const a = normalizeMappedTable(tableOf(specs));
+      const b = normalizeMappedTable(tableOf(permuted));
+      expect(hitsOf(b.normalized)).toEqual(hitsOf(a.normalized));
+      expect(hitsOf(a.normalized)).toEqual({
+        R1: { rule: "N-map-02", targetId: null, removed: ["OP3"] },
+        R3: { rule: "N-map-01", targetId: "E1.F2", removed: [] },
+        R4: { rule: "N-map-02", targetId: null, removed: ["OP3"] },
+      });
+      const again = normalizeMappedTable(tableOf(specs));
+      expect(again).toEqual(a);
+      expect(await nameTableSha256(again.table)).toBe(await nameTableSha256(a.table));
+    });
+  });
+
+  describe("(5) 門の不変", () => {
+    it("整える前に C2' を通る表は整えたあとも通り、整える前に落ちる表（孤立行・重なり・制約 ID 空・所属 0）は同じ固定文で落ちる", () => {
+      const hit: Spec = { id: "R1", roles: ["s:E1.F1", "d:OP1"] };
+      const ref: Spec = { id: "R2", roles: ["s:E1.F2"] };
+      const passing = [tableOf([hit, ref, cover()]), tableOf([{ id: "R1", roles: ["s:E1.F3", "d:E2"] }, cover()])];
+      for (const raw of passing) {
+        const list = listOf(raw.ownership.map((entry) => ({ id: entry.requirementId, roles: [] })));
+        expect(checkMappedTable(list, raw, FIXTURE_DOCUMENTS)).toEqual([]);
+        const { table, normalized } = normalizeMappedTable(raw);
+        expect(normalized.length).toBeGreaterThan(0);
+        expect(checkMappedTable(list, table, FIXTURE_DOCUMENTS)).toEqual([]);
+      }
+      const failing: readonly (readonly Spec[])[] = [
+        [hit, ref, cover(["V1"])],
+        [hit, ref, { id: "R3", roles: ["s:E1.F1", "s:E1.F1"] }, cover()],
+        [hit, ref, { id: "R3", roles: ["s:E1.F1"], verification: { kind: "unresolved", reason: "書けない", constraintIds: [] } }, cover()],
+        [hit, ref, { id: "R3", roles: [] }, cover()],
+      ];
+      const expected = ["どの要件にも所属しない行がある", "同じ要件の中で所属が重なっている", "未解決の要件に制約 ID が無い", "固定した試験で確かめる要件に所属が無い"];
+      failing.forEach((specs, index) => {
+        const list = listOf(specs);
+        const raw = tableOf(specs);
+        const before = checkMappedTable(list, raw, FIXTURE_DOCUMENTS);
+        const { table, normalized } = normalizeMappedTable(raw);
+        expect(normalized.map((entry) => entry.requirementId)).toEqual(["R1", "R2"]);
+        expect(messagesOfProblems(checkMappedTable(list, table, FIXTURE_DOCUMENTS))).toEqual(messagesOfProblems(before));
+        expect(before.map((problem) => problem.message)).toContain(expected[index]);
+      });
+    });
+
+    const dupSpecs: readonly Spec[] = [{ id: "R1", roles: ["s:E1.F1", "d:OP1", "d:OP1"] }, { id: "R2", roles: ["s:E2.F1"] }, { id: "R3", roles: ["s:E2.F2", "s:OP1"] }, cover(["OP1"])];
+    const dupList = listOf(dupSpecs);
+    const dupResponse = responseOf(tableOf(dupSpecs));
+    const goodResponse = responseOf(tableOf([{ id: "R1", roles: ["s:E1.F1", "d:OP1"] }, ...dupSpecs.slice(1)]));
+    const r1Of = (output: Entry) => withEntries((output["requirements"] as Entry[]).filter((entry) => entry["requirementId"] === "R1"));
+    const runCustom = async (outputs: readonly unknown[], previous?: MappingPrevious) => {
+      const recording = createCheckedRecordingClient(outputs.map(recordedStructured));
+      const outcome = await runMapping({
+        plan: planOf(dupList),
+        list: dupList,
+        documents: FIXTURE_DOCUMENTS,
+        gateway: makeGateway(recording.client),
+        rows: ROWS,
+        ledger: PROPERTY_LEDGER_VIEW,
+        ...(previous === undefined ? {} : { previous }),
+      });
+      return { outcome, recording };
+    };
+
+    it("stated の項目と同じ when 無しの操作を dependency で 2 回持つ要件（その操作をほかの要件が stated で持つ）は、初回・書き直しの合併・2 回目の合併のどれでも重なりの固定文で落ちる", async () => {
+      const first = inspectMappingSourced(dupList, ROWS, dupResponse, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+      expect(first.ok).toBe(false);
+      if (!first.ok) expect(first.problems.map((problem) => problem.message)).toEqual(["同じ要件の中で所属が重なっている"]);
+      // 初回の落ちは R1 に帰属するので R1 だけを書き直させ、書き直しも重なれば合併後の C2' が同じ文で落とす
+      const rewritten = await runCustom([dupResponse, r1Of(dupResponse)]);
+      expect(rewritten.recording.structured).toHaveLength(2);
+      expect(rewritten.outcome.ok).toBe(false);
+      expect(messagesOf(rewritten.outcome)).toEqual(["同じ要件の中で所属が重なっている"]);
+      // C3 の拒否のあとの 2 回目（R1 を拒否）も同じ
+      const previous: MappingPrevious = {
+        response: goodResponse,
+        rejections: [{ requirementId: "R1", kind: "unnecessary-ownership", quote: "要件 R1 の文" }] as unknown as MappingPrevious["rejections"],
+        advice: [],
+      };
+      const second = await runCustom([r1Of(dupResponse)], previous);
+      expect(second.recording.structured).toHaveLength(1);
+      expect(messagesOf(second.outcome)).toEqual(["同じ要件の中で所属が重なっている"]);
+    });
+
+    it("(6) 落ちた要件だけの書き直しの合併と、C3 の拒否のあとの 2 回目の合併にも同じ手が当たる。結果の response は整える前の raw で、2 回目の要求の「前回の写像」も raw。初回の要求は手の当たり方に依らない", async () => {
+      // 初回：R2 の所属に表に無い ID（R2 に帰属）→ R2 だけ書き直す。合併した表で R1 の OP1（R3 が stated で持つ）が外れる
+      const r2Bad = withEntries((goodResponse["requirements"] as Entry[]).map((entry) => (entry["requirementId"] === "R2" ? { ...entry, roles: [...(entry["roles"] as Entry[]), { id: "E9", basis: "stated", reason: null }] } : entry)));
+      const r2Only = withEntries((goodResponse["requirements"] as Entry[]).filter((entry) => entry["requirementId"] === "R2"));
+      const merged = await runCustom([r2Bad, r2Only]);
+      expect(merged.recording.structured).toHaveLength(2);
+      expect(merged.outcome.ok).toBe(true);
+      if (!merged.outcome.ok) return;
+      expect(merged.outcome.value.normalized).toEqual([{ requirementId: "R1", rule: "N-map-02", targetId: null, removedRowIds: ["OP1"] }]);
+      expect(merged.outcome.value.response).toEqual(goodResponse);
+      expect(merged.outcome.value.table.ownership[0]?.roles.map((role) => role.id)).toEqual(["E1.F1"]);
+      expect(merged.outcome.value.tableSha256).toBe(await nameTableSha256(merged.outcome.value.table));
+      // 初回の要求は、手が当たらない応答を返す走りの初回の要求とバイト列で同じ
+      const plain = await runCustom([responseOf(tableOf([{ id: "R1", roles: ["s:E1.F1"] }, ...dupSpecs.slice(1)]))]);
+      expect(JSON.stringify(merged.recording.structured[0])).toBe(JSON.stringify(plain.recording.structured[0]));
+      // 2 回目：R2 を拒否。前回の写像は raw（R1 が OP1 を dependency で持つまま）で、合併した表にまた手が当たる
+      const previous: MappingPrevious = {
+        response: merged.outcome.value.response,
+        rejections: [{ requirementId: "R2", kind: "weak-verification", quote: "要件 R2 の文" }] as unknown as MappingPrevious["rejections"],
+        advice: [],
+      };
+      const second = await runCustom([r2Only], previous);
+      expect(blockOf(second.recording.structured[0]?.input, MAPPING_DATA_NAMES.response)).toEqual(goodResponse);
+      expect(second.outcome.ok).toBe(true);
+      if (second.outcome.ok) {
+        expect(second.outcome.value.normalized).toEqual(merged.outcome.value.normalized);
+        expect(second.outcome.value.response).toEqual(goodResponse);
+      }
+    });
+
+    it("(9) 書き直した要件が共有の操作を手放すと、保持した要件の手 2 の可否が変わる：合併した全表に手が掛かり直す", async () => {
+      // 初回：R1・R3 がともに OP1 を dependency で持ち、ほかに持ち主が無い → どちらも外れない
+      const shared: readonly Spec[] = [{ id: "R1", roles: ["s:E1.F1", "d:OP1"] }, { id: "R2", roles: ["s:E2.F1"] }, { id: "R3", roles: ["s:E2.F2", "d:OP1"] }, cover(["OP1"])];
+      const sharedResponse = responseOf(tableOf(shared));
+      const first = await runCustom([sharedResponse]);
+      expect(first.outcome.ok && first.outcome.value.normalized).toEqual([]);
+      // C3 が R3 を拒否し、R3 が OP1 を stated で持つ形に書き直す → 保持した R1 から OP1 が外れる
+      const r3Stated = withEntries((goodResponse["requirements"] as Entry[]).filter((entry) => entry["requirementId"] === "R3"));
+      const previous: MappingPrevious = {
+        response: sharedResponse,
+        rejections: [{ requirementId: "R3", kind: "missing-target", quote: "要件 R3 の文" }] as unknown as MappingPrevious["rejections"],
+        advice: [],
+      };
+      const second = await runCustom([r3Stated], previous);
+      expect(second.outcome.ok).toBe(true);
+      if (second.outcome.ok) {
+        expect(second.outcome.value.normalized).toEqual([{ requirementId: "R1", rule: "N-map-02", targetId: null, removedRowIds: ["OP1"] }]);
+        expect(second.outcome.value.table.ownership[0]?.roles.map((role) => role.id)).toEqual(["E1.F1"]);
+      }
+    });
+  });
+
+  it("(8) 手の非破壊：raw を凍結した入力で、整えた表に手を再適用すると 1 回の結果と異なる例がある。段は raw から 1 回しか当てず、同じ raw から同じ表になる", async () => {
+    // 参照の項目 1 行の stated と、共有の when 無しの操作の dependency を持つ fixed-test：1 回目は手 2 だけ、2 回目なら手 1 に当たる
+    const specs: readonly Spec[] = [{ id: "R1", roles: ["s:E1.F2", "d:OP1"] }, cover()];
+    const list = listOf(specs);
+    const raw = deepFreeze(tableOf(specs));
+    const once = normalizeMappedTable(raw);
+    expect(once.normalized).toEqual([{ requirementId: "R1", rule: "N-map-02", targetId: null, removedRowIds: ["OP1"] }]);
+    expect(once.table.verification[0]?.kind).toBe("fixed-test");
+    const twice = normalizeMappedTable(once.table);
+    expect(twice.normalized).toEqual([{ requirementId: "R1", rule: "N-map-01", targetId: "E1.F2", removedRowIds: [] }]);
+    expect(twice.table).not.toEqual(once.table);
+    // 段（C2' の口）は応答から組んだ表に 1 回だけ当てる：凍結した同じ応答から 2 回とも 1 回の結果
+    const response = deepFreeze(responseOf(tableOf(specs)));
+    const shaOf = async () => {
+      const inspected = inspectMappingSourced(list, ROWS, response, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+      if (!inspected.ok) throw new Error("前提が壊れた：通る応答であること");
+      expect(inspected.table).toEqual(once.table);
+      expect(inspected.normalized).toEqual(once.normalized);
+      return nameTableSha256(inspected.table);
+    };
+    expect(await shaOf()).toBe(await shaOf());
+    expect(await shaOf()).toBe(await nameTableSha256(once.table));
+    expect(response).toEqual(responseOf(tableOf(specs)));
+  });
+
+  it("要求・試験の題材に受入の題材の言葉が無い", () => {
+    expectNoAcceptanceMaterial([JSON.stringify(ROWS), ...listOf([cover()]).requirements.map((requirement) => requirement.text)]);
+  });
+});
+
+describe("検査の対象の並び（同じ種類の検査を 2 つ以上の行に掛ける。Issue #724）", () => {
+  /** R3 を、同じ種類（action-kind）の検査を 2 つの操作（OP1・OP2）に掛ける structural にした応答（所属は項目だけ。操作は検査の対象から足す） */
+  const twoOperations = (
+    checks: unknown = fields({ "action-kind": [{ targetId: "OP1" }, { targetId: "OP2" }] }),
+    roles: readonly Entry[] = [{ id: "E2.F3", basis: "stated", reason: null }],
+  ) =>
+    withEntries(
+      entries().map((entry, index) =>
+        index === 2
+          ? {
+              ...entry,
+              roles: [...roles],
+              verification: { kind: "structural", value: null, reason: "操作の種類を確かめる", checks, constraintIds: [] },
+            }
+          : entry,
+      ),
+    );
+  /** R2 の view-shows を、同じ画面 V2 に表示元 2 つ（E1.F1・C1。どちらも V2 と同じ entity）を掛けた応答 */
+  const twoSources = () => withChecksAt(1, fields({ "view-shows": [{ targetId: "V2", sourceId: "E1.F1" }, { targetId: "V2", sourceId: "C1" }] }));
+  const r3Of = (table: NameTable) => table.verification.find((entry) => entry.requirementId === "R3");
+
+  for (const ledger of [undefined, PROPERTY_LEDGER_VIEW]) {
+    const label = ledger === undefined ? "ledger off" : "ledger on";
+    it(`二点測定 (1)（${label}）：同じ種類を 2 つの操作に掛けた応答は問題 0 で、表の checks に同じ種類が 2 回・targets に 2 つの対象が並び、2 行とも所属に足される`, async () => {
+      const output = twoOperations();
+      expect(validateSchema(mappingSchemaOf(ledger), output)).toBeUndefined();
+      const inspected = inspectMapping(LIST, TABLE.rows, output, FIXTURE_DOCUMENTS, ledger);
+      expect(inspected.ok, JSON.stringify(inspected)).toBe(true);
+      if (!inspected.ok) return;
+      expect(r3Of(inspected.table)).toEqual({
+        requirementId: "R3",
+        kind: "structural",
+        reason: "操作の種類を確かめる",
+        checks: ["action-kind", "action-kind"],
+        targets: [
+          { check: "action-kind", targetId: "OP1", sourceId: null },
+          { check: "action-kind", targetId: "OP2", sourceId: null },
+        ],
+      });
+      expect(inspected.table.ownership[2]?.roles).toEqual([
+        { id: "E2.F3", basis: "stated", reason: null },
+        { id: "OP1", basis: "dependency", reason: "action-kind" },
+        { id: "OP2", basis: "dependency", reason: "action-kind" },
+      ]);
+      // 段を通しても同じ表（形のやり直し無し・要求 1）
+      const { outcome, recording } = await run([output], ledger === undefined ? {} : { ledger });
+      expect(recording.structured).toHaveLength(1);
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) expect(outcome.value.table).toEqual(inspected.table);
+    });
+  }
+
+  it("二点測定 (1)：手で組んだ型付きの複数対象の表（同じ種類が 2 回・対象が別）は表の検査を通り、targets を外すと今の固定文「checks の中身が重なっている」で落ちる", () => {
+    const inspected = inspectMapping(LIST, TABLE.rows, twoOperations(), FIXTURE_DOCUMENTS);
+    if (!inspected.ok) throw new Error("前提が壊れた：通る応答であること");
+    expect(checkMappedTable(LIST, inspected.table, FIXTURE_DOCUMENTS)).toEqual([]);
+    const withoutTargets: NameTable = {
+      ...inspected.table,
+      verification: inspected.table.verification.map((entry) => {
+        if (entry.requirementId !== "R3" || entry.kind !== "structural") return entry;
+        const { targets: _omit, ...rest } = entry;
+        return rest;
+      }),
+    };
+    expect(checkMappedTable(LIST, withoutTargets, FIXTURE_DOCUMENTS)).toEqual([{ field: "verification[2].checks[1]", message: "checks の中身が重なっている" }]);
+    // checks と並びの合わない targets（種類の順が違う）も、今までどおり同じ種類が 2 回で落ちる
+    const mismatched: NameTable = {
+      ...inspected.table,
+      verification: inspected.table.verification.map((entry) =>
+        entry.requirementId === "R3" && entry.kind === "structural"
+          ? { ...entry, targets: [{ check: "field-type" as const, targetId: "E2.F3", sourceId: null }, { check: "action-kind" as const, targetId: "OP2", sourceId: null }] }
+          : entry,
+      ),
+    };
+    expect(checkMappedTable(LIST, mismatched, FIXTURE_DOCUMENTS).map((problem) => problem.message)).toContain("checks の中身が重なっている");
+  });
+
+  it("二点測定 (2)：種類ごとに対象 1 つの応答から組んだ表（検査の対象・所属・表の SHA）と参照の数は、直す前（欄が写像）の同じ内容と深く等しい", async () => {
+    // 直す前の値：base 2c514cf で GOOD（R2 の view-shows 1 件）から組んだ表は MAPPED、参照の数は要件 ID 5・所属・対象 2
+    const { outcome } = await run([GOOD]);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.table).toEqual(MAPPED);
+    expect(outcome.value.tableSha256).toBe(await nameTableSha256(MAPPED));
+    const roles = TABLE.ownership.reduce((total, entry) => total + entry.roles.length, 0);
+    expect(outcome.references).toEqual({ checked: LIST.requirements.length + roles + 2, unknown: 0, duplicate: 0, crossBundle: 0 });
+    // R2 の欄は 1 件の並び
+    const r2 = ((entries()[1] as Entry)["verification"] as Entry)["checks"] as Entry;
+    expect(r2["view-shows"]).toEqual([{ targetId: "V2", sourceId: "E1.F1" }]);
+  });
+
+  it("二点測定 (2)：複数対象の応答は並びの全要素の targetId・sourceId を数え、知らない ID も要素ごとに数える", async () => {
+    const roles = TABLE.ownership.reduce((total, entry) => total + entry.roles.length, 0);
+    const r3Roles = TABLE.ownership[2]?.roles.length ?? 0;
+    const multi = await run([twoOperations()]);
+    // 要件 ID 5・所属（R3 は 1 行）・R2 の view-shows 2・R3 の action-kind 2
+    expect(multi.outcome.references).toEqual({ checked: LIST.requirements.length + roles - r3Roles + 1 + 2 + 2, unknown: 0, duplicate: 0, crossBundle: 0 });
+    const sources = await run([twoSources()]);
+    expect(sources.outcome.references).toEqual({ checked: LIST.requirements.length + roles + 4, unknown: 0, duplicate: 0, crossBundle: 0 });
+    const unknown = twoOperations(fields({ "action-kind": [{ targetId: "OP1" }, { targetId: "OP9" }, { targetId: "R1" }] }));
+    const counted = await run([unknown, rewriteOf(unknown, ["R3"])]);
+    expect(counted.outcome.references.unknown).toBe(2);
+    expect(counted.outcome.references.crossBundle).toBe(2);
+  });
+
+  it("二点測定 (2)：落ちた要件だけの書き直しは、保った複数対象の要件を数え直さない", async () => {
+    const roles = TABLE.ownership.reduce((total, entry) => total + entry.roles.length, 0);
+    const r1Roles = TABLE.ownership[0]?.roles.length ?? 0;
+    const r3Roles = TABLE.ownership[2]?.roles.length ?? 0;
+    const good = twoOperations();
+    const bad = withEntries(
+      (good["requirements"] as Entry[]).map((entry, index) =>
+        index === 0 ? { ...entry, roles: [...(entry["roles"] as Entry[]), { id: "E1.F99", basis: "stated", reason: null }] } : entry,
+      ),
+    );
+    const { outcome, recording } = await run([bad, rewriteOf(good, ["R1"])]);
+    expect(recording.structured).toHaveLength(2);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(r3Of(outcome.value.table)).toMatchObject({ checks: ["action-kind", "action-kind"] });
+    // 初回：要件 ID 5・所属（＋行に無い 1）・対象 4。書き直し：要件 ID 1・R1 の所属（R3 の対象を数え直さない）
+    expect(outcome.references).toEqual({
+      checked: LIST.requirements.length + roles - r3Roles + 1 + 1 + 4 + (1 + r1Roles),
+      unknown: 1,
+      duplicate: 0,
+      crossBundle: 0,
+    });
+  });
+
+  it("(3) の前提：同じ画面に表示元 2 つの view-shows は問題 0 で、targets に 2 組が応答の順に並ぶ", () => {
+    const inspected = inspectMapping(LIST, TABLE.rows, twoSources(), FIXTURE_DOCUMENTS);
+    expect(inspected.ok).toBe(true);
+    if (!inspected.ok) return;
+    expect(inspected.table.verification[1]).toMatchObject({
+      checks: ["view-shows", "view-shows"],
+      targets: [
+        { check: "view-shows", targetId: "V2", sourceId: "E1.F1" },
+        { check: "view-shows", targetId: "V2", sourceId: "C1" },
+      ],
+    });
+  });
+
+  it("復号：種類の固定の順に並べ、種類の中は応答の順のまま（応答の欄の鍵の順に依らない）", () => {
+    const checks = fields({ "write-anonymous": [{ targetId: "OP2" }, { targetId: "OP1" }], "action-kind": [{ targetId: "OP2" }, { targetId: "OP1" }] });
+    const reversed = Object.fromEntries(Object.entries(checks).reverse());
+    for (const set of [checks, reversed]) {
+      const inspected = inspectMapping(LIST, TABLE.rows, twoOperations(set), FIXTURE_DOCUMENTS);
+      expect(inspected.ok).toBe(true);
+      if (inspected.ok) {
+        expect(r3Of(inspected.table)).toMatchObject({
+          checks: ["action-kind", "action-kind", "write-anonymous", "write-anonymous"],
+          targets: [
+            { check: "action-kind", targetId: "OP2" },
+            { check: "action-kind", targetId: "OP1" },
+            { check: "write-anonymous", targetId: "OP2" },
+            { check: "write-anonymous", targetId: "OP1" },
+          ],
+        });
+      }
+    }
+  });
+
+  describe("負例 (5)：同じ組を 2 回は今の固定文「checks の中身が重なっている」で落ちる（形のやり直し 1 回のあと 2 回で unmet）", () => {
+    const cases = [
+      { label: "同じ操作に同じ種類を 2 回", bad: () => twoOperations(fields({ "action-kind": [{ targetId: "OP2" }, { targetId: "OP2" }] })), rewrite: ["R3"] },
+      {
+        label: "view-shows で同じ画面・同じ表示元を 2 回",
+        bad: () => withChecksAt(1, fields({ "view-shows": [{ targetId: "V2", sourceId: "E1.F1" }, { targetId: "V2", sourceId: "E1.F1" }] })),
+        rewrite: ["R2"],
+      },
+    ] as const;
+    it.each(cases)("$label", async ({ bad, rewrite }) => {
+      const inspected = inspectMapping(LIST, TABLE.rows, bad(), FIXTURE_DOCUMENTS);
+      expect(inspected.ok).toBe(false);
+      if (!inspected.ok) expect(inspected.problems.map((problem) => problem.message)).toEqual(["checks の中身が重なっている"]);
+      const { outcome, recording } = await run([bad(), rewriteOf(bad(), rewrite)]);
+      expect(recording.structured).toHaveLength(2);
+      expect(blockOf(recording.structured[1]?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual(rewrite);
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.failure.kind).toBe("unmet");
+      expect(messagesOf(outcome)).toContain("checks の中身が重なっている");
+    });
+
+    it("手で組んだ targets 無しの表で同じ種類が 2 回も、今の固定文で落ちる", () => {
+      const table: NameTable = {
+        ...TABLE,
+        verification: TABLE.verification.map((entry) =>
+          entry.requirementId === "R3" ? { requirementId: "R3", kind: "structural" as const, reason: "操作の種類だけ", checks: ["action-kind", "action-kind"] as const } : entry,
+        ),
+        ownership: TABLE.ownership.map((entry) => (entry.requirementId === "R3" ? { ...entry, roles: [...entry.roles, { id: "OP1", basis: "stated" as const, reason: null }] } : entry)),
+      };
+      expect(checkMappedTable(LIST, table, FIXTURE_DOCUMENTS).map((problem) => problem.message)).toEqual(["checks の中身が重なっている"]);
+    });
+  });
+
+  describe("負例 (6)：固定文で形のやり直し 1 回のあと 2 回で unmet", () => {
+    // 落ちた対象は所属に足さないので、R3 だけが所属させる OP2 は所属に名指しして孤立行を作らない（問題を R3 に帰属させる）
+    const withOp2 = [
+      { id: "E2.F3", basis: "stated", reason: null },
+      { id: "OP2", basis: "stated", reason: null },
+    ];
+    const cases = [
+      { label: "空の並びの欄", bad: () => twoOperations(fields({ "action-kind": [{ targetId: "OP1" }], "write-anonymous": [] })), message: MAPPING_MESSAGES.checksEmpty },
+      { label: "空の並びの欄だけ", bad: () => twoOperations(fields({ "action-kind": [] })), message: MAPPING_MESSAGES.checksEmpty },
+      { label: "並びの 2 件目の種類が違う（action-kind に項目）", bad: () => twoOperations(fields({ "action-kind": [{ targetId: "OP1" }, { targetId: "E2.F3" }] }), withOp2), message: CHECK_TARGET_MESSAGES.targetKind },
+      { label: "並びの 2 件目が表に無い", bad: () => twoOperations(fields({ "action-kind": [{ targetId: "OP1" }, { targetId: "OP9" }] }), withOp2), message: CHECK_TARGET_MESSAGES.unknownTarget },
+      {
+        label: "view-shows の 2 件目が同じ entity でない対",
+        bad: () => twoOperations(fields({ "action-kind": [{ targetId: "OP2" }], "view-shows": [{ targetId: "V1", sourceId: "E2.F3" }, { targetId: "V1", sourceId: "E1.F1" }] }), withOp2),
+        message: CHECK_TARGET_MESSAGES.sourcePair,
+      },
+      {
+        label: "直す前の写像の欄（並びでない。schema では出ない）",
+        bad: () => negative(twoOperations(rawFields({ "action-kind": { targetId: "OP1" } })), "欄は schema で並びか null"),
+        message: MAPPING_MESSAGES.checksShape,
+      },
+    ] as const;
+    it.each(cases)("$label", async ({ bad, message }) => {
+      const { outcome, recording } = await run([bad(), rewriteOf(bad(), ["R3"])]);
+      expect(recording.structured).toHaveLength(2);
+      expect(blockOf(recording.structured[1]?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual(["R3"]);
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.failure.kind).toBe("unmet");
+      expect(messagesOf(outcome)).toContain(message);
+      const fixed = await run([bad(), rewriteOf(twoOperations(), ["R3"])]);
+      expect(fixed.outcome.ok).toBe(true);
+    });
+  });
+
+  it("(7)：どの検査の対象にも所属にも無い行は今の固定文で落ちる（対象の並びから推測で足さない）", () => {
+    // R3 の所属から操作を外し、検査の対象にも OP2 だけを書く（OP2 は R3 だけが所属させる行ではないので、E2.F3 を外して孤立させる）
+    const orphan = withEntries(
+      (twoOperations(fields({ "action-kind": [{ targetId: "OP2" }] }))["requirements"] as Entry[]).map((entry, index) =>
+        index === 2 ? { ...entry, roles: [{ id: "OP2", basis: "stated", reason: null }] } : index === 0 ? { ...entry, roles: (entry["roles"] as Entry[]).filter((role) => role["id"] !== "E2.F3") } : entry,
+      ),
+    );
+    const inspected = inspectMapping(LIST, TABLE.rows, orphan, FIXTURE_DOCUMENTS);
+    expect(inspected.ok).toBe(false);
+    if (!inspected.ok) expect(inspected.problems.map((problem) => problem.message)).toEqual(["どの要件にも所属しない行がある"]);
+  });
+
+  it("要求：通常版・台帳版・書き直しの版の R-map-03 が同じ新しい文で、ID・why は直す前のまま・since に履歴がある", () => {
+    const plain = MAPPING_RULE_DEFINITIONS.find((definition) => definition.id === "R-map-03");
+    for (const [definitions, ledgerVersion] of [
+      [MAPPING_RULE_DEFINITIONS, false],
+      [mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW), true],
+      [mappingRewriteRuleDefinitionsOf(), false],
+      [mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW), true],
+    ] as const) {
+      expect(ruleDefinitionDefects(definitions)).toEqual([]);
+      const r3 = definitions.find((definition) => definition.id === "R-map-03");
+      expect(r3?.text).toContain("同じ種類の検査を 2 つ以上の行に掛けて確かめる要件は、その種類の欄に行ごとに 1 件ずつ並べる。同じ組（view-shows は画面と表示元の組、ほかは行）を 2 回書かない。");
+      expect(r3?.text).not.toContain("同じ種類の検査は要件ごとに 1 件");
+      expect(r3?.text).not.toContain("structural にせず、kind を fixed-test にしてそれらの行を所属させる");
+      expect(r3?.why).toBe(plain?.why);
+      // 台帳版と台帳版の書き直しの since は、直す前の since の後ろに #725 の履歴を足したもの（Issue #725 で台帳版の期待を置き換えた）
+      expect(r3?.since).toBe(
+        ledgerVersion
+          ? `${plain?.since ?? ""}。#682 は空の並び 34/129 件を理由に 1 件以上とした。根拠を文書に縛る理由（怠慢の持ち越しを塞ぐ）は保ち、台帳の未対応を根拠に足した（Issue #725）`
+          : plain?.since,
+      );
+    }
+    expect(plain?.why).toBe(
+      "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（T1 の R-nt-08）。構造の検査の対象は規則の文で所属を求めず、応答の欄で行の ID を書かせて対と所属をコードが導く（方法論 03 の F4・H1・H2）",
+    );
+    expect(plain?.since).toContain("#682 は形の落ち率を理由に 1 種類 1 件とした。fixed-test にすると試験 0 本・操作が未検証になる要件があり（U1 の 30 本の分析）");
+    expect(plain?.since).toContain("Issue #724");
+    expectNoAcceptanceMaterial([JSON.stringify(twoOperations()), JSON.stringify(twoSources()), MAPPING_MESSAGES.checksEmpty, plain?.text ?? ""]);
+  });
+});
+
+describe("台帳の未対応の観測を unresolved の根拠に足す（旗 ids と ledger が on の C2 だけ。v1.2 表の契約 A-U。Issue #725）", () => {
+  /** 台帳を受けた C2 の行（計算の行に集計の欄）と、その行で書いた正しい応答 */
+  const LEDGER_TABLE = withCodeIds(withAggregates(fixtureTable()));
+  const LEDGER_GOOD = idsResponsesOf(LIST, LEDGER_TABLE, PROPERTY_LEDGER_VIEW).mapping;
+  const LEDGER_ID = "state-after-set";
+  const unresolvedIndex = (LEDGER_GOOD["requirements"] as Entry[]).findIndex((entry) => (entry["verification"] as Entry)["kind"] === "unresolved");
+  /** 未解決の要件の constraintIds だけを差し替えた応答 */
+  const withConstraintIds = (good: Record<string, unknown>, constraintIds: readonly string[]) => ({
+    requirements: (good["requirements"] as Entry[]).map((entry, index) =>
+      index === unresolvedIndex ? { ...entry, verification: { ...(entry["verification"] as Entry), constraintIds } } : entry,
+    ),
+  });
+  /** 要求のデータの塊の名前の並び */
+  const dataNamesOf = (input: string | undefined): readonly string[] => [...(input ?? "").matchAll(/<data name="([^"]+)">\n/gu)].map((match) => match[1] ?? "");
+  const EXPECTED_BLOCK = { observations: [{ id: LEDGER_ID, message: PROPERTY_LEDGER_VIEW.unsupportedObservations[0]?.message }] };
+
+  it("前提：未解決の要件が 1 件で、文書の制約 ID を挙げている。台帳の未対応の観測は state-after-set の 1 件で、文書の制約 ID ではない", () => {
+    expect(unresolvedIndex).toBe(4);
+    expect(((LEDGER_GOOD["requirements"] as Entry[])[unresolvedIndex]?.["verification"] as Entry | undefined)?.["constraintIds"]).toEqual([...constraintIdsIn(FIXTURE_DOCUMENTS)].slice(0, 1));
+    expect(PROPERTY_LEDGER_VIEW.unsupportedObservations.map((entry) => entry.id)).toEqual([LEDGER_ID]);
+    expect(constraintIdsIn(FIXTURE_DOCUMENTS).has(LEDGER_ID)).toBe(false);
+  });
+
+  it("(1) 台帳の未対応の観測の ID だけを挙げた unresolved は、台帳を受けた C2' で問題 0（1 回で通る）。表の確かめ方は unresolved のまま理由とその ID を持つ。台帳を受けない C2 では今までどおり「制約 ID が文書に無い」で落ちる", async () => {
+    const response = withConstraintIds(LEDGER_GOOD, [LEDGER_ID]);
+    const { outcome, recording } = await run([response], { table: LEDGER_TABLE, ledger: PROPERTY_LEDGER_VIEW });
+    expect(recording.structured).toHaveLength(1);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.value.table.verification[unresolvedIndex]).toMatchObject({ kind: "unresolved", reason: "宣言で書けない", constraintIds: [LEDGER_ID] });
+    }
+    const inspected = inspectMapping(LIST, LEDGER_TABLE.rows, response, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+    expect(inspected.ok).toBe(true);
+    // 台帳を受けない C2（ids on・ledger off）は今のまま落ちる
+    // （初回の問題は要件 R5 に帰属するので、2 本目は R5 だけの書き直し。同じ ID のまま書けば落ちる）
+    const offResponse = withConstraintIds(GOOD, [LEDGER_ID]);
+    const off = await run([offResponse, rewriteOf(offResponse, ["R5"])]);
+    expect(off.outcome.ok).toBe(false);
+    expect(messagesOf(off.outcome)).toEqual(["制約 ID が文書に無い"]);
+  });
+
+  it("(2) 文書の制約 ID の unresolved は、台帳を受けても直す前と同じ表（応答から組んだ表）で通る", async () => {
+    const { outcome } = await run([LEDGER_GOOD], { table: LEDGER_TABLE, ledger: PROPERTY_LEDGER_VIEW });
+    expect(outcome.ok).toBe(true);
+    const inspected = inspectMapping(LIST, LEDGER_TABLE.rows, LEDGER_GOOD, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+    expect(inspected.ok).toBe(true);
+    if (outcome.ok && inspected.ok) {
+      expect(outcome.value.table).toEqual(inspected.table);
+      expect(outcome.value.table.verification[unresolvedIndex]).toMatchObject({ kind: "unresolved", constraintIds: [...constraintIdsIn(FIXTURE_DOCUMENTS)].slice(0, 1) });
+    }
+  });
+
+  it("(3)(4) 負例：空の constraintIds・台帳の有効な観測の ID・どちらにも無い ID は、台帳を受けた C2' でも今の固定文で落ちる", () => {
+    const problemsOf = (ids: readonly string[]) => {
+      const inspected = inspectMapping(LIST, LEDGER_TABLE.rows, withConstraintIds(LEDGER_GOOD, ids), FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+      return inspected.ok ? [] : inspected.problems.map((problem) => problem.message);
+    };
+    expect(problemsOf([])).toEqual(["未解決の要件に制約 ID が無い"]);
+    for (const id of ["when", "value", "default-value", "どちらにも無い"]) expect(problemsOf([id]), id).toEqual(["制約 ID が文書に無い"]);
+  });
+
+  it("要求：台帳を受けた C2 のデータは文書の塊の直後に未対応の観測の一覧（ID と文）を持ち、それを除けば台帳を受けない要求のデータと同じ。規則は R-map-03 だけが違う", async () => {
+    const on = await run([LEDGER_GOOD], { table: LEDGER_TABLE, ledger: PROPERTY_LEDGER_VIEW });
+    const off = await run([LEDGER_GOOD, LEDGER_GOOD], { table: LEDGER_TABLE });
+    const onRequest = on.recording.structured[0];
+    const offRequest = off.recording.structured[0];
+    expect(dataNamesOf(onRequest?.input)).toEqual([
+      MAPPING_DATA_NAMES.plan,
+      MAPPING_DATA_NAMES.list,
+      MAPPING_DATA_NAMES.rows,
+      MAPPING_DATA_NAMES.documents,
+      MAPPING_LEDGER_DATA_NAMES.unsupported,
+    ]);
+    expect(dataNamesOf(offRequest?.input)).toEqual([MAPPING_DATA_NAMES.plan, MAPPING_DATA_NAMES.list, MAPPING_DATA_NAMES.rows, MAPPING_DATA_NAMES.documents]);
+    expect(blockOf(onRequest?.input, MAPPING_LEDGER_DATA_NAMES.unsupported)).toEqual(EXPECTED_BLOCK);
+    const block = `\n<data name="${MAPPING_LEDGER_DATA_NAMES.unsupported}">\n${(onRequest?.input ?? "").split(`<data name="${MAPPING_LEDGER_DATA_NAMES.unsupported}">\n`)[1]?.split("\n</data>")[0] ?? ""}\n</data>`;
+    expect(onRequest?.input.replace(block, "")).toBe(offRequest?.input);
+    expect(MAPPING_LEDGER_DATA_NAMES).toEqual({ unsupported: "台帳の未対応の観測" });
+    // 規則：R-map-03 のほかは同じ文・同じ順
+    const onRules = mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    expect(onRules.map((definition) => definition.id)).toEqual(MAPPING_RULE_DEFINITIONS.map((definition) => definition.id));
+    expect(onRules.filter((definition) => definition.id !== "R-map-03")).toEqual(MAPPING_RULE_DEFINITIONS.filter((definition) => definition.id !== "R-map-03"));
+    expect(onRequest?.rules).toEqual(ruleTexts(onRules));
+    expect(offRequest?.rules).toEqual(ruleTexts(MAPPING_RULE_DEFINITIONS));
+    expectNoAcceptanceMaterial([onRequest?.input ?? "", ...ruleTexts(onRules)]);
+  });
+
+  it("要求：落ちた要件だけの書き直しと C3 の拒否のあとの 2 回目の要求も、文書の塊の直後に同じ一覧を持ち、台帳版の書き直しの規則（新しい R-map-03）を使う", async () => {
+    const rewriteRules = ruleTexts(mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW));
+    // 落ちた要件だけの書き直し（R1 の所属に行に無い ID）
+    const bad = {
+      requirements: (LEDGER_GOOD["requirements"] as Entry[]).map((entry, index) =>
+        index === 0 ? { ...entry, roles: [...(entry["roles"] as Entry[]), { id: "X99", basis: "stated", reason: null }] } : entry,
+      ),
+    };
+    const shape = await run([bad, rewriteOf(LEDGER_GOOD, ["R1"])], { table: LEDGER_TABLE, ledger: PROPERTY_LEDGER_VIEW });
+    expect(shape.outcome.ok).toBe(true);
+    const second = shape.recording.structured[1];
+    expect(dataNamesOf(second?.input).slice(0, 5)).toEqual([
+      MAPPING_DATA_NAMES.plan,
+      MAPPING_DATA_NAMES.list,
+      MAPPING_DATA_NAMES.rows,
+      MAPPING_DATA_NAMES.documents,
+      MAPPING_LEDGER_DATA_NAMES.unsupported,
+    ]);
+    expect(blockOf(second?.input, MAPPING_LEDGER_DATA_NAMES.unsupported)).toEqual(EXPECTED_BLOCK);
+    expect(second?.rules).toEqual(rewriteRules);
+    // C3 の拒否のあとの 2 回目
+    const previous: MappingPrevious = {
+      response: LEDGER_GOOD,
+      rejections: [{ requirementId: "R2", verdict: "reject", kind: "unnecessary-ownership", quote: "一覧で見られる" }] as unknown as MappingPrevious["rejections"],
+      advice: [],
+    };
+    const rejected = await run([rewriteOf(LEDGER_GOOD, ["R2"])], { table: LEDGER_TABLE, ledger: PROPERTY_LEDGER_VIEW, previous });
+    expect(rejected.outcome.ok).toBe(true);
+    const request = rejected.recording.structured[0];
+    expect(dataNamesOf(request?.input)).toEqual([
+      MAPPING_DATA_NAMES.plan,
+      MAPPING_DATA_NAMES.list,
+      MAPPING_DATA_NAMES.rows,
+      MAPPING_DATA_NAMES.documents,
+      MAPPING_LEDGER_DATA_NAMES.unsupported,
+      MAPPING_DATA_NAMES.response,
+      MAPPING_DATA_NAMES.rejections,
+      MAPPING_DATA_NAMES.advice,
+      MAPPING_REWRITE_DATA_NAMES.requirements,
+    ]);
+    expect(request?.rules).toEqual(rewriteRules);
+    // 台帳版の書き直しの R-map-03 は新しい文（kind・reason の記入の指示と、根拠の一覧に台帳の未対応の観測）
+    const r3 = mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW).find((definition) => definition.id === "R-map-03")?.text ?? "";
+    expect(r3).toContain("kind を unresolved にし、reason に理由を書き、constraintIds に根拠の ID を 1 件以上（文書の制約 ID の一覧か台帳の未対応の観測の一覧にあるものだけ）書く。");
+    expect(r3).toContain("根拠を一覧から挙げられない要件は unresolved にしない。");
+  });
+
+  it("規則の定義の不備 0（台帳の文で組み直した版・書き直しの版）。台帳を受けない版の R-map-03 は直す前と同じ文・同じ since", () => {
+    for (const definitions of [mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW), mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW), MAPPING_RULE_DEFINITIONS, mappingRewriteRuleDefinitionsOf()]) {
+      expect(ruleDefinitionDefects(definitions)).toEqual([]);
+    }
+    const plain = MAPPING_RULE_DEFINITIONS.find((definition) => definition.id === "R-map-03");
+    expect(plain?.text).not.toContain("台帳");
+    expect(plain?.since).not.toContain("#725");
+    const ledger = mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW).find((definition) => definition.id === "R-map-03");
+    expect(ledger?.id).toBe(plain?.id);
+    expect(ledger?.why).toBe(plain?.why);
+    expect(ledger?.since).toContain("#682 は空の並び 34/129 件を理由に 1 件以上とした。根拠を文書に縛る理由（怠慢の持ち越しを塞ぐ）は保ち、台帳の未対応を根拠に足した");
   });
 });

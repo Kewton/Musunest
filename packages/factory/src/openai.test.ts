@@ -918,18 +918,25 @@ describe("識別子 v1.2-ids の client は、C1・C2 と T1''〜B5' の全段�
     );
   };
 
-  it("欄の写像の C2 の応答（view-shows だけ sourceId・ほかの欄は null）は受け、そのまま段へ渡す", async () => {
-    const output = mappingOutput(fields({ "view-shows": { targetId: "V1", sourceId: "E1.F1" } }));
-    expect((await callMapping(output)).output).toEqual(output);
+  it("欄の写像の C2 の応答（各欄は null か対象の並び。view-shows の要素だけ sourceId・ほかの欄は null）は受け、そのまま段へ渡す（Issue #724：同じ種類の対象を 2 つ以上並べてよい）", async () => {
+    for (const checks of [
+      fields({ "view-shows": [{ targetId: "V1", sourceId: "E1.F1" }] }),
+      fields({ "view-shows": [{ targetId: "V1", sourceId: "E1.F1" }, { targetId: "V1", sourceId: "E1.F2" }] }),
+      fields({ "action-kind": [{ targetId: "OP1" }, { targetId: "OP2" }], "field-type": [{ targetId: "E1.F1" }] }),
+    ]) {
+      const output = mappingOutput(checks);
+      expect((await callMapping(output)).output, JSON.stringify(checks)).toEqual(output);
+    }
     expect((await callMapping(mappingOutput(null))).output).toEqual(mappingOutput(null));
   });
 
-  it("負例 (6)：view-shows でない欄に sourceId を持つ応答・配列の形の checks・欄の欠けた checks は、adapter の schema の検査で形の誤り", async () => {
+  it("負例 (6)：view-shows でない欄の要素に sourceId を持つ応答・配列の形の checks・欄の欠けた checks・並びでない欄（直す前の写像の欄）は、adapter の schema の検査で形の誤り", async () => {
     for (const checks of [
-      fields({ "field-type": { targetId: "E1.F1", sourceId: "E1.F1" } }),
+      fields({ "field-type": [{ targetId: "E1.F1", sourceId: "E1.F1" }] }),
       [{ check: "view-shows", targetId: "V1", sourceId: "E1.F1" }],
-      { "view-shows": { targetId: "V1", sourceId: "E1.F1" } },
-      fields({ "view-shows": { targetId: "V1", sourceId: null } }),
+      { "view-shows": [{ targetId: "V1", sourceId: "E1.F1" }] },
+      fields({ "view-shows": [{ targetId: "V1", sourceId: null }] }),
+      fields({ "view-shows": { targetId: "V1", sourceId: "E1.F1" } }),
     ]) {
       const error = await captureError(() => callMapping(mappingOutput(checks)));
       expect(error.kind, JSON.stringify(checks)).toBe("malformed");

@@ -6,7 +6,7 @@
 //   3. 導く欄：entity の所属は basis `dependency`・reason に導いた行の `id`、`shared` は所属 2 以上だけ
 //   4. 表の SHA-256 は決定的で、行の順と分類で変わる
 import { describe, expect, it } from "vitest";
-import type { Problem } from "../stages/prompt.js";
+import { constraintIdsIn, normalizeConstraintId, type Problem } from "../stages/prompt.js";
 import type { RequirementList } from "../pipeline.js";
 import {
   FIXTURE_CONSTRAINT_ID,
@@ -1529,6 +1529,37 @@ describe("旗 v12.ids の検査の口（出典は null。写し・引用の検�
     expect(duplicated).not.toContain("どの要件にも所属しない行がある");
   });
 
+  it("C2'（checkMappedTable）の重なり（Issue #724）：targets を持つ表は同じ組（種類＋targetId、view-shows は＋sourceId）が 2 回で落ち、同じ種類で対象が別なら通る。targets を持たない表は今のまま同じ種類が 2 回で落ちる", () => {
+    const OVERLAP = "checks の中身が重なっている";
+    type Target = { readonly check: "action-kind" | "view-shows"; readonly targetId: string; readonly sourceId: string | null };
+    const structural = (requirementId: string, targets: readonly Target[] | undefined, checks: readonly Target["check"][]): NameTable => ({
+      ...table,
+      ownership: table.ownership.map((entry) => (entry.requirementId === "R3" ? { ...entry, roles: [...entry.roles, { id: "OP1", basis: "dependency" as const, reason: "action-kind" }] } : entry)),
+      verification: table.verification.map((entry) =>
+        entry.requirementId === requirementId ? { requirementId, kind: "structural" as const, reason: "構造だけ", checks, ...(targets === undefined ? {} : { targets }) } : entry,
+      ),
+    });
+    const op = (targetId: string): Target => ({ check: "action-kind", targetId, sourceId: null });
+    const view = (targetId: string, sourceId: string): Target => ({ check: "view-shows", targetId, sourceId });
+    const messages = (target: NameTable) => checkMappedTable(list, target, FIXTURE_DOCUMENTS).map((problem) => problem.message);
+    // 通る：同じ種類・別の対象
+    expect(messages(structural("R3", [op("OP1"), op("OP2")], ["action-kind", "action-kind"]))).toEqual([]);
+    expect(messages(structural("R2", [view("V2", "E1.F1"), view("V2", "C1")], ["view-shows", "view-shows"]))).toEqual([]);
+    // 落ちる：同じ組が 2 回
+    expect(checkMappedTable(list, structural("R3", [op("OP2"), op("OP2")], ["action-kind", "action-kind"]), FIXTURE_DOCUMENTS)).toEqual([
+      { field: "verification[2].checks[1]", message: OVERLAP },
+    ]);
+    expect(messages(structural("R2", [view("V2", "E1.F1"), view("V2", "E1.F1")], ["view-shows", "view-shows"]))).toEqual([OVERLAP]);
+    // targets を持たない表（ids off の T1・手で組んだ旧の形）は、今のまま同じ種類が 2 回で落ちる
+    expect(messages(structural("R3", undefined, ["action-kind", "action-kind"]))).toEqual([OVERLAP]);
+    const t1 = fixtureTable();
+    const t1Duplicated: NameTable = {
+      ...t1,
+      verification: t1.verification.map((entry) => (entry.requirementId === "R2" && entry.kind === "structural" ? { ...entry, checks: ["view-shows", "view-shows"] } : entry)),
+    };
+    expect(checkNameTable(list, t1Duplicated, FIXTURE_DOCUMENTS).map((problem) => problem.message)).toContain(OVERLAP);
+  });
+
   it("C2'（checkMappedTable）：表全体は問題 0。所属の欠落は今の (g) の固定文で落ちる", () => {
     expect(checkMappedTable(list, table, FIXTURE_DOCUMENTS)).toEqual([]);
     const missing = checkMappedTable(list, { ...table, ownership: table.ownership.slice(1) }, FIXTURE_DOCUMENTS).map((problem) => problem.message);
@@ -1618,5 +1649,76 @@ describe("読み漏れの検出：T1'・C1'・C2' の共通の検査は台帳を
     void ledger.rowByVerificationKind.get("default-value")?.rules;
     expect(same).toHaveLength(7);
     expect(ledger.verificationKinds).toEqual(PROPERTY_LEDGER_VIEW.verificationKinds);
+  });
+});
+
+describe("C2'（checkMappedTable）の unresolved の根拠に台帳の未対応の観測の ID を受ける（台帳を受けたときだけ。v1.2 表の契約 A-U。Issue #725）", () => {
+  const list = fixtureList();
+  // 台帳を受けた C2' の表は計算の行に集計の欄を持つ（台帳を受けない表は持たない）
+  const table = withCodeIds(withAggregates(fixtureTable()));
+  const plainTable = withCodeIds(fixtureTable());
+  const unresolvedIndex = table.verification.findIndex((entry) => entry.kind === "unresolved");
+  const withUnresolved = (target: NameTable, constraintIds: readonly string[], reason = "宣言で書けない"): NameTable => ({
+    ...target,
+    verification: target.verification.map((entry) => (entry.kind === "unresolved" ? { ...entry, reason, constraintIds } : entry)),
+  });
+  const LEDGER_IDS = PROPERTY_LEDGER_VIEW.unsupportedObservations.map((entry) => entry.id);
+  const ledgerId = LEDGER_IDS[0] ?? "";
+  const NOT_IN_DOCUMENT = "制約 ID が文書に無い";
+  const mapped = (target: NameTable, withLedger: boolean) =>
+    checkMappedTable(list, target, FIXTURE_DOCUMENTS, withLedger ? { ledger: PROPERTY_LEDGER_VIEW } : {});
+
+  it("前提：未解決の要件が 1 件あり、表は台帳の有無に依らず問題 0。台帳の未対応の観測は state-after-set の 1 件", () => {
+    expect(unresolvedIndex).toBe(4);
+    expect(mapped(table, true)).toEqual([]);
+    expect(mapped(plainTable, false)).toEqual([]);
+    expect(LEDGER_IDS).toEqual(["state-after-set"]);
+  });
+
+  it("(1) 台帳の未対応の観測の ID だけを挙げた unresolved は、台帳を受けた C2' で問題 0（文書の制約 ID と混ぜても通る）", () => {
+    expect(mapped(withUnresolved(table, [ledgerId]), true)).toEqual([]);
+    expect(mapped(withUnresolved(table, [FIXTURE_CONSTRAINT_ID, ledgerId]), true)).toEqual([]);
+    // 正規化（前後の空白・バッククォート）は文書の制約 ID と同じ関数で掛かる
+    expect(mapped(withUnresolved(table, [` \`${ledgerId}\` `]), true)).toEqual([]);
+  });
+
+  it("(2) 文書の制約 ID の unresolved は、台帳の有無で同じ結果（問題 0）", () => {
+    expect(mapped(withUnresolved(table, [FIXTURE_CONSTRAINT_ID]), true)).toEqual([]);
+    expect(mapped(withUnresolved(plainTable, [FIXTURE_CONSTRAINT_ID]), false)).toEqual([]);
+  });
+
+  it("(3) 負例：空の constraintIds・空の reason は台帳を受けても今の固定文で落ちる", () => {
+    expect(mapped(withUnresolved(table, []), true)).toEqual([{ field: `verification[${String(unresolvedIndex)}].constraintIds`, message: "未解決の要件に制約 ID が無い" }]);
+    expect(mapped(withUnresolved(table, [ledgerId], " "), true)).toEqual([{ field: `verification[${String(unresolvedIndex)}].reason`, message: "未解決の理由が空である" }]);
+  });
+
+  it("(4) 負例：台帳の有効な観測の ID・どちらの一覧にも無い ID は、台帳を受けても「制約 ID が文書に無い」で落ちる", () => {
+    const active = PROPERTY_LEDGER_VIEW.observes.filter((id) => !LEDGER_IDS.includes(id));
+    expect(active.length).toBeGreaterThan(3);
+    for (const id of [...active, ...PROPERTY_LEDGER_VIEW.verificationKinds, "どちらにも無い"]) {
+      expect(mapped(withUnresolved(table, [id]), true), id).toEqual([{ field: `verification[${String(unresolvedIndex)}].constraintIds[0]`, message: NOT_IN_DOCUMENT }]);
+    }
+    // 文書の制約 ID と並べても、一覧に無い要素はその位置で落ちる
+    expect(mapped(withUnresolved(table, [ledgerId, "when"]), true)).toEqual([{ field: `verification[${String(unresolvedIndex)}].constraintIds[1]`, message: NOT_IN_DOCUMENT }]);
+  });
+
+  it("(5) 負例：ids on・ledger off の C2'（台帳を渡さない）と、T1'（checkNameTable。台帳を渡しても）は台帳の ID を受けない", () => {
+    expect(mapped(withUnresolved(plainTable, [ledgerId]), false)).toEqual([{ field: `verification[${String(unresolvedIndex)}].constraintIds[0]`, message: NOT_IN_DOCUMENT }]);
+    const t1 = withUnresolved(fixtureTable(), [ledgerId]);
+    for (const options of [{}, { ledger: PROPERTY_LEDGER_VIEW }]) {
+      expect(checkNameTable(list, t1, FIXTURE_DOCUMENTS, options)).toContainEqual({ field: "verification[4].constraintIds[0]", message: NOT_IN_DOCUMENT });
+    }
+  });
+
+  it("台帳の未対応の観測の ID は、正規化しても自身のままで、文書の制約 ID（試験の文書・ID を地の文に書いた文書）と衝突しない", () => {
+    const documentIds = constraintIdsIn(FIXTURE_DOCUMENTS);
+    expect(documentIds.size).toBeGreaterThan(0);
+    for (const id of LEDGER_IDS) {
+      expect(normalizeConstraintId(id)).toBe(id);
+      expect(documentIds.has(id)).toBe(false);
+      expect([...documentIds].some((documentId) => normalizeConstraintId(documentId) === id)).toBe(false);
+      // 地の文に書いても文書の制約 ID として取り出されない（規則の ID の形でも見出しでもない）
+      expect(constraintIdsIn([{ name: "文書", text: `本文に ${id} と書く。` }]).size).toBe(0);
+    }
   });
 });

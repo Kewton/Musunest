@@ -26,10 +26,28 @@
 // 足す（basis dependency・reason に検査の種類）。
 //
 // 検査の種類ごとの欄（Issue #682。方法論 03 の H3）：表の契約は「checks は検査の種類の集合」（表の検査が種類の重なりを断る）だが、
-// 並びの schema は重なりを許し、初回の形の落ちの多くが重なりだった。`verification.checks` を検査の種類ごとの欄（全部 required・
-// 各欄は null か `{targetId}`、view-shows だけ `{targetId, sourceId}`）を持つ写像（structural 以外は null）にして、重なりを**出せない
-// 形**にする。復号は欄を種類の固定の順（`STRUCTURAL_ASSERTIONS`）で `[{check, targetId, sourceId}]` に写してから、今の照合と
-// 表の検査（重なり・checks 無し・孤立行・制約 ID）を全部そのまま掛ける（重なりの検査は手で組んだ表・偽物の LLM に効く）。
+// 並びの schema は重なりを許し、初回の形の落ちの多くが重なりだった。`verification.checks` を検査の種類ごとの欄（全部 required）を
+// 持つ写像（structural 以外は null）にする。復号は欄を種類の固定の順（`STRUCTURAL_ASSERTIONS`）で `[{check, targetId, sourceId}]` に
+// 写してから、今の照合と表の検査（重なり・checks 無し・孤立行・制約 ID）を全部そのまま掛ける。
+//
+// 対象の並び（Issue #724。方法論 03 の H2）：1 種類 1 対象では、同じ種類の検査を 2 つ以上の行に掛けて確かめる要件を書けず、
+// fixed-test に寄せると試験 0 本・操作が未検証になる要件があった。各欄を null か対象の写像の並び（1 件以上。view-shows の要素だけ
+// `{targetId, sourceId}`）にし、復号は種類の固定の順・種類の中は応答の順に写す（`checks` は `targets` と同じ順・同じ数で、同じ種類が
+// 複数回並んでよい）。空の並びは形の固定文で断る（schema の minItems に頼らない）。表の検査の重なりは「同じ組が 2 回」の意味になる
+// （`checkMappedTable`。組は種類＋targetId、view-shows は種類＋targetId＋sourceId）。
+//
+// 整える手（Issue #723。方法論 03 の H1・04 §1）：応答から組んで検査の対象の行を所属に足し、一覧の順に並べた表に、C2' の**前**に
+// コードの決まった手順を手 1 → 手 2 の順で 1 回だけ当てる（`normalizeMappedTable`。初回・落ちた要件だけの書き直しの合併・C3 の
+// 拒否のあとの 2 回目の合併の全部が `inspectMappingSourced` を通るので同じ関数が当たる）。手は表の行（kind・type・refEntity・
+// hasWhen）と basis だけで決まり、規則の文と LLM の要求は変えない。C2' は整えた表に今のまま掛け、表の SHA も整えた表で取る。
+// 前回の写像（C2 の 2 回目の要求のデータ）は整える前の raw のまま（整えた差分を LLM に見せない）。整えた中身は結果の `normalized`
+// で返し、診断の table-rounds にだけ残す。
+//
+// 台帳の未対応の観測（Issue #725。方法論 03 の H3・H2）：unresolved の根拠は文書の制約 ID だけで、文書には「工場が観測できない」を
+// 指す ID が無く、台帳が未対応とする観測でしか確かめられない要件は根拠を挙げられずに fixed-test へ寄っていた。台帳を受けた C2
+// だけ、文書の塊の直後に未対応の観測の一覧（ID と文）を渡し、R-map-03 の unresolved の文（構造の文の中の誘導を含む）の根拠にその
+// 一覧を足し、C2' は constraintIds の各要素を文書の制約 ID か未対応の観測の ID で受ける。1 件以上・空の理由・文書に無い ID の
+// 固定文と、根拠を挙げられない要件を unresolved にしない規律は同じ。台帳を受けない C2 は今のまま。
 //
 // 参照の照合の数（`ReferenceCounts`）：照らした参照＝応答の要件 ID・所属の ID・検査の対象の ID の全部、知らない ID＝一覧に無い
 // 要件 ID・行に無い所属や対象の ID、重複＝同じ要件 2 件・同じ要件の中の同じ行、別の束の ID＝要件 ID の欄に行の ID の形・所属や
@@ -61,12 +79,15 @@ import {
   checkCheckTargets,
   checkMappedTable,
   nameTableSha256,
+  ownersByRowId,
   ownershipWithCheckTargets,
   shapeOfMappingEntry,
   type MappingEntry,
   type NameTable,
   type NameTableCheckTarget,
+  type NameTableOwnership,
   type NameTableRow,
+  type NameTableVerification,
 } from "../../v11a/names.js";
 import { planWithoutRequirementKinds, type SemanticRejection } from "../../v11a/stages/name-table.js";
 import type { JudgeAdviceMarkEntry } from "../../v11a/stages/judge-advice.js";
@@ -90,6 +111,11 @@ export const MAPPING_DATA_NAMES = {
   advice: "助言の印",
 } as const;
 
+/** 台帳を受けた C2 だけが足すデータの塊の名前（文書の塊の直後。Issue #725） */
+export const MAPPING_LEDGER_DATA_NAMES = {
+  unsupported: "台帳の未対応の観測",
+} as const;
+
 /**
  * 落ちた要件だけの書き直しの要求で足すデータの塊の名前（Issue #660。前回の写像は `MAPPING_DATA_NAMES.response`）。C3 の拒否のあとの
  * 2 回目は「書き直す要件」だけを足す（問題は拒否の塊。Issue #661）
@@ -108,16 +134,33 @@ export const MAPPING_REWRITE_MESSAGES = {
 
 /** C2 の固定文（構造の検査の対象の欄の形。要件の欠落・重複・一覧に無い ID は表の検査 `checkMappedTable` の文） */
 export const MAPPING_MESSAGES = {
-  checksShape: `checks は検査の種類（${STRUCTURAL_ASSERTIONS.join("・")}）ごとの欄を全部持つ写像か null で、各欄は null か対象の写像（targetId は空でない文字列。view-shows だけ sourceId も空でない文字列で持ち、ほかの欄は sourceId を持たない）であること`,
+  checksShape: `checks は検査の種類（${STRUCTURAL_ASSERTIONS.join("・")}）ごとの欄を全部持つ写像か null で、各欄は null か対象の写像の並び（各対象の targetId は空でない文字列。view-shows の対象だけ sourceId も空でない文字列で持ち、ほかの欄の対象は sourceId を持たない）であること`,
+  /** 欄が空の並び（Issue #724。使わない種類の欄は null） */
+  checksEmpty: "checks の欄は null か 1 件以上の対象の並びであること（使わない種類の欄は null にする）",
 } as const;
 
-/** 構造の検査の書き方（R-map-03 と台帳の文の頭で同じ文） */
-const STRUCTURAL_RULE_TEXT =
-  "構造で確かめるなら kind を structural にし、reason に理由を書く。checks は検査の種類ごとの欄で、同じ種類の検査は要件ごとに 1 件である。使う種類の欄に targetId で検査が見る行の ID（field-type は項目、action-kind・action-unconditioned・write-anonymous は操作、view-shows は画面、aggregate-no-period は計算）を書き、view-shows の欄は sourceId に画面と同じ entity の項目か計算の行の ID（entity を持たない画面は entity を持たない計算の ID）も書き、使わない種類の欄は null にする。structural は、検査の種類のうち 1 つ以上で確かめられる要件だけである。確かめ方の種類を選ぶ既存の条件（default-value など、専用の種類を指定する文）は今までどおり先に当てる。そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。欄が全部 null の structural は表の検査で断られる。同じ種類の検査を 2 つ以上の行に掛けなければ確かめられない要件（複数の操作・複数の項目・1 つの画面と複数の項目）は structural にせず、kind を fixed-test にしてそれらの行を所属させる。検査の対象の行はコードが所属に足す。";
+/** 構造の検査の書き方（R-map-03 と台帳の文の頭で同じ文。unresolved への誘導の文だけ台帳の版で差し替える。Issue #725） */
+const structuralRuleText = (unresolvedGuide: string): string =>
+  `構造で確かめるなら kind を structural にし、reason に理由を書く。checks は検査の種類ごとの欄で、各欄は検査の対象の並びである。使う種類の欄に、targetId で検査が見る行の ID（field-type は項目、action-kind・action-unconditioned・write-anonymous は操作、view-shows は画面、aggregate-no-period は計算）を書いた対象を並べ、view-shows の対象は sourceId に画面と同じ entity の項目か計算の行の ID（entity を持たない画面は entity を持たない計算の ID）も書き、使わない種類の欄は空の並びにせず null にする。同じ種類の検査を 2 つ以上の行に掛けて確かめる要件は、その種類の欄に行ごとに 1 件ずつ並べる。同じ組（view-shows は画面と表示元の組、ほかは行）を 2 回書かない。structural は、検査の種類のうち 1 つ以上で確かめられる要件だけである。確かめ方の種類を選ぶ既存の条件（default-value など、専用の種類を指定する文）は今までどおり先に当てる。そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、${unresolvedGuide}欄が全部 null の structural は表の検査で断られる。検査の対象の行はコードが所属に足す。`;
+
+/** 構造の文の中の unresolved への誘導（台帳を受けない版） */
+const STRUCTURAL_RULE_TEXT = structuralRuleText("宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。");
+
+/** 構造の文の中の unresolved への誘導（台帳を受けた版。未解決の文と同じ条件。Issue #725） */
+const STRUCTURAL_LEDGER_RULE_TEXT = structuralRuleText(
+  "宣言で書けないか台帳が未対応とする観測でしか確かめられず、根拠の ID を文書の制約 ID の一覧か台帳の未対応の観測の一覧から 1 件以上挙げられるなら unresolved にする。",
+);
 
 /** 書けない要件の書き方（R-map-03 と台帳の文の頭で同じ文。制約 ID の 1 件以上は Issue #682） */
 const UNRESOLVED_RULE_TEXT =
   "宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に書けない根拠となる文書の制約 ID を 1 件以上（文書の制約 ID の一覧にあるものだけ）書く。根拠となる制約 ID を一覧から挙げられない要件は unresolved にしない。";
+
+/**
+ * 書けない要件の書き方（台帳を受けた版。根拠に台帳の未対応の観測の ID を足す。根拠を一覧から挙げられない要件は unresolved に
+ * しない規律は同じ。Issue #725）
+ */
+const UNRESOLVED_LEDGER_RULE_TEXT =
+  "宣言で書けない、または台帳が未対応とする観測でしか確かめられない要件は kind を unresolved にし、reason に理由を書き、constraintIds に根拠の ID を 1 件以上（文書の制約 ID の一覧か台帳の未対応の観測の一覧にあるものだけ）書く。根拠を一覧から挙げられない要件は unresolved にしない。";
 
 /** C2 の規則の定義（ID は `R-map-nn`） */
 export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
@@ -138,7 +181,7 @@ export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
     text: `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}${UNRESOLVED_RULE_TEXT}要件の決まりが選択肢の項目の既定値だけなら kind を default-value にし、value にそのキー（その項目の options のキー）を書き、その項目だけを所属させる。使わない欄は null か空の並びにする。`,
     why: "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（T1 の R-nt-08）。構造の検査の対象は規則の文で所属を求めず、応答の欄で行の ID を書かせて対と所属をコードが導く（方法論 03 の F4・H1・H2）",
     since:
-      "Issue #593（構造の検査の対象の欄は Issue #594。検査の種類ごとの欄・同じ種類の検査を 2 つ以上の行に掛ける要件の fixed-test への選び方・未解決の制約 ID の 1 件以上は Issue #682。当たる種類が無い要件を structural にせず fixed-test か unresolved にする選び方は Issue #690）",
+      "Issue #593（構造の検査の対象の欄は Issue #594。検査の種類ごとの欄・同じ種類の検査を 2 つ以上の行に掛ける要件の fixed-test への選び方・未解決の制約 ID の 1 件以上は Issue #682。当たる種類が無い要件を structural にせず fixed-test か unresolved にする選び方は Issue #690。#682 は形の落ち率を理由に 1 種類 1 件とした。fixed-test にすると試験 0 本・操作が未検証になる要件があり（U1 の 30 本の分析）、Issue #724 で契約を対象の並びに広げ、同じ種類の検査を 2 つ以上の行に掛ける要件の fixed-test への選び方を外した）",
   },
   {
     id: "R-map-04",
@@ -148,16 +191,27 @@ export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
 ];
 
-/** 性質の台帳の文を差し込む規則（R-map-03。T1 の R-nt-08 と同じ作法） */
-const MAPPING_LEDGER_RULE_HEAD = `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}${UNRESOLVED_RULE_TEXT}`;
+/**
+ * 性質の台帳の文を差し込む規則（R-map-03。T1 の R-nt-08 と同じ作法）。台帳を受けた版は、unresolved の根拠に台帳の未対応の観測の
+ * ID を足した文にする（構造の文の中の誘導も同じ条件。Issue #725）
+ */
+const MAPPING_LEDGER_RULE_HEAD = `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_LEDGER_RULE_TEXT}${UNRESOLVED_LEDGER_RULE_TEXT}`;
 const MAPPING_LEDGER_RULE_TAIL = "使わない欄は null か空の並びにする。";
+
+/** 台帳を受けた版の R-map-03 の since（ID・why は同じ。Issue #725） */
+const MAPPING_LEDGER_RULE_SINCE_TAIL =
+  "。#682 は空の並び 34/129 件を理由に 1 件以上とした。根拠を文書に縛る理由（怠慢の持ち越しを塞ぐ）は保ち、台帳の未対応を根拠に足した（Issue #725）";
 
 /** C2 の規則の定義（旗 `v12.ledger` が on なら R-map-03 を台帳の文で組み直す） */
 export function mappingRuleDefinitionsOf(ledger?: UpstreamLedgerView): readonly RuleDefinition[] {
   if (ledger === undefined) return MAPPING_RULE_DEFINITIONS;
   return MAPPING_RULE_DEFINITIONS.map((definition) =>
     definition.id === "R-map-03"
-      ? { ...definition, text: `${MAPPING_LEDGER_RULE_HEAD}${ledger.t1RuleTexts.join("")}${MAPPING_LEDGER_RULE_TAIL}` }
+      ? {
+          ...definition,
+          text: `${MAPPING_LEDGER_RULE_HEAD}${ledger.t1RuleTexts.join("")}${MAPPING_LEDGER_RULE_TAIL}`,
+          since: `${definition.since}${MAPPING_LEDGER_RULE_SINCE_TAIL}`,
+        }
       : definition,
   );
 }
@@ -191,18 +245,22 @@ export function mappingRewriteRuleDefinitionsOf(ledger?: UpstreamLedgerView): re
 }
 
 /**
- * 検査の種類ごとの欄の schema（Issue #682）。欄は null か対象の写像（view-shows だけ `{targetId, sourceId}`）。nullable は type に
- * object と null の並びで表す（strict の走査は全節に type を求めるので anyOf を使わない）
+ * 検査の種類ごとの欄の schema（Issue #682・#724）。欄は null か対象の写像の並び（view-shows の要素だけ `{targetId, sourceId}`）。
+ * nullable は type に array と null の並びで表す（strict の走査は全節に type を求めるので anyOf を使わない）。空の並びは schema の
+ * minItems に頼らず、復号の形の検査で断る
  */
 function checkFieldSchemaOf(check: (typeof STRUCTURAL_ASSERTIONS)[number]): Record<string, unknown> {
   const paired = check === "view-shows";
   return {
-    type: ["object", "null"],
-    additionalProperties: false,
-    required: paired ? ["targetId", "sourceId"] : ["targetId"],
-    properties: {
-      targetId: { type: "string", description: "検査が見る行の ID" },
-      ...(paired ? { sourceId: { type: "string", description: "画面と組にする行の ID（画面と同じ entity の項目か計算）" } } : {}),
+    type: ["array", "null"],
+    items: {
+      type: "object",
+      additionalProperties: false,
+      required: paired ? ["targetId", "sourceId"] : ["targetId"],
+      properties: {
+        targetId: { type: "string", description: "検査が見る行の ID" },
+        ...(paired ? { sourceId: { type: "string", description: "画面と組にする行の ID（画面と同じ entity の項目か計算）" } } : {}),
+      },
     },
   };
 }
@@ -332,14 +390,156 @@ export interface MappingRewriteCounts {
  */
 export type MappingRejectedCandidate = RejectedCandidate & { readonly rewrite?: MappingRewriteCounts };
 
-/** C2 の結果（表・表の SHA-256・raw の応答）。参照の照合の数は成否によらず返す */
+/** C2 の結果（整えた表・その SHA-256・整える前の raw の応答・整えた中身）。参照の照合の数は成否によらず返す */
 export type MappingOutcome =
   | {
       readonly ok: true;
-      readonly value: { readonly table: NameTable; readonly tableSha256: string; readonly response: unknown };
+      readonly value: {
+        readonly table: NameTable;
+        readonly tableSha256: string;
+        readonly response: unknown;
+        readonly normalized: readonly MappingNormalization[];
+      };
       readonly references: ReferenceCounts;
     }
   | { readonly ok: false; readonly failure: StageFailure; readonly references: ReferenceCounts };
+
+// ── 整える手（Issue #723）──────────────────────────────────────────
+
+/** 整える手の ID */
+export type MappingNormalizationRuleId = "N-map-01" | "N-map-02";
+
+/** 手 1 で structural にした要件の reason（固定文） */
+export const MAPPING_NORMALIZATION_REASON = "参照の項目 1 つの種類と参照先を構造の検査で確かめる（コードが整えた）";
+
+/**
+ * 整える手の定義（LLM には送らない。コードが守ること。`ruleDefinitionDefects` で不備を照らす）。手は表の行（kind・type・
+ * refEntity・hasWhen）と basis だけで決まる（方法論 03 の H1・04 §1「コードが決められる事実を規則で指示しない」）
+ */
+export const MAPPING_NORMALIZATION_DEFINITIONS: readonly (RuleDefinition & { readonly id: MappingNormalizationRuleId })[] = [
+  {
+    id: "N-map-01",
+    text: "確かめ方が fixed-test で、所属（応答の roles に検査の対象を足したもの。導いた entity は含めない）が、type が ref か list で refEntity を持つ項目の行 1 つと、その項目の entity・refEntity の entity の行だけの要件を、kind structural・checks は field-type 1 件・targets はその項目（sourceId null）・reason は固定文にする。所属は変えない。basis は問わない。所属に表に無い ID があれば当てない。",
+    why: "「A が B を指す」だけを求める要件は参照の項目 1 行を所属させ、validate の決まりが無いので固定した試験は在ることしか確かめられない。field-type（期待＝種類・refEntity）は表の行から決定的に導ける（コードが作る構造の検査と同じ導き）。C2 は fixed-test に寄り、fixed-test は対象の行を書かないので所属を絞る錨が無い（U1 の 30 本の採点で、fixed-test → 正解が単一行の structural が 21 件）",
+    since: "Issue #723",
+  },
+  {
+    id: "N-map-02",
+    text: "確かめ方が fixed-test で basis stated の行が 1 つ以上ある要件から、basis dependency・kind operation・hasWhen false の行を外す。その要件の所属に同じ行 ID の重複か表に無い ID があれば当てない。候補の全部を外した表で所属の無い行が新たに出るなら、その行とその行を entity に持つ候補を残して計算し直す。外して 0 行になる要件・全部 dependency の要件は変えない。所属を足さない。",
+    why: "台帳の when の行は when の無い操作に action の試験を作らないので、fixed-test の要件が when の無い操作を dependency で所属させても固定した試験の対象にならず、余計な生成試験と網羅の免除に効く（U1 の 30 本の過剰 75 要件のうち 71 件が fixed-test、余計な行は全部ほかの要件が所属させる行）。門の落ち（重複・表に無い ID・孤立行）は消さない（#627：コードで所属を足さない）",
+    since: "Issue #723",
+  },
+];
+
+/** 整えた中身の 1 件（要件ごと。仮に外した分ではなく、整える前の表との最終の差分） */
+export interface MappingNormalization {
+  readonly requirementId: string;
+  readonly rule: MappingNormalizationRuleId;
+  /** 手 1 の対象の項目の ID（手 2 は null） */
+  readonly targetId: string | null;
+  /** 手 2 で外した行 ID（所属の順。手 1 は空） */
+  readonly removedRowIds: readonly string[];
+}
+
+const isWhenlessOperation = (row: NameTableRow): boolean =>
+  row.kind === "operation" && row.type !== null && typeof row.type === "object" && "hasWhen" in row.type && !row.type.hasWhen;
+
+/** 所属の i 番目と確かめ方の i 番目が同じ要件のときだけ、その組の所属（C2 が組む表は同じ並び） */
+const pairedRoles = (table: NameTable, index: number): NameTableOwnership["roles"] | undefined => {
+  const ownership = table.ownership[index];
+  const verification = table.verification[index];
+  return ownership !== undefined && verification !== undefined && ownership.requirementId === verification.requirementId ? ownership.roles : undefined;
+};
+
+/** 手 1（N-map-01）の対象の項目（当たらなければ undefined） */
+function referenceFieldOf(roles: NameTableOwnership["roles"], rowById: ReadonlyMap<string, NameTableRow>): NameTableRow | undefined {
+  const owned: NameTableRow[] = [];
+  for (const role of roles) {
+    const row = rowById.get(role.id);
+    if (row === undefined) return undefined;
+    owned.push(row);
+  }
+  const fieldIds = new Set(owned.filter((row) => row.kind === "field").map((row) => row.id));
+  if (fieldIds.size !== 1) return undefined;
+  const field = owned.find((row) => row.kind === "field") as NameTableRow;
+  if ((field.type !== "ref" && field.type !== "list") || field.refEntity === null) return undefined;
+  const allowed = owned.every((row) => row.id === field.id || (row.kind === "entity" && (row.id === field.entity || row.id === field.refEntity)));
+  return allowed ? field : undefined;
+}
+
+/**
+ * C2 が組んだ表を整える（純粋。Issue #723）。手 1（N-map-01）→ 手 2（N-map-02）の順に**1 回だけ**当てる（整えた表に再適用しない。
+ * 2 手の合成は冪等でない）。表の行・所属の並びは変えず、所属を足さない。手 2 の結果は候補の集合で決まり、要件・行の順に依らない。
+ * 当たる要件が無ければ同じ表を返す
+ */
+export function normalizeMappedTable(table: NameTable): { readonly table: NameTable; readonly normalized: readonly MappingNormalization[] } {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  // 手 1：参照の項目 1 行の fixed-test → field-type の structural（所属は変えない）
+  const firstTargets = new Map<number, string>();
+  const verification: NameTableVerification[] = table.verification.map((entry, index) => {
+    const roles = pairedRoles(table, index);
+    if (entry.kind !== "fixed-test" || roles === undefined) return entry;
+    const field = referenceFieldOf(roles, rowById);
+    if (field === undefined) return entry;
+    firstTargets.set(index, field.id);
+    return {
+      requirementId: entry.requirementId,
+      kind: "structural",
+      reason: MAPPING_NORMALIZATION_REASON,
+      checks: ["field-type"],
+      targets: [{ check: "field-type", targetId: field.id, sourceId: null }],
+    };
+  });
+  const afterFirst: NameTable = firstTargets.size === 0 ? table : { ...table, verification };
+  // 手 2：stated のある fixed-test から、dependency の when の無い操作を外す候補（要件の添字ごとの行 ID の集合）
+  const candidates = new Map<number, Set<string>>();
+  afterFirst.verification.forEach((entry, index) => {
+    const roles = pairedRoles(afterFirst, index);
+    if (entry.kind !== "fixed-test" || roles === undefined || !roles.some((role) => role.basis === "stated")) return;
+    const ids = roles.map((role) => role.id);
+    if (new Set(ids).size !== ids.length || ids.some((id) => !rowById.has(id))) return;
+    const removable = roles.filter((role) => role.basis === "dependency" && isWhenlessOperation(rowById.get(role.id) as NameTableRow));
+    if (removable.length === 0 || removable.length === roles.length) return;
+    candidates.set(index, new Set(removable.map((role) => role.id)));
+  });
+  const without = (active: ReadonlyMap<number, ReadonlySet<string>>): NameTable => ({
+    ...afterFirst,
+    ownership: afterFirst.ownership.map((entry, index) => {
+      const removed = active.get(index);
+      return removed === undefined ? entry : { requirementId: entry.requirementId, roles: entry.roles.filter((role) => !removed.has(role.id)) };
+    }),
+  });
+  const ownedBefore = new Set(ownersByRowId(afterFirst).keys());
+  let active: Map<number, Set<string>> = candidates;
+  // 孤立行を作らない：新たに所属の無い行が出れば、その行とその行を entity に持つ候補を残して計算し直す（候補が減るだけなので止まる）
+  while (active.size > 0) {
+    const owners = ownersByRowId(without(active));
+    const orphans = new Set([...ownedBefore].filter((id) => !owners.has(id)));
+    if (orphans.size === 0) break;
+    const next = new Map<number, Set<string>>();
+    for (const [index, ids] of active) {
+      const removing = new Set([...ids].filter((id) => !orphans.has(id) && !orphans.has(rowById.get(id)?.entity ?? "")));
+      if (removing.size > 0) next.set(index, removing);
+    }
+    const before = [...active.values()].reduce((sum, ids) => sum + ids.size, 0);
+    const after = [...next.values()].reduce((sum, ids) => sum + ids.size, 0);
+    // 減らなければ外さない（孤立の原因が候補に無い。起こらない前提だが、外し続けない）
+    active = after < before ? next : new Map();
+  }
+  const normalized: MappingNormalization[] = [];
+  afterFirst.verification.forEach((entry, index) => {
+    const target = firstTargets.get(index);
+    if (target !== undefined) {
+      normalized.push({ requirementId: entry.requirementId, rule: "N-map-01", targetId: target, removedRowIds: [] });
+      return;
+    }
+    const removed = active.get(index);
+    if (removed === undefined) return;
+    const roles = afterFirst.ownership[index]?.roles ?? [];
+    normalized.push({ requirementId: entry.requirementId, rule: "N-map-02", targetId: null, removedRowIds: roles.filter((role) => removed.has(role.id)).map((role) => role.id) });
+  });
+  return { table: active.size === 0 ? afterFirst : without(active), normalized };
+}
 
 /** 骨組み（写像・`requirements` が写像の並び） */
 function skeletonProblems(output: unknown): readonly Problem[] {
@@ -349,12 +549,20 @@ function skeletonProblems(output: unknown): readonly Problem[] {
   return items.flatMap((item, index) => (isRecord(item) ? [] : [{ field: `requirements[${String(index)}]`, message: "写像（object）であること" }]));
 }
 
-/** 応答の確かめ方の検査の種類ごとの欄のうち、写像の欄（種類の固定の順。写像でない checks は無し） */
+/**
+ * 応答の確かめ方の検査の種類ごとの欄の対象の写像（種類の固定の順・種類の中は並びの順。写像でない checks は無し）。欄が並びなら
+ * 写像の要素を全部、写像なら（形で落ちる応答）その 1 つを数える（Issue #724）
+ */
 const checkFieldsOf = (entry: Record<string, unknown>): readonly Record<string, unknown>[] => {
   const verification = entry["verification"];
   if (!isRecord(verification)) return [];
   const checks = verification["checks"];
-  return isRecord(checks) ? STRUCTURAL_ASSERTIONS.flatMap((check) => (isRecord(checks[check]) ? [checks[check]] : [])) : [];
+  if (!isRecord(checks)) return [];
+  return STRUCTURAL_ASSERTIONS.flatMap((check) => {
+    const field = checks[check];
+    if (Array.isArray(field)) return (field as readonly unknown[]).filter(isRecord);
+    return isRecord(field) ? [field] : [];
+  });
 };
 
 const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
@@ -363,24 +571,30 @@ const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): 
 const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
 /**
- * checks（検査の種類ごとの欄）を、種類の固定の順（`STRUCTURAL_ASSERTIONS`）の検査の対象の並びに写す（Issue #682）。null は空の
- * 並び。欄が欠ける・余る、欄が null でも対象の写像でもない、targetId・view-shows の sourceId が空でない文字列でない、view-shows
- * でない欄が sourceId を持つ、のどれかなら形が合わない（undefined）。重なりは落とさない（欄の写像からは出ない）
+ * checks（検査の種類ごとの欄）を、種類の固定の順（`STRUCTURAL_ASSERTIONS`）・種類の中は応答の順の検査の対象の並びに写す
+ * （Issue #682・#724）。null は空の並び。欄が欠ける・余る、欄が null でも並びでもない、要素が対象の写像でない、targetId・view-shows
+ * の sourceId が空でない文字列でない、view-shows でない欄の要素が sourceId を持つ、のどれかなら形が合わない（`shape`）。欄が空の
+ * 並びなら `empty`。重なり（同じ組が 2 回）は落とさない（表の検査が断る）
  */
-function readCheckFields(checks: unknown): readonly NameTableCheckTarget[] | undefined {
+function readCheckFields(checks: unknown): readonly NameTableCheckTarget[] | "shape" | "empty" {
   if (checks === null) return [];
-  if (!isRecord(checks) || !hasExactKeys(checks, STRUCTURAL_ASSERTIONS)) return undefined;
+  if (!isRecord(checks) || !hasExactKeys(checks, STRUCTURAL_ASSERTIONS)) return "shape";
   const targets: NameTableCheckTarget[] = [];
+  let empty = false;
   for (const check of STRUCTURAL_ASSERTIONS) {
     const field = checks[check];
     if (field === null) continue;
-    if (!isRecord(field)) return undefined;
+    if (!Array.isArray(field)) return "shape";
+    if (field.length === 0) empty = true;
     const paired = check === "view-shows";
-    if (!hasExactKeys(field, paired ? ["targetId", "sourceId"] : ["targetId"]) || !isNonEmptyString(field["targetId"])) return undefined;
-    if (paired && !isNonEmptyString(field["sourceId"])) return undefined;
-    targets.push({ check, targetId: field["targetId"], sourceId: paired ? (field["sourceId"] as string) : null });
+    for (const item of field as readonly unknown[]) {
+      if (!isRecord(item)) return "shape";
+      if (!hasExactKeys(item, paired ? ["targetId", "sourceId"] : ["targetId"]) || !isNonEmptyString(item["targetId"])) return "shape";
+      if (paired && !isNonEmptyString(item["sourceId"])) return "shape";
+      targets.push({ check, targetId: item["targetId"], sourceId: paired ? (item["sourceId"] as string) : null });
+    }
   }
-  return targets;
+  return empty ? "empty" : targets;
 }
 
 /** 応答の参照を数える（純粋。ID の値は数に入れない） */
@@ -435,8 +649,8 @@ function shapeOfEntry(
   if (isRecord(value) && isRecord(value["verification"])) {
     const verification = value["verification"];
     const read = readCheckFields(verification["checks"]);
-    if (read === undefined) {
-      problems.push({ field: `${field}.verification.checks`, message: MAPPING_MESSAGES.checksShape });
+    if (typeof read === "string") {
+      problems.push({ field: `${field}.verification.checks`, message: read === "shape" ? MAPPING_MESSAGES.checksShape : MAPPING_MESSAGES.checksEmpty });
       return undefined;
     }
     targets = read;
@@ -455,7 +669,7 @@ export type MappingProblemSource = "response" | "table";
 
 /** C2' の結果に、問題ごとの出どころと検査した表の要件 ID の並びを足したもの（Issue #660。帰属の入力） */
 export type MappingInspection =
-  | { readonly ok: true; readonly table: NameTable }
+  | { readonly ok: true; readonly table: NameTable; readonly normalized: readonly MappingNormalization[] }
   | {
       readonly ok: false;
       readonly problems: readonly Problem[];
@@ -476,7 +690,8 @@ export type MappingInspector = (
 
 /**
  * 応答（骨組みは通った）から表を組み、C2' を掛ける（純粋）。構造の検査の対象を照らして通った対象の行を所属に足し（対象の問題の
- * 位置は応答の `requirements[j]`）、一覧の順に並べた表に C2' を掛ける（表の問題の位置は表の欄。手 3a と同じ）
+ * 位置は応答の `requirements[j]`）、一覧の順に並べた表を整え（`normalizeMappedTable`。Issue #723）、整えた表に C2' を掛ける（表の
+ * 問題の位置は表の欄。手 3a と同じ。整える手は並びを変えない）
  */
 export function inspectMapping(
   list: RequirementList,
@@ -484,7 +699,9 @@ export function inspectMapping(
   output: Record<string, unknown>,
   documents: readonly PromptDocument[],
   ledger?: UpstreamLedgerView,
-): { readonly ok: true; readonly table: NameTable } | { readonly ok: false; readonly problems: readonly Problem[] } {
+):
+  | { readonly ok: true; readonly table: NameTable; readonly normalized: readonly MappingNormalization[] }
+  | { readonly ok: false; readonly problems: readonly Problem[] } {
   const inspected = inspectMappingSourced(list, rows, output, documents, ledger);
   return inspected.ok ? inspected : { ok: false, problems: inspected.problems };
 }
@@ -513,19 +730,21 @@ export function inspectMappingSourced(
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) => (order.get(a.entry.requirementId) ?? list.requirements.length + a.index) - (order.get(b.entry.requirementId) ?? list.requirements.length + b.index) || a.index - b.index)
     .map(({ entry }) => entry);
-  const table: NameTable = {
+  const built: NameTable = {
     rows,
     ownership: sorted.map((entry) => ({ requirementId: entry.requirementId, roles: entry.roles })),
     verification: sorted.map((entry) => ({ ...entry.verification, requirementId: entry.requirementId })),
     classification: sorted.map((entry) => ({ requirementId: entry.requirementId, nature: entry.nature })),
   };
+  // 整える手は C2' の前に、組んだ表へ 1 回だけ当てる（門は整えた表に今のまま掛ける。Issue #723）
+  const { table, normalized } = normalizeMappedTable(built);
   const sources: MappingProblemSource[] = problems.map(() => "response");
   const tableProblems = checkMappedTable(list, table, documents, ledger === undefined ? {} : { ledger });
   problems.push(...tableProblems);
   sources.push(...tableProblems.map((): MappingProblemSource => "table"));
   return problems.length > 0
     ? { ok: false, problems, sources, tableRequirementIds: sorted.map((entry) => entry.requirementId) }
-    : { ok: true, table };
+    : { ok: true, table, normalized };
 }
 
 /** 要件 1 件に帰属した問題（Issue #660） */
@@ -668,6 +887,13 @@ function buildData(input: MappingInput): readonly PromptData[] {
       text: serializeJson({ names: input.documents.map((document) => document.name), constraintIds: [...constraintIdsIn(input.documents)] }),
     },
   ];
+  // 台帳を受けた C2 だけ、文書の塊に並べて未対応の観測の一覧（ID と文。台帳の順）を渡す（Issue #725）
+  if (input.ledger !== undefined) {
+    data.push({
+      name: MAPPING_LEDGER_DATA_NAMES.unsupported,
+      text: serializeJson({ observations: input.ledger.unsupportedObservations.map((entry) => ({ id: entry.id, message: entry.message })) }),
+    });
+  }
   const previous = input.previous;
   if (previous !== undefined) {
     data.push({ name: MAPPING_DATA_NAMES.response, text: rawResponseText(previous.response) });
@@ -718,7 +944,7 @@ export function rejectedRequirementIds(list: RequirementList, rejections: readon
 
 /** 初回の検査の結果：表、または落ちた要件だけを書き直す予定（Issue #660） */
 type FirstCheck =
-  | { readonly kind: "table"; readonly table: NameTable }
+  | { readonly kind: "table"; readonly table: NameTable; readonly normalized: readonly MappingNormalization[] }
   | { readonly kind: "rewrite"; readonly problems: readonly Problem[]; readonly groups: readonly MappingProblemGroup[] };
 
 /**
@@ -757,7 +983,7 @@ export async function runMapping(input: MappingInput): Promise<MappingOutcome> {
   const firstCheck = (output: unknown): ShapeCheck<FirstCheck> => {
     attempts += 1;
     const inspected = inspectSourced(output);
-    if (inspected.ok) return { ok: true, value: { kind: "table", table: inspected.table } };
+    if (inspected.ok) return { ok: true, value: { kind: "table", table: inspected.table, normalized: inspected.normalized } };
     if (attempts === 1 && !("skeleton" in inspected)) {
       const { groups } = attributeMappingProblems(input.list, output as Record<string, unknown>, inspected);
       if (groups !== null) return { ok: true, value: { kind: "rewrite", problems: inspected.problems, groups } };
@@ -768,7 +994,11 @@ export async function runMapping(input: MappingInput): Promise<MappingOutcome> {
   if (answer.ok) {
     const first = answer.value;
     if (first.kind === "rewrite") return rewriteFailedRequirements(input, request, answer.output as Record<string, unknown>, first, tally);
-    return { ok: true, value: { table: first.table, tableSha256: await nameTableSha256(first.table), response: answer.output }, references: tally.counts };
+    return {
+      ok: true,
+      value: { table: first.table, tableSha256: await nameTableSha256(first.table), response: answer.output, normalized: first.normalized },
+      references: tally.counts,
+    };
   }
   const failure: StageFailure =
     answer.failure.kind === "malformed" && !lastWasSkeleton
@@ -826,7 +1056,11 @@ async function rewriteFailedRequirements(
     reject(2, merged, inspected.problems);
     return { ok: false, failure: { kind: "unmet", attempts: STEP_ATTEMPTS, problems: inspected.problems }, references: tally.counts };
   }
-  return { ok: true, value: { table: inspected.table, tableSha256: await nameTableSha256(inspected.table), response: merged }, references: tally.counts };
+  return {
+    ok: true,
+    value: { table: inspected.table, tableSha256: await nameTableSha256(inspected.table), response: merged, normalized: inspected.normalized },
+    references: tally.counts,
+  };
 }
 
 /**
@@ -867,5 +1101,9 @@ async function rewriteRejectedRequirements(
   // 合併した写像に C2' を全部掛ける（孤立行・網羅・重複を含む。初回と同じ検査）
   const inspected = (input.inspect ?? inspectMappingSourced)(input.list, input.rows, merged, input.documents, input.ledger);
   if (!inspected.ok) return unmet(merged, inspected.problems);
-  return { ok: true, value: { table: inspected.table, tableSha256: await nameTableSha256(inspected.table), response: merged }, references: tally.counts };
+  return {
+    ok: true,
+    value: { table: inspected.table, tableSha256: await nameTableSha256(inspected.table), response: merged, normalized: inspected.normalized },
+    references: tally.counts,
+  };
 }

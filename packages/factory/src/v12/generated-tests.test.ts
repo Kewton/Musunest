@@ -439,6 +439,52 @@ describe("手 3d：構造の検査・画面と在ることの構造の確認を�
     expect(ofRequirement(generateD(plainField), "R9").map(({ test }) => test.assertion)).toEqual([{ check: "field-type", expected: "number" }]);
   });
 
+  it("対象の並び（Issue #724）：同じ種類の検査を 2 つの操作に掛けた要件に対象ごとに 1 本（計 2 本）。同じ画面に表示元 2 つの view-shows は 2 本で ID が一意、それぞれの assertion を持つ。単一対象の ID は今のまま", () => {
+    const multi = (checks: readonly ("action-kind" | "view-shows")[], targets: readonly { check: "action-kind" | "view-shows"; targetId: string; sourceId: string | null }[]): NameTable => ({
+      ...TABLE_D,
+      ownership: TABLE_D.ownership.map((entry) =>
+        entry.requirementId === "R9" ? { ...entry, roles: ["o.addItem", "o.closeItem", "s.items", "f.item.title", "f.item.owner"].map(stated) } : entry,
+      ),
+      verification: TABLE_D.verification.map((entry) =>
+        entry.requirementId === "R9" ? { requirementId: "R9", kind: "structural" as const, reason: "宣言の構造だけ", checks, targets } : entry,
+      ),
+    });
+    const operations = generateD(
+      multi(["action-kind", "action-kind"], [
+        { check: "action-kind", targetId: "o.addItem", sourceId: null },
+        { check: "action-kind", targetId: "o.closeItem", sourceId: null },
+      ]),
+    );
+    expect(operations.stopped).toEqual([]);
+    expect(operations.excludedRequirementIds).toContain("R9");
+    expect(ofRequirement(operations, "R9").map(({ test, observed }) => [test.id, test.target.roleId, test.assertion, observed])).toEqual([
+      [`${GENERATED_TEST_ID_PREFIX}structure:R9:action-kind:o.addItem:normal`, "o.addItem", { check: "action-kind", expected: "create" }, "existence"],
+      [`${GENERATED_TEST_ID_PREFIX}structure:R9:action-kind:o.closeItem:normal`, "o.closeItem", { check: "action-kind", expected: "update" }, "existence"],
+    ]);
+    const screens = generateD(
+      multi(["view-shows", "view-shows"], [
+        { check: "view-shows", targetId: "s.items", sourceId: "f.item.title" },
+        { check: "view-shows", targetId: "s.items", sourceId: "f.item.owner" },
+      ]),
+    );
+    expect(screens.stopped).toEqual([]);
+    const made = ofRequirement(screens, "R9");
+    expect(made.map(({ test, observed }) => [test.id, test.target.roleId, test.assertion, observed])).toEqual([
+      [`${GENERATED_TEST_ID_PREFIX}structure:R9:view-shows:s.items:f.item.title:normal`, "s.items", { check: "view-shows", role: "f.item.title" }, "view-structure"],
+      [`${GENERATED_TEST_ID_PREFIX}structure:R9:view-shows:s.items:f.item.owner:normal`, "s.items", { check: "view-shows", role: "f.item.owner" }, "view-structure"],
+    ]);
+    // 観測の写像は試験 ID が鍵なので、2 本とも引ける（全体でも ID が一意）
+    expect(new Set(screens.tests.map((test) => test.id)).size).toBe(screens.tests.length);
+    for (const { test } of made) expect(screens.observes.get(test.id)).toBe("view-structure");
+    // 単一対象の ID は直す前（base 2c514cf）と同じ形（表示元の行の ID を足さない）
+    const single = ofRequirement(generateD(), "R9").map(({ test }) => test.id);
+    expect(single).toEqual([
+      `${GENERATED_TEST_ID_PREFIX}structure:R9:field-type:f.item.owner:normal`,
+      `${GENERATED_TEST_ID_PREFIX}structure:R9:action-kind:o.addItem:normal`,
+      `${GENERATED_TEST_ID_PREFIX}structure:R9:view-shows:s.items:normal`,
+    ]);
+  });
+
   it("画面 2 行の fixed-test の要件に screen × screen 2 本、画面が無く entity 1 行の要件に entity × screen 1 本、画面と項目を持つ要件には画面の 1 本だけ（項目には作らない）", () => {
     const made = generateD();
     const shape = (requirementId: string) =>
