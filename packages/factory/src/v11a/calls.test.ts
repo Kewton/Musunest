@@ -70,7 +70,7 @@ import {
 import { DECL_CHECK_SCHEMA_NAME } from "./stages/decl-check.js";
 import { NAME_TABLE_SCHEMA_NAME } from "./stages/name-table.js";
 import * as semanticCheckStage from "./stages/semantic-check.js";
-import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
+import { SEMANTIC_CHECK_REFERENCE_DATA_NAME, SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION, SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
 import { TEST_SPEC_FRAMES_DATA_NAME, TEST_SPEC_RETRY_DATA_NAMES, TEST_SPEC_SCHEMA_NAME } from "./stages/test-spec.js";
 import { WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, WRITE_V11A_SCHEMA_NAME } from "./stages/write.js";
 
@@ -2272,6 +2272,16 @@ describe("(12) 旗 v12.ids の C3 は要件 5 件ごとの束に分けて同時�
       expect((artifactOf(run, "artifacts/carry-over.json")["entries"] as readonly unknown[]).length).toBe(0);
       // 要求は束 k（一覧の順に 5 件ずつ）、記録は 1 つで束の計を 1 回だけ集計する
       expect(c3RequestsOf(run)).toHaveLength(k);
+      // 束が 2 つ以上なので、各束の要求は束の外の対象を参照のみの塊で持ち、末尾に参照の規則を持つ（Issue #741。数は変わらない）
+      for (const request of c3RequestsOf(run)) {
+        const parsed = JSON.parse(request) as { readonly input: string; readonly rules: readonly string[] };
+        const blockOf = (name: string) =>
+          JSON.parse(parsed.input.split(`<data name="${name}">\n`)[1]?.split("\n</data>")[0] ?? "null") as unknown;
+        const own = (blockOf("要件の文と引用") as readonly { readonly requirementId: string }[]).map((entry) => entry.requirementId);
+        const reference = blockOf(SEMANTIC_CHECK_REFERENCE_DATA_NAME) as { readonly 要件の文と引用: readonly { readonly requirementId: string }[] };
+        expect(reference.要件の文と引用.map((entry) => entry.requirementId)).toEqual(materials.ids.filter((id) => !own.includes(id)));
+        expect(parsed.rules.at(-1)).toBe(SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION.text);
+      }
       const records = c3RecordsOf(run);
       expect(records).toHaveLength(1);
       expect(records[0]).toMatchObject({
