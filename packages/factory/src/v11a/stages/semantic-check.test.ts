@@ -8,7 +8,7 @@
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { describe, expect, it } from "vitest";
 import type { RequirementList } from "../../pipeline.js";
-import { ruleDefinitionDefects } from "../../stages/prompt.js";
+import { ruleDefinitionDefects, ruleTexts, type RuleDefinition } from "../../stages/prompt.js";
 import { expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
   createCheckedRecordingClient,
@@ -33,11 +33,14 @@ import {
   requestDiffsOf,
   withoutEnumMembership,
   withoutWhenAndNonRequirement,
+  withCheckTargets,
 } from "../__tests__/fixtures.js";
 import { deriveCarryOver } from "../carry-over.js";
 import { checkNameTable, nameTableSha256, type NameTable } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView, type UpstreamLedgerView } from "../../v12/ledger.js";
+import { STRUCTURAL_ASSERTIONS } from "../../fixed-test.js";
+import { STRUCTURAL_MEANINGS, structuralReadingText, type StructuralMeaningTable } from "../../v12/structural-meanings.js";
 import {
   SEMANTIC_CHECK_LEDGER_RULE_ID,
   SEMANTIC_CHECK_RULE_DEFINITIONS,
@@ -612,5 +615,158 @@ describe("読み漏れの検出：C3（T1''）は台帳を上流の見方で受�
     void ledger.rows;
     expect(same).toHaveLength(2);
     expect(ledger.t1AcceptanceTexts).toEqual(PROPERTY_LEDGER_VIEW.t1AcceptanceTexts);
+  });
+});
+
+// ── 旗 v12.ids：構造の検査の読み方（Issue #732）──────────────────────────────
+
+describe("旗 ids on：R-sc-02 の 3 つの観点のあとに構造の検査の種類の意味と targets の読み方を、意味の表から組む（Issue #732）", () => {
+  const rsc02 = (definitions: readonly { readonly id: string; readonly text: string }[]) =>
+    definitions.find((definition) => definition.id === SEMANTIC_CHECK_LEDGER_RULE_ID)?.text ?? "";
+  const HEAD = rsc02(SEMANTIC_CHECK_RULE_DEFINITIONS).slice(0, rsc02(SEMANTIC_CHECK_RULE_DEFINITIONS).indexOf("確かめ方が default-value の要件は"));
+  const READING = structuralReadingText();
+  const others = (definitions: readonly RuleDefinition[]) => definitions.filter((definition) => definition.id !== SEMANTIC_CHECK_LEDGER_RULE_ID);
+
+  it("ids off は今の定数のまま（台帳の on・off とも）。ids を明示で off にしても同じ。4 通りとも規則の定義に不備が無い", () => {
+    expect(semanticCheckRuleDefinitionsOf()).toBe(SEMANTIC_CHECK_RULE_DEFINITIONS);
+    expect(semanticCheckRuleDefinitionsOf(undefined, false)).toBe(SEMANTIC_CHECK_RULE_DEFINITIONS);
+    expect(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, false)).toEqual(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW));
+    expect(rsc02(SEMANTIC_CHECK_RULE_DEFINITIONS)).not.toContain(READING);
+    expect(rsc02(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW))).not.toContain(READING);
+    for (const [ledger, ids] of [[undefined, false], [undefined, true], [PROPERTY_LEDGER_VIEW, false], [PROPERTY_LEDGER_VIEW, true]] as const) {
+      expect(ruleDefinitionDefects(semanticCheckRuleDefinitionsOf(ledger, ids)), `${String(ledger !== undefined)}・${String(ids)}`).toEqual([]);
+    }
+  });
+
+  it("(1) ids on の R-sc-02 は 3 つの観点 → 種類の意味 → 受理条件の文の順（台帳 off は今の default-value の文、台帳 on は台帳の文）。ID・why は同じで since に履歴。ほかの規則は同じ", () => {
+    expect(HEAD.endsWith("（weak-verification）。")).toBe(true);
+    const plain = rsc02(semanticCheckRuleDefinitionsOf(undefined, true));
+    expect(plain).toBe(`${HEAD}${READING}${rsc02(SEMANTIC_CHECK_RULE_DEFINITIONS).slice(HEAD.length)}`);
+    const withLedger = rsc02(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true));
+    expect(withLedger).toBe(`${HEAD}${READING}${PROPERTY_LEDGER_VIEW.t1AcceptanceTexts.join("")}`);
+    expect(withLedger.replace(READING, "")).toBe(rsc02(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)));
+    for (const check of STRUCTURAL_ASSERTIONS) expect(withLedger).toContain(STRUCTURAL_MEANINGS[check].meaning);
+    expect(withLedger).toContain("同じ種類を複数の行に掛けた確かめ方は行ごとに 1 件の検査である");
+    expect(withLedger).toContain("(2) と (3) は targets の行の集合に対して見る");
+    for (const ledger of [undefined, PROPERTY_LEDGER_VIEW]) {
+      const on = semanticCheckRuleDefinitionsOf(ledger, true);
+      const off = semanticCheckRuleDefinitionsOf(ledger);
+      expect(others(on)).toEqual(others(off));
+      const onRule = on.find((definition) => definition.id === SEMANTIC_CHECK_LEDGER_RULE_ID);
+      const offRule = off.find((definition) => definition.id === SEMANTIC_CHECK_LEDGER_RULE_ID);
+      expect(onRule?.why).toBe(offRule?.why);
+      expect(onRule?.since.startsWith(offRule?.since ?? "（無い）")).toBe(true);
+      expect(onRule?.since).toContain("#732");
+    }
+  });
+
+  it("(1) 同じ応答で ids on・off の要求の差は R-sc-02（$.rules[1]）だけで、データ・schema・結果はバイト列で同じ（台帳の on・off とも）", async () => {
+    const table = withCheckTargets(fixtureTable());
+    for (const ledger of [undefined, PROPERTY_LEDGER_VIEW]) {
+      const runWith = async (ids?: boolean) => {
+        const recording = createCheckedRecordingClient([structured({ judgments: TARGETS.map(accept) })]);
+        const outcome = await runSemanticCheck({
+          plan: PLAN,
+          list: LIST,
+          table,
+          documents: FIXTURE_DOCUMENTS,
+          gateway: makeGateway(recording.client),
+          ...(ledger === undefined ? {} : { ledger }),
+          ...(ids === undefined ? {} : { ids }),
+        });
+        return { outcome, requests: JSON.parse(JSON.stringify(recording.structured)) as unknown[] };
+      };
+      const omitted = await runWith();
+      const off = await runWith(false);
+      const on = await runWith(true);
+      expect(JSON.stringify(off.requests)).toBe(JSON.stringify(omitted.requests));
+      expect(requestDiffsOf(on.requests, off.requests).map((diff) => diff.paths)).toEqual([["$.rules[1]"]]);
+      const [onRequest] = on.requests as { rules: string[] }[];
+      expect(onRequest?.rules).toEqual(ruleTexts(semanticCheckRuleDefinitionsOf(ledger, true)));
+      expect(on.outcome).toEqual(off.outcome);
+      expectNoAcceptanceMaterial([JSON.stringify(on.requests)]);
+    }
+  });
+
+  it("(2) 意味の表の 1 文字を変えると ids on の R-sc-02 が変わる（表から組んでいる）。ids off は変わらない", () => {
+    const changed: StructuralMeaningTable = {
+      ...STRUCTURAL_MEANINGS,
+      "field-type": { ...STRUCTURAL_MEANINGS["field-type"], meaning: STRUCTURAL_MEANINGS["field-type"].meaning.replace("項目", "列") },
+    };
+    for (const ledger of [undefined, PROPERTY_LEDGER_VIEW]) {
+      expect(rsc02(semanticCheckRuleDefinitionsOf(ledger, true, changed))).not.toBe(rsc02(semanticCheckRuleDefinitionsOf(ledger, true)));
+      expect(semanticCheckRuleDefinitionsOf(ledger, false, changed)).toEqual(semanticCheckRuleDefinitionsOf(ledger));
+    }
+  });
+
+  /** R4 を同じ種類（aggregate-no-period）の 2 つの行に掛けた構造の確かめ方の表（`targets` は対象の行ごとに 1 件） */
+  function multiTargetTable(): NameTable {
+    const table = fixtureTable();
+    return {
+      ...table,
+      verification: table.verification.map((entry) =>
+        entry.requirementId === "R4"
+          ? {
+              requirementId: "R4",
+              kind: "structural" as const,
+              reason: "集計が在ることを見る",
+              checks: ["aggregate-no-period" as const, "aggregate-no-period" as const],
+              targets: [
+                { check: "aggregate-no-period" as const, targetId: "c.byKind", sourceId: null },
+                { check: "aggregate-no-period" as const, targetId: "c.byMonth", sourceId: null },
+              ],
+            }
+          : entry,
+      ),
+    };
+  }
+
+  async function runIds(outputs: readonly unknown[]) {
+    const table = multiTargetTable();
+    const recording = createCheckedRecordingClient(outputs.map(structured));
+    const outcome = await runSemanticCheck({
+      plan: PLAN,
+      list: LIST,
+      table,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(recording.client),
+      ledger: PROPERTY_LEDGER_VIEW,
+      ids: true,
+    });
+    return { table, outcome, requests: recording.structured };
+  }
+
+  it.each([
+    ["missing-target", "全体の率"],
+    ["weak-verification", "月ごとの金額の合計"],
+  ] as const)("(3) 同じ種類を 2 つの行に掛けた structural の要件に偽物の %s を返すと形の検査を通り、持ち越しになる", async (kind, quote) => {
+    const { table, outcome, requests } = await runIds([{ judgments: [...acceptAll("R4"), reject("R4", kind, quote)] }]);
+    expect(requests).toHaveLength(1);
+    const request = requests[0]!;
+    // データは確かめ方の entry（checks・targets）をそのまま渡す。規則に読み方の文がある
+    const verification = JSON.parse(dataBlocks(request.input).find((block) => block.name === "確かめ方")!.text) as Record<string, unknown>[];
+    const sent = verification.find((item) => item["requirementId"] === "R4");
+    expect(sent?.["checks"]).toEqual(["aggregate-no-period", "aggregate-no-period"]);
+    expect(sent?.["targets"]).toHaveLength(2);
+    expect(request.rules?.[1]).toContain(READING);
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.judgments.find((judgment) => judgment.requirementId === "R4")).toEqual({ requirementId: "R4", verdict: "reject", kind, quote });
+    const carry = await deriveCarryOver({ list: LIST, table, semanticCheck: { tableSha256: outcome.value.tableSha256, judgments: outcome.value.judgments } });
+    expect(carry.entries.map((item) => item.requirementId)).toEqual(["R4", "R5"]);
+    expect(carry.entries.find((item) => item.requirementId === "R4")?.reasons).toEqual([{ origin: "semantic-check", reason: kind }]);
+  });
+
+  it("(3) 受理すれば持ち越しにならない。拒否の種類の数は 3 のまま（schema・schema の名前は ids の on・off で同じ）。判定の欠落は今までどおり 2 回で malformed", async () => {
+    const { table, outcome, requests } = await runIds([{ judgments: TARGETS.map(accept) }]);
+    if (!outcome.ok) throw new Error("通るはず");
+    const carry = await deriveCarryOver({ list: LIST, table, semanticCheck: { tableSha256: outcome.value.tableSha256, judgments: outcome.value.judgments } });
+    expect(carry.entries.map((item) => item.requirementId)).toEqual(["R5"]);
+    expect(SEMANTIC_REJECTION_KINDS).toHaveLength(3);
+    expect(JSON.stringify(requests[0]?.schema)).toBe(JSON.stringify(SEMANTIC_CHECK_SCHEMA));
+    expect(requests[0]?.schemaName).toBe(SEMANTIC_CHECK_SCHEMA_NAME);
+    const partial = { judgments: acceptAll("R4") };
+    const missing = await runIds([partial, partial]);
+    if (missing.outcome.ok || missing.outcome.failure.kind !== "malformed") throw new Error("malformed でない");
+    expect(missing.requests).toHaveLength(2);
   });
 });
