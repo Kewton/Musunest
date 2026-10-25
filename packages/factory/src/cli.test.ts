@@ -4394,9 +4394,13 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     expect(eventsOf(search, "version").map((event) => ({ origin: event["origin"], declaration_sha256: event["declaration_sha256"], violations: event["violations"], adopted: event["adoption"] === "adopted" }))).toEqual(
       (file["versions"] as readonly Json[]).map((version) => ({ origin: version["origin"], declaration_sha256: version["declaration_sha256"], violations: version["violations"], adopted: version["adopted"] })),
     );
+    // 納品物は B3' を流していない版も空の件数を持つが、段の走りの記録は未実施を null にする（静的チェックの落ちと、理由の付いた不明）
+    const declRan = (violations: Json): boolean => violations["kind"] !== "static-check-failed" && violations["unknown"] === null;
     expect(eventsOf(search, "version").map((event) => event["discarded"])).toEqual(
       (file["versions"] as readonly Json[]).map((version) =>
-        version["discarded"] === null ? null : { unmarked: (version["discarded"]["unmarked"] as readonly string[]).length, rejections: version["discarded"]["rejections"] },
+        version["discarded"] === null || !declRan(version["violations"])
+          ? null
+          : { unmarked: (version["discarded"]["unmarked"] as readonly string[]).length, rejections: version["discarded"]["rejections"] },
       ),
     );
     expect(eventsOf(search, "recount").map((event) => ({ cause: event["cause"], declaration_sha256: event["declaration_sha256"], violations: event["violations"] }))).toEqual(file["recounts"]);
@@ -4593,10 +4597,12 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     // 静的チェックに落ちた版：違反は最悪の種類だけで、失敗の集合は静的チェックの 1 件
     expect(events[4]?.["violations"]).toEqual({ kind: "static-check-failed", declaration_sha256: broken });
     expect(events[4]?.["failure_set_sha256"]).toBe(await fingerprint([["static-check", null, null]]));
-    expect(events[4]?.["discarded"]).toEqual({ unmarked: 0, rejections: 0 });
+    // B3' を流していないので捨てた件数は未実施（0 にしない）
+    expect(events[4]?.["discarded"]).toBeNull();
     // B3' を流していない版（B3 で R3 の操作が結び付かない）：拒否・unmarked は不明（null）で和に入れない。R3 の試験 3 本が不一致
     expect(events[5]?.["violations"]).toEqual(counted(miss, { miss: 1, rej: null, unm: null, mis: 3 }, "name-check"));
     expect(events[5]?.["failure_set_sha256"]).toBe(await fingerprint([["correspondence-miss", null, "R3"], ...R3_CASES.map((testId) => mis(testId, "R3"))]));
+    expect(events[5]?.["discarded"]).toBeNull();
     expect(events[7]?.["failure_set_sha256"]).toBe(events[0]?.["failure_set_sha256"]);
     checkStructure(record);
     matchesDeliverable(search, (await wholeRun746("sets", SETS())).searchFile);

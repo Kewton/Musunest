@@ -2136,7 +2136,8 @@ async function runV11a(
         // 比べた一番良い状態（write は比べる相手が無いので null。採ったときの一番良い状態の更新より前に読む）
         event.comparedSeq = origin === "write" ? null : searchLog.bestSeq;
         event.adoption = adopted ? "adopted" : "not-adopted";
-        event.discarded = adopted ? null : { unmarked: state.unmarked.length, rejections: state.rejections.length };
+        // B3' を流していない版（静的チェック・名前の照合の落ち・点検の枯渇）の件数は未実施なので 0 にせず null にする
+        event.discarded = adopted || !state.decl.ran ? null : { unmarked: state.unmarked.length, rejections: state.rejections.length };
         if (adopted) searchLog.bestSeq = event.seq;
       };
 
