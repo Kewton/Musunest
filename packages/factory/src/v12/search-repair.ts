@@ -401,7 +401,7 @@ export interface SearchVersionEvent {
   /** 失敗の集合の指紋（評価の途中で止まれば null） */
   readonly failureSetSha256: string | null;
   readonly adoption: SearchEventAdoption;
-  /** 捨てた候補の B3' の unmarked と拒否の件数（採った版・未決は null） */
+  /** 捨てた候補の B3' の unmarked と拒否の件数（採った版・未決と、B3' を流していない版は null。未実施を 0 に置き換えない） */
   readonly discarded: { readonly unmarked: number; readonly rejections: number } | null;
   /** 作る時間（候補を作る段の開始から応答まで。ミリ秒） */
   readonly makeMs: number | null;

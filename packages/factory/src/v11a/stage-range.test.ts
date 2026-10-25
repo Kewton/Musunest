@@ -647,6 +647,47 @@ describe("段の走りの記録の search_repair（探索の出来事の列。Is
       stop: { reason: "stopped", stage: "decl-check", kind: "malformed" },
     });
   });
+
+  it("違反の内訳・不明の理由の内側に混ぜた ID・文の欄の番兵も出ない（内訳は固定の 5 つの鍵だけを写す。版・数え直しの両方。Issue #746 の R2）", () => {
+    const extra = { requirementId: SENTINEL, testId: SENTINEL, message: SENTINEL };
+    const breakdown = { "correspondence-miss": 1, "decl-rejection": null, "decl-unmarked": null, "test-mismatch": 3, "test-unresolved": 0, ...extra };
+    const counted = {
+      kind: "counted",
+      declarationSha256: sha,
+      breakdown,
+      knownTotal: 4,
+      unknown: { reason: "name-check", declarationSha256: sha, ...extra },
+      ...extra,
+    };
+    const leaky = {
+      events: [
+        { ...log().events[0], violations: counted },
+        { ...log().events[2], violations: { ...counted, unknown: null }, failureSetSha256: "c".repeat(64), rows: { first: 9, last: 9 } },
+        { ...log().events[3], violations: { kind: "static-check-failed", declarationSha256: sha, breakdown, ...extra } },
+      ],
+      bestSeq: 0,
+      rewritten: false,
+      stop: { reason: "completed", stage: null, kind: null },
+    } as unknown as StageSearchRepairLog;
+    const projected = recordOf(outcomeOf({ searchRepair: leaky }), { testSpecInRange: false })["search_repair"] as {
+      readonly events: readonly { readonly violations: unknown }[];
+    };
+    expect(JSON.stringify(projected)).not.toContain(SENTINEL);
+    const fixedBreakdown = { "correspondence-miss": 1, "decl-rejection": null, "decl-unmarked": null, "test-mismatch": 3, "test-unresolved": 0 };
+    expect(projected.events.map((event) => event.violations)).toEqual([
+      { kind: "counted", declaration_sha256: sha, breakdown: fixedBreakdown, known_total: 4, unknown: { reason: "name-check", declaration_sha256: sha } },
+      { kind: "counted", declaration_sha256: sha, breakdown: fixedBreakdown, known_total: 4, unknown: null },
+      { kind: "static-check-failed", declaration_sha256: sha },
+    ]);
+    // 内訳の鍵の順は納品物（violationsJson）と同じ
+    expect(Object.keys((projected.events[0] as { readonly violations: { readonly breakdown: object } }).violations.breakdown)).toEqual([
+      "correspondence-miss",
+      "decl-rejection",
+      "decl-unmarked",
+      "test-mismatch",
+      "test-unresolved",
+    ]);
+  });
 });
 
 // ── 回ごとの行（旗 `v12.ids` の C2・C3。Issue #699）────────────────────────

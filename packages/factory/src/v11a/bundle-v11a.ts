@@ -845,8 +845,33 @@ export interface StageRunOutcome {
   readonly searchRepair?: StageSearchRepairLog;
 }
 
-/** 違反の数（未決は null）の投影 */
-const violationsOrNull = (violations: VersionViolations | null): unknown => (violations === null ? null : violationsJson(violations));
+/**
+ * 違反の数（未決は null）の段の走りの記録への投影。納品物の `violationsJson` と違い、内訳も固定の 5 つの鍵を 1 つずつ写す
+ * （内訳の内側に型の外の欄が混ざっても出さない。正常な入力では `violationsJson` と同じバイト列。Issue #746）
+ */
+function stageViolationsJson(violations: VersionViolations | null): unknown {
+  if (violations === null) return null;
+  if (violations.kind === "static-check-failed") {
+    return { kind: violations.kind, declaration_sha256: violations.declarationSha256 };
+  }
+  const { breakdown } = violations;
+  return {
+    kind: violations.kind,
+    declaration_sha256: violations.declarationSha256,
+    breakdown: {
+      "correspondence-miss": breakdown["correspondence-miss"],
+      "decl-rejection": breakdown["decl-rejection"],
+      "decl-unmarked": breakdown["decl-unmarked"],
+      "test-mismatch": breakdown["test-mismatch"],
+      "test-unresolved": breakdown["test-unresolved"],
+    },
+    known_total: violations.knownTotal,
+    unknown:
+      violations.unknown === null
+        ? null
+        : { reason: violations.unknown.reason, declaration_sha256: violations.unknown.declarationSha256 },
+  };
+}
 
 /** 探索の出来事 1 つを段の走りの記録の形にする（許した欄だけを写す。欄の名前は snake_case。Issue #746） */
 function searchEventJson(event: SearchEvent): unknown {
@@ -860,7 +885,7 @@ function searchEventJson(event: SearchEvent): unknown {
         declaration_sha256: event.declarationSha256,
         parent_seq: event.parentSeq,
         compared_seq: event.comparedSeq,
-        violations: violationsOrNull(event.violations),
+        violations: stageViolationsJson(event.violations),
         failure_set_sha256: event.failureSetSha256,
         adoption: event.adoption,
         discarded: event.discarded === null ? null : { unmarked: event.discarded.unmarked, rejections: event.discarded.rejections },
@@ -875,7 +900,7 @@ function searchEventJson(event: SearchEvent): unknown {
         cause: event.cause,
         declaration_sha256: event.declarationSha256,
         before_seq: event.beforeSeq,
-        violations: violationsOrNull(event.violations),
+        violations: stageViolationsJson(event.violations),
         failure_set_sha256: event.failureSetSha256,
         stage_rows: spanJson(event.rows),
       };
