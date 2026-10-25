@@ -1519,4 +1519,73 @@ describe("旗 ids on：束が 2 つ以上の C3 の要求に、束の外の対�
     const reference = referenceOf(onC.requests[1]) as { readonly 要件の文と引用: readonly unknown[] };
     expect(reference.要件の文と引用[0]).toEqual({ requirementId: "R1", text: PAIR_X_TEXT.B, quote: PAIR_X_QUOTE });
   });
+
+  /**
+   * 直す前（99b6478）の R-sc-06 の文（Issue #745 の前）。塊を名前だけで指し、入力の直下か参照の塊の中かを言わなかった
+   */
+  const BEFORE_745_REFERENCE_RULE =
+    "データの「ほかの要件（参照のみ。判定しない）」の要件は、判定の材料（必要な対象が表に揃っているか・所属が正しいかを見るための、ほかの要件の文と所属）に使ってよいが、その要件の判定を返さない。判定の対象は、データの「要件の文と引用」の要件だけである。";
+  /** Issue #745 で足した、判定の対象の階層を言う文 */
+  const HIERARCHY_745 =
+    "判定の対象は、入力の直下にあるデータの塊「要件の文と引用」の要件だけである。データの塊「ほかの要件（参照のみ。判定しない）」の中にある同じ名前の鍵（要件の文と引用・要件ごとの所属・確かめ方・助言の印）の要件は、判定の対象に含めない。";
+
+  it("(#745 の 1) 束が 2 つ以上の要求の規則の末尾の R-sc-06 に、判定の対象を入力の直下の塊と階層で指す文が入る。直す前（99b6478）の R-sc-06 の文には入っていない", async () => {
+    // 直す前の挙動：階層を言わない（入力の直下・参照の塊の中の同じ名前の鍵を言わない）
+    expect(BEFORE_745_REFERENCE_RULE).not.toContain(HIERARCHY_745);
+    expect(BEFORE_745_REFERENCE_RULE).not.toContain("入力の直下");
+    expect(BEFORE_745_REFERENCE_RULE).not.toContain("同じ名前の鍵");
+    // 直した後：今の文の末尾に階層の文を足しただけ（前の文は残す）
+    expect(SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION.text).toBe(`${BEFORE_745_REFERENCE_RULE}${HIERARCHY_745}`);
+    expect(SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION.id).toBe("R-sc-06");
+    expect(SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION.why).toContain("Issue #745");
+    expect(SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION.since).toContain("#745");
+    expect(ruleDefinitionDefects([...semanticCheckRuleDefinitionsOf(undefined, true), SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION])).toEqual([]);
+    // 階層の文で名指す鍵は、参照の塊の鍵（今の塊の名前 4 つ）と同じ
+    const mixed = mixedOf();
+    const { requests } = await requestsOf(mixed, { advice: mixed.advice });
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      expect(request.rules?.at(-1)).toBe(REFERENCE_RULE);
+      expect(request.rules?.at(-1)).toContain(HIERARCHY_745);
+      expect(Object.keys(referenceOf(request) as Record<string, unknown>)).toEqual(["要件の文と引用", "要件ごとの所属", "確かめ方", "助言の印"]);
+      // 直す前の要求との差は R-sc-06 の文だけ（規則のほかの文・データ・schema は同じ）
+      const before = { ...request, rules: [...(request.rules ?? []).slice(0, -1), BEFORE_745_REFERENCE_RULE] };
+      expect(JSON.stringify(before)).not.toBe(JSON.stringify(request));
+      expect(before.rules.slice(0, -1)).toEqual(ruleTexts(semanticCheckRuleDefinitionsOf(undefined, true)));
+    }
+  });
+
+  it("(#745 の 2) 束が 1 つの要求と旗 off の要求には R-sc-06 も階層の文も入らない", async () => {
+    const mixed = mixedOf();
+    const off = await requestsOf(mixed, { ids: false });
+    const single = await requestsOf({ ...mixed, list: { ...mixed.list, requirements: mixed.list.requirements.slice(0, 5) } });
+    for (const run of [off, single]) {
+      expect(run.requests).toHaveLength(1);
+      expect(JSON.stringify(run.requests[0])).not.toContain(HIERARCHY_745);
+      expect(JSON.stringify(run.requests[0])).not.toContain("入力の直下");
+      expect(run.requests[0]?.rules).not.toContain(REFERENCE_RULE);
+    }
+  });
+
+  it("(#745 の 3) 階層の文を足しても、参照の塊の中の要件の判定を返した応答は、その束の形の落ち（形の検査は変えない）", async () => {
+    const materials = referringOf("A");
+    const requests: LlmStructuredRequest[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        requests.push(request);
+        // 束 2 は、参照の塊の中の X（R1）の判定も返す
+        const ids = semanticRequestIds(request);
+        const output = ids[0] === "R6" ? { judgments: [accept("R6"), accept("R1")] } : { judgments: ids.map(accept) };
+        return { output: output as T, usage: undefined };
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    const outcome = await runSemanticCheck({ ...materials, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(client), ids: true, bundleConcurrency: 1 });
+    if (outcome.ok) throw new Error("通らないはず");
+    expect(outcome.failure).toMatchObject({ kind: "malformed" });
+    expect(requests.map((request) => semanticRequestIds(request)[0])).toEqual(["R1", "R6", "R6"]);
+    for (const request of requests) expect(request.rules?.at(-1)).toContain(HIERARCHY_745);
+  });
 });
