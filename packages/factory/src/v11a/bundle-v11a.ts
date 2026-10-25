@@ -30,6 +30,7 @@ import {
 } from "../bundle.js";
 import { BUILD_CLI_RECORD_SCHEMA } from "../cli-plan.js";
 import type { RequirementNature, TestSuite } from "../fixed-test.js";
+import type { StageEfforts } from "../limits.js";
 import type { Verdict } from "../outcome.js";
 import { requirementsFromPlan } from "../pipeline.js";
 import type { FailureAttribution, StageId, StageRecord, StopReason } from "../record.js";
@@ -753,6 +754,8 @@ export interface StageRunConditions {
   readonly pipeline?: "v1.2";
   readonly v12_flags?: V12PublicFlags;
   readonly v12_call_limits?: StageCallLimits;
+  /** `--pipeline v1.2` の段の走りで `--stage-effort` を付けたときだけ：段 → 推論の effort（付けた順。Issue #664） */
+  readonly stage_efforts?: StageEfforts;
 }
 
 /** T2' を通った組の数（`test_spec`。Issue #637） */

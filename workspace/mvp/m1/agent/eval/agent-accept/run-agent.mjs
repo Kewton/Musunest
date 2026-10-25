@@ -61,6 +61,13 @@
 //   --stage-from <組のディレクトリ>：組のファイル（freeze-stage-input.mjs の出力。人の採否を反映した組だけ）があるディレクトリも受ける。組の署名・写しの SHA・境界（開始の段の直前の境界）・
 //          (b)（--build-from の組と同じ）・経路と旗の組（今の計測と同じ）・review を確かめ（違えば exit 4・stage-from:set-*。子 0 本）、P ごとの 1 本をその P の全反復に
 //          同じバイト列で渡す。組が外した P は入力なし（stage_input_absent）。条件の params.stage_from は組の種類・id・版・SHA（上流の計測の出力先を渡す形は今のまま）
+// #664（段ごとの effort の口。v1.2 時間 I8・U1 の 2 水準の計測の前提）：
+//   --stage-effort <段>=<値>（繰り返し可）：--pipeline v1.2 のとき（一気通貫と v1.2 の段の旗との組）だけ受け、子の引数の末尾に付けた順のまま足す。
+//          子を起こす前に、工場の dist の package の入口の parseStageEfforts で段と値を確かめる（段・値の集合をこの道具に書かない）。関数の無い dist は
+//          stage-effort:unavailable、知らない段・値・重複・形の誤りは工場の符号（stage-effort:*）で、どれも exit 3・子 0 本。v1・v1.1α との組は flags:conflict。
+//          条件の params.stage_efforts に段 → 値を写す（指定したときだけ。署名に入る。無ければ条件のバイト列は今と同じ）。再開は署名の一致（違えば resume:signature）。
+//          --compare は候補の群（v1.2 の群。段だけの対の比較は after）の子にだけ渡し、比較元の群には付けない（効果を 1 つの群に局所化する。2 水準の対の計測）。
+//          群の条件の照合は stage_efforts を外し（同じ値を求めない）、比較の記録の群に両群の値を並べる（持たない群は null）。--make-pairs の対のファイルは変えない
 // 採点は: node score-agent.mjs <repo> <out> [--label high]（リポジトリ・出力先の順で渡す）。比較は score-agent.mjs <repo> <out> --compare
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
@@ -134,6 +141,11 @@ const comparePipelinesArg = valueOf("--compare-pipelines"), selectedGroups = com
 if (comparePipelinesArg !== null && (selectedGroups === null || (!compare && makePairsOut === null) || stageMode)) refuseCode("flags:conflict");
 /** 比較の群（v1／v1.1α の比較。省略は v1,v1.1a） */
 const compareGroups = selectedGroups ?? COMPARE_GROUPS;
+// #664：段ごとの effort。値の無い指定は組めない。v1.2 の経路（単独・段の旗との組）か、候補の群が v1.2 の比較と対のファイルだけで受ける
+const stageEffortArgs = args.flatMap((a, i) => (a === "--stage-effort" ? [args[i + 1] ?? ""] : []));
+if (stageEffortArgs.some((v) => v === "" || v.startsWith("--"))) refuseCode("flags:conflict");
+const stageEffortTarget = pipeline === V12_PIPELINE || ((compare || makePairsOut !== null) && !stageMode && compareGroups[1] === V12_PIPELINE);
+if (stageEffortArgs.length > 0 && !stageEffortTarget) refuseCode("flags:conflict");
 if (compare && !args.includes("--budget-usd")) refuseCode("compare:budget-required");
 if (compare && !(Number.isFinite(budget) && budget >= 0 && Number.isInteger(CONC) && CONC >= 1)) refuseCode("flags:conflict");
 /** 条件の params.mode：build（指定なし）・e2e（--plan）・plan-only・build-from・stage-run（段の旗。#545） */
@@ -239,6 +251,16 @@ if (usesV12) {
   const limOk = lim !== null && typeof lim === "object" && ok(lim.logicalCalls) && ok(lim.realAttempts) && ok(lim.judgeBranch);
   if (v12Flags.ids === true && !limOk) refuseCode("pipeline:v1.2-limits-unavailable");
   if (limOk && v12Flags.ids === true) v12CallLimits = { logical_calls: lim.logicalCalls, real_attempts: lim.realAttempts, judge_branch: lim.judgeBranch };
+}
+// #664：段ごとの effort を工場の dist の関数で読む（段・値の集合を手書きしない）。条件の params.stage_efforts に写す段 → 値（指定が無ければ null）
+let stageEfforts = null;
+if (stageEffortArgs.length > 0) {
+  if (typeof v12Entry?.parseStageEfforts !== "function") refuseCode("stage-effort:unavailable");
+  let read = null;
+  try { read = v12Entry.parseStageEfforts(stageEffortArgs); } catch { read = null; }
+  const known = (code) => typeof code === "string" && /^stage-effort:[a-z-]+$/.test(code);
+  if (read === null || typeof read !== "object" || read.stageEfforts === null || typeof read.stageEfforts !== "object" || Array.isArray(read.stageEfforts)) refuseCode(known(read?.code) ? read.code : "stage-effort:unavailable");
+  stageEfforts = JSON.parse(JSON.stringify(read.stageEfforts));
 }
 
 // --compare（#513）：比較元の checkout を同じ形で読む（読めなければ断る。パスは出さない）
@@ -482,16 +504,18 @@ if (script) {
 }
 
 // 子プロセスへ渡す引数を 1 か所で組み立て、条件のファイルもここから作る（既定値を別に手書きしない）。v1.1a・v1.2 の経路だけ末尾に --pipeline <経路> を足す（#513・#557）
-const argvFor = (cli, dir, pl) => {
+const argvFor = (cli, dir, pl, withEfforts = false) => {
   const argv = [cli, join(dir, "request.md"), "--out", join(dir, "bundle"), "--effort", effort, "--model", model, "--budget", String(perRunBudget), "--deadline", String(deadlineMin)];
   if (plan || planOnly) argv.push(plan ? "--plan" : "--plan-only", ...(script ? ["--script", join(dir, "script.json")] : ["--answers", join(dir, "answers.json")]));
   if (buildFrom !== null) argv.push("--plan-file", join(dir, "plan-file.json"));
   if (pl === "v1.1a" || pl === V12_PIPELINE) argv.push("--pipeline", pl);
   // 段単位の走り（#545）：工場の開始・終了の段と、開始の段の直前の境界があれば本のディレクトリに写した上流の checkpoint
   if (stageMode) argv.push("--stage-start", stageRange.start, "--stage-end", stageRange.end, ...(stageBoundary === null ? [] : ["--stage-input", join(dir, STAGE_INPUT_DIR, stageLib.stageCheckpointFile(stageBoundary))]));
+  // 段ごとの effort（#664）：付けた順のまま末尾に足す（比較では候補の群の子だけ）
+  if (withEfforts) for (const v of stageEffortArgs) argv.push("--stage-effort", v);
   return argv;
 };
-const childArgsFor = (job) => argvFor(cliFile, dirOf(job), pipeline);
+const childArgsFor = (job) => argvFor(cliFile, dirOf(job), pipeline, stageEfforts !== null);
 
 const gitOut = (checkout, gitArgs) => { try { return execFileSync("git", ["-C", checkout, ...gitArgs], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); } catch { return null; } };
 
@@ -516,7 +540,7 @@ const scoringOf = () => ({ dir: relative(repo, evDir), ...scoringFingerprint(evD
  * ctx ＝ 子を起こす checkout（工場の dist・spec-engine の dist・生成に渡す文書・git の状態はここから）。argvOf ＝ 条件に書く子の引数。
  * pl ＝ 経路、comparison ＝ 比較の群の印（#513。比較でなければ null）
  */
-function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId }) {
+function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId, efforts = null }) {
   const probe = js[0] ?? { pid: only?.[0] ?? "P1", r: 1 };
   const sampleArgv = argvOf(probe);
   const argOf = (flag) => { const i = sampleArgv.indexOf(flag); return i >= 0 ? sampleArgv[i + 1] : undefined; };
@@ -558,6 +582,8 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId })
       ...(pl === V12_PIPELINE ? { v12_flags: v12Flags } : {}),
       // #618：経路 v1.2 の単独の計測だけ（署名に入る。上限が変われば再開を断る）。比較の群には足さない（採点側の比較が params の同一を見るため）
       ...(pl === V12_PIPELINE && comparison === null && v12CallLimits !== null ? { v12_call_limits: v12CallLimits } : {}),
+      // #664：--stage-effort を子に渡したときだけ。段 → 値（付けた順。署名に入る。値が変われば再開を断る）
+      ...(efforts === null ? {} : { stage_efforts: efforts }),
       // #545：段単位の走りのときだけ。範囲・予算と締切の適用の単位（工場の dist の値）・上流の計測の条件の指紋（開始 T1 は null）・本ごとの上流の入力の SHA
       ...(stageMode ? { stage_start: stageRange.start, stage_end: stageRange.end, budget_scope: stageLib.STAGE_BUDGET_SCOPE, stage_from: stageFrom, stage_inputs: stageInputRecords } : {}),
     },
@@ -664,7 +690,7 @@ const runOne = (job) => new Promise((resolve) => {
     // 組のディレクトリから渡す記録は、組に写した名前のまま（段の走りの記録か Build だけの記録。#640）
     writeFileSync(join(dir, STAGE_INPUT_DIR, si.recordFile ?? stageLib.STAGE_RUN_RECORD_FILE), si.recordBytes);
   }
-  const cliArgs = group === null ? childArgsFor(job) : argvFor(group.ctx.cliFile, dir, runPipeline);
+  const cliArgs = group === null ? childArgsFor(job) : argvFor(group.ctx.cliFile, dir, runPipeline, group.efforts);
   const t0 = Date.now();
   // 子を起こす直前の時刻（#497。凍結の規則が読む。終わる順に依らない）
   const startedAt = new Date().toISOString();
@@ -731,7 +757,7 @@ else await runSingle();
 
 /** 比較でない計測（今までの流れ。#400〜#497） */
 async function runSingle() {
-  const { measured, signature, signatureLegacy } = conditionsFor(main, { jobs, argvOf: childArgsFor, pl: pipeline, comparison: null, measurementId: basename(outRoot) });
+  const { measured, signature, signatureLegacy } = conditionsFor(main, { jobs, argvOf: childArgsFor, pl: pipeline, comparison: null, measurementId: basename(outRoot), efforts: stageEfforts });
   mkdirSync(outRoot, { recursive: true });
   const conditionsPath = join(outRoot, "conditions.json");
   const priorDirs = readdirSync(outRoot).filter((n) => /^P\d+-r\d+$/.test(n));
@@ -819,10 +845,12 @@ async function runCompare() {
     rubric: scoring.files.some((f) => f.path === "rubric-v5.mjs") ? "v5" : null,
   }, GROUPS);
   // 条件に書く子の引数は checkout と出力先からの相対（比較元のパスを記録に写さない。実際の引数は本のディレクトリの絶対パス）
-  const relArgvOf = (pl, ctx) => (job) => argvFor(relative(ctx.checkout, ctx.cliFile), idOf(job), pl);
+  // 段ごとの effort（#664）は候補の群の子にだけ渡す（比較元の群は付けない）
+  const effortsOf = (g) => (g === candGroup ? stageEfforts : null);
+  const relArgvOf = (pl, ctx, g) => (job) => argvFor(relative(ctx.checkout, ctx.cliFile), idOf(job), pl, effortsOf(g) !== null);
   const conds = {};
   for (const g of GROUPS) {
-    conds[g] = conditionsFor(ctxOf[g], { jobs, argvOf: relArgvOf(pipelineOf(g), ctxOf[g]), pl: pipelineOf(g), comparison: { pairs_sha256: pairsSha, group: g, role: ROLES[g], profile }, measurementId: basename(outRoot) });
+    conds[g] = conditionsFor(ctxOf[g], { jobs, argvOf: relArgvOf(pipelineOf(g), ctxOf[g], g), pl: pipelineOf(g), comparison: { pairs_sha256: pairsSha, group: g, role: ROLES[g], profile }, measurementId: basename(outRoot), efforts: effortsOf(g) });
   }
   // 経路 v1.2 を含む組（#557）：各群の条件を版ごとに検証してから（v1・v1.1a は v5、v1.2 は v7）、共通の形で照らす。保存する条件と署名は元のまま
   if (GROUPS.includes(V12_PIPELINE)) for (const g of GROUPS) { const problem = groupConditionsProblem(conds[g].measured, g); if (problem !== null) refuseCode(problem); }
@@ -830,7 +858,9 @@ async function runCompare() {
   const comparable = (c) => {
     const { source: _s, factory: _f, comparison: _c, schema: _v, params, child_args: childArgs, ...rest } = c;
     const p = comparableParams(params);
-    return { ...rest, params: p, child_args: childArgs.map((x) => ({ id: x.id, argv: x.argv === null ? null : x.argv.filter((a, i, all) => !(a === "--pipeline" || all[i - 1] === "--pipeline")) })) };
+    // 経路と段ごとの effort（#664）の旗は群の意図した差なので、子の引数の照合から外す
+    const intended = (a) => a === "--pipeline" || a === "--stage-effort";
+    return { ...rest, params: p, child_args: childArgs.map((x) => ({ id: x.id, argv: x.argv === null ? null : x.argv.filter((a, i, all) => !(intended(a) || intended(all[i - 1]))) })) };
   };
   const a = comparable(conds[baseGroup].measured), b = comparable(conds[candGroup].measured);
   const differs = Object.keys({ ...a, ...b }).flatMap((k) => (k === "params" ? Object.keys({ ...a.params, ...b.params }).filter((pk) => JSON.stringify(a.params[pk]) !== JSON.stringify(b.params[pk])).map((pk) => `params.${pk}`) : JSON.stringify(a[k]) !== JSON.stringify(b[k]) ? [k] : []));
@@ -846,7 +876,7 @@ async function runCompare() {
     const dir = join(outRoot, g);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "conditions.json"), JSON.stringify({ ...conds[g].measured, started_at: startedAt, signature: conds[g].signature }, null, 1));
-    groupCtx[g] = { ctx: ctxOf[g], pipeline: pipelineOf(g), dir, exitClasses: Object.fromEntries(EXIT_CLASSES.map((c) => [c, 0])), spent: 0, executed: [] };
+    groupCtx[g] = { ctx: ctxOf[g], pipeline: pipelineOf(g), dir, exitClasses: Object.fromEntries(EXIT_CLASSES.map((c) => [c, 0])), spent: 0, executed: [], efforts: effortsOf(g) !== null };
   }
   const groupRecord = (g) => {
     const m = conds[g].measured;
@@ -856,6 +886,8 @@ async function runCompare() {
       stage_output_limits: m.params.stage_output_limits, stage_output_limits_v11a: m.params.stage_output_limits_v11a, defaults: defaultsOf(ctxOf[g]), conditions_signature: conds[g].signature,
       // 経路 v1.2 の群（#557）：条件に写した旗の組
       ...(pipelineOf(g) === V12_PIPELINE ? { v12_flags: m.params.v12_flags } : {}),
+      // 段ごとの effort（#664）：指定したときだけ、両群の値を並べる（付けない群は null。違いを隠さない）
+      ...(stageEfforts === null ? {} : { stage_efforts: m.params.stage_efforts ?? null }),
     };
   };
   const m1 = conds[candGroup].measured;

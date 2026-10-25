@@ -22,12 +22,15 @@ import {
   CONTRACT_VERSION,
   PROMPT_VERSION_V11A,
   PROMPT_VERSION_V12,
+  STAGE_EFFORT_USAGE,
   STAGE_USAGE,
   VOCABULARY_VERSION,
   USAGE,
   parseCliArguments,
+  parseStageEfforts,
   runCli,
 } from "./cli.js";
+import { AGENT_LIMITS, maxOutputTokensForEffort } from "./limits.js";
 import { BUILD_CLI_RECORD_FILE, PLAN_ONLY_RESULT_SCHEMA } from "./cli-plan.js";
 import * as factory from "./index.js";
 import { createFakeJudge } from "./judge-fake.js";
@@ -87,6 +90,8 @@ import {
   withoutWhenAndNonRequirement,
   REQUIRED_VALIDATIONS_BLOCK,
   withoutRequiredValidations,
+  revert735,
+  revertBundleFiles735,
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
 import type { LedgerView } from "./v12/ledger.js";
@@ -101,6 +106,8 @@ import {
   testSpecSchemaOf,
 } from "./v11a/stages/test-spec.js";
 import * as testSpecModule from "./v11a/stages/test-spec.js";
+import { SEMANTIC_CHECK_SCHEMA_NAME, semanticCheckRuleDefinitionsOf } from "./v11a/stages/semantic-check.js";
+import { structuralReadingText } from "./v12/structural-meanings.js";
 import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
 import type { NameTable } from "./v11a/names.js";
@@ -965,6 +972,9 @@ function v11aTestSpec(): Record<string, unknown> {
   };
 }
 
+/** Issue #663 で旗 ids の走りだけ T2 の R-tsp-02 の末尾に足した、要件ごとの試験の上限の文（値は限度の表の定数から組む） */
+const T2_IDS_LIMIT_TEXT = `要件ごとの試験は、コードが作った分を含めて ${String(AGENT_LIMITS.testsPerRequirement)} 本まで。必要な試験の枠の残る本数（remaining）を超えて場合を書かない。`;
+
 /** 手 3e（#625）で旗 ids の走りだけ場合の形に差し替えた、欄の名前を指す T2 の規則 */
 const CASE_FORM_RULE_IDS: readonly string[] = ["R-tsp-07", "R-tsp-09", "R-tsp-11", "R-tsp-12", "R-tsp-13", "R-tsp-14"];
 
@@ -1083,6 +1093,8 @@ async function runV11aCli(input: {
   readonly dir: string;
   readonly calls: readonly RecordedCall[];
   readonly pipeline?: "v1.1a" | "v1.2";
+  /** 末尾に足す引数（`--stage-effort` など。省けば今の引数。Issue #664） */
+  readonly args?: readonly string[];
 }) {
   const planPath = `${input.dir}-plan.json`;
   const planText = JSON.stringify(await v11aEnvelope());
@@ -1091,7 +1103,7 @@ async function runV11aCli(input: {
   const lines: string[] = [];
   const written: string[] = [];
   const code = await runCli({
-    argv: ["--", "request.txt", "--out", input.dir, "--pipeline", input.pipeline ?? "v1.1a", "--plan-file", planPath],
+    argv: ["--", "request.txt", "--out", input.dir, "--pipeline", input.pipeline ?? "v1.1a", "--plan-file", planPath, ...(input.args ?? [])],
     env: { [API_KEY_ENV]: "sk-FAKE" },
     readFile: async (path) => (path === planPath ? planText : V11A_SOURCE),
     writeFile: async (path, text) => {
@@ -1283,12 +1295,21 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
   const withoutIdsGenerated = (requests: readonly unknown[], ledger: LedgerView = PROPERTY_LEDGER_VIEW, generated = true): unknown[] => {
     const idsRules = ruleTexts(testSpecRuleDefinitionsOf(ledger, true));
     const offRules = ruleTexts(testSpecRuleDefinitionsOf(ledger));
+    const idsSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(ledger, true));
+    const offSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(ledger));
     const [, , testsName] = WRITE_V11A_DATA_NAMES;
     const testsBlock = new RegExp(`(<data name="${testsName}">\\n)([\\s\\S]*?)(\\n</data>)`);
     return requests.map((value) => {
       const request = value as LlmStructuredRequest;
       if (request.schemaName === TEST_SPEC_SCHEMA_NAME) {
+        // Issue #663：旗 ids の R-tsp-02 は末尾に要件ごとの試験の上限の文（限度の表の定数）を持つ。在ることを確かめてから旗 off の文に戻す
+        expect((request.rules ?? []).filter((text) => text.endsWith(T2_IDS_LIMIT_TEXT))).toHaveLength(1);
         return { ...request, rules: (request.rules ?? []).map((text) => { const at = idsRules.indexOf(text); return at < 0 ? text : (offRules[at] ?? text); }) };
+      }
+      if (request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME) {
+        // Issue #732：旗 ids の C3 の R-sc-02 は構造の検査の読み方の文を持つ。在ることを確かめてから旗 ids off の文に戻す
+        expect(request.rules).toEqual(idsSemanticRules);
+        return { ...request, rules: offSemanticRules };
       }
       if (request.schemaName === WRITE_V11A_SCHEMA_NAME) {
         // 手 4d（#666）：旗 ids の B1 は「要る検査の骨組み」の塊と R-w11-07 の旗 ids の文を持つ。塊が在ることを確かめてから元に戻す
@@ -1481,6 +1502,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(v12Calls).toEqual({
       real_attempts: { limit: 144, used: 12 },
       judge_branch: { limit: 80, used: 4 },
+      // C3 の束の欄（Issue #735）：対象 4 件で束 1、形のやり直しの予算は要件 5 件で束 1（使わない）
+      semantic_check: { rounds: [{ round: 1, bundles: 1 }], shape_retries: { limit: 1, used: 0, remaining: 1, by: [] } },
       test_spec: { bundles: 1, concurrency: 1, total: t2TotalOf(v12.summary) },
     });
     expect(v11a.summary).not.toHaveProperty("v12_calls");
@@ -1525,6 +1548,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(run.summary["v12_calls"]).toEqual({
       real_attempts: { limit: 144, used: 12 },
       judge_branch: { limit: 80, used: 4 },
+      // C3 の束の欄（Issue #735）：対象 4 件で束 1、形のやり直しの予算は要件 5 件で束 1（使わない）
+      semantic_check: { rounds: [{ round: 1, bundles: 1 }], shape_retries: { limit: 1, used: 0, remaining: 1, by: [] } },
       test_spec: { bundles: 1, concurrency: 1, total: t2TotalOf(run.summary) },
     });
   });
@@ -2199,15 +2224,28 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     // その出力ダイジェストに戻した記録は、直す前（fa21c65）のバイト列と同じ
     const checkpoint = JSON.parse(await fs.readFile(`${dir}/${stageCheckpointFile("t1-t2")}`, "utf8")) as Record<string, any>;
     expect(checkpoint["versions"]["ledger_upstream"]).toBe(await ledgerModule.upstreamLedgerSha256());
+    // Issue #735 で取り直した差は、論理の枠の値（checkpoint の call_limits・条件の記録の v12_call_limits）と記録の v12_calls の C3 の束の欄、
+    // それに由来する記録の出力ダイジェストだけ：欄を旧の値に戻すと #735 の前と同じ。以下の #725・#713 の照合は戻した値で続ける
+    expect(checkpoint["versions"]["call_limits"]["logical_calls"]).toBe(80);
+    revert735(checkpoint);
+    {
+      const revertedRecord = await stageRecordOf(dir);
+      expect((revertedRecord["v12_calls"] as Record<string, unknown>)["semantic_check"]).toEqual({ rounds: [{ round: 1, bundles: 1 }], shape_retries: { limit: 1, used: 0, remaining: 1, by: [] } });
+      revert735(revertedRecord);
+      (revertedRecord["checkpoints"] as { output_digest: string }[])[0]!.output_digest = await stageOutputDigest(checkpoint);
+      expect([await sha256Hex(stageJsonText(revertedRecord)), await sha256Hex(stageJsonText(checkpoint))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_735);
+    }
     // Issue #725 で取り直した差は、checkpoint の ledger_upstream と記録の出力ダイジェストだけ：版 1 の部分の指紋に戻すと #725 の前と同じ
     {
       const reverted = { ...checkpoint, versions: { ...checkpoint["versions"], ledger_upstream: V12_UPSTREAM_BEFORE_725 } };
       const revertedRecord = await stageRecordOf(dir);
+      revert735(revertedRecord);
       (revertedRecord["checkpoints"] as { output_digest: string }[])[0]!.output_digest = await stageOutputDigest(reverted);
       expect([await sha256Hex(stageJsonText(revertedRecord)), await sha256Hex(stageJsonText(reverted))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_725);
     }
     delete checkpoint["versions"]["ledger_upstream"];
     const record = await stageRecordOf(dir);
+    revert735(record);
     const before = record["checkpoints"] as { output_digest: string }[];
     before[0]!.output_digest = await stageOutputDigest(checkpoint);
     expect([await sha256Hex(stageJsonText(record)), await sha256Hex(stageJsonText(checkpoint))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_713);
@@ -2252,8 +2290,15 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
       pipeline: "v1.2",
     });
     expect(run.code).toBe(EXIT_RUN_FAILED);
-    // 直す前（fa21c65）のコードで測った値（記録。境界に届かないので checkpoint は無い。手で直さない）
+    // 記録の SHA-256（境界に届かないので checkpoint は無い。手で直さない）。Issue #735 で取り直した差は論理の枠の値だけで、戻すと直す前
+    // （fa21c65）のコードで測った値と同じ
     expect(await digestsOf(dir, [STAGE_RUN_RECORD_FILE])).toEqual(V12_STAGE_C2_STOP_DIGESTS);
+    {
+      const reverted = await stageRecordOf(dir);
+      expect(reverted["v12_calls"]).not.toHaveProperty("semantic_check");
+      revert735(reverted);
+      expect([await sha256Hex(stageJsonText(reverted))]).toEqual(V12_STAGE_C2_STOP_DIGESTS_BEFORE_735);
+    }
     expect(run.written).toEqual([STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
     const record = await stageRecordOf(dir);
     expect(record["stopped"]).toMatchObject({ stage: "mapping", kind: "unmet" });
@@ -2387,9 +2432,20 @@ const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
   // Issue #725 で取り直した（上流の台帳の見方に未対応の観測を足して版を 2 に上げ、checkpoint の ledger_upstream と、それに由来する
   // 記録の出力ダイジェストが変わったため。旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_725` に残し、2 つの欄を旧の値に戻せば一致する
   // ことを試験で確かめる）
+  // Issue #735 で取り直した（論理の枠 L-v12-01 を 72 → 80 にして checkpoint の版の call_limits・条件の記録の v12_call_limits の
+  // logical_calls が変わり、記録の v12_calls に C3 の束の欄 semantic_check を足したため。旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_735`
+  // に残し、`revert735` で欄を旧の値に戻せば一致することを試験で確かめる。旧 9e94a228cc565b2d77e210828065bfa74cc337bd6c05cab330e8bbdbd5b09a3d・
+  // 8cad6abfb8cd5659407e25934411c26fb9ca537adae3e88a6b4a9cd327258a5a）
+  "c22cffe09c359a3e98eee0885efd47c9c3d2ab2c6158a731442e27f62572fc9b",
+  "3646122573cce8254ad727db2d194021b54e683dbf9f98166cbdd36faadbf92d",
+];
+
+/** Issue #735 の前の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値。#725 で取り直した値） */
+const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_735: readonly string[] = [
   "9e94a228cc565b2d77e210828065bfa74cc337bd6c05cab330e8bbdbd5b09a3d",
   "8cad6abfb8cd5659407e25934411c26fb9ca537adae3e88a6b4a9cd327258a5a",
 ];
+
 
 /** Issue #725 の前の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値。base 354cc49 で測った値） */
 const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_725: readonly string[] = [
@@ -2415,8 +2471,15 @@ const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_713: readonly string[] = [
   "8f0dc33c3bd0682ecfa8f6ef064608099b46acb627cff61977ca6b1d93af7018",
 ];
 
-/** fa21c65（直す前）の段の走り：C2 が 2 回落ちて止まる走りの記録の SHA-256（Issue #683） */
-const V12_STAGE_C2_STOP_DIGESTS: readonly string[] = ["00443168d1b3bc21efa0d78604fe89bcea391c54e545a67db4e1d68f61eb7367"];
+/**
+ * 段の走り：C2 が 2 回落ちて止まる走りの記録の SHA-256（Issue #683）。Issue #735 で取り直した（論理の枠 L-v12-01 を 72 → 80 にして
+ * 条件の記録の v12_call_limits の logical_calls が変わったため。C3 に届かないので v12_calls は変わらない。旧の値は
+ * `V12_STAGE_C2_STOP_DIGESTS_BEFORE_735` に残し、`revert735` で戻せば一致することを試験で確かめる）
+ */
+const V12_STAGE_C2_STOP_DIGESTS: readonly string[] = ["4edd73d295d2105783e7da7cbe36ff0a3aa6c13c32e3b1436ca3ae79caf1ed91"];
+
+/** fa21c65（直す前）の段の走り：C2 が 2 回落ちて止まる走りの記録の SHA-256（Issue #683。Issue #735 の前の値） */
+const V12_STAGE_C2_STOP_DIGESTS_BEFORE_735: readonly string[] = ["00443168d1b3bc21efa0d78604fe89bcea391c54e545a67db4e1d68f61eb7367"];
 
 /** fa21c65（直す前）の v1.1a の段の走り：T1 が形で 1 度落ちてやり直しで通る走りの記録と t1-t2 の checkpoint の SHA-256（Issue #683） */
 const V11A_STAGE_T1_RETRY_DIGESTS: readonly string[] = [
@@ -2430,6 +2493,43 @@ const V11A_STAGE_RUN_DIGESTS: readonly string[] = [
   "50dde03644297779f6259db18fe73422c80f2aaa48439be189ea472bfb93ec33",
   "0d3d1378e80402c9f7e6625191e1e9b4821b1a75a4872b62716bbc0e125eecb2",
 ];
+
+describe("旗 v12.ids の C3 の構造の検査の読み方（Issue #732）：一気通貫と段の走りの C3 の要求が同じ文を持ち、ids off の走りには無い", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const rsc02Of = (requests: readonly LlmStructuredRequest[]): readonly string[] =>
+    requests.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME).map((request) => request.rules?.[1] ?? "");
+
+  it("(4) 一気通貫（旗 ids on）と段の走り（name-table..semantic-check・ids on）の C3 の R-sc-02 は同じで読み方の文を含む。ids off の一気通貫・段の走りには無い", async () => {
+    const whole = await runV11aCli({ dir: `${directory}/v12-ids-reading-whole`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    const stage = await runStageCli({ dir: `${directory}/v12-ids-reading-stage`, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: v12Head().slice(0, 5), pipeline: "v1.2" });
+    expect(whole.code).toBe(EXIT_OK);
+    expect(stage.code).toBe(EXIT_OK);
+    const wholeRules = rsc02Of(whole.recording.structured);
+    const stageRules = rsc02Of(stage.requests.map((text) => JSON.parse(text) as LlmStructuredRequest));
+    expect(wholeRules).toHaveLength(1);
+    expect(stageRules).toEqual(wholeRules);
+    expect(wholeRules[0]).toContain(structuralReadingText());
+    expect(wholeRules[0]).toBe(ruleTexts(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true))[1]);
+    // ids off（台帳と探索は on）の走りは読み方の文を持たない
+    const flags = { ledger: true, searchRepair: true, ids: false };
+    vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => flags);
+    const wholeOff = await runV11aCli({
+      dir: `${directory}/v12-ids-reading-whole-off`,
+      calls: [structured(v11aT1(true)), structured(v11aJudgments()), structured(v11aTestSpec()), structured({ declaration: V11A_YAML }), structured(v11aJudgments())],
+      pipeline: "v1.2",
+    });
+    const stageOff = await runStageCli({ dir: `${directory}/v12-ids-reading-stage-off`, args: ["--stage-end", "semantic-check"], calls: [structured(v11aT1(true)), structured(v11aJudgments())], pipeline: "v1.2" });
+    const offRules = [...rsc02Of(wholeOff.recording.structured), ...rsc02Of(stageOff.requests.map((text) => JSON.parse(text) as LlmStructuredRequest))];
+    expect(offRules).toHaveLength(2);
+    for (const rule of offRules) {
+      expect(rule).not.toContain(structuralReadingText());
+      expect(rule).toBe(ruleTexts(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW))[1]);
+    }
+  });
+});
 
 describe("部分の指紋の版 2（台帳の未対応の観測を上流の見方に足した。Issue #725）：記録と checkpoint の差は申告した 3 つの欄だけ", () => {
   afterEach(() => {
@@ -2455,6 +2555,16 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
     }
     const dir = `${directory}/v12-upstream-v2-${String(index)}`;
     const idsOff = scenario.flags?.ids === false;
+    // Issue #732：ids on の C3 の要求は R-sc-02 に構造の検査の読み方の文を持ち、ids off は持たない。在る・無いを確かめてから外して照らす
+    // （外した要求は #732 の前の要求とバイト列で同じ＝下の BEFORE の requests のまま）
+    let semanticRequests = 0;
+    const withoutC3Reading = (request: LlmStructuredRequest): LlmStructuredRequest => {
+      if (request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME) return request;
+      semanticRequests += 1;
+      const rules = request.rules ?? [];
+      expect(rules.some((text) => text.includes(structuralReadingText())), scenario.name).toBe(!idsOff);
+      return { ...request, rules: rules.map((text) => text.replace(structuralReadingText(), "")) };
+    };
     // ledger off の C1 の schema は計算の行に集計の欄を持たない（応答も持たせない）
     const head = scenario.flags?.ledger === false ? v12Head({ ...ledgerModule.PROPERTY_LEDGER_VIEW, aggregateKinds: [] }) : v12Head();
     let requests: unknown;
@@ -2465,7 +2575,7 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
       const run = idsOff
         ? await runStageCli({ dir, args: ["--stage-end", "semantic-check"], calls: [structured(v11aT1(true)), structured(v11aJudgments())], pipeline: "v1.2" })
         : await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: head.slice(0, 5), pipeline: "v1.2" });
-      requests = run.requests;
+      requests = run.requests.map((text) => JSON.stringify(withoutC3Reading(JSON.parse(text) as LlmStructuredRequest)));
       summary = run.lines.at(-1) ?? "";
       code = run.code;
       written = run.written;
@@ -2474,11 +2584,16 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
         ? [structured(v11aT1(true)), structured(v11aJudgments()), structured(v11aTestSpec()), structured({ declaration: V11A_YAML }), structured(v11aJudgments())]
         : [...head, structured(v11aJudgments())];
       const run = await runV11aCli({ dir, calls, pipeline: "v1.2" });
-      requests = { structured: run.recording.structured, tools: run.recording.tools };
-      summary = JSON.stringify(run.summary);
+      requests = { structured: run.recording.structured.map(withoutC3Reading), tools: run.recording.tools };
+      // Issue #735：要約の v12_calls の C3 の束の欄を外して照らす（ids on の走りだけが持つ。外した要約は #735 の前と同じ）
+      const revertedSummary = structuredClone(run.summary) as Record<string, any>;
+      expect(revertedSummary["v12_calls"]?.["semantic_check"] !== undefined, scenario.name).toBe(!idsOff);
+      revert735(revertedSummary);
+      summary = JSON.stringify(revertedSummary);
       code = run.code;
       written = run.written;
     }
+    expect(semanticRequests, scenario.name).toBeGreaterThan(0);
     // manifest の storage_unit は出力の場所（試験ごとの一時の場所）なので、目印に置き換えて照らす
     const textOf = async (path: string): Promise<string> => {
       const text = await fs.readFile(`${dir}/${path}`, "utf8");
@@ -2616,8 +2731,19 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
   const BEFORE_UPSTREAM = V12_UPSTREAM_BEFORE_725;
   /** 要求が変わってよい組（旗 ids と ledger が on の C2 のデータと規則だけ。差が C2 の要求だけであることは run.test.ts が照らす） */
   const REQUESTS_CHANGED = new Set(["段の走り・ids と ledger が on", "一気通貫・ids と ledger が on"]);
-  /** 変わってよいファイル（申告した 3 つの欄を持つもの：t1-t2 の checkpoint と、それを宣言する記録） */
-  const MAY_CHANGE = new Set([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, BUILD_CLI_RECORD_FILE]);
+  /**
+   * 変わってよいファイル（申告した 3 つの欄を持つもの：t1-t2 の checkpoint と、それを宣言する記録）。Issue #735 で、版の call_limits の
+   * 論理の枠を持つ t2-b1 の checkpoint、要約の v12_calls の C3 の束の欄を持つ納品物の要約と、その SHA-256 を載せる manifest を足した
+   * （`revert735`・`revertBundleFiles735` で戻して照らす）
+   */
+  const MAY_CHANGE = new Set([
+    stageCheckpointFile("t1-t2"),
+    STAGE_RUN_RECORD_FILE,
+    BUILD_CLI_RECORD_FILE,
+    stageCheckpointFile("t2-b1"),
+    "artifacts/summary.json",
+    BUNDLE_MANIFEST_FILE,
+  ]);
 
   it("段の走りと一気通貫の Build の記録の両方で、ids と ledger の on・off に依らず、t1-t2 の ledger_upstream と記録の output_digest だけを旧の値に戻すと直す前とバイト列で同じ。要約・終了コード・納品物・ほかの診断は不変、要求は ids と ledger が on の走りだけ変わる", async () => {
     const current = await ledgerModule.upstreamLedgerSha256();
@@ -2644,13 +2770,19 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
         expect(stageJsonText(checkpoint), path).toBe(text);
         expect(run.upstream[path], path).toBe(path === stageCheckpointFile("t1-t2") ? current : null);
         if (checkpoint["versions"]["ledger_upstream"] !== null) checkpoint["versions"]["ledger_upstream"] = BEFORE_UPSTREAM;
+        // Issue #735 で変わった論理の枠の値も旧の値に戻す（#725 の前の値と照らすため）
+        revert735(checkpoint);
         digestOf.set(path, await stageOutputDigest(checkpoint));
         reverted[path] = await sha256Hex(stageJsonText(checkpoint));
       }
+      // Issue #735：納品物の要約の C3 の束の欄を外し、manifest のその SHA-256 を計算し直す（ほかのファイルはそのまま）
+      const bundleTexts = new Map(
+        (await revertBundleFiles735(await Promise.all(run.written.map(async (path) => ({ path, text: await run.textOf(path) }))))).map((file) => [file.path, file.text] as const),
+      );
       for (const path of run.written.filter((name) => !name.startsWith("stage-checkpoint-"))) {
         const text = await run.textOf(path);
         if (path !== STAGE_RUN_RECORD_FILE && path !== BUILD_CLI_RECORD_FILE) {
-          reverted[path] = await sha256Hex(text);
+          reverted[path] = await sha256Hex(bundleTexts.get(path) ?? text);
           continue;
         }
         const record = JSON.parse(text) as Record<string, any>;
@@ -2658,6 +2790,8 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
         const serialize = (value: unknown): string =>
           path === STAGE_RUN_RECORD_FILE ? stageJsonText(value) : `${JSON.stringify(value)}${text.endsWith("\n") ? "\n" : ""}`;
         expect(serialize(record), path).toBe(text);
+        // Issue #735 で変わった論理の枠の値と C3 の束の欄も旧の値に戻す（#725 の前の値と照らすため）
+        revert735(record);
         for (const entry of (record["checkpoints"] ?? []) as { path: string; output_digest: string }[]) {
           expect(entry.output_digest, path).toBe(await stageOutputDigest(JSON.parse(await run.textOf(entry.path))));
           entry.output_digest = digestOf.get(entry.path) ?? "";
@@ -3373,10 +3507,12 @@ async function runStageCli(input: {
   const planText = JSON.stringify(input.envelope ?? (await v11aEnvelope()));
   const recording = createCheckedRecordingClient(input.calls);
   const order: string[] = [];
+  const structuredRequests: LlmStructuredRequest[] = [];
   const clientErrors: unknown[] = [];
   const client: LlmClient = {
     async callStructured<T>(request: LlmStructuredRequest) {
       order.push(requestText(request));
+      structuredRequests.push(request);
       return keepingErrors(clientErrors, () => recording.client.callStructured<T>(request));
     },
     async callWithTools(request) {
@@ -3412,7 +3548,7 @@ async function runStageCli(input: {
     log: (line) => lines.push(line),
     logError: (line) => errors.push(line),
   });
-  return { code, lines, errors, written, directories, makeClient, requests: order, clientErrors };
+  return { code, lines, errors, written, directories, makeClient, requests: order, structuredRequests, clientErrors };
 }
 
 /** 段の走りの記録を読む */
@@ -3874,3 +4010,142 @@ function t2TotalOf(summary: Record<string, unknown>): unknown {
     retries: row.retries,
   };
 }
+
+/** 要求から段ごとの effort と打ち切りの合図を除く（口なしの走りの要求と比べる。Issue #664） */
+const withoutEffort = ({ effort: _effort, signal: _signal, ...rest }: LlmStructuredRequest) => rest;
+/** 条件の記録から段ごとの effort の欄を除く（Issue #664） */
+const withoutStageEfforts = (text: string): string => {
+  const value = JSON.parse(text) as { conditions: Record<string, unknown> };
+  const { stage_efforts: _stageEfforts, ...conditions } = value.conditions;
+  return JSON.stringify({ ...value, conditions });
+};
+
+describe("段ごとの effort の口（`--pipeline v1.2` の `--stage-effort`。Issue #664）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+
+  it("(1) 一気通貫：--stage-effort semantic-check=low を付けた v1.2 の走りの条件の記録の末尾に stage_efforts が段 → 値で載り、C3 の要求だけ effort low。付けない走りには欄が無く、欄と effort を除けば記録・要約・要求・納品物が同じ", async () => {
+    const calls = (): RecordedCall[] => [...v12Head(), structured(v11aJudgments())];
+    const plainDir = `${directory}/v12-stage-effort-plain`;
+    const tunedDir = `${directory}/v12-stage-effort-tuned`;
+    const plain = await runV11aCli({ dir: plainDir, calls: calls(), pipeline: "v1.2" });
+    const tuned = await runV11aCli({ dir: tunedDir, calls: calls(), pipeline: "v1.2", args: ["--stage-effort", "semantic-check=low"] });
+    expect(tuned.code).toBe(plain.code);
+    expect(plain.record.conditions).not.toHaveProperty("stage_efforts");
+    expect(tuned.record.conditions["stage_efforts"]).toEqual({ "semantic-check": "low" });
+    expect(Object.keys(tuned.record.conditions).at(-1)).toBe("stage_efforts");
+    // adapter の設定（effort・封筒）は今のまま。段の effort は要求で渡す
+    expect(tuned.makeClient.mock.calls).toEqual(plain.makeClient.mock.calls);
+    const c3 = tuned.recording.structured.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(c3.length).toBeGreaterThan(0);
+    for (const request of c3) {
+      expect(request.effort).toBe("low");
+      expect(request.maxOutputTokens).toBe(maxOutputTokensForEffort("low", "semantic-check"));
+    }
+    expect(tuned.recording.structured.filter((request) => request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME).some((request) => "effort" in request)).toBe(false);
+    expect(plain.recording.structured.some((request) => "effort" in request)).toBe(false);
+    expect(tuned.recording.structured.map(withoutEffort)).toEqual(plain.recording.structured.map(withoutEffort));
+    expect(tuned.summary).toEqual(plain.summary);
+    expect(tuned.written).toEqual(plain.written);
+    for (const path of plain.written) {
+      const plainText = await fs.readFile(`${plainDir}/${path}`, "utf8");
+      // 出力の場所（納品物の storage_unit）だけは走りごとに違うので、比較元の場所に読み替えて比べる
+      const tunedText = (await fs.readFile(`${tunedDir}/${path}`, "utf8")).replaceAll(tunedDir, plainDir);
+      expect(path === BUILD_CLI_RECORD_FILE ? withoutStageEfforts(tunedText) : tunedText, path).toBe(plainText);
+    }
+    expectNoAcceptanceMaterial(tuned.recording.structured.map((request) => JSON.stringify(request)));
+  });
+
+  it("(2') 段の走り（v1.2・vocabulary..semantic-check）：段の走りの記録の conditions の末尾に stage_efforts が載り、C3 の要求の effort と上限が low でほかは今のまま。付けなければ段の走りの記録はバイト列で同じ（欄を除けば同じ）", async () => {
+    const segment0 = (): RecordedCall[] => v12Head().slice(0, 5);
+    const plainDir = `${directory}/v12-stage-effort-segment0-plain`;
+    const tunedDir = `${directory}/v12-stage-effort-segment0-tuned`;
+    const args = ["--stage-start", "vocabulary", "--stage-end", "semantic-check"];
+    const plain = await runStageCli({ dir: plainDir, args, calls: segment0(), pipeline: "v1.2" });
+    const tuned = await runStageCli({ dir: tunedDir, args: [...args, "--stage-effort", "semantic-check=low"], calls: segment0(), pipeline: "v1.2" });
+    expect(tuned.code).toBe(EXIT_OK);
+    expect(plain.code).toBe(EXIT_OK);
+    const plainRecord = await stageRecordOf(plainDir);
+    const tunedRecord = await stageRecordOf(tunedDir);
+    expect(plainRecord["conditions"]).not.toHaveProperty("stage_efforts");
+    const conditions = tunedRecord["conditions"] as Record<string, unknown>;
+    expect(conditions["stage_efforts"]).toEqual({ "semantic-check": "low" });
+    expect(Object.keys(conditions).at(-1)).toBe("stage_efforts");
+    const c3 = tuned.structuredRequests.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(c3.length).toBeGreaterThan(0);
+    for (const request of c3) {
+      expect(request.effort).toBe("low");
+      expect(request.maxOutputTokens).toBe(maxOutputTokensForEffort("low", "semantic-check"));
+    }
+    expect(tuned.structuredRequests.filter((request) => request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME).some((request) => "effort" in request)).toBe(false);
+    expect(tuned.structuredRequests.map(withoutEffort)).toEqual(plain.structuredRequests.map(withoutEffort));
+    expect(tuned.written).toEqual(plain.written);
+    for (const path of plain.written) {
+      const plainText = await fs.readFile(`${plainDir}/${path}`, "utf8");
+      const tunedText = await fs.readFile(`${tunedDir}/${path}`, "utf8");
+      expect(path === STAGE_RUN_RECORD_FILE ? stageJsonText(JSON.parse(withoutStageEfforts(tunedText))) : tunedText, path).toBe(plainText);
+    }
+    expect(tuned.lines).toEqual(plain.lines);
+  });
+
+  it("引数：繰り返しを付けた順に段 → 値で読み、省けば欄が無い。一気通貫と段の走りの両方で受ける", () => {
+    const base = ["--", "request.txt", "--out", "out", "--pipeline", "v1.2", "--plan-file", "plan.json"];
+    const parsed = parseCliArguments([...base, "--stage-effort", "write=medium", "--stage-effort", "vocabulary=low"]);
+    expect("error" in parsed ? parsed.error : parsed.stageEfforts).toEqual({ write: "medium", vocabulary: "low" });
+    expect(Object.keys("error" in parsed ? {} : (parsed.stageEfforts ?? {}))).toEqual(["write", "vocabulary"]);
+    const staged = parseCliArguments([...base, "--stage-end", "semantic-check", "--stage-effort", "semantic-check=low"]);
+    expect("error" in staged ? staged.error : [staged.stageRange, staged.stageEfforts]).toEqual([{ start: "name-table", end: "semantic-check" }, { "semantic-check": "low" }]);
+    expect(parseCliArguments(base)).not.toHaveProperty("stageEfforts");
+    expect(parseStageEfforts([])).toEqual({ stageEfforts: {} });
+  });
+
+  const usageCases: readonly { readonly name: string; readonly argv: readonly string[]; readonly code: string }[] = [
+    { name: "知らない段", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "unknown-stage=low"], code: "stage-effort:stage" },
+    { name: "配線していない段（name-table）", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "name-table=low"], code: "stage-effort:stage" },
+    { name: "配線していない段（repair）", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "repair=low"], code: "stage-effort:stage" },
+    { name: "知らない値", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "semantic-check=extreme"], code: "stage-effort:value" },
+    { name: "空の値", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "semantic-check="], code: "stage-effort:value" },
+    {
+      name: "同じ段の重複",
+      argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "mapping=low", "--stage-effort", "mapping=low"],
+      code: "stage-effort:duplicate",
+    },
+    { name: "= の無い形", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "semantic-check"], code: "stage-effort:format" },
+    { name: "段の無い形", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "=low"], code: "stage-effort:format" },
+    { name: "値の無い旗", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort"], code: "stage-effort:missing" },
+    { name: "--pipeline v1.1a との組", argv: ["--pipeline", "v1.1a", "--plan-file", "plan.json", "--stage-effort", "semantic-check=low"], code: "stage-effort:pipeline" },
+    { name: "--pipeline v1 との組", argv: ["--pipeline", "v1", "--plan-file", "plan.json", "--stage-effort", "semantic-check=low"], code: "stage-effort:pipeline" },
+    { name: "--pipeline の省略", argv: ["--stage-effort", "semantic-check=low"], code: "stage-effort:pipeline" },
+    {
+      name: "v1.1a の段の走りとの組",
+      argv: ["--pipeline", "v1.1a", "--plan-file", "plan.json", "--stage-end", "semantic-check", "--stage-effort", "semantic-check=low"],
+      code: "stage-effort:pipeline",
+    },
+  ];
+  it.each(usageCases)("(2) $name → $code（終了コード 2・API を呼ばない・何も書かない）", async (example) => {
+    const makeClient = vi.fn();
+    const writeFile = vi.fn(async () => {});
+    const makeDirectory = vi.fn(async () => {});
+    const readFile = vi.fn(async () => V11A_SOURCE);
+    const lines: string[] = [];
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", "out", ...example.argv],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile,
+      writeFile,
+      makeDirectory,
+      loadDocuments: async () => [],
+      makeClient,
+      log: (line) => lines.push(line),
+    });
+    expect(code).toBe(EXIT_USAGE);
+    expect(lines[0]).toContain(`使い方の誤り: ${example.code}（`);
+    expect(lines.slice(1)).toEqual([USAGE, STAGE_EFFORT_USAGE]);
+    expect(makeClient).not.toHaveBeenCalled();
+    expect(readFile).not.toHaveBeenCalled();
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(makeDirectory).not.toHaveBeenCalled();
+  });
+});

@@ -758,6 +758,15 @@ const TEST_SPEC_FRAME_EXISTENCE_TEXT =
 const FRAME_SINCE = "（旗 v12.ids の必要な試験の枠は #653）";
 
 /**
+ * 旗 `v12.ids` の R-tsp-02 の末尾に足す、要件ごとの試験の上限の文（#663）。上限は門（`checkLimit("testsPerRequirement")`）と
+ * 枠の残る本数（`remaining`）が引く限度の表の定数から埋める（数字を直書きしない）。超えた応答は今までどおり門が落とし、切り詰めない
+ */
+const TEST_SPEC_FRAME_LIMIT_TEXT = `要件ごとの試験は、コードが作った分を含めて ${String(AGENT_LIMITS.testsPerRequirement)} 本まで。必要な試験の枠の残る本数（remaining）を超えて場合を書かない。`;
+
+/** 旗 `v12.ids` の上限の文の履歴（R-tsp-02 の since の末尾に足す。#663） */
+const FRAME_LIMIT_SINCE = "（旗 v12.ids の要件ごとの試験の上限の文は #663）";
+
+/**
  * T2 の規則の定義（旗 on なら台帳から組む。Issue #547）。省けば今の定数を返す。渡せば R-tsp-02 の除外（structural と、
  * 試験の型の必須の kind が normal だけの確かめ方の種類。台帳の順）と、R-tsp-16 の形の位置（有効の行の文 → 未対応の行の
  * 文。台帳の順）を台帳から組み直す（ID・why・since は変えない）。手 2a では off の定数とバイト列で同じになる。
@@ -770,11 +779,11 @@ export function testSpecRuleDefinitionsOf(ledger?: LedgerView, ids = false): rea
     if (definition.id === "R-tsp-02") {
       const excluded = ["structural", ...ledger.t2ExemptKinds].join("・");
       if (ids) {
-        // 旗 ids：必要な試験の枠の値の対象ごとの三種と、コードの在ることの試験を数えないこと・免除の集合（#653）
+        // 旗 ids：必要な試験の枠の値の対象ごとの三種と、コードの在ることの試験を数えないこと・免除の集合（#653）、要件ごとの上限（#663）
         return {
           ...definition,
-          text: `確かめ方が ${excluded} の要件を除いて、ruled と分類した要件は、枠の値の対象のうち決まりの対象ごとに正常・異常・境界の場合を書く。コードが作る画面・entity・項目の在ることの試験は三種に数えない。所属が画面・entity の行だけの要件は三種を求めない（枠が空）。`,
-          since: `${definition.since}${FRAME_SINCE}`,
+          text: `確かめ方が ${excluded} の要件を除いて、ruled と分類した要件は、枠の値の対象のうち決まりの対象ごとに正常・異常・境界の場合を書く。コードが作る画面・entity・項目の在ることの試験は三種に数えない。所属が画面・entity の行だけの要件は三種を求めない（枠が空）。${TEST_SPEC_FRAME_LIMIT_TEXT}`,
+          since: `${definition.since}${FRAME_SINCE}${FRAME_LIMIT_SINCE}`,
         };
       }
       return {

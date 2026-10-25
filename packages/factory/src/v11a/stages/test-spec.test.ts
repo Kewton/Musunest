@@ -96,6 +96,7 @@ import { JobBudget } from "../../budget.js";
 import type { LlmClient } from "../../llm.js";
 import { RATES, USAGE } from "../../__tests__/run.js";
 import { V12_T2_BUNDLE } from "../../v12/limits.js";
+import { AGENT_LIMITS } from "../../limits.js";
 import { fromPublicV12Flags, ledgerViewOf, V12_PIPELINE_FLAGS } from "../../v12/ledger.js";
 import { buildSized, type SizedMaterials } from "../__tests__/sizes.js";
 import { bundledT2Client, requestListedIds, requestRetainedIds, retainingT2Client } from "../__tests__/fixtures.js";
@@ -4292,6 +4293,10 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
   });
 });
 
+/** 旗 ids の T2 の要件ごとの試験の上限の文（Issue #663）。試験は限度の表の定数から期待の文を組む */
+const frameLimitText = (): string =>
+  `要件ごとの試験は、コードが作った分を含めて ${String(AGENT_LIMITS.testsPerRequirement)} 本まで。必要な試験の枠の残る本数（remaining）を超えて場合を書かない。`;
+
 // ── 旗 v12.ids の手 3i（Issue #653）：必要な試験の枠と observes の埋め方 ──────────────────────────────
 
 describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組んで要求に渡し、項目・entity・操作の observes はコードが埋める（Issue #653）", () => {
@@ -4407,8 +4412,9 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     const on = testSpecRuleDefinitionsOf(ledger, true);
     const off = testSpecRuleDefinitionsOf(ledger);
     const textOf = (definitions: readonly { readonly id: string; readonly text: string }[], id: string) => definitions.find((definition) => definition.id === id)?.text ?? "";
+    // Issue #663：R-tsp-02 の末尾に要件ごとの試験の上限の文（値は限度の表の定数から）を足した
     expect(textOf(on, "R-tsp-02")).toBe(
-      "確かめ方が structural・default-value・enum-membership の要件を除いて、ruled と分類した要件は、枠の値の対象のうち決まりの対象ごとに正常・異常・境界の場合を書く。コードが作る画面・entity・項目の在ることの試験は三種に数えない。所属が画面・entity の行だけの要件は三種を求めない（枠が空）。",
+      `確かめ方が structural・default-value・enum-membership の要件を除いて、ruled と分類した要件は、枠の値の対象のうち決まりの対象ごとに正常・異常・境界の場合を書く。コードが作る画面・entity・項目の在ることの試験は三種に数えない。所属が画面・entity の行だけの要件は三種を求めない（枠が空）。${frameLimitText()}`,
     );
     expect(textOf(on, "R-tsp-03")).toBe(
       "existence-only と分類した要件は、コードが在ることの試験を作った対象に場合を書かない。コードの試験が無い計算・条件のある操作の対象には正常（normal）の場合だけ書いてよい。検査（validate）・異常・境界の場合は書かない。",
@@ -4507,6 +4513,88 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     expect(outcome.failure.problems).toContainEqual({ field: "requirements[0]", message: "要件の試験が上限 16 を超えている（17）" });
     expect(framesIn(recording.structured[0]!)[0]?.ifRuled.remaining).toBe(13);
     expect(framesIn(recording.structured[0]!)[0]?.codeTests).toHaveLength(3);
+  });
+
+  // ── Issue #663：要件ごとの試験の上限を規則の文に明示する（値は限度の表の定数から。門と枠の残る本数は今までどおり）──
+  it("#663 (1)(2) 規則：旗 ids の R-tsp-02 の末尾に限度の表の定数を埋めた上限の文があり、ほかの規則の文に同じ数字の直書きが無い。since に履歴（why は同じ）。旗 off の文に上限の文は無い", () => {
+    const on = testSpecRuleDefinitionsOf(ledger, true);
+    const off = testSpecRuleDefinitionsOf(ledger);
+    const limit = String(AGENT_LIMITS.testsPerRequirement);
+    const r02 = on.find((definition) => definition.id === "R-tsp-02");
+    expect(r02?.text.endsWith(frameLimitText())).toBe(true);
+    // 上限の文を除けば手 3i（#653）の文のまま
+    expect(r02?.text.slice(0, (r02?.text.length ?? 0) - frameLimitText().length)).toBe(
+      "確かめ方が structural・default-value・enum-membership の要件を除いて、ruled と分類した要件は、枠の値の対象のうち決まりの対象ごとに正常・異常・境界の場合を書く。コードが作る画面・entity・項目の在ることの試験は三種に数えない。所属が画面・entity の行だけの要件は三種を求めない（枠が空）。",
+    );
+    // 文の中の数字は定数と同じで、旗 ids の規則の文のどこにも上限の数字の直書きはほかに無い
+    const numbers = (text: string) => text.match(/\d+/g) ?? [];
+    expect(numbers(frameLimitText())).toEqual([limit]);
+    expect(ruleTexts(on).flatMap(numbers).filter((value) => value === limit)).toHaveLength(1);
+    expect(r02?.why).toBe(off.find((definition) => definition.id === "R-tsp-02")?.why);
+    expect(r02?.since).toContain("#663");
+    for (const definition of off) {
+      expect(definition.text, definition.id).not.toContain(frameLimitText());
+      expect(definition.since, definition.id).not.toContain("#663");
+    }
+    // 旗 ids の文で上限の文を持つのは R-tsp-02 だけ
+    expect(on.filter((definition) => definition.text.includes(frameLimitText())).map((definition) => definition.id)).toEqual(["R-tsp-02"]);
+    expect(ruleDefinitionDefects(on)).toEqual([]);
+    expect(ruleDefinitionDefects(off)).toEqual([]);
+    expectNoAcceptanceMaterial([JSON.stringify(on)]);
+  });
+
+  it("#663 (3) 規則の文の上限と枠の残る本数は同じ定数から出る：枠ごとに 残る本数 ＋ コードが作る数 ＝ 定数（ruled・existence-only の枝とも。切り捨てない）", async () => {
+    const many = scenario([
+      ["R1", "三つの画面で題名を見られ、題名は空にできない。", ["s.items", "s.members", "s.overview", "f.item.title"], "ruled"],
+      ...BASE.slice(1),
+    ]);
+    const { recording } = await runS(many, [baseOk()]);
+    const request = recording.structured[0]!;
+    const frames = framesIn(request);
+    expect(frames.length).toBeGreaterThan(0);
+    for (const frame of frames) {
+      expect(frame.ifRuled.remaining + frame.codeTests.length, frame.requirementId).toBe(AGENT_LIMITS.testsPerRequirement);
+      expect(frame.ifExistenceOnly.remaining + frame.codeTests.length, frame.requirementId).toBe(AGENT_LIMITS.testsPerRequirement);
+    }
+    expect(frames[0]?.ifRuled.remaining).toBe(AGENT_LIMITS.testsPerRequirement - 3);
+    // 要求の規則に、同じ定数を埋めた上限の文がある
+    expect((request.rules ?? []).filter((text) => text.includes(frameLimitText()))).toHaveLength(1);
+  });
+
+  it("#663 要求：旗 ids の T2 の要求の規則は、上限の文を除けば直す前（#653）と同じで、差はその 1 文だけ。データ・schema は同じ", async () => {
+    const { recording } = await runS(base, [baseOk()]);
+    const request = recording.structured[0]!;
+    const rules = request.rules ?? [];
+    const withLimit = rules.flatMap((text, index) => (text.includes(frameLimitText()) ? [index] : []));
+    expect(withLimit).toHaveLength(1);
+    const before = rules.map((text) => text.replace(frameLimitText(), ""));
+    const changed = before.flatMap((text, index) => (text === rules[index] ? [] : [index]));
+    expect(changed).toEqual(withLimit);
+    expect(rules[withLimit[0]!]).toBe(`${before[withLimit[0]!] ?? ""}${frameLimitText()}`);
+    expect(request.schema).toEqual(testCasesSchemaOf(ledger));
+    expect(dataNamesOf(request.input)).toEqual([...TEST_SPEC_DATA_NAMES, TEST_SPEC_FRAMES_DATA_NAME]);
+    expectNoAcceptanceMaterial([requestText(request)]);
+  });
+
+  it("#663 (4)(5) 二点測定：要件 1 件に 16 本（生成 3＋LLM 13）の応答は 1 回で通り、17 本（生成 3＋LLM 14）は今までどおり上限の固定文で落ちて切り詰めない。中身のやり直しは 1 回（要求 2 回）", async () => {
+    const many = scenario([["R1", "三つの画面で題名を見られ、題名は空にできない。", ["s.items", "s.members", "s.overview", "f.item.title"], "ruled"]]);
+    const llmTests = (count: number) =>
+      Array.from({ length: count }, (_, index) =>
+        rawTest({ id: `r1-${String(index)}`, requirementId: "R1", targetKind: "field", roleId: "f.item.title", kind: KINDS[index % 3]!, operation: "validate", observes: "validation" }),
+      );
+    const limit = AGENT_LIMITS.testsPerRequirement;
+    const fit = response(llmTests(limit - 3), [{ requirementId: "R1", nature: "ruled" }]);
+    const passed = await runS(many, [fit]);
+    if (!passed.outcome.ok) throw new Error(`通るはず：${JSON.stringify(passed.outcome.failure)}`);
+    expect(passed.recording.structured).toHaveLength(1);
+    expect(passed.outcome.value.suite.tests.filter((test) => test.target.requirementId === "R1")).toHaveLength(limit);
+    const over = response(llmTests(limit - 2), [{ requirementId: "R1", nature: "ruled" }]);
+    const failed = await runS(many, [over, over]);
+    if (failed.outcome.ok || failed.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(failed.outcome.failure.attempts).toBe(2);
+    expect(failed.recording.structured).toHaveLength(2);
+    expect(failed.outcome.failure.problems).toContainEqual({ field: "requirements[0]", message: `要件の試験が上限 ${String(limit)} を超えている（${String(limit + 1)}）` });
+    expect(failed.outcome.failure.problems).toContainEqual({ field: "requirements[0]", message: "要件の試験が上限 16 を超えている（17）" });
   });
 
   /** 集計（選択肢の見出しごとの件数）の正常（集計元の行を置く） */

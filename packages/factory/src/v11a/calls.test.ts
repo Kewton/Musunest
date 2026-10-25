@@ -2,7 +2,7 @@
 //
 // **これは今の v1.1α（段を束に分けない）の呼び出し数の回帰の試験である。** 設計書 §4.1 の束の契約試験（要件 5 件ごとの
 // T1・13 試験ごとの束・段別の論理の枠・生成と判定の共通の門・判定の枝）は、段を束に分ける手 3 の前提として残す。
-// ここは §4.1 の前提を満たしたとは言わない。また v1.2 専用の上限の表（論理 72・実試行 144・判定 80）も手 3 で足す。
+// ここは §4.1 の前提を満たしたとは言わない。また v1.2 専用の上限の表（論理 80〔Issue #735 で 72 から〕・実試行 144・判定 80）も手 3 で足す。
 // ここでは v1・v1.1α の上限の値（`AGENT_LIMITS`）と配線を変えない。
 //
 // 偽物の LLM（記録した応答）・偽物の判定・固定の時計で、`runGenerationV11a` を要件 N・試験 M の大きさ
@@ -24,8 +24,8 @@
 // 束の行を足す。旗 `v12.ids` の走りでは判定も門に数える（上の「判定」の行の「門に数えない」は旗 off の走りの話）。
 //
 // 外部の API は呼ばない。題材は抽象的なもので、受入の題材の言葉は使わない。
-import { TEST_CASE_ID_PREFIX } from "../v12/test-cases.js";
-import { describe, expect, it } from "vitest";
+import { TEST_CASE_ID_PREFIX, bundleRequirementIds } from "../v12/test-cases.js";
+import { describe, expect, it, vi } from "vitest";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer } from "../judge.js";
 import type { StageRecord } from "../record.js";
@@ -41,6 +41,8 @@ import { USAGE, RATES } from "../__tests__/run.js";
 import { ARBITRATION_SCHEMA_NAME } from "../stages/arbitrate.js";
 import {
   FIXTURE_DOCUMENTS,
+  bundledC2Client,
+  bundledC3Client,
   bundledT2Client,
   negative,
   recordedStructured,
@@ -67,7 +69,8 @@ import {
 } from "../v12/limits.js";
 import { DECL_CHECK_SCHEMA_NAME } from "./stages/decl-check.js";
 import { NAME_TABLE_SCHEMA_NAME } from "./stages/name-table.js";
-import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
+import * as semanticCheckStage from "./stages/semantic-check.js";
+import { SEMANTIC_CHECK_REFERENCE_DATA_NAME, SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION, SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
 import { TEST_SPEC_FRAMES_DATA_NAME, TEST_SPEC_RETRY_DATA_NAMES, TEST_SPEC_SCHEMA_NAME } from "./stages/test-spec.js";
 import { WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, WRITE_V11A_SCHEMA_NAME } from "./stages/write.js";
 
@@ -127,10 +130,14 @@ function createMouth(
       : new Map(Object.entries(bySchema).map(([name, calls]) => [name, bundledT2Client(createFakeLlmClient(calls, { validateAgainstSchema: true }), home)] as const));
   // 旗 v12.ids の T2 は束ごとに同時に呼ぶので、記録した T2 の応答を束ごとに独立に読んで絞る（順序に依らない。Issue #626）
   const ordered = bundledT2Client(createFakeLlmClient(recorded, { validateAgainstSchema: true }), home);
-  const inner: LlmClient = {
-    callStructured: (request) => (routed?.get(request.schemaName) ?? ordered).callStructured(request),
-    callWithTools: (request) => ordered.callWithTools(request),
-  };
+  // 旗 v12.ids の C3 も束ごとに同時に呼ぶので、記録した C3 の応答を点検の回ごとに束で読んで絞る（順序に依らない。Issue #735）
+  // 旗 v12.ids の C2 の初回も要件 6 件以上なら束ごとに同時に呼ぶので、記録した C2 の応答を回ごとに束で読んで絞る（Issue #736）
+  const inner: LlmClient = bundledC2Client(
+    bundledC3Client({
+      callStructured: (request) => (routed?.get(request.schemaName) ?? ordered).callStructured(request),
+      callWithTools: (request) => ordered.callWithTools(request),
+    }),
+  );
   const logical = zeroCounts();
   const started = zeroCounts();
   const requests: string[] = [];
@@ -341,6 +348,17 @@ function t2SummaryOf(run: { readonly result: { readonly record: { readonly stage
   };
 }
 
+/**
+ * 要約の `v12_calls.semantic_check` の期待（Issue #735）：回ごとの束の数（`rounds` の値。回は 1 から）と、形のやり直しの予算（上限 k・
+ * 使った数・残り・どの回のどの束〔0 から〕が使ったか）
+ */
+function c3SummaryOf(limit: number, rounds: readonly number[], by: readonly { readonly round: number; readonly bundle: number }[] = []) {
+  return {
+    rounds: rounds.map((bundles, index) => ({ round: index + 1, bundles })),
+    shape_retries: { limit, used: by.length, remaining: limit - by.length, by },
+  };
+}
+
 /** 初回で全段が通る走りの記録（T1〔旗 v12.ids の走りは C1 の 3 束と C2〕・T1''・T2・B1・B3' を 1 回ずつ） */
 const cleanCalls = (materials: SizedMaterials): RecordedCall[] => [
   ...materials.tableResponses().map(structured),
@@ -389,9 +407,10 @@ const listedIds = (request: string): readonly string[] => {
 /**
  * 旗 v12.ids の走りのやり直しを含む走りの頭（表を組む段と T1''。Issue #593）。C1 は束 2 が知らない ID で落ちて形のやり直し
  * 1 回（束 1・3 は 1 回ずつ。計 4）、C2 は要件の欠落で落ちて形のやり直し 1 回・T1'' の拒否のあとの 2 回目（拒否された R1 だけの書き直し。Issue #661）1 回（計 3）、
- * T1'' は旗 off と同じ 3 回（形の落ち → 形のやり直しで R1 を拒否／2 回目で全部受理）
+ * T1''（C3）は要件 5 件ごとの束 k に分かれる（Issue #735）。1 回目は R1 を拒否し最後の判定が欠けた応答で、最後の束だけが形で落ちて
+ * 形のやり直しで通る（k＋1）／2 回目は全部受理（k）。計 2k＋1（束 1 なら旗 off と同じ 3 回）
  */
-function idsRetryHead(materials: SizedMaterials, incomplete: unknown, rejectR1: unknown): RecordedCall[] {
+function idsRetryHead(materials: SizedMaterials, rejectR1: unknown): RecordedCall[] {
   const [entities, fields, behaviors, mapping] = materials.tableResponses() as readonly Record<string, readonly Record<string, unknown>[]>[];
   if (entities === undefined || fields === undefined || behaviors === undefined || mapping === undefined) throw new Error("前提が壊れた：C1・C2 の応答が 4 つでない");
   const unknownEntity = { fields: (fields["fields"] ?? []).map((item, index) => (index === 0 ? { ...item, entity: "E9" } : item)) };
@@ -403,7 +422,8 @@ function idsRetryHead(materials: SizedMaterials, incomplete: unknown, rejectR1: 
     structured(behaviors),
     structured(missingRequirement),
     structured(mapping),
-    structured(incomplete),
+    // C3 の 1 回目：R1 を拒否し、最後の判定を欠いた応答（最後の要件の束だけが形で落ちる。Issue #735）→ 形のやり直し
+    structured({ judgments: (rejectR1 as { readonly judgments: readonly unknown[] }).judgments.slice(0, -1) }),
     structured(rejectR1),
     // 2 回目は拒否された R1 だけの書き直し（Issue #661）
     structured({ requirements: (mapping["requirements"] ?? []).filter((entry) => entry["requirementId"] === "R1") }),
@@ -423,7 +443,7 @@ function retryCalls(materials: SizedMaterials): RecordedCall[] {
   const repair1 = search ? fieldRepairCall("R1", 1, [dispute]) : repairDone(materials.declaration(["R2"]), [dispute]);
   const repair2 = search ? fieldRepairCall("R1", 0) : repairDone(materials.declaration());
   return [
-    ...(materials.flags.ids ? idsRetryHead(materials, incomplete, rejectR1) : [
+    ...(materials.flags.ids ? idsRetryHead(materials, rejectR1) : [
       structured(negative({ rows: "x", requirements: "x" }, "rows・requirements が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
       structured(materials.nameTableResponse()),
       structured(incomplete),
@@ -781,24 +801,41 @@ const RETRY_TABLE: RunTable = {
 /** 旗 v12.ids の T2 の束の数（要件 5 件ごと。台本の要件は全部 T2 の要求に残る。Issue #626） */
 const t2Bundles = (requirements: number): number => Math.ceil(requirements / V12_T2_BUNDLE.size);
 /**
- * 全部 on の初回で通る走りの生成の論理要求（C1 3・C2 1・T1'' 1・T2 束 k・B1 1・B3' 1。手 3a で T1 の 1 が C1・C2 の 4 になった。
- * Issue #593。手 3f で T2 の 1 が束 k〔要件 5 件ごと〕になった。Issue #626）
+ * 全部 on の初回で通る走りの生成の論理要求（C1 3・C2 束 k・T1'' 束 k・T2 束 k・B1 1・B3' 1。手 3a で T1 の 1 が C1・C2 の 4 になった。
+ * Issue #593。手 3f で T2 の 1 が束 k〔要件 5 件ごと〕になった。Issue #626。C3 の 1 も束 k になった。Issue #735。C2 の初回の 1 も束 k
+ * になった。Issue #736）
  */
-const cleanGeneration = (requirements: number): number => 7 + t2Bundles(requirements);
+const cleanGeneration = (requirements: number): number => 5 + 3 * t2Bundles(requirements);
 /** 走りの T2 の記録（束ごとに 1 つ。Issue #626） */
 const t2RecordsOfRun = (run: { readonly result: { readonly record: { readonly stages: readonly StageRecord[] } } }): readonly StageRecord[] =>
   run.result.record.stages.filter((record) => record.stage === "test-spec");
 /** 旗 v12.ids の台本の T2 の束の数（その台本の T2 の応答が分類する要件＝T2 の要求の一覧の数から。Issue #626） */
 const t2BundlesOf = (materials: SizedMaterials): number => t2Bundles(((materials.t2Response().classifications ?? []) as readonly unknown[]).length);
 /**
- * 旗 v12.ids の初回で通る走り（T1 の代わりに C1 3〔束ごと 1〕・C2 1。Issue #593）。T2 は束 k（要件 5 件ごと）に 1 つずつ（Issue #626）
+ * 旗 v12.ids の初回で通る走り（T1 の代わりに C1 3〔束ごと 1〕・C2 1。Issue #593）。T2 は束 k（要件 5 件ごと）に 1 つずつ（Issue #626）。
+ * C3 も束 k に 1 つずつ（Issue #735。台本の要件は全部 C3 の対象）。C2 の初回も束 k に 1 つずつ（Issue #736）
  */
-const cleanIdsTable = (k: number): RunTable => ({ ...CLEAN_TABLE, "name-table": row(0), vocabulary: row(3), mapping: row(1), "test-spec": row(k) });
+const cleanIdsTable = (k: number): RunTable => ({
+  ...CLEAN_TABLE,
+  "name-table": row(0),
+  vocabulary: row(3),
+  mapping: row(k),
+  "semantic-check": row(k),
+  "test-spec": row(k),
+});
 /**
- * 旗 v12.ids のやり直しを含む走り（C1 4〔束 2 の形 1〕・C2 3〔形 1・T1'' の拒否のあとの 2 回目 1〕。Issue #593）。T2 は束 k の
- * 初回 k・形 k（台本の負例は全部の束が読む）・中身 1（R1 の異常の欠けは R1 の束だけに帰属する）で 2k＋1（Issue #626）
+ * 旗 v12.ids のやり直しを含む走り（C1 4〔束 2 の形 1〕・C2 k＋2〔初回の束 k・形 1・T1'' の拒否のあとの 2 回目 1。Issue #593・#736〕）。T2 は束 k の
+ * 初回 k・形 k（台本の負例は全部の束が読む）・中身 1（R1 の異常の欠けは R1 の束だけに帰属する）で 2k＋1（Issue #626）。C3 は束 k の
+ * 1 回目 k・形 1（最後の束だけ）・2 回目 k で 2k＋1（Issue #735）
  */
-const retryIdsTable = (k: number): RunTable => ({ ...RETRY_TABLE, "name-table": row(0), vocabulary: row(4), mapping: row(3), "test-spec": row(2 * k + 1) });
+const retryIdsTable = (k: number): RunTable => ({
+  ...RETRY_TABLE,
+  "name-table": row(0),
+  vocabulary: row(4),
+  mapping: row(k + 2),
+  "semantic-check": row(2 * k + 1),
+  "test-spec": row(2 * k + 1),
+});
 /** 再送を全部使う（実開始＝論理要求の 2 倍・再送＝論理要求） */
 const doubled = (table: RunTable): RunTable =>
   Object.fromEntries(COUNTED_STAGES.map((stage) => [stage, row(table[stage].logical, table[stage].logical, 2 * table[stage].logical, table[stage].logical)])) as unknown as RunTable;
@@ -824,13 +861,13 @@ const RETRY_FAIL_GATE24_TABLE: RunTable = {
  * | v1.1α の段 | §4.1 の行（単位） | 初回で通る | やり直しを含む（初回＋形＋中身） | 再送を全部使う（初回で通る：実開始） | 再送を全部使う（やり直し）：off・前の手 | 同：全部 on |
  * |---|---|---|---|---|---|---|
  * | name-table（T1） | C1・C2（段全体＝束 1） | 1 | 3（1＋形 1＋中身 1） | 2 | 3（実開始 6） | 3（実開始 6） |
- * | semantic-check（T1''） | C3（段全体） | 1 | 3（1＋形 1＋拒否後 1） | 2 | 3（6） | 3（6） |
+ * | semantic-check（T1''） | C3（off・前の手は段全体＝束 1。全部 on は要件 5 件ごとの束 k。Issue #735） | 1（全部 on は k） | 3（1＋形 1＋拒否後 1。全部 on は 2k＋1） | 2（2k） | 3（6） | 2k＋1（4k＋2） |
  * | test-spec（T2） | C4（off・前の手は段全体＝束 1。全部 on は要件 5 件ごとの束 k） | 1（全部 on は k） | 3（1＋形 1＋中身 1。全部 on は 2k＋1） | 2（2k） | 3（6） | 2k＋1（4k＋2） |
  * | write（B1） | （C5。手 6） | 1 | 1 | 2 | 1（2） | 1（2） |
  * | decl-check（B3'） | C6（版ごと 1・形は段全体） | 1 | 4（3 版＋形 1） | 2 | 2（4） | 4（8） |
  * | repair（B5） | ループ（往復ごと） | 0 | 2（往復 2） | 0 | 0（未着手 1） | 2（4） |
  * | arbitration（B5'） | ループ（往復ごと 0〜1） | 0 | 1 | 0 | 0 | 1（2） |
- * | 合計 | | 5 | 17 | 10 | 12（24・call-limit） | 15＋2k（30＋4k・完走） |
+ * | 合計 | | 5 | 17 | 10 | 12（24・call-limit） | 13＋4k（26＋8k・完走） |
  *
  * 判定：J4 は T1 のたびに要件ごとに 1 要求（初回で通る N・やり直し 2N）、J2 は 0。全部 on では判定も実試行の門に数える。
  */
@@ -890,13 +927,16 @@ describe("(5) 旗の組ごとの論理の枠：段 × 旗の組の期待の表�
       // 要求に受入の題材の言葉が無い
       for (const run of [clean, retry]) expectNoAcceptanceMaterial(run.requests);
       if (ids) {
-        // 全部 on：再送を全部使うやり直しの走りも門 144 の内側で完走。論理 72・実試行 144・判定 80 の内側
+        // 全部 on：再送を全部使うやり直しの走りも門 144 の内側で完走。論理 80・実試行 144・判定 80 の内側
         expect(retryFail.result.outcome).toEqual({ result: "pass", verdict: "full" });
+        const k = t2Bundles(size.requirements);
         for (const run of [clean, retry, cleanFail, retryFail]) {
           const judged = run.judge.j4 + run.judge.j2;
           expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
-          // 門の数＝生成の実開始＋判定の実試行（偽物の判定は内部の再送を持たないので、要求の数＝実試行）
+          // 門の数＝生成の実開始＋判定の実試行（偽物の判定は内部の再送を持たないので、要求の数＝実試行）。C3 は束 k、やり直しの走りは
+          // 2 回の点検で、1 回目の最後の束が形のやり直しを 1 つ使う（Issue #735）
           expect(run.calls).toEqual({
+            semantic_check: run === clean || run === cleanFail ? c3SummaryOf(k, [k]) : c3SummaryOf(k, [k, k], [{ round: 1, bundle: k - 1 }]),
             test_spec: t2SummaryOf(run),
             real_attempts: { limit: V12_CALL_LIMITS.realAttempts, used: run.totalStarted + judged },
             judge_branch: { limit: V12_CALL_LIMITS.judgeBranch, used: judged },
@@ -916,7 +956,7 @@ describe("(5) 旗の組ごとの論理の枠：段 × 旗の組の期待の表�
     });
   }
 
-  it("中央値と最大で段ごとの数が同じ（J4 だけ要件の数に比例。全部 on の T2 は束の数 k に従う）。旗の組の間でも段ごとの論理要求は同じ", async () => {
+  it("中央値と最大で段ごとの数が同じ（J4 だけ要件の数に比例。全部 on の T2・C3・C2 は束の数 k に従う）。旗の組の間でも段ごとの論理要求は同じ", async () => {
     const logicalBySet: unknown[] = [];
     for (const set of FLAG_SETS) {
       const median = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, set.flags);
@@ -924,10 +964,10 @@ describe("(5) 旗の組ごとの論理の枠：段 × 旗の組の期待の表�
       for (const make of [cleanCalls, retryCalls]) {
         const medianRun = await observe(median, make(median), { flags: set.flags });
         const maxRun = await observe(max, make(max), { flags: set.flags });
-        // 全部 on の T2 は束の数に従う（要件 15 で束 3・要件 25 で束 5。Issue #626）。ほかの段は同じ
+        // 全部 on の T2・C3・C2 は束の数に従う（要件 15 で束 3・要件 25 で束 5。Issue #626・#735・#736）。ほかの段は同じ
         const withoutT2 = (run: typeof medianRun) => {
-          const { "test-spec": _logical, ...logical } = run.logical;
-          const { "test-spec": _stages, ...stages } = run.stages;
+          const { "test-spec": _logical, "semantic-check": _c3Logical, mapping: _c2Logical, ...logical } = run.logical;
+          const { "test-spec": _stages, "semantic-check": _c3Stages, mapping: _c2Stages, ...stages } = run.stages;
           return resolveIds(set.flags) ? { logical, stages } : { logical: run.logical, stages: run.stages };
         };
         expect(withoutT2(maxRun), set.name).toEqual(withoutT2(medianRun));
@@ -938,6 +978,10 @@ describe("(5) 旗の組ごとの論理の枠：段 × 旗の組の期待の表�
             [MAX_SIZE, maxRun],
           ] as const) {
             expect(run.logical["test-spec"]).toBe(perBundle[0]! * t2Bundles(size.requirements) + perBundle[1]!);
+            // C3 も同じ式（初回で通る走りは k、やり直しの走りは 1 回目 k・形 1・再点検 k。Issue #735）
+            expect(run.logical["semantic-check"]).toBe(perBundle[0]! * t2Bundles(size.requirements) + perBundle[1]!);
+            // C2 は初回の束 k（Issue #736）。やり直しの走りは形 1・中身 1 を足して k＋2
+            expect(run.logical.mapping).toBe(t2Bundles(size.requirements) + (make === cleanCalls ? 0 : 2));
           }
         }
         expect(maxRun.judge.j2).toBe(medianRun.judge.j2);
@@ -951,14 +995,16 @@ describe("(5) 旗の組ごとの論理の枠：段 × 旗の組の期待の表�
       const { "name-table": _t1, vocabulary: _c1, mapping: _c2, ...rest } = counts as StageCounts;
       return rest;
     };
-    // 全部 on の T2 は束 3（要件 15）：初回 3・やり直し 7。ids off は 1・3（Issue #626）
+    // 全部 on の T2・C3 は束 3（要件 15）：初回 3・やり直し 7。ids off は 1・3（Issue #626・#735）
     const outsideT2 = (counts: unknown) => {
-      const { "test-spec": _t2, ...rest } = outsideTable(counts) as Record<string, number>;
+      const { "test-spec": _t2, "semantic-check": _c3, ...rest } = outsideTable(counts) as Record<string, number>;
       return rest;
     };
     expect(logicalBySet.slice(4).map(outsideT2)).toEqual(logicalBySet.slice(0, 2).map(outsideT2));
     expect(logicalBySet.slice(4).map((counts) => (counts as StageCounts)["test-spec"])).toEqual([3, 7]);
     expect(logicalBySet.slice(0, 2).map((counts) => (counts as StageCounts)["test-spec"])).toEqual([1, 3]);
+    expect(logicalBySet.slice(4).map((counts) => (counts as StageCounts)["semantic-check"])).toEqual([3, 7]);
+    expect(logicalBySet.slice(0, 2).map((counts) => (counts as StageCounts)["semantic-check"])).toEqual([1, 3]);
     expect(logicalBySet.slice(4).map((counts) => (counts as StageCounts)["name-table"])).toEqual([0, 0]);
   });
 
@@ -1026,11 +1072,12 @@ describe("(5') 旗 v12.ids の C1・C2 の枠（手 3a・Issue #593）", () => {
     expect(retry.stages.vocabulary.retries).toEqual({ communication: 0, shape: 1, content: 0 });
     expect(retry.stages.mapping.retries).toEqual({ communication: 0, shape: 1, content: 1 });
     expect(retry.stages["semantic-check"].retries).toEqual({ communication: 0, shape: 1, content: 0 });
-    // 2 回目の C2 の要求は前回の写像・拒否・印のデータを持つ
+    // 2 回目の C2 の要求は前回の写像・拒否・印のデータを持つ（初回は束 k。Issue #736。形のやり直し 1・2 回目 1 で k＋2）
+    const k = t2Bundles(size.requirements);
     const mappingRequests = retry.requests.filter((request) => request.includes(`"schemaName":"${MAPPING_SCHEMA_NAME}"`));
-    expect(mappingRequests).toHaveLength(3);
-    expect(mappingRequests[2]).toContain("前回の写像");
-    expect(mappingRequests[2]).toContain("表の点検の拒否");
+    expect(mappingRequests).toHaveLength(k + 2);
+    expect(mappingRequests[k + 1]).toContain("前回の写像");
+    expect(mappingRequests[k + 1]).toContain("表の点検の拒否");
     // 束 2 の形のやり直しは束 2 の要求だけ（束 1・3 は 1 回ずつ）
     const bundleRequests = (name: string) => retry.requests.filter((request) => request.includes(`"schemaName":"${name}"`)).length;
     expect(Object.values(VOCABULARY_SCHEMA_NAMES).map(bundleRequests)).toEqual([1, 2, 1]);
@@ -1041,7 +1088,7 @@ describe("(5') 旗 v12.ids の C1・C2 の枠（手 3a・Issue #593）", () => {
   });
 });
 
-describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の束を戻した。Issue #627）", () => {
+describe("(5'') 旗 v12.ids の C2 の初回は要件 5 件ごとの束（手 3b の束を #627 で戻し、束の規則から大域の文を外して #736 で作り直した）", () => {
   const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
   const materials = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, ALL_ON);
   const [entities, fields, behaviors, mapping, ...rest] = materials.tableResponses() as readonly Record<string, readonly Record<string, unknown>[]>[];
@@ -1070,23 +1117,26 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
   };
   /** 一覧の末尾の要件（C3 が R1 と一緒に拒否する要件。要件 15 では束 3 にあった要件） */
   const LAST = materials.ids.at(-1) as string;
+  /** 初回の束の一覧（一覧の順に 5 件ごと。Issue #736） */
+  const bundlesOf = (ids: readonly string[]): readonly (readonly string[])[] => bundleRequirementIds(ids, V12_T2_BUNDLE.size);
+  const k = t2Bundles(MEDIAN_SIZE.requirements);
 
-  it.each([MEDIAN_SIZE.requirements, 7])("要件 %i でも、C2 の初回の要求は 1 本で、データに全要件がある（記録も 1 つ）", async (count) => {
+  it.each([MEDIAN_SIZE.requirements, 7])("要件 %i では、C2 の初回の要求は一覧の順に 5 件ごとの束（Issue #736）で、記録は 1 つ", async (count) => {
     const sized = buildSized(count, 3 * count, ALL_ON);
     const run = await observe(sized, cleanCalls(sized), { flags: ALL_ON });
     expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
-    expect(mappingRequestsOf(run).map(listedIds)).toEqual([sized.ids]);
+    expect(mappingRequestsOf(run).map(listedIds)).toEqual(bundlesOf(sized.ids));
     expect(mappingRecordsOf(run)).toHaveLength(1);
   });
 
-  it("形で落ちると、やり直しの要求は 1 本（全要件）。2 回続けば段 mapping・unmet で止まる（終了コード 1・納品物無し）。断った候補に束の欄は無い", async () => {
+  it("形で落ちると、やり直しの要求は初回の束のあと 1 本（全要件）。2 回続けば段 mapping・unmet で止まる（終了コード 1・納品物無し）。断った候補に束の欄は無い", async () => {
     const missing = { requirements: entries().slice(1) };
     const run = await observe(materials, [...vocabulary(), structured(missing), structured(missing)], { flags: ALL_ON });
     expect(run.result.stopped).toMatchObject({ stage: "mapping", kind: "unmet" });
     expect(run.result.summary.exit_code).toBe(1);
     expect(run.result.bundle).toBeNull();
-    expect(mappingRequestsOf(run).map(listedIds)).toEqual([materials.ids, materials.ids]);
-    expect(mappingRequestsOf(run)[1]).toContain("前回の形の問題");
+    expect(mappingRequestsOf(run).map(listedIds)).toEqual([...bundlesOf(materials.ids), materials.ids]);
+    expect(mappingRequestsOf(run)[k]).toContain("前回の形の問題");
     expect(mappingRecordsOf(run).map((record) => [record.status, record.retries.shape])).toEqual([["failed", 1]]);
     const file = run.result.diagnostics.find((artifact) => artifact.path === "diagnostics/rejected-mapping.json");
     const candidates = (JSON.parse(file?.text ?? "{}") as { readonly candidates?: readonly Record<string, unknown>[] }).candidates ?? [];
@@ -1103,7 +1153,8 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
     const run = await observe(materials, [...vocabulary(), structured(orphan), structured(orphan)], { flags: ALL_ON });
     expect(run.result.stopped).toMatchObject({ stage: "mapping", kind: "unmet" });
     expect(run.result.stopped?.problems?.map((problem) => problem.message)).toContain("どの要件にも所属しない行がある");
-    expect(mappingRequestsOf(run)).toHaveLength(2);
+    // 初回の束 k と全体の作り直し 1（Issue #736）
+    expect(mappingRequestsOf(run)).toHaveLength(k + 1);
     expect(run.logical["semantic-check"]).toBe(0);
   });
 
@@ -1112,11 +1163,13 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
     const lastOnly = { requirements: entries().filter((entry) => entry["requirementId"] === LAST) };
     const run = await observe(materials, [...vocabulary(), structured(mapping), structured(reject), structured(lastOnly), structured(reject), ...tailWithout([LAST])], { flags: ALL_ON });
     const requests = mappingRequestsOf(run);
-    expect(requests.map(listedIds)).toEqual([materials.ids, materials.ids]);
-    for (const name of ["前回の写像", "表の点検の拒否", "助言の印", "書き直す要件"]) expect(requests[1]).toContain(`<data name=\\"${name}\\">`);
-    expect(requests[1]).toContain(`<data name=\\"書き直す要件\\">\\n[\\n  \\"${LAST}\\"\\n]`);
-    expect(requests[1]).toContain(LAST);
-    expect(run.logical["semantic-check"]).toBe(2);
+    // 初回の束 k（Issue #736）と、C3 の拒否のあとの 2 回目 1（全要件の一覧）
+    expect(requests.map(listedIds)).toEqual([...bundlesOf(materials.ids), materials.ids]);
+    for (const name of ["前回の写像", "表の点検の拒否", "助言の印", "書き直す要件"]) expect(requests[k]).toContain(`<data name=\\"${name}\\">`);
+    expect(requests[k]).toContain(`<data name=\\"書き直す要件\\">\\n[\\n  \\"${LAST}\\"\\n]`);
+    expect(requests[k]).toContain(LAST);
+    // C3 は束 k の 1 回目と再点検（Issue #735）
+    expect(run.logical["semantic-check"]).toBe(2 * t2Bundles(MEDIAN_SIZE.requirements));
     expect(mappingRecordsOf(run).map((record) => [record.status, record.retries.content])).toEqual([
       ["ok", 0],
       ["ok", 1],
@@ -1135,12 +1188,14 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
       [...vocabulary(), structured(mapping), structured(reject), structured({ requirements: entries().slice(1) }), ...tailWithout(["R1", LAST])],
       { flags: ALL_ON },
     );
-    expect(mappingRequestsOf(run)).toHaveLength(2);
+    // 初回の束 k（Issue #736）と 2 回目 1
+    expect(mappingRequestsOf(run)).toHaveLength(k + 1);
     expect(mappingRecordsOf(run).map((record) => [record.status, record.failure_kind])).toEqual([
       ["ok", null],
       ["failed", "unmet"],
     ]);
-    expect(run.logical["semantic-check"]).toBe(1);
+    // C3 は 1 回目の束 k だけ（再点検は無い。Issue #735）
+    expect(run.logical["semantic-check"]).toBe(t2Bundles(MEDIAN_SIZE.requirements));
     expect(run.result.stopped).toBeNull();
     expect(run.result.outcome.verdict).toBe("partial");
     const reasons = [{ origin: "semantic-check", reason: "unnecessary-ownership" }];
@@ -1192,7 +1247,8 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
       { requirementId: "R1", reasons },
       { requirementId: LAST, reasons },
     ]);
-    expect(run.logical["semantic-check"]).toBe(1);
+    // C3 は 1 回目の束 k だけ（Issue #735）
+    expect(run.logical["semantic-check"]).toBe(t2Bundles(MEDIAN_SIZE.requirements));
     expect(run.result.outcome.verdict).not.toBe("full");
     // 2 件は残る要件に戻らない：T2 の要求の要件の一覧に無い
     const t2Requests = run.requests.filter((request) => request.includes(`"schemaName":"${TEST_SPEC_SCHEMA_NAME}"`));
@@ -1226,8 +1282,8 @@ function resolveIds(flags: Partial<V12Flags>): boolean {
 
 describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
   const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
-  /** 表を組む段（C1・C2）の要求の数（J4 より前の生成） */
-  const TABLE_GENERATION = 4;
+  /** 表を組む段（C1 3・C2 の初回の束 k。Issue #736）の要求の数（要件 15 の J4 より前の生成） */
+  const TABLE_GENERATION = 3 + t2Bundles(MEDIAN_SIZE.requirements);
 
   it("(1) 全部 on の初回で通る走り：門の数＝生成の実開始＋判定の実試行、枝の数＝J4 の要件の数。再送を全部使うと門は再送の分だけ増える", async () => {
     for (const size of [MEDIAN_SIZE, MAX_SIZE]) {
@@ -1235,7 +1291,8 @@ describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
       const clean = await observe(materials, cleanCalls(materials), { flags: ALL_ON });
       expect(clean.result.outcome).toEqual({ result: "pass", verdict: "full" });
       expect(clean.calls).toEqual({
-            test_spec: t2SummaryOf(clean),
+        semantic_check: c3SummaryOf(t2Bundles(size.requirements), [t2Bundles(size.requirements)]),
+        test_spec: t2SummaryOf(clean),
         real_attempts: { limit: 144, used: clean.totalStarted + size.requirements },
         judge_branch: { limit: 80, used: size.requirements },
       });
@@ -1261,7 +1318,8 @@ describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
     });
     expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(run.calls).toEqual({
-            test_spec: t2SummaryOf(run),
+      semantic_check: c3SummaryOf(t2Bundles(MEDIAN_SIZE.requirements), [t2Bundles(MEDIAN_SIZE.requirements)]),
+      test_spec: t2SummaryOf(run),
       real_attempts: { limit: 144, used: cleanGeneration(MEDIAN_SIZE.requirements) + 2 * MEDIAN_SIZE.requirements },
       judge_branch: { limit: 80, used: 2 * MEDIAN_SIZE.requirements },
     });
@@ -1279,7 +1337,8 @@ describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
     expect(run.stages["decl-check"]).toMatchObject({ started: 0, notStartedLimit: 1 });
     expect(run.judge).toEqual({ j4: MEDIAN_SIZE.requirements, j2: 0 });
     expect(run.calls).toEqual({
-            test_spec: t2SummaryOf(run),
+      semantic_check: c3SummaryOf(t2Bundles(MEDIAN_SIZE.requirements), [t2Bundles(MEDIAN_SIZE.requirements)]),
+      test_spec: t2SummaryOf(run),
       real_attempts: { limit: firstTotal - 1, used: firstTotal - 1 },
       judge_branch: { limit: 80, used: MEDIAN_SIZE.requirements },
     });
@@ -1287,7 +1346,7 @@ describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
 
   it("(2') 門が J4 の途中で尽きると、残りの J4 は未判定（gate）で判定を呼ばず、次の生成（T1''）が call-limit で止まる", async () => {
     const materials = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, ALL_ON);
-    // J4 の前の生成（C1・C2）の 4 試行のあと、J4 を 9 本だけ通す門
+    // J4 の前の生成（C1・C2）の試行のあと、J4 を 9 本だけ通す門
     const gate = TABLE_GENERATION + 9;
     const run = await observe(materials, cleanCalls(materials), { flags: ALL_ON, v12CallLimits: { realAttempts: gate } });
     expect(run.judge).toEqual({ j4: 9, j2: 0 });
@@ -1330,7 +1389,8 @@ describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
     ]);
     // 門の数は生成の実開始＋枝を通った判定だけ（断った判定を数えない）
     expect(run.calls).toEqual({
-            test_spec: t2SummaryOf(run),
+      semantic_check: c3SummaryOf(t2Bundles(MEDIAN_SIZE.requirements), [t2Bundles(MEDIAN_SIZE.requirements)]),
+      test_spec: t2SummaryOf(run),
       real_attempts: { limit: 144, used: run.totalStarted + branch },
       judge_branch: { limit: branch, used: branch },
     });
@@ -1423,7 +1483,7 @@ describe("(7) 旗 v12.ids のコードが作る試験：既定値・選択肢の
 describe("(5''') 旗 v12.ids の C2 の初回の形のやり直しを落ちた要件だけの書き直しにしても、論理要求の枠と門は同じ（Issue #660）", () => {
   const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
 
-  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements：C2 は初回 1・形（書き直し）1・中身 1 の論理要求 3、retries 形 1 中身 1。再送を全部使っても合計 72・実試行 144・判定 80 の内側で full", async (size) => {
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements：C2 は初回の束 k・形（書き直し）1・中身 1 の論理要求 k＋2（Issue #736）、retries 形 1 中身 1。再送を全部使っても合計 80・実試行 144・判定 80 の内側で full", async (size) => {
     const materials = buildSized(size.requirements, size.tests, ALL_ON);
     const [entities, fields, behaviors, mapping] = materials.tableResponses() as readonly Record<string, readonly Record<string, unknown>[]>[];
     if (entities === undefined || fields === undefined || behaviors === undefined || mapping === undefined) throw new Error("前提が壊れた：C1・C2 の応答が 4 つでない");
@@ -1452,10 +1512,12 @@ describe("(5''') 旗 v12.ids の C2 の初回の形のやり直しを落ちた�
       const run = await observe(materials, calls, { flags: ALL_ON, failFirst });
       expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
       expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
-      expect(run.logical.mapping).toBe(3);
-      expect(run.stages.mapping.retries).toEqual({ communication: failFirst ? 3 : 0, shape: 1, content: 1 });
+      // 初回は束 k（Issue #736）。target の問題は target に帰属するので、書き直しは target だけの 1 要求
+      const k = t2Bundles(size.requirements);
+      expect(run.logical.mapping).toBe(k + 2);
+      expect(run.stages.mapping.retries).toEqual({ communication: failFirst ? k + 2 : 0, shape: 1, content: 1 });
       const mappingRequests = run.requests.filter((request) => request.includes(`"schemaName":"${MAPPING_SCHEMA_NAME}"`));
-      expect(mappingRequests).toHaveLength(failFirst ? 6 : 3);
+      expect(mappingRequests).toHaveLength(failFirst ? 2 * (k + 2) : k + 2);
       // 書き直す要件の塊は初回の形のやり直し（target）と C3 の拒否のあとの 2 回目（R1）の 2 本に載る（Issue #661）
       expect(mappingRequests.filter((request) => request.includes('<data name=\\"書き直す要件\\">'))).toHaveLength(failFirst ? 4 : 2);
       expect(run.judge).toEqual({ j4: 2 * size.requirements, j2: 0 });
@@ -1481,7 +1543,7 @@ describe("(5'''') 旗 v12.ids の C3 の拒否のあとの C2 の 2 回目を拒
     return block === undefined ? null : (JSON.parse(block) as unknown);
   };
 
-  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements：C3 が 2 件を拒否した走りの C2 は初回 1・中身 1（書き直す要件は 2 件）、C3 は初回 1・再点検 1 で、再点検は合併した表から導いた全対象。再送を全部使っても合計 72・実試行 144・判定 80 の内側で full", async (size) => {
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements：C3 が 2 件を拒否した走りの C2 は初回の束 k（Issue #736）・中身 1（書き直す要件は 2 件）、C3 は初回・再点検とも束 k（Issue #735）で、再点検は合併した表から導いた全対象。再送を全部使っても合計 80・実試行 144・判定 80 の内側で full", async (size) => {
     const materials = buildSized(size.requirements, size.tests, ALL_ON);
     const [entities, fields, behaviors, mapping] = materials.tableResponses() as readonly Record<string, readonly Record<string, unknown>[]>[];
     if (entities === undefined || fields === undefined || behaviors === undefined || mapping === undefined) throw new Error("前提が壊れた：C1・C2 の応答が 4 つでない");
@@ -1503,17 +1565,23 @@ describe("(5'''') 旗 v12.ids の C3 の拒否のあとの C2 の 2 回目を拒
       const run = await observe(materials, calls, { flags: ALL_ON, failFirst });
       expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
       expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
-      expect(run.logical.mapping).toBe(2);
-      expect(run.logical["semantic-check"]).toBe(2);
-      expect(run.stages.mapping.retries).toEqual({ communication: failFirst ? 2 : 0, shape: 0, content: 1 });
+      // C2 の初回は束 k（Issue #736）
+      const k = t2Bundles(size.requirements);
+      expect(run.logical.mapping).toBe(k + 1);
+      // C3 は 1 回目と再点検がそれぞれ束 k（Issue #735）
+      expect(run.logical["semantic-check"]).toBe(2 * t2Bundles(size.requirements));
+      expect(run.stages.mapping.retries).toEqual({ communication: failFirst ? k + 1 : 0, shape: 0, content: 1 });
       const mappingRequests = run.requests.filter((request) => request.includes(`"schemaName":"${MAPPING_SCHEMA_NAME}"`));
-      expect(mappingRequests).toHaveLength(failFirst ? 4 : 2);
+      expect(mappingRequests).toHaveLength(failFirst ? 2 * (k + 1) : k + 1);
       const second = mappingRequests.at(-1) as string;
       expect(dataOf(second, "書き直す要件")).toEqual(materials.ids.filter((id) => id === X || id === Y));
       expect(dataOf(second, "前回の写像")).toEqual(mapping);
-      // C3 の再点検の対象は合併した表から導いた全対象（全要件が fixed-test か structural なので要件の数と同じ）
-      const semanticRequests = run.requests.filter((request) => request.includes(`"schemaName":"${SEMANTIC_CHECK_SCHEMA_NAME}"`));
-      expect(semanticTargetsOf(semanticRequests.at(-1) as string)).toEqual(materials.ids);
+      // C3 の再点検の対象は合併した表から導いた全対象（全要件が fixed-test か structural なので要件の数と同じ）。再点検は C2 の 2 回目の
+      // あとの C3 の要求で、束の対象を一覧の順につなぐと全対象になる（Issue #735）
+      const lastMapping = run.requests.lastIndexOf(mappingRequests.at(-1) as string);
+      const recheck = [...new Set(run.requests.slice(lastMapping + 1).filter((request) => request.includes(`"schemaName":"${SEMANTIC_CHECK_SCHEMA_NAME}"`)))];
+      expect(recheck).toHaveLength(t2Bundles(size.requirements));
+      expect(recheck.flatMap(semanticTargetsOf)).toEqual(materials.ids);
       expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
       expect(run.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
       expect(run.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
@@ -1570,7 +1638,7 @@ describe("(8) 旗 v12.ids の構造の検査と画面・在ることの構造の
     expect(both.testSpecResponse({ asOf3c: true }).tests).toHaveLength(size.tests - CODE_WRITTEN_TEST_COUNT);
   });
 
-  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：ids on・ids off とも T2 の論理要求 3（初回 1・形 1・中身 1）で full。組の数は M で同じ、作った試験 ID に構造の検査と画面の確認がある。呼び出しの合計は論理 72・実試行 144・判定 80 以下", async (size) => {
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：ids on・ids off とも T2 の論理要求 3（初回 1・形 1・中身 1）で full。組の数は M で同じ、作った試験 ID に構造の検査と画面の確認がある。呼び出しの合計は論理 80・実試行 144・判定 80 以下", async (size) => {
     const off = buildSized(size.requirements, size.tests, PRIOR, OPTIONS);
     const on = buildSized(size.requirements, size.tests, ALL_ON, OPTIONS);
     const offRun = await observe(off, t2RetryCalls(off), { flags: PRIOR });
@@ -1636,7 +1704,7 @@ describe("(9) 旗 v12.ids の場合の形の T2：T2 の論理要求は初回 1�
     }
   });
 
-  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：T2 の論理要求 3（初回 1・形 1・中身 1）で full、組の数は M。初回で通る走りは 1。呼び出しの合計は論理 72・実試行 144・判定 80 以下", async (size) => {
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：T2 の論理要求 3（初回 1・形 1・中身 1）で full、組の数は M。初回で通る走りは 1。呼び出しの合計は論理 80・実試行 144・判定 80 以下", async (size) => {
     const on = buildSized(size.requirements, size.tests, ALL_ON);
     const retried = await observe(on, t2RetryCalls(on), { flags: ALL_ON });
     expect(retried.result.stopped, JSON.stringify(retried.result.stopped)).toBeNull();
@@ -1661,7 +1729,7 @@ describe("(9) 旗 v12.ids の場合の形の T2：T2 の論理要求は初回 1�
 
 // ── (9b) 旗 v12.ids の手 3h：項目だけの fixed-test の要件（Issue #652）──────────────────────────────
 
-describe("(9b) 旗 v12.ids の手 3h：所属が項目の行だけの在ることだけの要件を含む台本で、T2 の論理要求は束ごと初回 1・形 1・中身 1 のまま、LLM に書かせる試験は M − コードが作る数で、合計は論理 72・実試行 144・判定 80 以下（Issue #652）", () => {
+describe("(9b) 旗 v12.ids の手 3h：所属が項目の行だけの在ることだけの要件を含む台本で、T2 の論理要求は束ごと初回 1・形 1・中身 1 のまま、LLM に書かせる試験は M − コードが作る数で、合計は論理 80・実試行 144・判定 80 以下（Issue #652）", () => {
   const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
   const PRIOR = { ledger: true, searchRepair: true } as const;
   const OPTIONS = { itemsOnly: true } as const;
@@ -1750,7 +1818,7 @@ describe("(9b) 旗 v12.ids の手 3h：所属が項目の行だけの在るこ�
 
 // ── (9c) 旗 v12.ids の手 3i：必要な試験の枠（Issue #653）──────────────────────────────
 
-describe("(9c) 旗 v12.ids の手 3i：必要な試験の枠を要求に足しても、T2 の論理要求は束ごと初回 1・形 1・中身 1 のまま。枠の文字数は要件数に線形、応答は同じ N・M の手 3e 以下で、合計は論理 72・実試行 144・判定 80 以下（Issue #653）", () => {
+describe("(9c) 旗 v12.ids の手 3i：必要な試験の枠を要求に足しても、T2 の論理要求は束ごと初回 1・形 1・中身 1 のまま。枠の文字数は要件数に線形、応答は同じ N・M の手 3e 以下で、合計は論理 80・実試行 144・判定 80 以下（Issue #653）", () => {
   const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
   const OPTIONS = { screens: true, entityOnly: true } as const;
   const t2RetryCalls = (materials: SizedMaterials): RecordedCall[] => [
@@ -1947,7 +2015,7 @@ describe("(10) 旗 v12.ids の T2 の束（手 3f・Issue #626）：束ごとの
     }
   });
 
-  it("呼び出しの数の契約：要件 15 で T2 初回 3・形 ≤ 3・中身 ≤ 3（束ごとに 3 以下）、要件 25 で初回 5。やり直しを全部使う台本が表どおりで、論理 72・実試行 144・判定 80 以下", async () => {
+  it("呼び出しの数の契約：要件 15 で T2 初回 3・形 ≤ 3・中身 ≤ 3（束ごとに 3 以下）、要件 25 で初回 5。やり直しを全部使う台本が表どおりで、論理 80・実試行 144・判定 80 以下", async () => {
     for (const size of [MEDIAN_SIZE, MAX_SIZE]) {
       const materials = buildSized(size.requirements, size.tests, ALL_ON);
       const k = t2BundlesOf(materials);
@@ -2020,14 +2088,16 @@ describe("(10) 旗 v12.ids の T2 の束（手 3f・Issue #626）：束ごとの
     expect(sumRecords(records)).toMatchObject({ started: 0, budget: 2, calls: 0 });
   });
 
-  it("要約の v12_calls：既存の鍵（real_attempts・judge_branch）は今の値のまま、test_spec に束の数・同時数・段全体の計を足す", async () => {
+  it("要約の v12_calls：既存の鍵（real_attempts・judge_branch）は今の値のまま、test_spec に束の数・同時数・段全体の計を足す（C3 の束の欄 semantic_check も足す。Issue #735）", async () => {
     for (const size of [MEDIAN_SIZE, MAX_SIZE]) {
       const materials = buildSized(size.requirements, size.tests, ALL_ON);
       const k = t2BundlesOf(materials);
       for (const concurrency of [undefined, 1]) {
         const run = await observe(materials, retryCalls(materials), { flags: ALL_ON, ...(concurrency === undefined ? {} : { v12T2Concurrency: concurrency }) });
         const v12Calls = (run.result.summary as unknown as Record<string, unknown>)["v12_calls"] as Record<string, unknown>;
-        expect(Object.keys(v12Calls)).toEqual(["real_attempts", "judge_branch", "test_spec"]);
+        // C3 の束の欄（Issue #735）は T2 の前に足す（既存の鍵の値は変えない）
+        expect(Object.keys(v12Calls)).toEqual(["real_attempts", "judge_branch", "semantic_check", "test_spec"]);
+        expect(v12Calls["semantic_check"]).toEqual(c3SummaryOf(k, [k, k], [{ round: 1, bundle: k - 1 }]));
         const judged = run.judge.j4 + run.judge.j2;
         expect(v12Calls["real_attempts"]).toEqual({ limit: V12_CALL_LIMITS.realAttempts, used: run.totalStarted + judged });
         expect(v12Calls["judge_branch"]).toEqual({ limit: V12_CALL_LIMITS.judgeBranch, used: judged });
@@ -2111,7 +2181,7 @@ describe("(10) 旗 v12.ids の T2 の束（手 3f・Issue #626）：束ごとの
 
 // ── (11) 旗 v12.ids の手 4d：要る検査の骨組み（Issue #666）──────────────────────────────────
 
-describe("(11) 旗 v12.ids の手 4d：B1・直す段に要る検査の骨組みを足しても論理要求は不変。骨組みの文字数は validate の試験の数に線形で、合計は論理 72・実試行 144・判定 80 以下（Issue #666）", () => {
+describe("(11) 旗 v12.ids の手 4d：B1・直す段に要る検査の骨組みを足しても論理要求は不変。骨組みの文字数は validate の試験の数に線形で、合計は論理 80・実試行 144・判定 80 以下（Issue #666）", () => {
   const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
   /** B1 の要求の骨組みの塊（文字列）と、その試験 ID の数 */
   const skeletonsOf = (requests: readonly string[]) =>
@@ -2149,5 +2219,310 @@ describe("(11) 旗 v12.ids の手 4d：B1・直す段に要る検査の骨組み
     }
     const [median = 0, max = 0] = perTest;
     expect(Math.abs(median - max) / median).toBeLessThan(0.15);
+  });
+});
+
+// ── (12) 旗 v12.ids の C3 の束（Issue #735）────────────────────────────────────────
+
+describe("(12) 旗 v12.ids の C3 は要件 5 件ごとの束に分けて同時に呼ぶ（Issue #735）：記録・持ち越し・呼び出しの数の契約", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+  const c3RecordsOf = (run: Awaited<ReturnType<typeof observe>>): readonly StageRecord[] =>
+    run.result.record.stages.filter((record) => record.stage === "semantic-check");
+  const c3RequestsOf = (run: Awaited<ReturnType<typeof observe>>): readonly string[] =>
+    run.requests.filter((request) => request.includes(`"schemaName":"${SEMANTIC_CHECK_SCHEMA_NAME}"`));
+  const artifactOf = (run: Awaited<ReturnType<typeof observe>>, path: string): Record<string, unknown> =>
+    JSON.parse(run.result.bundle?.artifacts.find((artifact) => artifact.path === path)?.text ?? "{}") as Record<string, unknown>;
+  /** 台本の頭（C1 の 3 束・C2）と、C3 の拒否のあとの C2 の 2 回目（拒否した要件だけの書き直し） */
+  function partsOf(materials: SizedMaterials) {
+    const [entities, fields, behaviors, mapping] = materials.tableResponses() as readonly Record<string, readonly Record<string, unknown>[]>[];
+    if (entities === undefined || fields === undefined || behaviors === undefined || mapping === undefined) throw new Error("前提が壊れた：C1・C2 の応答が 4 つでない");
+    const head = [structured(entities), structured(fields), structured(behaviors), structured(mapping)];
+    const rewriteOf = (ids: readonly string[]) => structured({ requirements: (mapping["requirements"] ?? []).filter((entry) => ids.includes(String(entry["requirementId"]))) });
+    /** 持ち越しの要件を除いた T2・B1・B3' の応答 */
+    const tailWithout = (excluded: readonly string[]) => {
+      const t2 = materials.testSpecCasesResponse();
+      return [
+        structured({
+          classifications: (t2.classifications as readonly { requirementId: string }[]).filter((entry) => !excluded.includes(entry.requirementId)),
+          cases: t2.cases.filter((entry) => !excluded.includes(String(entry["requirementId"]))),
+        }),
+        structured({ declaration: materials.declaration() }),
+        structured({ judgments: (materials.judgments().judgments as readonly { requirementId: string }[]).filter((entry) => !excluded.includes(entry.requirementId)) }),
+      ];
+    };
+    return { head, rewriteOf, tailWithout };
+  }
+  /** 形の落ちの応答（判定が空。どの束も全部の判定を欠く） */
+  const EMPTY = structured({ judgments: [] });
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("(8) 要件 $requirements：同じ判定を返す台本では、合併した判定・表の SHA・持ち越し・判定の値が一覧の順のまま全受理（full）。C3 の記録は回ごとに 1 つで、計量の欄は要求数・応答数（束 k）から置いた期待に一致する", async (size) => {
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
+    const k = t2Bundles(size.requirements);
+    for (const v12T2Concurrency of [undefined, 1]) {
+      const run = await observe(materials, cleanCalls(materials), { flags: ALL_ON, ...(v12T2Concurrency === undefined ? {} : { v12T2Concurrency }) });
+      expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      const semantic = artifactOf(run, "artifacts/semantic-check.json") as { readonly rounds: readonly { readonly table_sha256: string; readonly targets: readonly string[]; readonly judgments: readonly { readonly requirementId: string; readonly verdict: string }[] }[] };
+      expect(semantic.rounds).toHaveLength(1);
+      expect(semantic.rounds[0]?.targets).toEqual(materials.ids);
+      expect(semantic.rounds[0]?.judgments).toEqual(materials.ids.map((requirementId) => ({ requirementId, verdict: "accept" })));
+      // 表の SHA は採用した表の SHA（ホストが付ける。応答に SHA の欄は無い）
+      const table = artifactOf(run, "artifacts/name-table.json") as { readonly table_sha256: string };
+      expect(table.table_sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(semantic.rounds[0]?.table_sha256).toBe(table.table_sha256);
+      expect((artifactOf(run, "artifacts/carry-over.json")["entries"] as readonly unknown[]).length).toBe(0);
+      // 要求は束 k（一覧の順に 5 件ずつ）、記録は 1 つで束の計を 1 回だけ集計する
+      expect(c3RequestsOf(run)).toHaveLength(k);
+      // 束が 2 つ以上なので、各束の要求は束の外の対象を参照のみの塊で持ち、末尾に参照の規則を持つ（Issue #741。数は変わらない）
+      for (const request of c3RequestsOf(run)) {
+        const parsed = JSON.parse(request) as { readonly input: string; readonly rules: readonly string[] };
+        const blockOf = (name: string) =>
+          JSON.parse(parsed.input.split(`<data name="${name}">\n`)[1]?.split("\n</data>")[0] ?? "null") as unknown;
+        const own = (blockOf("要件の文と引用") as readonly { readonly requirementId: string }[]).map((entry) => entry.requirementId);
+        const reference = blockOf(SEMANTIC_CHECK_REFERENCE_DATA_NAME) as { readonly 要件の文と引用: readonly { readonly requirementId: string }[] };
+        expect(reference.要件の文と引用.map((entry) => entry.requirementId)).toEqual(materials.ids.filter((id) => !own.includes(id)));
+        expect(parsed.rules.at(-1)).toBe(SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION.text);
+      }
+      const records = c3RecordsOf(run);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        status: "ok",
+        calls: k,
+        missing_usage_calls: 0,
+        input_tokens: k * USAGE.inputTokens,
+        output_tokens: k * USAGE.outputTokens,
+        attempts: { started: k, responded: k, errors: 0, cancelled_deadline: 0, cancelled_timeout: 0 },
+        retries: { communication: 0, shape: 0, content: 0 },
+      });
+      expect(run.logical["semantic-check"]).toBe(k);
+      expect(run.calls).toMatchObject({ semantic_check: c3SummaryOf(k, [k]) });
+    }
+  });
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("(7) 要件 $requirements：誤った所属・必要な対象の欠落・弱い検査を別々の束に置いた負例は、拒否が両方の回で残って持ち越しになり full にならない", async (size) => {
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
+    const k = t2Bundles(size.requirements);
+    const [A, B, C] = ["R2", "R7", "R12"];
+    if (A === undefined || B === undefined || C === undefined) throw new Error("前提が壊れた");
+    const rejects = {
+      [A]: ["unnecessary-ownership", materials.textOf(A)] as const,
+      [B]: ["missing-target", materials.textOf(B)] as const,
+      [C]: ["weak-verification", materials.textOf(C)] as const,
+    };
+    const { head, rewriteOf, tailWithout } = partsOf(materials);
+    const reject = structured(materials.judgments(rejects));
+    const run = await observe(materials, [...head, reject, rewriteOf([A, B, C]), reject, ...tailWithout([A, B, C])], { flags: ALL_ON });
+    // 3 件は別々の束（5 件ごと）にある
+    expect(new Set([A, B, C].map((id) => Math.floor(materials.ids.indexOf(id) / V12_T2_BUNDLE.size))).size).toBe(3);
+    expect(run.result.stopped).toBeNull();
+    expect(run.result.outcome.verdict).toBe("partial");
+    const carry = artifactOf(run, "artifacts/carry-over.json")["entries"] as readonly { readonly requirementId: string; readonly reasons: readonly { readonly origin: string; readonly reason: string }[] }[];
+    expect(carry.map((entry) => [entry.requirementId, entry.reasons])).toEqual([
+      [A, [{ origin: "semantic-check", reason: "unnecessary-ownership" }]],
+      [B, [{ origin: "semantic-check", reason: "missing-target" }]],
+      [C, [{ origin: "semantic-check", reason: "weak-verification" }]],
+    ]);
+    expect(run.logical["semantic-check"]).toBe(2 * k);
+    expect(run.calls).toMatchObject({ semantic_check: c3SummaryOf(k, [k, k]) });
+  });
+
+  it("(5) 不正な表の SHA：段の返値を差し替えると、束に分けた走りでも呼ぶ側の検査で semantic-check・malformed になり T2 を呼ばない", async () => {
+    const materials = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, ALL_ON);
+    const original = semanticCheckStage.runSemanticCheck;
+    const spy = vi.spyOn(semanticCheckStage, "runSemanticCheck").mockImplementation(async (input) => {
+      const outcome = await original(input);
+      return outcome.ok ? { ok: true, value: { ...outcome.value, tableSha256: "0".repeat(64) } } : outcome;
+    });
+    try {
+      const run = await observe(materials, cleanCalls(materials), { flags: ALL_ON });
+      expect(run.result.stopped).toMatchObject({ stage: "semantic-check", kind: "malformed" });
+      expect(run.result.outcome.verdict).toBe("none");
+      expect(run.logical["semantic-check"]).toBe(t2Bundles(MEDIAN_SIZE.requirements));
+      expect(run.logical["test-spec"]).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("呼び出しの契約（要件 $requirements）：全部の束が 1 回目で形のやり直しを使う台本（予算 k を使い切る）と、通信の再送を使う台本で、C3 は 3k（初回 k・形 k・再点検 k）。論理 80・実試行 144・判定 80 以下で完走", async (size) => {
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
+    const k = t2Bundles(size.requirements);
+    const { head, rewriteOf, tailWithout } = partsOf(materials);
+    const R1 = { R1: ["unnecessary-ownership", materials.textOf("R1")] as const };
+    const calls = [...head, EMPTY, structured(materials.judgments(R1)), rewriteOf(["R1"]), structured(materials.judgments()), ...tailWithout([])];
+    for (const failFirst of [false, true]) {
+      const run = await observe(materials, calls, { flags: ALL_ON, failFirst });
+      expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
+      expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      expect(run.logical["semantic-check"]).toBe(3 * k);
+      expect(c3RecordsOf(run).map((record) => record.retries)).toEqual([
+        { communication: failFirst ? 2 * k : 0, shape: k, content: 0 },
+        { communication: failFirst ? k : 0, shape: 0, content: 0 },
+      ]);
+      expect(run.calls).toMatchObject({ semantic_check: c3SummaryOf(k, [k, k], Array.from({ length: k }, (_, bundle) => ({ round: 1, bundle }))) });
+      expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+      expect(run.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+      expect(run.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+    }
+  });
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("呼び出しの契約（要件 $requirements）：両方の回で全部の束が形で落ちる台本は、2 回目の形のやり直しを予算が断り semantic-check・malformed で止まる（C3 は 3k。終了コード 1・納品物無し）。論理 80・実試行 144・判定 80 以下", async (size) => {
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
+    const k = t2Bundles(size.requirements);
+    const { head, rewriteOf } = partsOf(materials);
+    const R1 = { R1: ["unnecessary-ownership", materials.textOf("R1")] as const };
+    for (const failFirst of [false, true]) {
+      const run = await observe(materials, [...head, EMPTY, structured(materials.judgments(R1)), rewriteOf(["R1"]), EMPTY], { flags: ALL_ON, failFirst });
+      expect(run.result.stopped).toMatchObject({ stage: "semantic-check", kind: "malformed" });
+      expect(run.result.summary.exit_code).toBe(1);
+      expect(run.result.bundle).toBeNull();
+      expect(run.logical["semantic-check"]).toBe(3 * k);
+      expect(c3RecordsOf(run).map((record) => [record.status, record.retries.shape])).toEqual([
+        ["ok", k],
+        ["failed", 0],
+      ]);
+      expect(run.calls).toMatchObject({ semantic_check: { shape_retries: { limit: k, used: k, remaining: 0 } } });
+      expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+      expect(run.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+      expect(run.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+    }
+  });
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("呼び出しの契約（要件 $requirements）：束の形のやり直しの直前に実試行の門が尽きる台本は、semantic-check・call-limit で止まり、告げたやり直しと門での未着手が記録に残る", async (size) => {
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
+    const k = t2Bundles(size.requirements);
+    const { head } = partsOf(materials);
+    // C1 3・C2 の初回の束 k（Issue #736）・J4（要件ごと）・C3 の初回 k でちょうど尽きる門
+    const gate = 3 + k + size.requirements + k;
+    const run = await observe(materials, [...head, EMPTY], { flags: ALL_ON, v12CallLimits: { realAttempts: gate } });
+    expect(run.result.stopped).toMatchObject({ stage: "semantic-check", kind: "call-limit" });
+    expect(run.result.summary.exit_code).toBe(1);
+    expect(run.logical["semantic-check"]).toBe(k);
+    const [record] = c3RecordsOf(run);
+    expect(record).toMatchObject({ status: "failed", attempts: { started: k, responded: k, not_started: { limit: k } }, retries: { shape: k } });
+    expect(run.calls?.real_attempts).toEqual({ limit: gate, used: gate });
+    expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+  });
+});
+
+// ── (13) 旗 v12.ids の C2 の初回の束（Issue #736）────────────────────────────────────────
+
+describe("(13) 旗 v12.ids の C2 の初回は要件 5 件ごとの束に分けて同時に呼ぶ（Issue #736）：持ち越し・呼び出しの数の契約", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+  type Entry = Record<string, unknown>;
+  const mappingRequestsOf = (run: Awaited<ReturnType<typeof observe>>) => run.requests.filter((request) => request.includes(`"schemaName":"${MAPPING_SCHEMA_NAME}"`));
+  /** 台本の頭（C1 の 3 束）・C2 の全要件の応答・持ち越しの要件を除いた T2・B1・B3' の応答 */
+  function partsOf(materials: SizedMaterials) {
+    const [entities, fields, behaviors, mapping] = materials.tableResponses() as readonly Record<string, readonly Entry[]>[];
+    if (entities === undefined || fields === undefined || behaviors === undefined || mapping === undefined) throw new Error("前提が壊れた：C1・C2 の応答が 4 つでない");
+    const vocabulary = [structured(entities), structured(fields), structured(behaviors)];
+    const entries = (): Entry[] => (mapping["requirements"] ?? []).map((entry) => ({ ...entry }));
+    const tailWithout = (excluded: readonly string[]) => {
+      const t2 = materials.testSpecCasesResponse();
+      return [
+        structured({
+          classifications: (t2.classifications as readonly { requirementId: string }[]).filter((entry) => !excluded.includes(entry.requirementId)),
+          cases: t2.cases.filter((entry) => !excluded.includes(String(entry["requirementId"]))),
+        }),
+        structured({ declaration: materials.declaration() }),
+        structured({ judgments: (materials.judgments().judgments as readonly { requirementId: string }[]).filter((entry) => !excluded.includes(entry.requirementId)) }),
+      ];
+    };
+    return { vocabulary, mapping, entries, tailWithout };
+  }
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("(6) 要件 $requirements：孤立行は 0 でも、ほかの要件の行まで抱え込んだ所属（#627 型）は C2' を通り、C3 が拒否し、書き直しでも拒否が残れば持ち越しになって full にならない", async (size) => {
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
+    const k = t2Bundles(size.requirements);
+    const { vocabulary, entries, tailWithout } = partsOf(materials);
+    // 2 つ目の束の要件 X に、ほかの要件が所属させた行を全部 dependency で足す（どの行もほかの要件にも所属するので孤立行は 0）
+    const X = materials.ids[V12_T2_BUNDLE.size] as string;
+    const others = new Set(entries().filter((entry) => entry["requirementId"] !== X).flatMap((entry) => (entry["roles"] as readonly Entry[]).map((role) => String(role["id"]))));
+    const inflate = (entry: Entry): Entry => {
+      const own = new Set((entry["roles"] as readonly Entry[]).map((role) => String(role["id"])));
+      const extra = [...others].filter((id) => !own.has(id)).map((id) => ({ id, basis: "dependency", reason: "実現に要る" }));
+      return { ...entry, roles: [...(entry["roles"] as readonly Entry[]), ...extra] };
+    };
+    const inflated = { requirements: entries().map((entry) => (entry["requirementId"] === X ? inflate(entry) : entry)) };
+    const reject = structured(materials.judgments({ [X]: ["unnecessary-ownership", materials.textOf(X)] }));
+    const rewriteX = structured({ requirements: inflated.requirements.filter((entry) => entry["requirementId"] === X) });
+    const run = await observe(materials, [...vocabulary, structured(inflated), reject, rewriteX, reject, ...tailWithout([X])], { flags: ALL_ON });
+    expect(run.result.stopped).toBeNull();
+    expect(run.result.outcome.verdict).toBe("partial");
+    // 初回の束 k（C2' を通るので形のやり直しは無い）と、C3 の拒否のあとの X だけの 2 回目 1
+    expect(run.logical.mapping).toBe(k + 1);
+    expect(mappingRequestsOf(run).map(listedIds)).toEqual([...bundleRequirementIds(materials.ids, V12_T2_BUNDLE.size), materials.ids]);
+    const carry = JSON.parse(run.result.bundle?.artifacts.find((artifact) => artifact.path === "artifacts/carry-over.json")?.text ?? "{}") as Record<string, unknown>;
+    expect(carry).toMatchObject({ entries: [{ requirementId: X, reasons: [{ origin: "semantic-check", reason: "unnecessary-ownership" }] }] });
+  });
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("呼び出しの契約（要件 $requirements）：C3 の束と重ねた本で、C2 は初回 k・形の書き直し 1・中身 1 の k＋2、C3 は 3k。通信の再送を全部使っても論理 80・実試行 144・判定 80 以下で完走し、started・usage の calls は要求数・応答数から置いた値", async (size) => {
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
+    const k = t2Bundles(size.requirements);
+    const { vocabulary, mapping, entries, tailWithout } = partsOf(materials);
+    // C2：2 つの束にまたがる 2 件の所属に表に無い ID（帰属できる）→ 2 件だけの書き直し 1。C3：全部の束が 1 回目で形のやり直し（予算 k）
+    // →R1 を拒否 → C2 の 2 回目（R1 だけ）→ C3 の再点検で全部受理
+    const X = materials.ids[1] as string;
+    const Y = materials.ids[V12_T2_BUNDLE.size + 1] as string;
+    const bad = { requirements: entries().map((entry) => (entry["requirementId"] === X || entry["requirementId"] === Y ? { ...entry, roles: [...(entry["roles"] as readonly Entry[]), { id: "E1.F99", basis: "stated", reason: null }] } : entry)) };
+    const only = (ids: readonly string[]) => structured({ requirements: (mapping["requirements"] ?? []).filter((entry) => ids.includes(String(entry["requirementId"]))) });
+    const calls = [
+      ...vocabulary,
+      structured(bad),
+      only([X, Y]),
+      structured({ judgments: [] }),
+      structured(materials.judgments({ R1: ["unnecessary-ownership", materials.textOf("R1")] })),
+      only(["R1"]),
+      structured(materials.judgments()),
+      ...tailWithout([]),
+    ];
+    for (const failFirst of [false, true]) {
+      const run = await observe(materials, calls, { flags: ALL_ON, failFirst });
+      expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
+      expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      expect(run.logical.mapping).toBe(k + 2);
+      expect(run.logical["semantic-check"]).toBe(3 * k);
+      expect(run.stages.mapping.retries).toEqual({ communication: failFirst ? k + 2 : 0, shape: 1, content: 1 });
+      // started・usage の calls は要求数・応答数から（再送を全部使えば実開始は論理の 2 倍）
+      expect(run.stages.mapping.started).toBe((failFirst ? 2 : 1) * (k + 2));
+      expect(run.stages.mapping.responses).toBe(k + 2);
+      expect(run.totalLogical).toBe(3 + (k + 2) + 3 * k + k + 2);
+      expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+      expect(run.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+      expect(run.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+      expect(run.calls?.real_attempts.used).toBe(run.totalStarted + run.judge.j4 + run.judge.j2);
+      expectNoAcceptanceMaterial(run.requests);
+    }
+  });
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("記録と要約（要件 $requirements）：初回で通る走りの C2 の記録は 1 つで、変わる欄は計量の欄（calls・usage・attempts）だけ。値は要求数・応答数（束 k）から置き、要約の v12_calls の鍵は増えない（同時数に依らないことは段の試験 mapping.test.ts の (2)）", async (size) => {
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
+    const k = t2Bundles(size.requirements);
+    const run = await observe(materials, cleanCalls(materials), { flags: ALL_ON });
+    expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const records = run.result.record.stages.filter((record) => record.stage === "mapping");
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      status: "ok",
+      calls: k,
+      missing_usage_calls: 0,
+      input_tokens: k * USAGE.inputTokens,
+      output_tokens: k * USAGE.outputTokens,
+      attempts: { started: k, responded: k, errors: 0, cancelled_deadline: 0, cancelled_timeout: 0 },
+      retries: { communication: 0, shape: 0, content: 0 },
+    });
+    expect(Object.keys(run.calls ?? {}).sort()).toEqual(["judge_branch", "real_attempts", "semantic_check", "test_spec"]);
+    expect(run.calls?.real_attempts.used).toBe(cleanGeneration(size.requirements) + size.requirements);
+  });
+
+  it("呼び出しの契約：要件 15・25 の C2 の論理要求の最大 k＋2 は、上限の表の C2 の行（束ごと 1・1・1）の内側で、C3 の 3k・T2 の 3k と重ねた表の合計は 80 以下（値は変えない）", () => {
+    for (const requirements of [MEDIAN_SIZE.requirements, MAX_SIZE.requirements]) {
+      const k = t2Bundles(requirements);
+      const c2 = V12_STAGE_FRAMES.find((frame) => frame.stage === "C2");
+      const perBundle = (c2?.initial?.count ?? 0) + (c2?.shape?.count ?? 0) + (c2?.content?.count ?? 0);
+      expect(k + 2).toBeLessThanOrEqual(perBundle * k);
+      // C1 6・C2 k＋2・C3 3k・C4 3k・C5 6・C6 8・ループ 18・作り直し 2
+      expect(6 + (k + 2) + 3 * k + 3 * k + 6 + 8 + 18 + 2).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+    }
+    expect(V12_CALL_LIMITS).toEqual({ logicalCalls: 80, realAttempts: 144, judgeBranch: 80 });
   });
 });

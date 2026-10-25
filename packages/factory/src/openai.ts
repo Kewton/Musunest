@@ -7,6 +7,8 @@
 // 決めごと（§2・§2.2）：
 //   * 構造化出力は Responses API の JSON Schema の出力（`text.format`）、道具付きは function calling。
 //   * どちらも `store: false` と `max_output_tokens` を必ず送る。
+//   * 推論の effort（`reasoning`）は、構造化の要求に effort があればそれ（段の名前で引いた口が載せる。Issue #664）、無ければ
+//     設定の値を送る。道具付きの要求は設定の値のまま。
 //   * 規則（`instructions`）は**毎回**送る。会話はこちらで組み立てて `input` に並べる
 //     （`previous_response_id` は送らない。§2 の「会話の状態」）。
 //   * 依頼文などのデータは、規則とは別の入力として `<data>` で囲んで送る（§2.2「規則とデータを分ける」）。
@@ -305,6 +307,7 @@ function baseBody(
   instructions: string,
   input: readonly unknown[],
   maxOutputTokens: number,
+  requestEffort?: string,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: config.model,
@@ -315,7 +318,9 @@ function baseBody(
     prompt_cache_options: { mode: "explicit" },
     input,
   };
-  if (config.effort !== undefined) body.reasoning = { effort: config.effort };
+  // 要求に effort があればそれを、無ければ設定の値を送る（段ごとの effort。要求に無ければ body は今と同じ。Issue #664）
+  const effort = requestEffort ?? config.effort;
+  if (effort !== undefined) body.reasoning = { effort };
   return body;
 }
 
@@ -346,6 +351,7 @@ function buildStructuredBody(
       entry === undefined ? undefined : stageInstruction(entry.stage),
     ),
     request.maxOutputTokens,
+    request.effort,
   );
   body.text = {
     format: {
