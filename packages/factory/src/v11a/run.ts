@@ -33,6 +33,9 @@
 // T2' を通ったときだけ組の数（`testSpec`）を足す。記録に載せるかは呼ぶ側（`--pipeline v1.2` の段の走り）が決める（Issue #637）。
 // 同じく旗 `v12.ids` の走りだけ、C2 の回ごとの行（C2 の表・C3 の判定・書き直した要件・採用した回）を `tableRounds` に積み、
 // 一気通貫では診断に、段の走りでは入口が `--out` の下の診断に書く（`table-rounds`。行が無ければ欄を持たない。Issue #699）。
+// 旗 `v12.ids`・`v12.search-repair` が on の段の走りだけ、探索の出来事の列（版・数え直し・往復を起きた順に 1 本。`searchRepair`）を
+// 初版の評価に入るときから積み、⑦ まで届いた走りと、探索に入ったあとで早期停止した走りの両方で返す。時間は段の行を組むときに読んだ
+// 時刻だけから組み、時刻を読む回数を足さない。工場の振る舞い（要求・採否・停止・判定・納品物）には使わない（Issue #746）。
 //
 // 旗（`flags`。08-architecture-v1.2.md §9・Issue #547）：省けば全部 off で、今の v1.1α とバイト列で同じに流れる。
 // `flags.ledger` が on なら、性質の台帳の導出（`v12/ledger.ts`）を T1（T1' を含む）・T2（T2' を含む）・評価口（B4・
@@ -202,14 +205,47 @@ import {
   type SearchRoundRecord,
   type VersionFacts,
   withSearchRounds,
+  failureSetSha256,
+  type SearchEvent,
+  type SearchMergeRefusalClass,
+  type SearchRecountEvent,
+  type SearchRoundEvent,
+  type SearchVersionEvent,
+  type StageRowSpan,
+  type StageSearchRepairLog,
 } from "../v12/search-repair.js";
 import { canRepairFields, locateFailures } from "../v12/locate.js";
 import { V12_CALL_LIMITS, V12_T2_BUNDLE, type V12CallLimits } from "../v12/limits.js";
-import { mergeReplacements, runFieldRepair } from "../v12/stages/field-repair.js";
+import { MERGE_REFUSALS, mergeReplacements, runFieldRepair, type MergeRefusal } from "../v12/stages/field-repair.js";
 import { VOCABULARY_BUNDLES, type ReferenceCounts } from "../v12/ids.js";
 import { isGeneratedTestId } from "../v12/generated-tests.js";
 import { runVocabularyBundle } from "../v12/stages/vocabulary.js";
 import { MAPPING_ROUNDS, rejectedRequirementIds, runMapping, type MappingOutcome, type MappingPrevious, type MappingRejectedCandidate } from "../v12/stages/mapping.js";
+
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
+/**
+ * 段の走りの探索の出来事の列の積み途中の状態（旗 `v12.ids`・`v12.search-repair` が on の段の走りだけ。Issue #746）。閉じていない区間
+ * （版の評価・数え直し・往復）は始めた段の行の添字を持ち、止まった走りでは止まった時点の行までを含める
+ */
+interface SearchLogState {
+  readonly events: (Mutable<SearchVersionEvent> | Mutable<SearchRecountEvent> | Mutable<SearchRoundEvent>)[];
+  bestSeq: number | null;
+  rewritten: boolean;
+  /** ⑦ まで届いた走りの止めた理由（探索のループを抜けたときに入れる） */
+  stopReason: StopReason | null;
+  openEvaluate: { readonly event: Mutable<SearchVersionEvent>; readonly first: number } | null;
+  openRecount: { readonly event: Mutable<SearchRecountEvent>; readonly first: number } | null;
+  openRound: { readonly event: Mutable<SearchRoundEvent>; readonly first: number; requestDone: boolean } | null;
+}
+
+/** マージを断った固定文を、その分類（`MERGE_REFUSALS` の鍵）に写す（文そのものは記録に書かない。Issue #746） */
+function mergeRefusalClassOf(refusal: MergeRefusal): SearchMergeRefusalClass {
+  const keys = Object.keys(MERGE_REFUSALS) as (keyof typeof MERGE_REFUSALS)[];
+  const found: SearchMergeRefusalClass | undefined = keys.find((key) => MERGE_REFUSALS[key] === refusal);
+  if (found === undefined) throw new Error("探索の記録：マージを断った固定文が分類に無い（field-repair の固定文の前提が壊れた）");
+  return found;
+}
 
 /** v1.1α の入力（v1 の `GenerationInput` と同じ形で、確定した仕様を必須にしたもの） */
 export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
@@ -817,6 +853,9 @@ async function runV11a(
     stageFailureAttribution(stage, failure, flags.ids);
   const startedAt = input.now();
   const stages: StageRecord[] = [];
+  // 段の行ごとの開始と終わりの時刻（`stages` と同じ添字。段の行を組むときに読んだ値をそのまま持つだけで、時刻を読む回数を足さない。
+  // 段の走りの探索の出来事の列の時間に使う。Issue #746）
+  const stageTimes: { readonly start: number; readonly end: number }[] = [];
   const upheld: string[] = [];
   const overturned: OverturnedTest[] = [];
   const unresolved: string[] = [];
@@ -983,11 +1022,13 @@ async function runV11a(
     failureKind: FailureKind | null,
     references?: ReferenceCounts,
   ): void => {
+    const end = input.now();
+    stageTimes.push({ start, end });
     stages.push(
       makeStageRecord(
         stage,
         status,
-        input.now() - start,
+        end - start,
         usageDelta(before.usage, meter.snapshot),
         callCountsDelta(before.counts, gateway.counts),
         failureKind,
@@ -1128,6 +1169,49 @@ async function runV11a(
     };
   };
 
+  // 段の走りの探索の出来事の列（旗 `v12.ids`・`v12.search-repair` が on の段の走りだけ。探索に入る＝初版の評価に入るまで undefined。
+  // 早期停止の catch からも読めるようにここに置く。工場の振る舞いには使わない。Issue #746）
+  const searchLogOn = stageControl !== undefined && flags.ids && flags.searchRepair;
+  let searchLog: SearchLogState | undefined;
+  /** 段の行の添字の区間（`first` から今の行の手前まで。行が無ければ null） */
+  const rowsFrom = (first: number): StageRowSpan | null => (first < stages.length ? { first, last: stages.length - 1 } : null);
+  /** 区間の時間（最初の行の開始から最後の行の終わりまで。段の行を組んだときに読んだ時刻だけを使う） */
+  const spanMs = (span: StageRowSpan | null): number | null => {
+    const first = span === null ? undefined : stageTimes[span.first];
+    const last = span === null ? undefined : stageTimes[span.last];
+    return first === undefined || last === undefined ? null : last.end - first.start;
+  };
+  /** 閉じていない往復を閉じる（止まらずに閉じたときだけ時間を持つ） */
+  const closeSearchRound = (log: SearchLogState, stopped: boolean): void => {
+    const open = log.openRound;
+    if (open === null) return;
+    open.event.rows = rowsFrom(open.first);
+    open.event.durationMs = stopped ? null : spanMs(open.event.rows);
+    if (stopped && open.event.result.kind === "pending" && !open.requestDone) open.event.result = { kind: "repair-stopped" };
+    log.openRound = null;
+  };
+  /** 出来事の列の写し（止まった走りは閉じていない区間を止まった時点の行までにし、時間・違反・採否を未決のまま残す） */
+  const searchLogOf = (stopped: FailureAttribution | null): StageSearchRepairLog | undefined => {
+    const log = searchLog;
+    if (log === undefined) return undefined;
+    if (stopped !== null) {
+      if (log.openEvaluate !== null) log.openEvaluate.event.evaluateRows = rowsFrom(log.openEvaluate.first);
+      if (log.openRecount !== null) log.openRecount.event.rows = rowsFrom(log.openRecount.first);
+      log.openEvaluate = null;
+      log.openRecount = null;
+    }
+    closeSearchRound(log, stopped !== null);
+    return {
+      events: log.events.map((event): SearchEvent => ({ ...event })),
+      bestSeq: log.bestSeq,
+      rewritten: log.rewritten,
+      stop:
+        stopped !== null
+          ? { reason: "stopped", stage: stopped.stage, kind: stopped.kind }
+          : { reason: log.stopReason ?? "completed", stage: null, kind: null },
+    };
+  };
+
   // 段の走り：通った境界の材料（通った順）と、段の走りの結果
   const boundaries: BoundaryMaterials[] = [];
   // この走りで T2 を回し T2' を通った組の数（段の走りの記録の `test_spec`。再開の材料から入った走りは持たない。Issue #637）
@@ -1169,6 +1253,11 @@ async function runV11a(
         // ⑦ まで流したときだけ、判定した宣言と検証の数（入口が記録とファイルに書く。Issue #687）
         ...(extra.declaration === undefined ? {} : { declaration: extra.declaration }),
         ...(extra.verification === undefined ? {} : { verification: extra.verification }),
+        // 探索に入った走りだけ、その時点までの探索の出来事の列（旗 ids・search-repair が on の段の走り。Issue #746）
+        ...(() => {
+          const log = searchLogOf(stopped);
+          return log === undefined ? {} : { searchRepair: log };
+        })(),
       },
     };
   };
@@ -1519,6 +1608,7 @@ async function runV11a(
       const settle = (status: StageStatus, failureKind: FailureKind | null): void => {
         for (const entry of runs) {
           if (entry === undefined) continue;
+          stageTimes.push({ start: entry.start, end: entry.end() });
           stages.push(makeStageRecord("test-spec", status, entry.end() - entry.start, entry.meter.snapshot, entry.gateway.counts, failureKind));
         }
         const made = runs.filter((entry): entry is (typeof runs)[number] => entry !== undefined);
@@ -1894,8 +1984,85 @@ async function runV11a(
         testUnresolved: state.report.testRun?.unresolved.length ?? 0,
       });
       const violationsOf = (state: VersionState) => countViolations(factsOf(state));
+      /** 版に残った失敗（作り直しに渡す名前付きの失敗と、段の走りの出来事の列の失敗の集合の指紋の材料） */
+      const failureSourceOf = (state: VersionState) => ({
+        staticCheckPassed: state.report.staticCheck.passed,
+        correspondenceMisses: state.report.correspondence?.misses ?? [],
+        rejections: state.rejections,
+        unmarked: state.unmarked,
+        mismatches: state.report.testRun?.mismatches ?? [],
+        unresolved: state.report.testRun?.unresolved ?? [],
+        requirementOfTest,
+      });
+      /** 段の走りの出来事の列の失敗の集合の指紋（Issue #746） */
+      const fingerprintOf = (state: VersionState): Promise<string> => failureSetSha256(namedFailuresOf(failureSourceOf(state)));
+      /**
+       * 候補を評価に入れる（④ → B3 → B3' → B4。旗 ids・search-repair の段の走りは、入るときに版の出来事を始め、評価が終われば
+       * 違反の数・指紋・評価の時間を入れる。途中で止まれば未決のまま残る。Issue #746）
+       */
+      const evaluateCandidate = async (
+        declaration: Declaration,
+        made: { readonly origin: SearchVersionOrigin; readonly round: number; readonly parentSeq: number | null; readonly makeRow: number },
+      ): Promise<{ readonly state: VersionState; readonly event: Mutable<SearchVersionEvent> | undefined }> => {
+        if (searchLogOn && searchLog === undefined) {
+          searchLog = { events: [], bestSeq: null, rewritten: false, stopReason: null, openEvaluate: null, openRecount: null, openRound: null };
+        }
+        const log = searchLog;
+        if (log === undefined) return { state: await evaluateVersion(declaration, true), event: undefined };
+        const makeRows: StageRowSpan | null = made.makeRow < 0 ? null : { first: made.makeRow, last: made.makeRow };
+        const event: Mutable<SearchVersionEvent> = {
+          kind: "version",
+          seq: log.events.length,
+          origin: made.origin,
+          round: made.round,
+          declarationSha256: await sha256Hex(declaration.source),
+          parentSeq: made.parentSeq,
+          comparedSeq: null,
+          violations: null,
+          failureSetSha256: null,
+          adoption: "pending",
+          discarded: null,
+          makeMs: spanMs(makeRows),
+          evaluateMs: null,
+          makeRows,
+          evaluateRows: null,
+        };
+        log.events.push(event);
+        if (made.origin === "repair" && log.openRound !== null) log.openRound.event.result = { kind: "version", versionSeq: event.seq };
+        log.openEvaluate = { event, first: stages.length };
+        const state = await evaluateVersion(declaration, true);
+        event.evaluateRows = rowsFrom(log.openEvaluate.first);
+        event.evaluateMs = spanMs(event.evaluateRows);
+        log.openEvaluate = null;
+        event.violations = violationsOf(state);
+        event.failureSetSha256 = await fingerprintOf(state);
+        return { state, event };
+      };
+      /** 段の走りの出来事の列に数え直しの出来事を始める（列が無ければ何もしない。Issue #746） */
+      const beginRecount = (state: VersionState, cause: SearchRecountRecord["cause"]): Mutable<SearchRecountEvent> | undefined => {
+        const log = searchLog;
+        if (log === undefined) return undefined;
+        const event: Mutable<SearchRecountEvent> = {
+          kind: "recount",
+          seq: log.events.length,
+          cause,
+          declarationSha256: state.report.declarationSha256,
+          beforeSeq: log.bestSeq,
+          violations: null,
+          failureSetSha256: null,
+          rows: null,
+        };
+        log.events.push(event);
+        log.openRecount = { event, first: stages.length };
+        return event;
+      };
       /** 一番良い版の違反の数を、確定した文脈でコードの検査（B3・B4）だけで数え直す（判定・点検を呼ばない） */
-      const recount = async (state: VersionState, cause: SearchRecountRecord["cause"]): Promise<VersionState> => {
+      const recount = async (
+        state: VersionState,
+        cause: SearchRecountRecord["cause"],
+        begun?: Mutable<SearchRecountEvent>,
+      ): Promise<VersionState> => {
+        const event = begun ?? beginRecount(state, cause);
         // 静的チェックの結果は、宣言のバイト列が同じときだけ引き継ぐ（違えば流し直す）
         const checked = await staticCheckForRecount(state.report, (declaration) =>
           runStage("static-check", async () => runStaticCheck(declaration)),
@@ -1932,17 +2099,32 @@ async function runV11a(
           };
         }
         recounts.push({ cause, declarationSha256: next.report.declarationSha256, violations: violationsOf(next) });
+        if (event !== undefined && searchLog !== undefined && searchLog.openRecount !== null) {
+          event.rows = rowsFrom(searchLog.openRecount.first);
+          searchLog.openRecount = null;
+          event.declarationSha256 = next.report.declarationSha256;
+          event.violations = violationsOf(next);
+          event.failureSetSha256 = await fingerprintOf(next);
+          searchLog.bestSeq = event.seq;
+        }
         return next;
       };
       /** 候補を採る：候補の内の unmarked を確定へ移し、文脈が変われば一番良い版を数え直す */
       const commit = async (state: VersionState): Promise<VersionState> => {
         searchBestSha256 = state.report.declarationSha256;
         if (state.unmarked.length === 0) return state;
+        // 段の走りの出来事の列は、持ち越しの更新から数え直しの出来事に含める（持ち越しの更新で止まれば数え直しが未決のまま残る）
+        const event = beginRecount(state, "adopted");
         for (const requirementId of state.unmarked) addCarry(requirementId, { origin: "decl-check", reason: "unmarked" });
         await refreshCarry();
-        return recount(state, "adopted");
+        return recount(state, "adopted", event);
       };
-      const recordVersion = (origin: SearchVersionOrigin, state: VersionState, adopted: boolean): void => {
+      const recordVersion = (
+        origin: SearchVersionOrigin,
+        state: VersionState,
+        adopted: boolean,
+        event: Mutable<SearchVersionEvent> | undefined,
+      ): void => {
         versions.push({
           origin,
           declarationSha256: state.report.declarationSha256,
@@ -1950,25 +2132,41 @@ async function runV11a(
           adopted,
           discarded: adopted ? null : { unmarked: [...state.unmarked], rejections: state.rejections.length },
         });
+        if (event === undefined || searchLog === undefined) return;
+        // 比べた一番良い状態（write は比べる相手が無いので null。採ったときの一番良い状態の更新より前に読む）
+        event.comparedSeq = origin === "write" ? null : searchLog.bestSeq;
+        event.adoption = adopted ? "adopted" : "not-adopted";
+        event.discarded = adopted ? null : { unmarked: state.unmarked.length, rejections: state.rejections.length };
+        if (adopted) searchLog.bestSeq = event.seq;
       };
 
       // B1 の版は比べる相手が無いので一番良い版になる（その unmarked も確定へ移す）
-      const first = await evaluateVersion({ source: written.declaration }, true);
-      recordVersion("write", first, true);
-      let best = await commit(first);
+      const first = await evaluateCandidate(
+        { source: written.declaration },
+        { origin: "write", round: 0, parentSeq: null, makeRow: lastOkStageIndex("write") },
+      );
+      recordVersion("write", first.state, true, first.event);
+      let best = await commit(first.state);
       let rounds = 0;
       let rewritesUsed = 0;
       let notAdopted = 0;
       let rewritten = false;
       /** 候補を一番良い版と同じ確定の文脈の数で比べ、厳密に良ければ採る。採れなければ捨てる（状態は確定へ移さない） */
-      const consider = async (origin: SearchVersionOrigin, candidate: VersionState): Promise<void> => {
+      const consider = async (
+        origin: SearchVersionOrigin,
+        evaluated: { readonly state: VersionState; readonly event: Mutable<SearchVersionEvent> | undefined },
+      ): Promise<void> => {
+        const candidate = evaluated.state;
         const adopted = isStrictlyBetter(violationsOf(candidate), violationsOf(best));
-        recordVersion(origin, candidate, adopted);
+        recordVersion(origin, candidate, adopted, evaluated.event);
         notAdopted = notAdoptedAfter(notAdopted, adopted);
         if (adopted) best = await commit(candidate);
       };
+      /** 段の走りの出来事の列の、今の一番良い状態の `seq`（列が無ければ null） */
+      const bestSeqNow = (): number | null => searchLog?.bestSeq ?? null;
 
       while (!isSettled(best)) {
+        if (searchLog !== undefined) closeSearchRound(searchLog, false);
         const action = stagnationAction(notAdopted, rewritesUsed, {
           stagnationRepeats: limits.stagnationRepeats,
           rewrites: SEARCH_REPAIR_BUDGET.rewrites,
@@ -1991,15 +2189,9 @@ async function runV11a(
           rewritesUsed += 1;
           notAdopted = 0;
           rewritten = true;
-          const failures = namedFailuresOf({
-            staticCheckPassed: best.report.staticCheck.passed,
-            correspondenceMisses: best.report.correspondence?.misses ?? [],
-            rejections: best.rejections,
-            unmarked: best.unmarked,
-            mismatches: best.report.testRun?.mismatches ?? [],
-            unresolved: best.report.testRun?.unresolved ?? [],
-            requirementOfTest,
-          });
+          if (searchLog !== undefined) searchLog.rewritten = true;
+          const rewriteParent = bestSeqNow();
+          const failures = namedFailuresOf(failureSourceOf(best));
           const rewrite = await runStageOk("write", () =>
             runWriteV11a({
               list: writeList,
@@ -2013,7 +2205,13 @@ async function runV11a(
               ...requiredValidationsFor(contextNow().suite),
             }),
           );
-          await consider("rewrite", await evaluateVersion({ source: rewrite.declaration }, true));
+          await consider(
+            "rewrite",
+            await evaluateCandidate(
+              { source: rewrite.declaration },
+              { origin: "rewrite", round: rounds, parentSeq: rewriteParent, makeRow: stages.length - 1 },
+            ),
+          );
           continue;
         }
         if (rounds >= Math.min(limits.repairRoundTrips, SEARCH_REPAIR_BUDGET.repairRoundTrips)) {
@@ -2045,6 +2243,7 @@ async function runV11a(
             returnToPlan = true;
             for (const testId of arbitration.returnToPlan) if (!returnedToPlan.includes(testId)) returnedToPlan.push(testId);
             stopReason = "unresolved";
+            if (searchLog?.openRound != null) searchLog.openRound.event.result = { kind: "return-to-plan" };
             return true;
           }
           // B5' の棄却と B6 の網羅の持ち越しは今までどおり（候補の採否に依らず確定）。文脈が変われば一番良い版を数え直す
@@ -2082,6 +2281,30 @@ async function runV11a(
         });
         /** 往復の記録の追加の場所の数（旗 `v12.ids` の走りだけ欄を持つ。Issue #667） */
         const additionsField = located.additions === undefined ? {} : { additions: located.additions.length };
+        // 段の走りの出来事の列に往復の出来事を始める（候補の親はこの時点の一番良い状態。Issue #746）
+        const roundParent = bestSeqNow();
+        if (searchLog !== undefined) {
+          const fields = canRepairFields(located);
+          const event: Mutable<SearchRoundEvent> = {
+            kind: "round",
+            seq: searchLog.events.length,
+            round: rounds,
+            hand: fields ? "field-repair" : "repair",
+            locations: located.locations.length,
+            unlocated: fields ? 0 : located.unlocated.length,
+            additions: located.additions?.length ?? 0,
+            result: { kind: "pending" },
+            durationMs: null,
+            rows: null,
+          };
+          searchLog.events.push(event);
+          searchLog.openRound = { event, first: stages.length, requestDone: false };
+        }
+        /** 修復の要求が返ったことを往復の出来事に入れ、作る段の行の添字を返す */
+        const requestReturned = (): number => {
+          if (searchLog?.openRound != null) searchLog.openRound.requestDone = true;
+          return stages.length - 1;
+        };
         if (canRepairFields(located)) {
           const answer = await runStageOk("repair", () =>
             runFieldRepair({
@@ -2094,6 +2317,7 @@ async function runV11a(
               gateway,
             }),
           );
+          const fieldRow = requestReturned();
           for (const dispute of answer.disputes) disputes.push(dispute);
           for (const item of answer.rejected) rejected.push(item);
           const merged = mergeReplacements(best.report.declaration.source, answer.replacements, located.spans, located.additions);
@@ -2104,9 +2328,15 @@ async function runV11a(
             refused: merged.ok ? null : merged.refusal,
             ...additionsField,
           });
+          if (!merged.ok && searchLog?.openRound != null) {
+            searchLog.openRound.event.result = { kind: "refused", refusal: mergeRefusalClassOf(merged.refusal) };
+          }
           if (await arbitrate(answer.disputes, merged.ok ? { source: merged.source } : best.report.declaration)) break;
           if (merged.ok) {
-            await consider("repair", await evaluateVersion({ source: merged.source }, true));
+            await consider(
+              "repair",
+              await evaluateCandidate({ source: merged.source }, { origin: "repair", round: rounds, parentSeq: roundParent, makeRow: fieldRow }),
+            );
           } else {
             // 断ったマージは採れない版に数える（版を作らない）
             notAdopted = notAdoptedAfter(notAdopted, false);
@@ -2137,10 +2367,19 @@ async function runV11a(
             ...requiredValidationsFor(context.suite),
           }),
         );
+        const repairRow = requestReturned();
         for (const dispute of step.disputes) disputes.push(dispute);
         for (const item of step.rejected) rejected.push(item);
         if (await arbitrate(step.disputes, step.declaration)) break;
-        await consider("repair", await evaluateVersion(step.declaration, true));
+        await consider(
+          "repair",
+          await evaluateCandidate(step.declaration, { origin: "repair", round: rounds, parentSeq: roundParent, makeRow: repairRow }),
+        );
+      }
+      // 段の走りの出来事の列：最後の往復を ⑦ の段の行の前で閉じ、止めた理由を入れる（Issue #746）
+      if (searchLog !== undefined) {
+        closeSearchRound(searchLog, false);
+        searchLog.stopReason = stopReason;
       }
       final = best;
       stalledFrom = best;
