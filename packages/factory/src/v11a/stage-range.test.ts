@@ -39,6 +39,7 @@ import { deriveCarryOver } from "./carry-over.js";
 import { nameTableSha256 } from "./names.js";
 import { undeterminedJudgeAdvice } from "./run.js";
 import { UPSTREAM_LEDGER_BOUNDARY } from "../v12/ledger.js";
+import type { StageSearchRepairLog } from "../v12/search-repair.js";
 
 // ── 段の表 ─────────────────────────────────────────────────────────
 
@@ -456,6 +457,195 @@ describe("v1.2 の段の走りの別名と記録の欄（Issue #637）", () => {
     expect([STAGE_RUN_RECORD_FILE, stageCheckpointFile("t1-t2"), stageCheckpointFile("t2-b1"), DIAGNOSTICS_TABLE_ROUNDS_FILE]).not.toContain(STAGE_DECLARATION_FILE);
     // ⑦ を流していない結果（欄が無い）は v12 を渡しても足さない
     expect(Object.keys(recordOf(outcomeOf(), range, { testSpecInRange: false }))).not.toContain("declaration");
+  });
+});
+
+describe("段の走りの記録の search_repair（探索の出来事の列。Issue #746）", () => {
+  const CONDITIONS = {
+    model: "m",
+    effort: "high",
+    documents: [],
+    judge: { primary: "llm", fallback: null },
+    prompt_version: "v1.1a",
+    vocabulary_version: "v1",
+    contract_version: "v0.2",
+    factory_version: "0.0.0",
+    spec_engine_version: "0.0.0",
+    budget_usd: 0.3,
+    deadline_ms: 600_000,
+    timeout_ms: null,
+  } as const;
+  const range = { start: "write", end: "judge" } as const;
+  const recordOf = (outcome: StageRunOutcome, v12?: { testSpecInRange: boolean }) =>
+    buildStageRunRecord({
+      range,
+      input: null,
+      planSha256: PLAN_SHA,
+      sourceSha256: SOURCE_SHA,
+      checkpoints: [],
+      conditions: CONDITIONS,
+      outcome,
+      exitCode: 1,
+      ...(v12 === undefined ? {} : { v12 }),
+    });
+  const SENTINEL = "SENTINEL-746";
+  const sha = "a".repeat(64);
+  /** 番兵を許していない欄に混ぜた出来事の列（型の外の欄・違反の外の欄・往復の結果の外の欄） */
+  const log = (): StageSearchRepairLog =>
+    ({
+      events: [
+        {
+          kind: "version",
+          seq: 0,
+          origin: "write",
+          round: 0,
+          declarationSha256: sha,
+          parentSeq: null,
+          comparedSeq: null,
+          violations: {
+            kind: "counted",
+            declarationSha256: sha,
+            breakdown: { "correspondence-miss": 0, "decl-rejection": 1, "decl-unmarked": 0, "test-mismatch": 2, "test-unresolved": 0 },
+            knownTotal: 3,
+            unknown: null,
+            requirementId: SENTINEL,
+          },
+          failureSetSha256: "b".repeat(64),
+          adoption: "adopted",
+          discarded: null,
+          makeMs: 1000,
+          evaluateMs: 200,
+          makeRows: { first: 0, last: 0 },
+          evaluateRows: { first: 1, last: 4 },
+          requirementId: SENTINEL,
+          unmarked: [SENTINEL],
+        },
+        {
+          kind: "round",
+          seq: 1,
+          round: 1,
+          hand: "field-repair",
+          locations: 1,
+          unlocated: 0,
+          additions: 0,
+          result: { kind: "refused", refusal: "bytes", message: SENTINEL },
+          durationMs: null,
+          rows: { first: 5, last: 5 },
+          problems: [{ message: SENTINEL }],
+        },
+        {
+          kind: "recount",
+          seq: 2,
+          cause: "coverage",
+          declarationSha256: sha,
+          beforeSeq: 0,
+          violations: null,
+          failureSetSha256: null,
+          rows: null,
+          testId: SENTINEL,
+        },
+        {
+          kind: "version",
+          seq: 3,
+          origin: "repair",
+          round: 1,
+          declarationSha256: sha,
+          parentSeq: 0,
+          comparedSeq: null,
+          violations: null,
+          failureSetSha256: null,
+          adoption: "pending",
+          discarded: null,
+          makeMs: 3000,
+          evaluateMs: null,
+          makeRows: { first: 6, last: 6 },
+          evaluateRows: { first: 7, last: 8 },
+        },
+      ],
+      bestSeq: 0,
+      rewritten: false,
+      stop: { reason: "stopped", stage: "decl-check", kind: "malformed" },
+    }) as unknown as StageSearchRepairLog;
+
+  it("v12 を渡す記録だけ、探索の出来事の列を末尾の search_repair に足す。v1.1a の記録と、列の無い結果はバイト列で同じ", () => {
+    const withLog = outcomeOf({ searchRepair: log() });
+    expect(stageJsonText(recordOf(withLog))).toBe(stageJsonText(recordOf(outcomeOf())));
+    const plain = recordOf(outcomeOf(), { testSpecInRange: false });
+    const v12 = recordOf(withLog, { testSpecInRange: false });
+    expect(Object.keys(v12)).toEqual([...Object.keys(plain), "search_repair"]);
+    expect(stageJsonText({ ...v12, search_repair: undefined })).toBe(stageJsonText(plain));
+  });
+
+  it("投影は許した欄（数・列挙値・SHA-256・seq・ミリ秒・段の行の添字）だけを写し、未決は pending・null のまま。型の外の欄の番兵は出ない", () => {
+    const projected = recordOf(outcomeOf({ searchRepair: log() }), { testSpecInRange: false })["search_repair"];
+    expect(JSON.stringify(projected)).not.toContain(SENTINEL);
+    expect(projected).toEqual({
+      events: [
+        {
+          seq: 0,
+          event: "version",
+          origin: "write",
+          round: 0,
+          declaration_sha256: sha,
+          parent_seq: null,
+          compared_seq: null,
+          violations: {
+            kind: "counted",
+            declaration_sha256: sha,
+            breakdown: { "correspondence-miss": 0, "decl-rejection": 1, "decl-unmarked": 0, "test-mismatch": 2, "test-unresolved": 0 },
+            known_total: 3,
+            unknown: null,
+          },
+          failure_set_sha256: "b".repeat(64),
+          adoption: "adopted",
+          discarded: null,
+          make_ms: 1000,
+          evaluate_ms: 200,
+          stage_rows: { make: { first: 0, last: 0 }, evaluate: { first: 1, last: 4 } },
+        },
+        {
+          seq: 1,
+          event: "round",
+          round: 1,
+          hand: "field-repair",
+          locations: 1,
+          unlocated: 0,
+          additions: 0,
+          result: { kind: "refused", refusal: "bytes" },
+          duration_ms: null,
+          stage_rows: { first: 5, last: 5 },
+        },
+        {
+          seq: 2,
+          event: "recount",
+          cause: "coverage",
+          declaration_sha256: sha,
+          before_seq: 0,
+          violations: null,
+          failure_set_sha256: null,
+          stage_rows: null,
+        },
+        {
+          seq: 3,
+          event: "version",
+          origin: "repair",
+          round: 1,
+          declaration_sha256: sha,
+          parent_seq: 0,
+          compared_seq: null,
+          violations: null,
+          failure_set_sha256: null,
+          adoption: "pending",
+          discarded: null,
+          make_ms: 3000,
+          evaluate_ms: null,
+          stage_rows: { make: { first: 6, last: 6 }, evaluate: { first: 7, last: 8 } },
+        },
+      ],
+      best_seq: 0,
+      rewritten: false,
+      stop: { reason: "stopped", stage: "decl-check", kind: "malformed" },
+    });
   });
 });
 

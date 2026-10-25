@@ -37,7 +37,7 @@ import { createFakeJudge } from "./judge-fake.js";
 import type { JudgeAnswer } from "./judge.js";
 import { FakeLlmSchemaMismatchError, uncheckedBecause, type RecordedCall } from "./llm-fake.js";
 import { createOpenAiLlmClient } from "./openai.js";
-import { FIELD_REPAIR_SCHEMA_NAME } from "./v12/stages/field-repair.js";
+import { FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "./v12/stages/field-repair.js";
 import {
   ENVELOPE_SCHEMA,
   ENVELOPE_SCHEMA_NAME,
@@ -60,6 +60,7 @@ import {
   stageJsonText,
   stageOutputDigest,
   V11A_ARTIFACT_NAMES,
+  V12_SEARCH_REPAIR_ARTIFACT_NAME,
   verifyStageInput,
   type StageInputCode,
 } from "./v11a/bundle-v11a.js";
@@ -106,6 +107,9 @@ import {
   testSpecSchemaOf,
 } from "./v11a/stages/test-spec.js";
 import * as testSpecModule from "./v11a/stages/test-spec.js";
+import * as declCheckStage from "./v11a/stages/decl-check.js";
+import { DECL_CHECK_SCHEMA_NAME } from "./v11a/stages/decl-check.js";
+import { NAMED_FAILURE_MESSAGES } from "./v12/search-repair.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME, semanticCheckRuleDefinitionsOf } from "./v11a/stages/semantic-check.js";
 import { structuralReadingText } from "./v12/structural-meanings.js";
 import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
@@ -127,7 +131,7 @@ import * as runModule from "./run.js";
 import type { Judge, JudgeRequest } from "./judge.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "./llm.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
-import { ATTEMPT_KEYS, RETRY_KEYS } from "./record.js";
+import { ATTEMPT_KEYS, FAILURE_KINDS, RETRY_KEYS, STAGE_IDS } from "./record.js";
 import { DESIGN_OUTPUT_MAPPED, SOURCE_TEXT, recordedRun, structured } from "./__tests__/run.js";
 
 interface NodeFs {
@@ -2828,8 +2832,8 @@ describe("v1.2 の段の走りが ⑦ まで流したとき、判定した宣言
     const record = await stageRecordOf(dir);
     expect(record["stage_judge_verdict"]).toBe("full");
     expect(record["declaration"]).toEqual({ file: STAGE_DECLARATION_FILE, sha256: await sha256Hex(text), static_check_passed: true });
-    // 既存の欄の並びは今のまま（v1.2 の欄の末尾に宣言と検証の数を足す）
-    expect(Object.keys(record).slice(-3)).toEqual(["v12_calls", "declaration", "verification"]);
+    // 既存の欄の並びは今のまま（v1.2 の欄の末尾に宣言と検証の数を足す。その後ろに探索の出来事の列。Issue #746 で末尾に 1 つ足した）
+    expect(Object.keys(record).slice(-4)).toEqual(["v12_calls", "declaration", "verification", "search_repair"]);
     const verification = record["verification"] as Record<string, unknown>;
     const v11a = await readJson(`${whole}/${V11A_ARTIFACT_NAMES.verification}`);
     expect(verification).toEqual({
@@ -3502,6 +3506,8 @@ async function runStageCli(input: {
   readonly source?: string;
   /** 経路（省けば v1.1a。Issue #637） */
   readonly pipeline?: "v1.1a" | "v1.2";
+  /** 偽物の時計（省けば 0 のまま）と、要求ごとに時計を進める口（出来事で進める。時刻を読む回数では進めない。Issue #746） */
+  readonly clock?: { readonly now: () => number; readonly onRequest: (schemaName: string) => void };
 }) {
   const planPath = `${input.dir}-plan.json`;
   const planText = JSON.stringify(input.envelope ?? (await v11aEnvelope()));
@@ -3513,10 +3519,12 @@ async function runStageCli(input: {
     async callStructured<T>(request: LlmStructuredRequest) {
       order.push(requestText(request));
       structuredRequests.push(request);
+      input.clock?.onRequest(request.schemaName);
       return keepingErrors(clientErrors, () => recording.client.callStructured<T>(request));
     },
     async callWithTools(request) {
       order.push(requestText(request));
+      input.clock?.onRequest("tools");
       return keepingErrors(clientErrors, () => recording.client.callWithTools(request));
     },
   };
@@ -3544,7 +3552,7 @@ async function runStageCli(input: {
     loadDocuments: async () => FIXTURE_DOCUMENTS,
     makeClient,
     makeLlmJudge: () => v11aJudge(),
-    now: () => 0,
+    now: input.clock?.now ?? (() => 0),
     log: (line) => lines.push(line),
     logError: (line) => errors.push(line),
   });
@@ -4147,5 +4155,792 @@ describe("段ごとの effort の口（`--pipeline v1.2` の `--stage-effort`。
     expect(readFile).not.toHaveBeenCalled();
     expect(writeFile).not.toHaveBeenCalled();
     expect(makeDirectory).not.toHaveBeenCalled();
+  });
+});
+
+// ── 段の走りの探索の出来事の列（旗 v12.ids・v12.search-repair が on の段の走りの `search_repair`。Issue #746）──────────────────────
+//
+// 偽物の LLM・判定と、出来事（要求）で進める偽物の時計で閉じる（時刻を読む回数では進めない）。時計は B1 の要求で 1000・B3' で 200・
+// 道具付きの直す段で 3000・欄だけの直しで 500・ほかの構造化出力で 100 ミリ秒進み、コードの段の中では進まない。だから出来事の時間は、
+// その出来事が含んだ段の行の `duration_ms` の和に等しい。期待の違反の数と失敗の集合は、台本（偽物の検証の結果）から手で組む。
+
+describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-repair の段の走りの search_repair。Issue #746）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** C7 で R4 の 3 本が不一致になる宣言（率の式を変える） */
+  const R4_BAD = V11A_YAML.replace("expression: base * 2", "expression: base * 3");
+  /** C7 で R3 の境界の 1 本が不一致になる宣言（closeItem の条件を変える。失敗は場所に写るので欄だけの直しへ流れる） */
+  const W1 = V11A_YAML.replace("when: amount > 0", "when: amount > 1");
+  /** 静的チェックに落ちる宣言 */
+  const BROKEN = `${V11A_YAML}entities: [\n`;
+  /** B3 で R3 の操作が結び付かない宣言（B3' を流さない） */
+  const MISS = V11A_YAML.replace("  - name: closeItem", "  - name: closeIt");
+  const QUOTE_746 = "全体の率";
+  /** 旗 ids の走りの試験 ID（T2 の場合の順にコードが振る `case:N`。R2 は構造の要件で T2 に書かない） */
+  const caseIdOf = (name: string): string => {
+    const tests = (v11aTestSpec() as { readonly tests: readonly { readonly id: string; readonly target: { readonly requirementId: string } }[] }).tests.filter(
+      (test) => test.target.requirementId !== "R2",
+    );
+    const index = tests.findIndex((test) => test.id === name);
+    expect(index, name).toBeGreaterThanOrEqual(0);
+    return `case:${String(index + 1)}`;
+  };
+  const R4_CASES = ["r4-normal", "r4-abnormal", "r4-boundary"].map(caseIdOf);
+  const R3_CASES = ["r3-normal", "r3-abnormal", "r3-boundary"].map(caseIdOf);
+  const R1_CASES = ["r1-normal", "r1-abnormal", "r1-boundary"].map(caseIdOf);
+  const textOf746 = (id: string): string => V11A_BASE_LIST.requirements.find((requirement) => requirement.id === id)?.text ?? "";
+  /** B3' の判定（`ids` の要件に、`rejects` だけ拒否。拒否の引用は要件の文） */
+  const judged = (ids: readonly string[], rejects: readonly string[] = []): RecordedCall =>
+    structured({
+      judgments: ids.map((requirementId) =>
+        rejects.includes(requirementId)
+          ? { requirementId, verdict: "reject", kind: "mismatch", quote: textOf746(requirementId) }
+          : { requirementId, verdict: "accept", kind: null, quote: null },
+      ),
+    });
+  const ALL = ["R1", "R2", "R3", "R4"] as const;
+  const repairTo = (yaml: string, disputes: readonly string[] = []): RecordedCall => ({
+    kind: "tools",
+    response: { kind: "done", declaration: { declaration: yaml, disputes: disputes.map((testId) => ({ testId, quote: QUOTE_746 })) }, usage: undefined },
+  });
+  const overturn = (testIds: readonly string[]): RecordedCall =>
+    structured({ decisions: testIds.map((testId) => ({ testId, verdict: "overturn", reason: "期待が誤り", quote: QUOTE_746 })) });
+  const closeBody = (expression: string, extra: readonly string[] = []): string =>
+    ["- name: closeItem", "  entity: item", "  kind: update", "  set:", "    kind: beta", `  when: ${expression}`, ...extra].join("\n");
+  const fieldTo = (expression: string, disputes: readonly string[] = [], extra: readonly string[] = []): RecordedCall =>
+    structured({
+      replacements: [{ location: "action:item.closeItem", element: closeBody(expression, extra) }],
+      disputes: disputes.map((testId) => ({ testId, quote: QUOTE_746 })),
+    });
+  const HUGE = [`  # ${"x".repeat(AGENT_LIMITS.declarationBytes)}`];
+  /**
+   * 目印の行（`# unmark:R1,R2`・`# reject:R4`）を持つ宣言だけ、B3' を偽物が返す（目印の要件を unmarked・拒否にし、ほかは受理。呼び出しなし）。
+   * ほかの宣言は本物の段
+   */
+  const markedDeclCheck = (): void => {
+    const original = declCheckStage.runDeclCheck;
+    vi.spyOn(declCheckStage, "runDeclCheck").mockImplementation(async (input) => {
+      const unmarkedIds = /# unmark:([A-Z0-9,]+)/u.exec(input.declaration.source)?.[1]?.split(",") ?? [];
+      const rejectedIds = /# reject:([A-Z0-9,]+)/u.exec(input.declaration.source)?.[1]?.split(",") ?? [];
+      if (unmarkedIds.length === 0 && rejectedIds.length === 0) return original(input);
+      const ids = input.list.requirements.map((requirement) => requirement.id);
+      return {
+        ok: true,
+        value: {
+          declarationSha256: await sha256Hex(input.declaration.source),
+          judgments: ids.map((requirementId) =>
+            unmarkedIds.includes(requirementId)
+              ? { requirementId, verdict: "unmarked" as const }
+              : rejectedIds.includes(requirementId)
+                ? { requirementId, verdict: "reject" as const, kind: "mismatch" as const, quote: textOf746(requirementId) }
+                : { requirementId, verdict: "accept" as const, kind: null, quote: null },
+          ),
+          targets: ids.filter((id) => !unmarkedIds.includes(id)),
+          unmarked: ids.filter((id) => unmarkedIds.includes(id)),
+        },
+      };
+    });
+  };
+
+  /** 出来事で進める偽物の時計（時刻を読む回数では進まない） */
+  const COSTS: Readonly<Record<string, number>> = { [WRITE_V11A_SCHEMA_NAME]: 1000, [DECL_CHECK_SCHEMA_NAME]: 200, tools: 3000, [FIELD_REPAIR_SCHEMA_NAME]: 500 };
+  const eventClock = () => {
+    let now = 0;
+    return { now: () => now, onRequest: (schemaName: string) => (now += COSTS[schemaName] ?? 100) };
+  };
+
+  // 同じ台本の上流（C1〜T2）を 1 回流し、t2-b1 の checkpoint を共有する
+  let checkpoint746 = "";
+  beforeAll(async () => {
+    const whole = `${directory}/sr746-whole`;
+    await runV11aCli({ dir: whole, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    checkpoint746 = `${whole}/${stageCheckpointFile("t2-b1")}`;
+  });
+  const HEAD_746 = (): RecordedCall[] => [...v12Head(), structured(v11aJudgments())].slice(0, 6);
+
+  type Json = Record<string, any>;
+  /** 範囲 write..judge の段の走りを流し、CLI が書いた stage-run.json を読む */
+  async function stageRun746(name: string, calls: readonly RecordedCall[]) {
+    const dir = `${directory}/sr746-${name}`;
+    const run = await runStageCli({ dir, args: ["--stage-start", "write", "--stage-input", checkpoint746], calls, pipeline: "v1.2", clock: eventClock() });
+    expect(run.errors.filter((line) => line.startsWith("stage-input:")), name).toEqual([]);
+    const text = await fs.readFile(`${dir}/${STAGE_RUN_RECORD_FILE}`, "utf8");
+    const record = JSON.parse(text) as Json;
+    return { run, text, record, search: record["search_repair"] as Json | undefined, stages: record["stages"] as readonly Json[] };
+  }
+  /** 同じ台本の一気通貫（納品物の search-repair.json と照らす比較元） */
+  async function wholeRun746(name: string, calls: readonly RecordedCall[]) {
+    const dir = `${directory}/sr746-whole-${name}`;
+    const run = await runV11aCli({ dir, calls: [...HEAD_746(), ...calls], pipeline: "v1.2" });
+    const searchFile = JSON.parse(await fs.readFile(`${dir}/${V12_SEARCH_REPAIR_ARTIFACT_NAME}`, "utf8")) as Json;
+    return { run, searchFile };
+  }
+
+  /** 違反の数の期待値（種類ごとの内訳から組む。不明は null で和に入れない） */
+  const counted = (
+    sha: string,
+    counts: { readonly miss?: number; readonly rej?: number | null; readonly unm?: number | null; readonly mis?: number; readonly unr?: number },
+    unknown: string | null = null,
+  ) => {
+    const breakdown = {
+      "correspondence-miss": counts.miss ?? 0,
+      "decl-rejection": counts.rej === undefined ? 0 : counts.rej,
+      "decl-unmarked": counts.unm === undefined ? 0 : counts.unm,
+      "test-mismatch": counts.mis ?? 0,
+      "test-unresolved": counts.unr ?? 0,
+    };
+    return {
+      kind: "counted",
+      declaration_sha256: sha,
+      breakdown,
+      known_total: Object.values(breakdown).reduce<number>((sum, value) => sum + (value ?? 0), 0),
+      unknown: unknown === null ? null : { reason: unknown, declaration_sha256: sha },
+    };
+  };
+  type Tuple = readonly [string, string | null, string | null];
+  /** 失敗の集合の指紋の期待値（(種類, 試験 ID, 要件 ID) の組を JSON の文字列の順に並べた配列の JSON の SHA-256） */
+  const fingerprint = (tuples: readonly Tuple[]): Promise<string> =>
+    sha256Hex(`[${tuples.map((tuple) => JSON.stringify(tuple)).sort().join(",")}]`);
+  const rej = (id: string): Tuple => ["decl-rejection", null, id];
+  const unm = (id: string): Tuple => ["decl-unmarked", null, id];
+  const mis = (testId: string, id: string): Tuple => ["test-mismatch", testId, id];
+
+  /** 版・数え直し・往復の要点（seq の順） */
+  const outline = (search: Json): readonly unknown[] =>
+    (search["events"] as readonly Json[]).map((event) =>
+      event["event"] === "version"
+        ? ["version", event["seq"], event["origin"], event["round"], event["parent_seq"], event["adoption"]]
+        : event["event"] === "recount"
+          ? ["recount", event["seq"], event["cause"], event["before_seq"]]
+          : ["round", event["seq"], event["round"], event["hand"], event["result"]],
+    );
+  const eventsOf = (search: Json, kind: string): readonly Json[] => (search["events"] as readonly Json[]).filter((event) => event["event"] === kind);
+
+  /** 区間の段の名前（添字の区間を記録の stages に当てる） */
+  const namesIn = (stages: readonly Json[], span: Json | null): readonly string[] =>
+    span === null ? [] : stages.slice(span["first"] as number, (span["last"] as number) + 1).map((stage) => stage["stage"] as string);
+  const msIn = (stages: readonly Json[], span: Json | null): number | null =>
+    span === null ? null : stages.slice(span["first"] as number, (span["last"] as number) + 1).reduce((sum, stage) => sum + (stage["duration_ms"] as number), 0);
+
+  /**
+   * (8) の構造の検査：各出来事の区間が記録の stages の実際の段に当たり、上位の区間（初版・作り直しの作る区間と評価する区間・その数え直し・
+   * 往復）が段の行の 0 から隙間も重なりも無く並び、⑦ まで届いた走りは次の行が judge。時間は区間の duration_ms の和
+   */
+  function checkStructure(record: Json): void {
+    const search = record["search_repair"] as Json;
+    const stages = record["stages"] as readonly Json[];
+    const events = search["events"] as readonly Json[];
+    events.forEach((event, index) => expect(event["seq"]).toBe(index));
+    const top: Json[] = [];
+    const rounds = events.filter((event) => event["event"] === "round");
+    const insideRound = (span: Json | null): boolean =>
+      span !== null && rounds.some((round) => round["stage_rows"] !== null && round["stage_rows"]["first"] <= span["first"] && span["last"] <= round["stage_rows"]["last"]);
+    for (const event of events) {
+      if (event["event"] === "version") {
+        const make = event["stage_rows"]["make"] as Json | null;
+        const evaluate = event["stage_rows"]["evaluate"] as Json | null;
+        expect(namesIn(stages, make)).toEqual([event["origin"] === "repair" ? "repair" : "write"]);
+        expect(event["make_ms"]).toBe(msIn(stages, make));
+        const names = namesIn(stages, evaluate);
+        expect(names[0]).toBe("static-check");
+        for (const name of names) expect(["static-check", "name-check", "decl-check", "run-tests"]).toContain(name);
+        // 比べた一番良い状態は、比べた版（write でも未決でもない版）だけが持ち、それより前の出来事を指す
+        if (event["origin"] === "write" || event["adoption"] === "pending") expect(event["compared_seq"]).toBeNull();
+        else expect(event["compared_seq"]).toBeLessThan(event["seq"] as number);
+        if (event["adoption"] !== "pending") {
+          expect(event["evaluate_ms"]).toBe(msIn(stages, evaluate));
+          expect(names.at(-1)).toBe(event["violations"]["kind"] === "static-check-failed" ? "static-check" : "run-tests");
+        } else {
+          expect(event["evaluate_ms"]).toBeNull();
+        }
+        if (event["origin"] !== "repair") {
+          if (make !== null) top.push(make);
+          if (evaluate !== null) top.push(evaluate);
+        }
+      } else if (event["event"] === "recount") {
+        for (const name of namesIn(stages, event["stage_rows"])) expect(["static-check", "name-check", "run-tests", "carry-over"]).toContain(name);
+        if (event["stage_rows"] !== null && !insideRound(event["stage_rows"])) top.push(event["stage_rows"]);
+      } else {
+        const span = event["stage_rows"] as Json;
+        expect(namesIn(stages, span)[0]).toBe("repair");
+        if (event["duration_ms"] !== null) expect(event["duration_ms"]).toBe(msIn(stages, span));
+        if (event["result"]["kind"] === "version") {
+          const version = events[event["result"]["version_seq"] as number] as Json;
+          expect(version["round"]).toBe(event["round"]);
+          expect(insideRound(version["stage_rows"]["make"])).toBe(true);
+          expect(version["stage_rows"]["make"]["first"]).toBe(span["first"]);
+        }
+        top.push(span);
+      }
+    }
+    const sorted = [...top].sort((a, b) => (a["first"] as number) - (b["first"] as number));
+    let next = 0;
+    for (const span of sorted) {
+      expect(span["first"]).toBe(next);
+      next = (span["last"] as number) + 1;
+    }
+    if (record["stopped"] === null) {
+      expect(stages[next]?.["stage"]).toBe("judge");
+      expect(next).toBe(stages.length - 1);
+    } else {
+      expect(next).toBe(stages.length);
+    }
+  }
+
+  /** 一気通貫の納品物（search-repair.json）の版・数え直し・往復と、出来事の列の同じ値が一致する（記録の行き先が増えただけ） */
+  function matchesDeliverable(search: Json, file: Json): void {
+    expect(eventsOf(search, "version").map((event) => ({ origin: event["origin"], declaration_sha256: event["declaration_sha256"], violations: event["violations"], adopted: event["adoption"] === "adopted" }))).toEqual(
+      (file["versions"] as readonly Json[]).map((version) => ({ origin: version["origin"], declaration_sha256: version["declaration_sha256"], violations: version["violations"], adopted: version["adopted"] })),
+    );
+    expect(eventsOf(search, "version").map((event) => event["discarded"])).toEqual(
+      (file["versions"] as readonly Json[]).map((version) =>
+        version["discarded"] === null ? null : { unmarked: (version["discarded"]["unmarked"] as readonly string[]).length, rejections: version["discarded"]["rejections"] },
+      ),
+    );
+    expect(eventsOf(search, "recount").map((event) => ({ cause: event["cause"], declaration_sha256: event["declaration_sha256"], violations: event["violations"] }))).toEqual(file["recounts"]);
+    expect(
+      eventsOf(search, "round").map((event) => ({
+        hand: event["hand"],
+        locations: event["locations"],
+        unlocated: event["unlocated"],
+        refused: event["result"]["kind"] === "refused" ? MERGE_REFUSALS[event["result"]["refusal"] as keyof typeof MERGE_REFUSALS] : null,
+        additions: event["additions"],
+      })),
+    ).toEqual(file["rounds"]);
+    expect(search["rewritten"]).toBe(file["rewritten"]);
+    expect((eventsOf(search, "version").concat(eventsOf(search, "recount")).find((event) => event["seq"] === search["best_seq"]) as Json)["declaration_sha256"]).toBe(file["best_declaration_sha256"]);
+  }
+
+  // ── 台本 ─────────────────────────────────────────────────────────
+
+  /** (1) 不採用が続いて停滞で止まる（作り直しを含む）：同じ拒否 R3 と R4 の不一致 3 の版が採れない */
+  const STAGNATION = (): RecordedCall[] => [
+    structured({ declaration: R4_BAD }), judged(ALL, ["R3"]),
+    repairTo(R4_BAD), judged(ALL, ["R3"]),
+    repairTo(R4_BAD), judged(ALL, ["R3"]),
+    structured({ declaration: R4_BAD }), judged(ALL, ["R3"]),
+    repairTo(R4_BAD), judged(ALL, ["R3"]),
+  ];
+  /** (2) 拒否の数が 4 → 3 → 2 → 1 と減って採り、同数の 2 版が採れずに点検 6 を使い切る */
+  const ADOPTING = (): RecordedCall[] => [
+    structured({ declaration: V11A_YAML }), judged(ALL, ["R1", "R2", "R3", "R4"]),
+    repairTo(V11A_YAML), judged(ALL, ["R2", "R3", "R4"]),
+    repairTo(V11A_YAML), judged(ALL, ["R3", "R4"]),
+    repairTo(V11A_YAML), judged(ALL, ["R3"]),
+    repairTo(V11A_YAML), judged(ALL, ["R3"]),
+    repairTo(V11A_YAML), judged(ALL, ["R3"]),
+  ];
+  const UNMARK_R1 = `${V11A_YAML}# unmark:R1\n`;
+  /** (3) 網羅（R4 の試験を棄却）と採用（R1 の unmarked を確定へ移す）の数え直し。どちらも SHA は同じで失敗の集合が変わる */
+  const RECOUNTS = (): RecordedCall[] => [
+    structured({ declaration: R4_BAD }), judged(ALL, ["R1", "R3"]),
+    repairTo(R4_BAD, R4_CASES), overturn(R4_CASES),
+    judged(["R1", "R2", "R3"], ["R1", "R3"]),
+    repairTo(UNMARK_R1),
+  ];
+  /** (4) 同数で集合の違う候補・静的チェックに落ちた版・B3' を流していない版（作り直し）を交ぜて停滞で止める */
+  const SETS = (): RecordedCall[] => [
+    structured({ declaration: V11A_YAML }), judged(ALL, ["R3"]),
+    repairTo(V11A_YAML), judged(ALL, ["R1"]),
+    repairTo(BROKEN),
+    structured({ declaration: MISS }),
+    repairTo(V11A_YAML), judged(ALL, ["R3"]),
+  ];
+  /** (5)(8) 欄だけの直しのマージを断った往復と、R3 の境界の試験の棄却による網羅の数え直しを交ぜる */
+  const MIXED = (): RecordedCall[] => [
+    structured({ declaration: W1 }), judged(ALL),
+    fieldTo("amount > 0", [], HUGE),
+    fieldTo("amount > 0", [R3_CASES[2] as string]), overturn([R3_CASES[2] as string]),
+    judged(["R1", "R2", "R4"]),
+  ];
+  /** (5) 裁定で Plan に戻した往復 */
+  const RETURNED = (): RecordedCall[] => [
+    structured({ declaration: V11A_YAML }), judged(ALL, ["R3"]),
+    repairTo(V11A_YAML, [R4_CASES[0] as string]),
+    structured({ decisions: [{ testId: R4_CASES[0], verdict: "return-to-plan", reason: "", quote: "" }] }),
+  ];
+
+  it("(1) 停滞で止まる走り：版の出どころ・往復の番号・親・採否と往復の出来事が停止の順どおりに並び、各版の違反の全欄と指紋が台本から組んだ値で、最後の一番良い状態の SHA が記録の宣言と一致する", async () => {
+    const { record, search } = await stageRun746("stagnation", STAGNATION());
+    if (search === undefined) throw new Error("探索の出来事の列が無い");
+    expect(record["verification"]["stop_reason"]).toBe("stagnation");
+    // 停止の順（stagnationAction）：直す・直す（2 つ採れない）→ 作り直し（往復を数えない）→ 直す（作り直しのあと 2 つ採れない）→ 止める
+    expect(outline(search)).toEqual([
+      ["version", 0, "write", 0, null, "adopted"],
+      ["round", 1, 1, "repair", { kind: "version", version_seq: 2 }],
+      ["version", 2, "repair", 1, 0, "not-adopted"],
+      ["round", 3, 2, "repair", { kind: "version", version_seq: 4 }],
+      ["version", 4, "repair", 2, 0, "not-adopted"],
+      ["version", 5, "rewrite", 2, 0, "not-adopted"],
+      ["round", 6, 3, "repair", { kind: "version", version_seq: 7 }],
+      ["version", 7, "repair", 3, 0, "not-adopted"],
+    ]);
+    const sha = await sha256Hex(R4_BAD);
+    const expectedFingerprint = await fingerprint([rej("R3"), ...R4_CASES.map((testId) => mis(testId, "R4"))]);
+    for (const version of eventsOf(search, "version")) {
+      expect(version["declaration_sha256"]).toBe(sha);
+      expect(version["violations"]).toEqual(counted(sha, { rej: 1, mis: 3 }));
+      expect(version["failure_set_sha256"]).toBe(expectedFingerprint);
+      expect(version["discarded"]).toEqual(version["adoption"] === "adopted" ? null : { unmarked: 0, rejections: 1 });
+    }
+    expect(search["best_seq"]).toBe(0);
+    expect(search["rewritten"]).toBe(true);
+    expect(search["stop"]).toEqual({ reason: "stagnation", stage: null, kind: null });
+    expect((search["events"] as readonly Json[])[search["best_seq"] as number]?.["declaration_sha256"]).toBe(record["declaration"]["sha256"]);
+    // 往復の出来事の数は記録の往復の数（rewrite を数えない）
+    expect(eventsOf(search, "round")).toHaveLength(record["verification"]["round_trips"] as number);
+    checkStructure(record);
+    matchesDeliverable(search, (await wholeRun746("stagnation", STAGNATION())).searchFile);
+  });
+
+  it("(2) 採用が挟まる走り：採った候補のあとの候補の親は採った版を指し、採らなかった候補のあとも一番良い状態が変わらない。各版の違反は台本の拒否の数（0 に固定・一番良い版の写しは落ちる）", async () => {
+    const { record, search } = await stageRun746("adopting", ADOPTING());
+    if (search === undefined) throw new Error("探索の出来事の列が無い");
+    expect(record["verification"]["stop_reason"]).toBe("limit");
+    expect(outline(search)).toEqual([
+      ["version", 0, "write", 0, null, "adopted"],
+      ["round", 1, 1, "repair", { kind: "version", version_seq: 2 }],
+      ["version", 2, "repair", 1, 0, "adopted"],
+      ["round", 3, 2, "repair", { kind: "version", version_seq: 4 }],
+      ["version", 4, "repair", 2, 2, "adopted"],
+      ["round", 5, 3, "repair", { kind: "version", version_seq: 6 }],
+      ["version", 6, "repair", 3, 4, "adopted"],
+      ["round", 7, 4, "repair", { kind: "version", version_seq: 8 }],
+      ["version", 8, "repair", 4, 6, "not-adopted"],
+      ["round", 9, 5, "repair", { kind: "version", version_seq: 10 }],
+      ["version", 10, "repair", 5, 6, "not-adopted"],
+    ]);
+    const sha = await sha256Hex(V11A_YAML);
+    const rejected = [["R1", "R2", "R3", "R4"], ["R2", "R3", "R4"], ["R3", "R4"], ["R3"], ["R3"], ["R3"]];
+    const versions = eventsOf(search, "version");
+    for (const [index, ids] of rejected.entries()) {
+      expect(versions[index]?.["violations"]).toEqual(counted(sha, { rej: ids.length }));
+      expect(versions[index]?.["failure_set_sha256"]).toBe(await fingerprint(ids.map(rej)));
+    }
+    expect(search["best_seq"]).toBe(6);
+    // 数え直しの無い走りでは、比べた状態は親と同じ
+    for (const version of versions.slice(1)) expect(version["compared_seq"]).toBe(version["parent_seq"]);
+    expect(search["stop"]).toEqual({ reason: "limit", stage: null, kind: null });
+    checkStructure(record);
+    matchesDeliverable(search, (await wholeRun746("adopting", ADOPTING())).searchFile);
+  });
+
+  it("(3) 同じ SHA の数え直し：網羅と採用の数え直しの違反の全欄と指紋が台本から組んだ値で、数え直しのあとに始まる往復の候補の親がその数え直しを指し、同じ往復の候補の親は数え直しの前の状態で、比べた状態（compared_seq）はその数え直し（指紋だけを更新して内訳を古い値のままにする実装・比べた状態を親の写しにする実装は落ちる）", async () => {
+    markedDeclCheck();
+    const { record, search } = await stageRun746("recounts", RECOUNTS());
+    if (search === undefined) throw new Error("探索の出来事の列が無い");
+    expect(record["verification"]["stop_reason"]).toBe("completed");
+    expect(outline(search)).toEqual([
+      ["version", 0, "write", 0, null, "adopted"],
+      ["round", 1, 1, "repair", { kind: "version", version_seq: 3 }],
+      ["recount", 2, "coverage", 0],
+      ["version", 3, "repair", 1, 0, "not-adopted"],
+      ["round", 4, 2, "repair", { kind: "version", version_seq: 5 }],
+      ["version", 5, "repair", 2, 2, "adopted"],
+      ["recount", 6, "adopted", 5],
+    ]);
+    const [bad, unmarked] = [await sha256Hex(R4_BAD), await sha256Hex(UNMARK_R1)];
+    const events = search["events"] as readonly Json[];
+    expect(events[0]?.["violations"]).toEqual(counted(bad, { rej: 2, mis: 3 }));
+    expect(events[0]?.["failure_set_sha256"]).toBe(await fingerprint([rej("R1"), rej("R3"), ...R4_CASES.map((testId) => mis(testId, "R4"))]));
+    // 網羅の数え直し：SHA は初版と同じで、R4 の試験が棄却されて不一致 3 → 0（拒否 R1・R3 は引き継ぐ）
+    expect(events[2]?.["declaration_sha256"]).toBe(bad);
+    expect(events[2]?.["violations"]).toEqual(counted(bad, { rej: 2 }));
+    expect(events[2]?.["failure_set_sha256"]).toBe(await fingerprint([rej("R1"), rej("R3")]));
+    expect(events[2]?.["failure_set_sha256"]).not.toBe(events[0]?.["failure_set_sha256"]);
+    // 採用の数え直し：SHA は採った版と同じで、R1 の unmarked を確定へ移して unmarked 1 → 0
+    expect(events[5]?.["violations"]).toEqual(counted(unmarked, { unm: 1 }));
+    expect(events[5]?.["failure_set_sha256"]).toBe(await fingerprint([unm("R1")]));
+    expect(events[6]?.["declaration_sha256"]).toBe(unmarked);
+    expect(events[6]?.["violations"]).toEqual(counted(unmarked, {}));
+    expect(events[6]?.["failure_set_sha256"]).toBe(await fingerprint([]));
+    expect(search["best_seq"]).toBe(6);
+    // 親と比べた状態：同じ往復の候補（seq 3）の親は数え直しの前の状態（往復を始めた時点の一番良い状態＝seq 0）で、採否は網羅の数え直し
+    // （seq 2）と比べた。数え直しのあとに始まる次の往復の候補（seq 5）の親はその数え直しで、比べた状態も同じ
+    expect(events[3]?.["parent_seq"]).toBe(0);
+    expect(events[3]?.["compared_seq"]).toBe(2);
+    expect(events[3]?.["compared_seq"]).not.toBe(events[3]?.["parent_seq"]);
+    expect(events[5]?.["parent_seq"]).toBe(2);
+    expect(events[5]?.["compared_seq"]).toBe(2);
+    expect(events[0]?.["compared_seq"]).toBeNull();
+    checkStructure(record);
+    matchesDeliverable(search, (await wholeRun746("recounts", RECOUNTS())).searchFile);
+  });
+
+  it("(4) 失敗の集合の指紋：同数で集合の違う不採用の候補の指紋は候補自身の集合の値で一番良い版と違い、静的チェックに落ちた版・B3' を流していない版の違反の全欄と指紋も台本の値。初版だけで終わる走りも同じ", async () => {
+    const { record, search } = await stageRun746("sets", SETS());
+    if (search === undefined) throw new Error("探索の出来事の列が無い");
+    expect(outline(search)).toEqual([
+      ["version", 0, "write", 0, null, "adopted"],
+      ["round", 1, 1, "repair", { kind: "version", version_seq: 2 }],
+      ["version", 2, "repair", 1, 0, "not-adopted"],
+      ["round", 3, 2, "repair", { kind: "version", version_seq: 4 }],
+      ["version", 4, "repair", 2, 0, "not-adopted"],
+      ["version", 5, "rewrite", 2, 0, "not-adopted"],
+      ["round", 6, 3, "repair", { kind: "version", version_seq: 7 }],
+      ["version", 7, "repair", 3, 0, "not-adopted"],
+    ]);
+    const events = search["events"] as readonly Json[];
+    const [good, broken, miss] = [await sha256Hex(V11A_YAML), await sha256Hex(BROKEN), await sha256Hex(MISS)];
+    // 同数（1）で集合の違う候補：候補の指紋は候補自身の集合（R1 の拒否）の値で、一番良い版（R3 の拒否）の指紋と違う
+    expect(events[0]?.["violations"]).toEqual(counted(good, { rej: 1 }));
+    expect(events[2]?.["violations"]).toEqual(counted(good, { rej: 1 }));
+    expect(events[0]?.["failure_set_sha256"]).toBe(await fingerprint([rej("R3")]));
+    expect(events[2]?.["failure_set_sha256"]).toBe(await fingerprint([rej("R1")]));
+    expect(events[2]?.["failure_set_sha256"]).not.toBe(events[0]?.["failure_set_sha256"]);
+    // 静的チェックに落ちた版：違反は最悪の種類だけで、失敗の集合は静的チェックの 1 件
+    expect(events[4]?.["violations"]).toEqual({ kind: "static-check-failed", declaration_sha256: broken });
+    expect(events[4]?.["failure_set_sha256"]).toBe(await fingerprint([["static-check", null, null]]));
+    expect(events[4]?.["discarded"]).toEqual({ unmarked: 0, rejections: 0 });
+    // B3' を流していない版（B3 で R3 の操作が結び付かない）：拒否・unmarked は不明（null）で和に入れない。R3 の試験 3 本が不一致
+    expect(events[5]?.["violations"]).toEqual(counted(miss, { miss: 1, rej: null, unm: null, mis: 3 }, "name-check"));
+    expect(events[5]?.["failure_set_sha256"]).toBe(await fingerprint([["correspondence-miss", null, "R3"], ...R3_CASES.map((testId) => mis(testId, "R3"))]));
+    expect(events[7]?.["failure_set_sha256"]).toBe(events[0]?.["failure_set_sha256"]);
+    checkStructure(record);
+    matchesDeliverable(search, (await wholeRun746("sets", SETS())).searchFile);
+    // 初版だけで終わる走り：違反は全部 0、失敗の集合は空
+    const single = await stageRun746("single", [structured({ declaration: V11A_YAML }), judged(ALL)]);
+    expect(outline(single.search as Json)).toEqual([["version", 0, "write", 0, null, "adopted"]]);
+    expect((single.search as Json)["events"][0]["violations"]).toEqual(counted(good, {}));
+    expect((single.search as Json)["events"][0]["failure_set_sha256"]).toBe(await fingerprint([]));
+    expect((single.search as Json)["stop"]).toEqual({ reason: "completed", stage: null, kind: null });
+    checkStructure(single.record);
+  });
+
+  it("(5) 版を作らない往復：マージを断った往復は往復の出来事だけが増えて結果は断った分類、裁定で Plan に戻した往復も版を作らない。要求の列・停止の順・判定は同じ台本の一気通貫と同じ", async () => {
+    const mixed = await stageRun746("mixed", MIXED());
+    const search = mixed.search as Json;
+    expect(outline(search)).toEqual([
+      ["version", 0, "write", 0, null, "adopted"],
+      ["round", 1, 1, "field-repair", { kind: "refused", refusal: "bytes" }],
+      ["round", 2, 2, "field-repair", { kind: "version", version_seq: 4 }],
+      ["recount", 3, "coverage", 0],
+      ["version", 4, "repair", 2, 0, "not-adopted"],
+    ]);
+    expect(eventsOf(search, "version")).toHaveLength(2);
+    expect(mixed.record["verification"]["round_trips"]).toBe(2);
+    const whole = await wholeRun746("mixed", MIXED());
+    matchesDeliverable(search, whole.searchFile);
+    // 段の走りの要求の列は一気通貫の B1 から先の要求の列と同じ（記録を足しても要求・停止の順・判定は変わらない）
+    const wholeTail = whole.run.recording.structured.slice(HEAD_746().length).map((request) => request.schemaName);
+    expect(mixed.run.structuredRequests.map((request) => request.schemaName)).toEqual(wholeTail);
+    expect(mixed.record["verification"]["stop_reason"]).toBe(whole.run.summary["stop_reason"]);
+    expect(mixed.record["stage_judge_verdict"]).toBe(whole.run.summary["verdict"]);
+    expect(mixed.run.clientErrors).toEqual([]);
+    checkStructure(mixed.record);
+
+    const returned = await stageRun746("returned", RETURNED());
+    expect(returned.run.code).toBe(EXIT_RETURN_TO_PLAN);
+    expect(outline(returned.search as Json)).toEqual([
+      ["version", 0, "write", 0, null, "adopted"],
+      ["round", 1, 1, "repair", { kind: "return-to-plan" }],
+    ]);
+    expect((returned.search as Json)["stop"]).toEqual({ reason: "unresolved", stage: null, kind: null });
+    checkStructure(returned.record);
+    matchesDeliverable(returned.search as Json, (await wholeRun746("returned", RETURNED())).searchFile);
+  });
+
+  it("(6) 早期停止：初版の評価の途中・修復の要求の途中・採用の確定（持ち越しの更新）の途中・修復の後の持ち越しで止まる走りは、止まるまでの出来事を出し、未完了の区間が pending・null。探索に入らずに止まった走りは欄を持たない", async () => {
+    // 初版の評価の途中（B3' の形の落ち 2 回）
+    const firstEval = await stageRun746("stop-first-eval", [structured({ declaration: V11A_YAML }), structured({ judgments: [] }), structured({ judgments: [] })]);
+    expect(firstEval.record["stopped"]).toMatchObject({ stage: "decl-check", kind: "malformed" });
+    const pendingFirst = (firstEval.search as Json)["events"] as readonly Json[];
+    expect(pendingFirst).toHaveLength(1);
+    expect(pendingFirst[0]).toMatchObject({ event: "version", origin: "write", adoption: "pending", violations: null, failure_set_sha256: null, discarded: null, evaluate_ms: null, make_ms: 1000 });
+    expect(namesIn(firstEval.stages, pendingFirst[0]?.["stage_rows"]["evaluate"])).toEqual(["static-check", "name-check", "decl-check"]);
+    expect((firstEval.search as Json)["best_seq"]).toBeNull();
+    expect((firstEval.search as Json)["stop"]).toEqual({ reason: "stopped", stage: "decl-check", kind: "malformed" });
+    checkStructure(firstEval.record);
+
+    // 修復の要求の途中（直す段の応答が無い）
+    const inRepair = await stageRun746("stop-repair", [structured({ declaration: V11A_YAML }), judged(ALL, ["R3"])]);
+    expect(inRepair.record["stopped"]).toMatchObject({ stage: "repair" });
+    expect(outline(inRepair.search as Json)).toEqual([
+      ["version", 0, "write", 0, null, "adopted"],
+      ["round", 1, 1, "repair", { kind: "repair-stopped" }],
+    ]);
+    expect((inRepair.search as Json)["events"][1]["duration_ms"]).toBeNull();
+    expect((inRepair.search as Json)["best_seq"]).toBe(0);
+    checkStructure(inRepair.record);
+
+    // 採用の確定（持ち越しの更新）の途中：全要件を unmarked にした候補を採り、全件持ち越しで止まる
+    markedDeclCheck();
+    const inCommit = await stageRun746("stop-commit", [structured({ declaration: R4_BAD }), judged(ALL, ["R1", "R3"]), repairTo(`${V11A_YAML}# unmark:R1,R2,R3,R4\n`)]);
+    expect(inCommit.record["stopped"]).toMatchObject({ stage: "carry-over", kind: "unmet" });
+    expect(outline(inCommit.search as Json)).toEqual([
+      ["version", 0, "write", 0, null, "adopted"],
+      ["round", 1, 1, "repair", { kind: "version", version_seq: 2 }],
+      ["version", 2, "repair", 1, 0, "adopted"],
+      ["recount", 3, "adopted", 2],
+    ]);
+    const commitEvents = (inCommit.search as Json)["events"] as readonly Json[];
+    expect(commitEvents[3]).toMatchObject({ violations: null, failure_set_sha256: null });
+    expect(namesIn(inCommit.stages, commitEvents[3]?.["stage_rows"])).toEqual(["carry-over"]);
+    expect(commitEvents[1]?.["duration_ms"]).toBeNull();
+    expect((inCommit.search as Json)["best_seq"]).toBe(2);
+    checkStructure(inCommit.record);
+
+    // 修復の後の持ち越し：R3 の unmarked を確定へ移したあと、R1 の試験を全部棄却し、網羅の持ち越しが残る行の参照を壊して持ち越しの段で止まる
+    // （棄却のあとの網羅の数え直しに届かない）
+    const afterRepair = await stageRun746("stop-after-repair", [
+      structured({ declaration: `${R4_BAD}# unmark:R3\n# reject:R1\n` }),
+      repairTo(R4_BAD, R1_CASES),
+      overturn(R1_CASES),
+    ]);
+    expect(afterRepair.record["stopped"]).toMatchObject({ stage: "carry-over", kind: "unmet" });
+    expect(outline(afterRepair.search as Json)).toEqual([
+      ["version", 0, "write", 0, null, "adopted"],
+      ["recount", 1, "adopted", 0],
+      ["round", 2, 1, "repair", { kind: "pending" }],
+    ]);
+    const afterEvents = (afterRepair.search as Json)["events"] as readonly Json[];
+    expect(namesIn(afterRepair.stages, afterEvents[2]?.["stage_rows"])).toEqual(["repair", "arbitration", "coverage", "carry-over"]);
+    expect(afterEvents[2]?.["duration_ms"]).toBeNull();
+    expect((afterRepair.search as Json)["best_seq"]).toBe(1);
+    checkStructure(afterRepair.record);
+
+    // 探索に入らずに止まった走り（B1 の応答が無い）は欄を持たない
+    const noSearch = await stageRun746("stop-before-search", []);
+    expect(noSearch.record["stopped"]).toMatchObject({ stage: "write" });
+    expect(noSearch.record).not.toHaveProperty("search_repair");
+  });
+
+  it("(7) 時間：出来事で進める時計で、作る時間・評価する時間・往復の時間が期待のミリ秒になり、段の行の duration_ms は時計から組んだ値のまま", async () => {
+    const { record, search } = await stageRun746("time", STAGNATION());
+    const events = (search as Json)["events"] as readonly Json[];
+    // B1 1000・B3' 200・道具付きの直す段 3000（コードの段は 0）
+    expect(events.filter((event) => event["event"] === "version").map((event) => [event["origin"], event["make_ms"], event["evaluate_ms"]])).toEqual([
+      ["write", 1000, 200],
+      ["repair", 3000, 200],
+      ["repair", 3000, 200],
+      ["rewrite", 1000, 200],
+      ["repair", 3000, 200],
+    ]);
+    expect(events.filter((event) => event["event"] === "round").map((event) => event["duration_ms"])).toEqual([3200, 3200, 3200]);
+    const durations: Record<string, number> = { write: 1000, "decl-check": 200, repair: 3000 };
+    for (const stage of record["stages"] as readonly Json[]) expect(stage["duration_ms"], stage["stage"]).toBe(durations[stage["stage"] as string] ?? 0);
+    // 網羅の数え直しと裁定を含む往復：直す段 3000・裁定 100・候補の B3' 200
+    markedDeclCheck();
+    const recounts = await stageRun746("time-recounts", RECOUNTS());
+    expect(eventsOf(recounts.search as Json, "round").map((event) => event["duration_ms"])).toEqual([3300, 3000]);
+  });
+
+  it("(8) 段の行への対応：同じ SHA の数え直しと版を作らない往復を交ぜた走りで、各出来事の区間が記録の stages の実際の段の位置と一致する", async () => {
+    const { record, search } = await stageRun746("rows", MIXED());
+    const names = (record["stages"] as readonly Json[]).map((stage) => stage["stage"]);
+    expect(names).toEqual([
+      "write", "static-check", "name-check", "decl-check", "run-tests",
+      "repair",
+      "repair", "arbitration", "coverage", "name-check", "run-tests", "static-check", "name-check", "decl-check", "run-tests",
+      "judge",
+    ]);
+    const events = (search as Json)["events"] as readonly Json[];
+    expect(events.map((event) => (event["event"] === "version" ? event["stage_rows"] : event["stage_rows"]))).toEqual([
+      { make: { first: 0, last: 0 }, evaluate: { first: 1, last: 4 } },
+      { first: 5, last: 5 },
+      { first: 6, last: 14 },
+      { first: 9, last: 10 },
+      { make: { first: 6, last: 6 }, evaluate: { first: 11, last: 14 } },
+    ]);
+    // 網羅の数え直し（seq 3）を挟む往復の候補：親は往復を始めた時点の一番良い状態（seq 0）、比べた状態はその数え直し
+    expect([events[4]?.["parent_seq"], events[4]?.["compared_seq"]]).toEqual([0, 3]);
+    checkStructure(record);
+  });
+
+  /**
+   * 不変の比較元（直す前＝99b6478 の工場で同じ試験の台本を流した出力のダイジェスト）。段の走りの記録は search_repair を除いて照らし
+   * （直す前の記録は欄を持たない）、ほかのファイル・要求の列・終了コード・1 行の要約はそのまま照らす。一時の場所の名前は目印に置き換える
+   */
+  const BEFORE_746: Readonly<Record<string, string>> = {
+    "stage-stagnation": "055ebe51378e8035e4ea152c509710fc84473c6d954be3d1168cb17b4ced9a1f",
+    "stage-adopting": "584eaf3e017350fb46a395f74ac640038a782c7b306b572e7ccbe6890fecd313",
+    "stage-sets": "25a22183c57cdbb64fe6b74e699063c6356201a037265d561f2731a1ac437146",
+    "stage-mixed": "c49884f9b7a556c4e0c9afd90d1a22f37b5828e44fee9d58399437dbaf5798d4",
+    "stage-returned": "7669c971267262ebc921bd61046f1d9e3540a12d3892a48d9508e281b544af78",
+    "stage-recounts": "de005c953d91b30fc27a7a24c2d41292be6cabf35242a0525a03804d1bd33252",
+    "stage-stop-repair": "4e17820e9cd8415b24850f555bed05d332ce45a3c79eb1d6eedb93ee1a892dac",
+    "stage-stop-first-eval": "fd323bfcc9d82f0f102dbf43d9ce14db17bc05cc9b8c0ff84c91939270710948",
+    "stage-stop-commit": "ab11a902ec436a60193e2b2b4c5ab3bf4afd6ae88b338dbb74bc042944100909",
+    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
+    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
+    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
+    "whole-mixed": "175e38f8f70ca325904c33cad04d27aede2d8cd1005ebef141c9825ab4acf572",
+    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
+    "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
+    "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
+    "stage-search-repair-off": "5dc5994e2dffc41aab246647e4b9b5d61d281194cf7cfff32d01525c95c311cd",
+    "whole-search-repair-off": "b54b883dcc61c988952fbce4d66ff2bc6cdd8174f24d797824d4bde1371875bb",
+    "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
+    "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
+  };
+  type FlagsOverride = { readonly ledger: boolean; readonly searchRepair: boolean; readonly ids: boolean } | null;
+  const INVARIANT_RUNS: readonly {
+    readonly name: string;
+    readonly kind: "stage" | "whole";
+    readonly pipeline: "v1.1a" | "v1.2";
+    readonly flags: FlagsOverride;
+    readonly marked?: boolean;
+    readonly calls: () => RecordedCall[];
+    readonly args?: readonly string[];
+  }[] = [
+    { name: "stage-stagnation", kind: "stage", pipeline: "v1.2", flags: null, calls: STAGNATION },
+    { name: "stage-adopting", kind: "stage", pipeline: "v1.2", flags: null, calls: ADOPTING },
+    { name: "stage-sets", kind: "stage", pipeline: "v1.2", flags: null, calls: SETS },
+    { name: "stage-mixed", kind: "stage", pipeline: "v1.2", flags: null, calls: MIXED },
+    { name: "stage-returned", kind: "stage", pipeline: "v1.2", flags: null, calls: RETURNED },
+    { name: "stage-recounts", kind: "stage", pipeline: "v1.2", flags: null, marked: true, calls: RECOUNTS },
+    { name: "stage-stop-repair", kind: "stage", pipeline: "v1.2", flags: null, calls: () => [structured({ declaration: V11A_YAML }), judged(ALL, ["R3"])] },
+    { name: "stage-stop-first-eval", kind: "stage", pipeline: "v1.2", flags: null, calls: () => [structured({ declaration: V11A_YAML }), structured({ judgments: [] }), structured({ judgments: [] })] },
+    { name: "stage-stop-commit", kind: "stage", pipeline: "v1.2", flags: null, marked: true, calls: () => [structured({ declaration: R4_BAD }), judged(ALL, ["R1", "R3"]), repairTo(`${V11A_YAML}# unmark:R1,R2,R3,R4\n`)] },
+    { name: "whole-stagnation", kind: "whole", pipeline: "v1.2", flags: null, calls: () => [...HEAD_746(), ...STAGNATION()] },
+    { name: "whole-adopting", kind: "whole", pipeline: "v1.2", flags: null, calls: () => [...HEAD_746(), ...ADOPTING()] },
+    { name: "whole-sets", kind: "whole", pipeline: "v1.2", flags: null, calls: () => [...HEAD_746(), ...SETS()] },
+    { name: "whole-mixed", kind: "whole", pipeline: "v1.2", flags: null, calls: () => [...HEAD_746(), ...MIXED()] },
+    { name: "whole-recounts", kind: "whole", pipeline: "v1.2", flags: null, marked: true, calls: () => [...HEAD_746(), ...RECOUNTS()] },
+    // ids off の v1.2（探索は流すが出来事の列を積まない）。上流から ⑦ まで
+    ...(["stage", "whole"] as const).map((kind) => ({
+      name: `${kind}-ids-off`,
+      kind,
+      pipeline: "v1.2" as const,
+      flags: { ledger: true, searchRepair: true, ids: false },
+      args: ["--stage-end", "judge"],
+      calls: (): RecordedCall[] => [
+        structured(v11aT1(true)), structured(v11aJudgments()), structured(v11aTestSpec()),
+        structured({ declaration: V11A_YAML }), structured(v11aJudgments(V11A_REJECT_R3)),
+        v11aRepairDone(), structured(v11aJudgments(V11A_REJECT_R3)),
+        v11aRepairDone(), structured(v11aJudgments(V11A_REJECT_R3)),
+        structured({ declaration: V11A_YAML }), structured(v11aJudgments(V11A_REJECT_R3)),
+        v11aRepairDone(), structured(v11aJudgments(V11A_REJECT_R3)),
+      ],
+    })),
+    // search-repair off の v1.2（今のループ）。上流から ⑦ まで
+    ...(["stage", "whole"] as const).map((kind) => ({
+      name: `${kind}-search-repair-off`,
+      kind,
+      pipeline: "v1.2" as const,
+      flags: { ledger: true, searchRepair: false, ids: true },
+      args: ["--stage-start", "vocabulary", "--stage-end", "judge"],
+      calls: (): RecordedCall[] => [...HEAD_746(), structured({ declaration: V11A_YAML }), judged(ALL, ["R3"]), repairTo(V11A_YAML), judged(ALL, ["R3"])],
+    })),
+    // v1.1a（旗なし）。上流から ⑦ まで
+    { name: "stage-v11a", kind: "stage", pipeline: "v1.1a", flags: null, args: [], calls: v11aStagnation },
+    { name: "whole-v11a", kind: "whole", pipeline: "v1.1a", flags: null, calls: v11aStagnation },
+  ];
+  /** 1 つの走りの出力のダイジェスト（書いたファイル・要求の列・終了コード・1 行の要約）と、段の走りの記録が search_repair を持つか */
+  async function invariantDigest(entry: (typeof INVARIANT_RUNS)[number]): Promise<{ readonly digest: string; readonly hasSearch: boolean }> {
+    if (entry.flags !== null) {
+      const flags = entry.flags;
+      vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => flags);
+    }
+    if (entry.marked === true) markedDeclCheck();
+    const dir = `${directory}/sr746-inv-${entry.name}`;
+    let written: readonly string[];
+    let requests: unknown;
+    let code: number;
+    let line: string;
+    if (entry.kind === "stage") {
+      const args = entry.args ?? ["--stage-start", "write", "--stage-input", checkpoint746];
+      const run = await runStageCli({ dir, args, calls: entry.calls(), pipeline: entry.pipeline, clock: eventClock() });
+      ({ written, code } = run);
+      requests = run.requests;
+      line = run.lines.at(-1) ?? "";
+    } else {
+      const run = await runV11aCli({ dir, calls: entry.calls(), pipeline: entry.pipeline });
+      ({ written, code } = run);
+      requests = {
+        structured: run.recording.structured.map(({ signal: _signal, ...rest }) => rest),
+        tools: run.recording.tools.map(({ signal: _signal, ...rest }) => rest),
+      };
+      line = JSON.stringify(run.summary);
+    }
+    vi.restoreAllMocks();
+    let hasSearch = false;
+    const files: [string, string][] = [];
+    for (const path of [...written].sort()) {
+      let text = (await fs.readFile(`${dir}/${path}`, "utf8")).replaceAll(directory, "<tmp>");
+      if (path === STAGE_RUN_RECORD_FILE) {
+        const record = JSON.parse(text) as Json;
+        hasSearch = "search_repair" in record;
+        delete record["search_repair"];
+        text = stageJsonText(record);
+      }
+      files.push([path, await sha256Hex(text)]);
+    }
+    const body = JSON.stringify({ files, requests, code, line }).replaceAll(directory, "<tmp>");
+    return { digest: await sha256Hex(body), hasSearch };
+  }
+
+  it("不変：v1・v1.1a・ids off の v1.2・search-repair off の走りと、ids on・search-repair on の一気通貫・段の走り（search_repair を除く）の全出力が直す前（99b6478）とバイト列で同じ。欄を持つのは ids on・search-repair on の段の走りで探索に入ったものだけ", async () => {
+    const digests: Record<string, string> = {};
+    const searched: Record<string, boolean> = {};
+    for (const entry of INVARIANT_RUNS) {
+      const { digest, hasSearch } = await invariantDigest(entry);
+      digests[entry.name] = digest;
+      searched[entry.name] = hasSearch;
+    }
+    expect(digests).toEqual(BEFORE_746);
+    for (const entry of INVARIANT_RUNS) {
+      expect(searched[entry.name], entry.name).toBe(entry.kind === "stage" && entry.flags === null && entry.pipeline === "v1.2");
+    }
+  });
+
+  /** 出来事の列に出てよい文字列（列挙値と SHA-256 だけ）と鍵 */
+  const ALLOWED_STRINGS = new Set<string>([
+    "version", "recount", "round", "write", "repair", "rewrite", "field-repair", "adopted", "not-adopted", "pending", "coverage",
+    "counted", "static-check-failed", "static-check", "name-check", "exhausted", "refused", "return-to-plan", "repair-stopped",
+    ...Object.keys(MERGE_REFUSALS), "completed", "stagnation", "limit", "unresolved", "deadline", "stopped", ...STAGE_IDS, ...FAILURE_KINDS,
+  ]);
+  const ALLOWED_KEYS = new Set<string>([
+    "events", "best_seq", "rewritten", "stop", "reason", "stage", "kind", "seq", "event", "origin", "round", "declaration_sha256", "parent_seq",
+    "violations", "breakdown", "correspondence-miss", "decl-rejection", "decl-unmarked", "test-mismatch", "test-unresolved", "known_total", "unknown",
+    "compared_seq", "failure_set_sha256", "adoption", "discarded", "unmarked", "rejections", "make_ms", "evaluate_ms", "stage_rows", "make", "evaluate", "first", "last",
+    "cause", "before_seq", "hand", "locations", "unlocated", "additions", "result", "version_seq", "refusal", "duration_ms",
+  ]);
+  function walk(value: unknown, visit: (key: string | null, leaf: unknown) => void): void {
+    if (Array.isArray(value)) for (const item of value) walk(item, visit);
+    else if (typeof value === "object" && value !== null) {
+      for (const [key, inner] of Object.entries(value)) {
+        visit(key, undefined);
+        walk(inner, visit);
+      }
+    } else visit(null, value);
+  }
+
+  it("(9) 漏えい：要件 ID・試験 ID・要件の文・引用・失敗の文・例外の文（止まった問題の文）を番兵にした走りで、search_repair のどこにも番兵が無く、文字列は列挙値と SHA-256 だけ。記録に題材の言葉が無い", async () => {
+    markedDeclCheck();
+    const runs = [
+      await stageRun746("leak-stagnation", STAGNATION()),
+      await stageRun746("leak-recounts", RECOUNTS()),
+      await stageRun746("leak-sets", SETS()),
+      await stageRun746("leak-mixed", MIXED()),
+      await stageRun746("leak-returned", RETURNED()),
+      await stageRun746("leak-stop", [structured({ declaration: V11A_YAML }), structured({ judgments: [] }), structured({ judgments: [] })]),
+    ];
+    for (const { record, text } of runs) {
+      const search = record["search_repair"] as Json;
+      const sentinels = [
+        ...ALL,
+        "case:",
+        ...V11A_BASE_LIST.requirements.flatMap((requirement) => [requirement.text, requirement.quote]),
+        QUOTE_746,
+        "期待が誤り",
+        ...Object.values(MERGE_REFUSALS),
+        ...Object.values(NAMED_FAILURE_MESSAGES),
+        ...((record["stopped"]?.["problems"] ?? []) as readonly Json[]).map((problem) => problem["message"] as string),
+      ].filter((sentinel) => sentinel !== "");
+      const serialized = JSON.stringify(search);
+      for (const sentinel of sentinels) expect(serialized, sentinel).not.toContain(sentinel);
+      walk(search, (key, leaf) => {
+        if (key !== null) expect(ALLOWED_KEYS.has(key), key).toBe(true);
+        else if (typeof leaf === "string") expect(ALLOWED_STRINGS.has(leaf) || /^[0-9a-f]{64}$/u.test(leaf), leaf).toBe(true);
+        else expect(leaf === null || typeof leaf === "number" || typeof leaf === "boolean", String(leaf)).toBe(true);
+      });
+      expectNoAcceptanceMaterial([text]);
+    }
+    // 早期停止の問題の文は記録の既存の欄（stopped）にあるが、search_repair には無い
+    const stopped = runs.at(-1)?.record["stopped"] as Json;
+    expect((stopped["problems"] as readonly unknown[]).length).toBeGreaterThan(0);
   });
 });
