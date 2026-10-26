@@ -5441,8 +5441,8 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       readonly resolve: (response: LlmStructuredResponse<unknown>) => void;
     }[] = [];
     const notify = (): void => {
-      for (const waiter of [...waiters]) {
-        if (pending.length < waiter.count) continue;
+      const ready = waiters.filter((waiter) => pending.length >= waiter.count);
+      for (const waiter of ready) {
         waiters.splice(waiters.indexOf(waiter), 1);
         waiter.resolve();
       }
@@ -6408,7 +6408,8 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
           throw error;
         },
       );
-      while (!finished) {
+      for (;;) {
+        if (finished) break;
         await vi.advanceTimersByTimeAsync(60);
         await Promise.resolve();
       }
