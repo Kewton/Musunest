@@ -48,7 +48,7 @@ import type { JudgeAdviceMarkEntry, JudgeAdviceRecord } from "./stages/judge-adv
 import { semanticCheckTargets } from "./stages/semantic-check.js";
 import { testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
 import { UPSTREAM_LEDGER_BOUNDARY, type V12PublicFlags } from "../v12/ledger.js";
-import type { SearchRepairRecord, VersionViolations } from "../v12/search-repair.js";
+import type { SearchEvent, SearchRepairRecord, StageSearchRepairLog, VersionViolations } from "../v12/search-repair.js";
 
 /** v1.1α の記録の置き場所（成果物の置き場所の下。v1 の成果物と重ならない） */
 export const V11A_ARTIFACT_NAMES = {
@@ -838,6 +838,110 @@ export interface StageRunOutcome {
    */
   readonly declaration?: StageJudgedDeclaration;
   readonly verification?: StageVerificationCounts;
+  /**
+   * 旗 `v12.ids`・`v12.search-repair` が on の段の走りで探索に入った走りだけ、その時点までの探索の出来事の列（⑦ まで届いた走りと、
+   * 探索に入ったあとで早期停止した走りの両方。探索に入らなかった走りは持たない。記録に載せるかは呼ぶ側が決める。Issue #746）
+   */
+  readonly searchRepair?: StageSearchRepairLog;
+}
+
+/**
+ * 違反の数（未決は null）の段の走りの記録への投影。納品物の `violationsJson` と違い、内訳も固定の 5 つの鍵を 1 つずつ写す
+ * （内訳の内側に型の外の欄が混ざっても出さない。正常な入力では `violationsJson` と同じバイト列。Issue #746）
+ */
+function stageViolationsJson(violations: VersionViolations | null): unknown {
+  if (violations === null) return null;
+  if (violations.kind === "static-check-failed") {
+    return { kind: violations.kind, declaration_sha256: violations.declarationSha256 };
+  }
+  const { breakdown } = violations;
+  return {
+    kind: violations.kind,
+    declaration_sha256: violations.declarationSha256,
+    breakdown: {
+      "correspondence-miss": breakdown["correspondence-miss"],
+      "decl-rejection": breakdown["decl-rejection"],
+      "decl-unmarked": breakdown["decl-unmarked"],
+      "test-mismatch": breakdown["test-mismatch"],
+      "test-unresolved": breakdown["test-unresolved"],
+    },
+    known_total: violations.knownTotal,
+    unknown:
+      violations.unknown === null
+        ? null
+        : { reason: violations.unknown.reason, declaration_sha256: violations.unknown.declarationSha256 },
+  };
+}
+
+/** 探索の出来事 1 つを段の走りの記録の形にする（許した欄だけを写す。欄の名前は snake_case。Issue #746） */
+function searchEventJson(event: SearchEvent): unknown {
+  switch (event.kind) {
+    case "version":
+      return {
+        seq: event.seq,
+        event: "version",
+        origin: event.origin,
+        round: event.round,
+        declaration_sha256: event.declarationSha256,
+        parent_seq: event.parentSeq,
+        compared_seq: event.comparedSeq,
+        violations: stageViolationsJson(event.violations),
+        failure_set_sha256: event.failureSetSha256,
+        adoption: event.adoption,
+        discarded: event.discarded === null ? null : { unmarked: event.discarded.unmarked, rejections: event.discarded.rejections },
+        make_ms: event.makeMs,
+        evaluate_ms: event.evaluateMs,
+        stage_rows: { make: spanJson(event.makeRows), evaluate: spanJson(event.evaluateRows) },
+      };
+    case "recount":
+      return {
+        seq: event.seq,
+        event: "recount",
+        cause: event.cause,
+        declaration_sha256: event.declarationSha256,
+        before_seq: event.beforeSeq,
+        violations: stageViolationsJson(event.violations),
+        failure_set_sha256: event.failureSetSha256,
+        stage_rows: spanJson(event.rows),
+      };
+    case "round":
+      return {
+        seq: event.seq,
+        event: "round",
+        round: event.round,
+        hand: event.hand,
+        locations: event.locations,
+        unlocated: event.unlocated,
+        additions: event.additions,
+        result: roundResultJson(event.result),
+        duration_ms: event.durationMs,
+        stage_rows: spanJson(event.rows),
+      };
+  }
+}
+
+const spanJson = (span: { readonly first: number; readonly last: number } | null): unknown =>
+  span === null ? null : { first: span.first, last: span.last };
+
+function roundResultJson(result: Extract<SearchEvent, { kind: "round" }>["result"]): unknown {
+  switch (result.kind) {
+    case "version":
+      return { kind: result.kind, version_seq: result.versionSeq };
+    case "refused":
+      return { kind: result.kind, refusal: result.refusal };
+    default:
+      return { kind: result.kind };
+  }
+}
+
+/** 段の走りの記録の `search_repair`（出来事の列・一番良い状態の `seq`・作り直したか・止まり方。Issue #746） */
+export function stageSearchRepairJson(log: StageSearchRepairLog): unknown {
+  return {
+    events: log.events.map(searchEventJson),
+    best_seq: log.bestSeq,
+    rewritten: log.rewritten,
+    stop: { reason: log.stop.reason, stage: log.stop.stage, kind: log.stop.kind },
+  };
 }
 
 /** 段の通過：範囲の中に早期停止が無く、終了の段の最後の記録が ok */
@@ -898,6 +1002,8 @@ export function buildStageRunRecord(input: {
           },
         }),
     ...(v12 === undefined || outcome.verification === undefined ? {} : { verification: outcome.verification }),
+    // 探索に入った v1.2 の段の走りだけ、探索の出来事の列を末尾に足す（v1.1α の記録・探索に入らなかった走りは欄を持たない。Issue #746）
+    ...(v12 === undefined || outcome.searchRepair === undefined ? {} : { search_repair: stageSearchRepairJson(outcome.searchRepair) }),
   });
 }
 

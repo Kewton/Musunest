@@ -16,6 +16,10 @@
 //     ループと作り直しの行はここの値から写す
 //   - 作り直しに渡す名前付きの失敗の一覧（`namedFailuresOf`。試験 ID・要件 ID・種類と、種類ごとの固定文だけ）
 //   - 探索の記録の形（`SearchRepairRecord`。納品物の `search-repair.json` に書くのは `v11a/bundle-v11a.ts`）
+//   - 段の走りの探索の出来事の列の形（`StageSearchRepairLog`。旗 `v12.ids`・`v12.search-repair` が on の段の走りだけ。段の走りの記録の
+//     `search_repair` に投影するのは `v11a/bundle-v11a.ts`）と、失敗の集合の指紋（`failureSetSha256`。Issue #746）
+import { sha256Hex } from "@musunest/spec-engine";
+import type { FailureKind, StageId, StopReason } from "../record.js";
 import type { RuleDefinition } from "../stages/prompt.js";
 
 // ── 違反の種類と重み ───────────────────────────────────────────────
@@ -360,4 +364,116 @@ export interface SearchRepairRecord {
 export function withSearchRounds(text: string, rounds: readonly SearchRoundRecord[]): string {
   const parsed = JSON.parse(text) as Record<string, unknown>;
   return `${JSON.stringify({ ...parsed, rounds }, null, 2)}\n`;
+}
+
+// ── 段の走りの探索の出来事の列（旗 `v12.ids`・`v12.search-repair` が on の段の走りだけ。Issue #746）──────────────────────
+//
+// 版・数え直し・往復を、起きた順に 1 本の列に並べ、各出来事に通し番号 `seq`（0 から）を振る。持つのは数・列挙値・SHA-256・`seq`・
+// ミリ秒・段の行（段の走りの記録の `stages`）の添字だけで、要件の文・ID の値・失敗の文・例外の文・費用・トークンを持たない。
+// 未完了・未決・未実施は `pending`・null で表し、0・不採用・空に置き換えない。納品物の `SearchRepairRecord` とは別の形である。
+
+/** 出来事が含んだ段の行の添字の区間（段の走りの記録の `stages` の位置。両端を含む） */
+export interface StageRowSpan {
+  readonly first: number;
+  readonly last: number;
+}
+
+/** 版の採否（評価の途中で止まれば `pending`） */
+export type SearchEventAdoption = "adopted" | "not-adopted" | "pending";
+
+/** 版の出来事（候補を評価に入れたときに始まる） */
+export interface SearchVersionEvent {
+  readonly kind: "version";
+  readonly seq: number;
+  readonly origin: SearchVersionOrigin;
+  /** 往復の番号（write は 0。rewrite は直前の往復の番号で、往復を数えない） */
+  readonly round: number;
+  readonly declarationSha256: string;
+  /** その候補を作るもとにした一番良い状態の出来事の `seq`（write は null） */
+  readonly parentSeq: number | null;
+  /**
+   * 採否を比べた一番良い状態の出来事の `seq`（親と同じなら同じ値。同じ往復の網羅の数え直しを挟めばその数え直し。write と、評価の途中で
+   * 止まって比べていない版は null）
+   */
+  readonly comparedSeq: number | null;
+  /** 違反の数（評価の途中で止まれば null） */
+  readonly violations: VersionViolations | null;
+  /** 失敗の集合の指紋（評価の途中で止まれば null） */
+  readonly failureSetSha256: string | null;
+  readonly adoption: SearchEventAdoption;
+  /** 捨てた候補の B3' の unmarked と拒否の件数（採った版・未決と、B3' を流していない版は null。未実施を 0 に置き換えない） */
+  readonly discarded: { readonly unmarked: number; readonly rejections: number } | null;
+  /** 作る時間（候補を作る段の開始から応答まで。ミリ秒） */
+  readonly makeMs: number | null;
+  /** 評価する時間（④・B3・B3'・B4 の開始から終わりまで。途中で止まれば null） */
+  readonly evaluateMs: number | null;
+  readonly makeRows: StageRowSpan | null;
+  readonly evaluateRows: StageRowSpan | null;
+}
+
+/** 数え直しの出来事 */
+export interface SearchRecountEvent {
+  readonly kind: "recount";
+  readonly seq: number;
+  readonly cause: SearchRecountRecord["cause"];
+  readonly declarationSha256: string;
+  /** 数え直しの前の一番良い状態の出来事の `seq` */
+  readonly beforeSeq: number | null;
+  /** 数え直した後の違反の数（途中で止まれば null） */
+  readonly violations: VersionViolations | null;
+  readonly failureSetSha256: string | null;
+  readonly rows: StageRowSpan | null;
+}
+
+/** マージを断った固定文の分類（`MERGE_REFUSALS` の鍵。文そのものは書かない） */
+export type SearchMergeRefusalClass = "unknownLocation" | "bytes" | "unreadable" | "outside" | "noSection" | "added";
+
+/** 往復の結果（版を作った・マージを断った・裁定で Plan に戻した・修復の要求の途中で止まった・未決） */
+export type SearchRoundResult =
+  | { readonly kind: "version"; readonly versionSeq: number }
+  | { readonly kind: "refused"; readonly refusal: SearchMergeRefusalClass }
+  | { readonly kind: "return-to-plan" }
+  | { readonly kind: "repair-stopped" }
+  | { readonly kind: "pending" };
+
+/** 往復の出来事 */
+export interface SearchRoundEvent {
+  readonly kind: "round";
+  readonly seq: number;
+  readonly round: number;
+  readonly hand: SearchRepairHand;
+  readonly locations: number;
+  readonly unlocated: number;
+  readonly additions: number;
+  readonly result: SearchRoundResult;
+  /** 往復の時間（往復の最初の段の行の開始から最後の段の行の終わりまで。途中で止まれば null） */
+  readonly durationMs: number | null;
+  readonly rows: StageRowSpan | null;
+}
+
+export type SearchEvent = SearchVersionEvent | SearchRecountEvent | SearchRoundEvent;
+
+/** 探索の止まり方（⑦ まで届けば止めた理由、探索に入ったあとの早期停止なら `stopped` と止めた段・種類） */
+export type StageSearchStop =
+  | { readonly reason: StopReason; readonly stage: null; readonly kind: null }
+  | { readonly reason: "stopped"; readonly stage: StageId; readonly kind: FailureKind };
+
+/** 段の走りの探索の出来事の列（探索に入った走りだけ） */
+export interface StageSearchRepairLog {
+  readonly events: readonly SearchEvent[];
+  /** 一番良い状態の出来事の `seq`（決まっていなければ null） */
+  readonly bestSeq: number | null;
+  readonly rewritten: boolean;
+  readonly stop: StageSearchStop;
+}
+
+/**
+ * 失敗の集合の指紋（純粋）：名前付きの失敗の (種類, 試験 ID, 要件 ID) の組を、各組の JSON の文字列の符号単位の順に並べた配列の
+ * JSON の SHA-256。並びに依らず、ID の値そのものは返さない。
+ */
+export async function failureSetSha256(failures: readonly Pick<NamedFailure, "kind" | "testId" | "requirementId">[]): Promise<string> {
+  const tuples = failures
+    .map((failure) => JSON.stringify([failure.kind, failure.testId, failure.requirementId]))
+    .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  return sha256Hex(`[${tuples.join(",")}]`);
 }

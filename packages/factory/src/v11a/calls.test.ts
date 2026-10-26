@@ -2365,6 +2365,28 @@ describe("(12) 旗 v12.ids の C3 は要件 5 件ごとの束に分けて同時�
     }
   });
 
+  it.each([MEDIAN_SIZE, MAX_SIZE])("呼び出しの契約（要件 $requirements。Issue #745）：C3 の各要求の末尾の R-sc-06 に判定の対象の階層の文が入っても、C3 は 3k・表の論理の合計（要件 25 で 77・15 で 63）・実試行 144・判定 80 は変わらない", async (size) => {
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
+    const k = t2Bundles(size.requirements);
+    const { head, rewriteOf, tailWithout } = partsOf(materials);
+    const R1 = { R1: ["unnecessary-ownership", materials.textOf("R1")] as const };
+    const run = await observe(materials, [...head, EMPTY, structured(materials.judgments(R1)), rewriteOf(["R1"]), structured(materials.judgments()), ...tailWithout([])], { flags: ALL_ON });
+    expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(c3RequestsOf(run)).toHaveLength(3 * k);
+    for (const request of c3RequestsOf(run)) {
+      const rule = (JSON.parse(request) as { readonly rules: readonly string[] }).rules.at(-1);
+      expect(rule).toBe(SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION.text);
+      expect(rule).toContain("入力の直下にあるデータの塊「要件の文と引用」の要件だけである");
+    }
+    expect(run.logical["semantic-check"]).toBe(3 * k);
+    // C1 6・C2 k＋2・C3 3k・C4 3k・C5 6・C6 8・ループ 18・作り直し 2
+    expect(6 + (k + 2) + 3 * k + 3 * k + 6 + 8 + 18 + 2).toBe(size.requirements === MAX_SIZE.requirements ? 77 : 63);
+    expect(V12_CALL_LIMITS).toEqual({ logicalCalls: 80, realAttempts: 144, judgeBranch: 80 });
+    expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+    expect(run.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+    expect(run.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+  });
+
   it.each([MEDIAN_SIZE, MAX_SIZE])("呼び出しの契約（要件 $requirements）：両方の回で全部の束が形で落ちる台本は、2 回目の形のやり直しを予算が断り semantic-check・malformed で止まる（C3 は 3k。終了コード 1・納品物無し）。論理 80・実試行 144・判定 80 以下", async (size) => {
     const materials = buildSized(size.requirements, size.tests, ALL_ON);
     const k = t2Bundles(size.requirements);

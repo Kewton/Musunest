@@ -1,6 +1,7 @@
 // 探索型の直しの部品（v12/search-repair.ts）の試験（08-architecture-v1.2.md §3 の 1 (c)・§4・§4.1。Issue #551）。
 //
 // 純粋な関数と定数だけを照らす。LLM・判定・時計を使わない。
+import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import { AGENT_LIMITS } from "../limits.js";
 import { ruleDefinitionDefects } from "../stages/prompt.js";
@@ -13,6 +14,7 @@ import {
   VIOLATION_KINDS,
   VIOLATION_WEIGHTS,
   countViolations,
+  failureSetSha256,
   isStrictlyBetter,
   namedFailuresOf,
   notAdoptedAfter,
@@ -220,5 +222,29 @@ describe("探索の記録の往復ごとの直す手（手 4b。Issue #553）", 
     expect(Object.keys(JSON.parse(extended) as object)).toEqual(["versions", "recounts", "best_declaration_sha256", "rewritten", "rounds"]);
     expect((JSON.parse(extended) as { rounds: unknown }).rounds).toEqual(rounds);
     expect(extended.startsWith(text.slice(0, text.lastIndexOf("\n}")))).toBe(true);
+  });
+});
+
+describe("失敗の集合の指紋（段の走りの探索の出来事の列。Issue #746）", () => {
+  const failure = (kind: (typeof NAMED_FAILURE_KINDS)[number], testId: string | null, requirementId: string | null) => ({
+    kind,
+    testId,
+    requirementId,
+    message: NAMED_FAILURE_MESSAGES[kind],
+  });
+  it("(種類, 試験 ID, 要件 ID) の組を JSON の文字列の順に並べた配列の JSON の SHA-256。並びに依らず、ID の値を返さない", async () => {
+    const a = failure("test-mismatch", "t-9", "R-9");
+    const b = failure("decl-rejection", null, "R-8");
+    const c = failure("static-check", null, null);
+    const expected = await sha256Hex(`[${[JSON.stringify(["decl-rejection", null, "R-8"]), JSON.stringify(["test-mismatch", "t-9", "R-9"])].sort().join(",")}]`);
+    expect(await failureSetSha256([a, b])).toBe(expected);
+    // 同じ集合で並びだけ違えば同じ値
+    expect(await failureSetSha256([b, a])).toBe(expected);
+    // 集合が違えば違う値（固定文は値に入れない）
+    expect(await failureSetSha256([a])).not.toBe(expected);
+    expect(await failureSetSha256([{ ...a, message: "別の文" }, b])).toBe(expected);
+    expect(await failureSetSha256([c])).toBe(await sha256Hex('[["static-check",null,null]]'));
+    expect(await failureSetSha256([])).toBe(await sha256Hex("[]"));
+    expect(await failureSetSha256([a, b])).toMatch(/^[0-9a-f]{64}$/u);
   });
 });
