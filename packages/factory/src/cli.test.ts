@@ -6211,6 +6211,8 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       const extra = "SENTINEL-REQ";
       const calls = new Map<number, number>();
       let first0: ReturnType<typeof deferred<LlmStructuredResponse<unknown>>> | undefined;
+      /** T2 の束 0 の最初の実試行が始まったことを知らせる（時計を回す時点を出来事で決める） */
+      const started0 = deferred<void>();
       /** T2 の応答に、応答の番兵を 1 つだけ混ぜる（値は文字列なので段の形は通る） */
       const sentinelResponse = (ids: readonly string[], usage: LlmUsage | undefined): LlmStructuredResponse<unknown> => {
         const output = LARGE_T2_OUTPUT as { readonly classifications: readonly Json[]; readonly cases: readonly Json[] };
@@ -6234,6 +6236,7 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
           if (bundle === 0) {
             if (count === 0) {
               first0 = deferred<LlmStructuredResponse<unknown>>();
+              started0.resolve();
               return first0.promise as Promise<LlmStructuredResponse<T>>;
             }
             // 打ち切った最初の試行に、遅着の応答（応答の番兵を含む）を返す
@@ -6258,12 +6261,25 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
         envelope: await largeEnvelope(extra),
         source: `${LARGE_SOURCE}${extra}`,
       });
-      // T2 の最初の実試行が始まった時点で timeout が動く。到達を待たずに時計を進める
-      for (let turn = 0; turn < 20; turn += 1) {
+      // T2 の束 0 の最初の実試行が**始まった**ことを待ってから timeout（60ms）を動かす。
+      // そのあとは回数を決めず、走りの約束が解けるまで時計を進める（遅い機械でも時刻の競争に依らない）
+      await started0.promise;
+      let finished = false;
+      const tracked = runPromise.then(
+        (value) => {
+          finished = true;
+          return value;
+        },
+        (error) => {
+          finished = true;
+          throw error;
+        },
+      );
+      while (!finished) {
         await vi.advanceTimersByTimeAsync(60);
         await Promise.resolve();
       }
-      const { run, record, requests, spans } = await runPromise;
+      const { run, record, requests, spans } = await tracked;
       expect(run.code, JSON.stringify(record["stopped"])).not.toBe(EXIT_OK);
       // 成功・誤り（通信・要求の不正）・遅着の行がそろっている
       expect(requests.some((request) => request["end"] === "response")).toBe(true);
