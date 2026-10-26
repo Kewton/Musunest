@@ -1696,6 +1696,7 @@ async function runV11a(
         requestLog?.failSpan(span, indices);
         throw new RunStop(attribution);
       }
+      // T2 の span は、束の準備・合併・内容の検査（`run` の中）を含め、束を記帳する（`settle`）前に閉じる（Issue #748）
       const endedAt = input.now();
       const indices = settle("ok", null);
       requestLog?.closeSpan(span, indices, endedAt - startedAt);
