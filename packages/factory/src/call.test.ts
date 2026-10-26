@@ -1705,6 +1705,94 @@ describe("実試行の観測の口（Issue #748）：口が確定した分類・
     }
   });
 
+  for (const [label, lateUsage] of [
+    ["usage", usage(11)],
+    ["missing", undefined],
+  ] as const) {
+    it(`E1（T2 の二重の計量・${label}）：束の確定のあと B1 が待つ間に同じ試行が遅着しても、束と全体の印を分けて採り、どの段の行にも入らなければ null`, async () => {
+      vi.useFakeTimers();
+      try {
+        const log = new CallRequestLog(0, () => 0);
+        const global = new UsageMeter();
+        const bundle = new UsageMeter(true);
+        let resolveFirst: ((response: LlmStructuredResponse<unknown>) => void) | undefined;
+        let calls = 0;
+        const client: LlmClient = {
+          callStructured: <T>() => {
+            calls += 1;
+            if (calls === 1) {
+              return new Promise<LlmStructuredResponse<T>>((resolve) => {
+                resolveFirst = (response) => resolve(response as LlmStructuredResponse<T>);
+              });
+            }
+            return Promise.resolve(structuredResponse({ ok: true }, usage(1)) as LlmStructuredResponse<T>);
+          },
+          callWithTools: () => {
+            throw new Error("呼ばない");
+          },
+        };
+        const bundleUnit = log.beginBoundUnit();
+        // 全体の計量と束の計量の**間**に置く門。遅着では全体の加算のあとで止め、B1 を始めてから開ける
+        const globalClient = global.wrap(client);
+        let invoked = 0;
+        let openGate!: () => void;
+        const gateOpen = new Promise<void>((resolve) => {
+          openGate = resolve;
+        });
+        const gate: LlmClient = {
+          callStructured: async <T>(request: LlmStructuredRequest) => {
+            const which = invoked + 1;
+            invoked = which;
+            const response = await globalClient.callStructured<T>(request);
+            if (which === 1) await gateOpen;
+            return response;
+          },
+          callWithTools: (request) => globalClient.callWithTools(request),
+        };
+        const gateway = new CallGateway({
+          client: bundle.wrap(gate),
+          budget: new JobBudget(1_000_000),
+          rates: RATES,
+          now: () => 0,
+          deadline: 600_000,
+          callTimeoutMs: 1_000,
+          maxAttempts: 2,
+          observer: log.observer(bundleUnit),
+        });
+        const pending = gateway.callStructured(STRUCTURED_REQUEST);
+        // 最初の試行を timeout で打ち切り、再試行を usage 1 で返す
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect((await pending).kind).toBe("ok");
+        // 束の行と T2 の全体の計量を確定する
+        log.finishUnit(bundleUnit, 0);
+        // 打ち切った同じ試行が遅着する。全体の計量の加算は束の確定の後・B1 の前（どの行にも入らない）
+        resolveFirst?.(structuredResponse({ ok: false }, lateUsage));
+        const waitFor = async (predicate: () => boolean): Promise<void> => {
+          for (let turn = 0; turn < 1_000 && !predicate(); turn += 1) await Promise.resolve();
+          if (!predicate()) throw new Error("前提が壊れた：待っていた加算が起きない");
+        };
+        await waitFor(() => global.snapshot.calls === 2);
+        // B1 の段を始める（全体の計量の前後スナップショットを取る）
+        const writeUnit = log.beginUnit();
+        const writeBefore = global.snapshot;
+        // 外側の束の計量の加算は B1 の開始後（旧の実装はここで印を上書きして B1 に誤帰属した）
+        openGate();
+        await waitFor(() => bundle.snapshot.calls === 2);
+        // 遅着の観測の callback まで microtask を進める
+        for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+        const writeAfter = global.snapshot;
+        log.finishUnit(writeUnit, 1);
+        // 遅着の usage は、束の行にも B1 の行にも入っていない
+        const request = log.requests()[0]!;
+        expect(request).toMatchObject({ end: "timeout", stage_index: 0, late: { metered_stage_index: null } });
+        expect(writeAfter.input_tokens - writeBefore.input_tokens).toBe(0);
+        expect(writeAfter.missing_usage_calls - writeBefore.missing_usage_calls).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
+
   it("timeout の打ち切りは打ち切りの時点で確定し、あとから来た応答は遅着として渡り、行を変えない", async () => {
     vi.useFakeTimers();
     try {

@@ -402,6 +402,7 @@ export function usageDelta(before: UsageSnapshot, after: UsageSnapshot): UsageSn
  * usage が返らない呼び出しも数える（「usage が欠けた呼び出しの数」）。
  */
 export class UsageMeter {
+  readonly #bound: boolean;
   #calls = 0;
   #missing = 0;
   #inputTokens = 0;
@@ -409,6 +410,11 @@ export class UsageMeter {
   #cacheWriteTokens = 0;
   #outputTokens = 0;
   #reasoningTokens = 0;
+
+  /** `bound` は束の計量（T2 の束ごとの口）か。束と全体の 2 つが加算するので、印を分けて採る（レビュー R1） */
+  constructor(bound = false) {
+    this.#bound = bound;
+  }
 
   /** いまの計（段の前後で取って差を出す） */
   get snapshot(): UsageSnapshot {
@@ -444,14 +450,14 @@ export class UsageMeter {
         try {
           const response = await client.callStructured<T>(request);
           this.note(response.usage);
-          runNoteHook(request.signal);
+          runNoteHook(request.signal, this.#bound);
           return response;
         } catch (error) {
           // 未完了の応答は例外として現れるが、usage は付くことがある（§1.5）。呼び出しの数と
           // トークンを数えてから投げ直す——usage が無ければ「usage が欠けた呼び出し」として数える。
           if (isIncompleteResponseError(error)) {
             this.note(error.usage);
-            runNoteHook(request.signal);
+            runNoteHook(request.signal, this.#bound);
           }
           throw error;
         }
@@ -460,12 +466,12 @@ export class UsageMeter {
         try {
           const response = await client.callWithTools(request);
           this.note(response.usage);
-          runNoteHook(request.signal);
+          runNoteHook(request.signal, this.#bound);
           return response;
         } catch (error) {
           if (isIncompleteResponseError(error)) {
             this.note(error.usage);
-            runNoteHook(request.signal);
+            runNoteHook(request.signal, this.#bound);
           }
           throw error;
         }
@@ -552,8 +558,10 @@ interface MutableCallRequestRow {
   lateUsage: CallRequestUsage | null;
   /** 遅着の加算を含んだ段の行の単位（まだ行の位置が決まっていなければ null でない単位のまま） */
   lateUnit: CallRequestUnit | null;
-  /** 計量の加算の時点で採った所属（`note` を渡さない単体の試験では使わない） */
-  noteUnit: CallRequestUnit | null;
+  /** 束の計量が加算した時点で開いていた束の単位（確定後は採らない。レビュー R1） */
+  boundUnit: CallRequestUnit | null;
+  /** 全体の計量が加算した時点で開いていた全体の単位（レビュー R1） */
+  globalUnit: CallRequestUnit | null;
   noted: boolean;
 }
 
@@ -682,7 +690,8 @@ export class CallRequestLog {
       usage: null,
       lateUsage: null,
       lateUnit: null,
-      noteUnit: null,
+      boundUnit: null,
+      globalUnit: null,
       noted: false,
     };
     this.#rows.push(row);
@@ -695,10 +704,15 @@ export class CallRequestLog {
         if (end.kind === "response" || end.kind === "incomplete") row.usage = callRequestUsageOf(end.usage);
         else if (end.kind === "error") row.errorKind = end.errorKind;
       },
-      note: (): void => {
-        // 計量がこの試行の加算をした時点の所属を採る（観測の callback の時点ではない。Issue #748 のレビュー R1）
+      note: (bound: boolean): void => {
+        // 計量がこの試行の加算をした時点の所属を採る（観測の callback の時点ではない。Issue #748 のレビュー R1）。
+        // T2 は束と全体の 2 つの計量が同じ応答を数えるので、束は開いている束の単位、全体は全体の単位で**別々に**採る
         row.noted = true;
-        row.noteUnit = row.unit !== null && row.unit.open ? row.unit : this.#globalUnit;
+        if (bound) {
+          if (row.unit !== null && row.unit.open) row.boundUnit = row.unit;
+        } else {
+          row.globalUnit = this.#globalUnit;
+        }
       },
       late: (usage: LlmUsage | undefined): void => {
         // 打ち切りのあとに返った応答・未完了だけが遅着。行の終わり方・時刻・所属は変えない
@@ -706,7 +720,7 @@ export class CallRequestLog {
         row.lateUsage = callRequestUsageOf(usage);
         // 計量の加算の時点の印があればそれを使う。無ければ（印を渡さない単体の試験）従来どおりこの時点で解く
         row.lateUnit = row.noted
-          ? row.noteUnit
+          ? (row.boundUnit ?? row.globalUnit)
           : row.unit !== null && row.unit.open
             ? row.unit
             : this.#globalUnit;

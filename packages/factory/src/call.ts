@@ -216,22 +216,23 @@ export interface CallAttemptObservation {
   /**
    * 計量（`UsageMeter.note`）がこの試行の usage を加算した**その時点**に呼ばれる（Issue #748 のレビュー R1）。
    * 遅着の帰属は、観測の callback が動いた時点ではなく、この印の時点の単位から解く。
+   * `bound` は束の計量か（T2 は束と全体の 2 つが同じ応答を数える。レビュー R1）。
    */
-  note?(): void;
+  note?(bound: boolean): void;
 }
 
 /** 試行ごとの計量の印（実呼び出しの合図で引く。Issue #748 のレビュー R1） */
-const noteHooks = new WeakMap<object, () => void>();
+const noteHooks = new WeakMap<object, (bound: boolean) => void>();
 
 /** 計量の加算の時点で呼ぶ印を、その実呼び出しの合図に結び付ける */
-export function registerNoteHook(key: object, hook: () => void): void {
+export function registerNoteHook(key: object, hook: (bound: boolean) => void): void {
   noteHooks.set(key, hook);
 }
 
 /** 計量の加算の時点で、その実呼び出しの印を呼ぶ（印が無ければ何もしない） */
-export function runNoteHook(key: object | undefined): void {
+export function runNoteHook(key: object | undefined, bound: boolean): void {
   if (key === undefined) return;
-  noteHooks.get(key)?.();
+  noteHooks.get(key)?.(bound);
 }
 
 /**
@@ -893,7 +894,7 @@ export class CallGateway {
     });
     try {
       // 計量の加算の時点の印（遅着の帰属を、観測の callback の時点でなく加算の時点から解く。Issue #748 のレビュー R1）
-      registerNoteHook(controller.signal, () => observation?.note?.());
+      registerNoteHook(controller.signal, (bound) => observation?.note?.(bound));
       const call = invoke(controller.signal);
       if (observation === undefined) {
         // 打ち切ったあとに来る拒否を握る（待っていない側の拒否を、未処理のまま残さない）

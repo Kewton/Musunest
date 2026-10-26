@@ -4903,10 +4903,19 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       if (path === STAGE_RUN_RECORD_FILE) {
         const record = JSON.parse(text) as Json;
         hasSearch = "search_repair" in record;
-        if (!keepSearch) delete record["search_repair"];
-        // Issue #748 で足した実試行の行・段全体の span も外して、直す前（4a80f4b）の記録と照らす
-        revert748(record);
-        text = stageJsonText(record);
+        const idsOnStage = entry.kind === "stage" && entry.pipeline === "v1.2" && (entry.flags === null || entry.flags.ids);
+        if (idsOnStage) {
+          if (!keepSearch) delete record["search_repair"];
+          // Issue #748 で足した実試行の行・段全体の span も外して、直す前（4a80f4b）の記録と照らす。
+          // 外すのは ids on の v1.2 の**段の走り**の記録だけ（レビュー Q2）
+          revert748(record);
+          text = stageJsonText(record);
+        } else {
+          // 対象外の経路は、新しい 2 欄が無いことと、元のバイト列のままであることを比べる（レビュー Q2）
+          expect(record["requests"], path).toBeUndefined();
+          expect(record["stage_spans"], path).toBeUndefined();
+          expect(stageJsonText(record), path).toBe(text);
+        }
       }
       files.push([path, await sha256Hex(text)]);
     }
@@ -6035,8 +6044,9 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       });
       expect(run.run.code).toBe(EXIT_OK);
       expect(run.requests[0]).toMatchObject({ stage_index: 0, end: "response", usage: null });
-      expect(run.stages[0]!["input_tokens"]).toBe(0);
+      for (const key of TOKEN_KEYS) expect(run.stages[0]![key], key).toBe(0);
       expect(run.stages[0]!["missing_usage_calls"]).toBe(1);
+      expect(run.stages[0]!["attempts"]).toMatchObject({ started: 1, responded: 1, errors: 0 });
     }
 
     // 未完了（usage あり）：行は incomplete で usage を持ち、段は responded 1・missing 0
@@ -6057,8 +6067,8 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       expect(run.run.code).not.toBe(EXIT_OK);
       expect(run.requests.map((request) => request["end"])).toEqual(["response", "incomplete"]);
       expect(run.requests[1]!["usage"]).toEqual(TOKENS_OF(LATE_USAGE));
-      expect(run.stages[1]!["attempts"]["responded"]).toBe(1);
-      expect(run.stages[1]!["input_tokens"]).toBe(11);
+      for (const key of TOKEN_KEYS) expect(run.stages[1]![key], key).toBe(TOKENS_OF(LATE_USAGE)[key]);
+      expect(run.stages[1]!["attempts"]).toMatchObject({ started: 1, responded: 1, errors: 0 });
       expect(run.stages[1]!["missing_usage_calls"]).toBe(0);
     }
 
@@ -6079,6 +6089,8 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       const run = await runLarge("r5-incomplete-missing", { args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"], client });
       expect(run.requests[1]!["end"]).toBe("incomplete");
       expect(run.requests[1]!["usage"]).toBeNull();
+      for (const key of TOKEN_KEYS) expect(run.stages[1]![key], key).toBe(0);
+      expect(run.stages[1]!["attempts"]).toMatchObject({ started: 1, responded: 1, errors: 0 });
       expect(run.stages[1]!["missing_usage_calls"]).toBe(1);
     }
 
@@ -6097,9 +6109,9 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
         ["error", "network"],
         ["response", null],
       ]);
-      expect(run.stages[0]!["attempts"]["started"]).toBe(2);
-      expect(run.stages[0]!["attempts"]["errors"]).toBe(1);
-      expect(run.stages[0]!["attempts"]["responded"]).toBe(1);
+      expect(run.stages[0]!["attempts"]).toMatchObject({ started: 2, errors: 1, responded: 1 });
+      for (const key of TOKEN_KEYS) expect(run.stages[0]![key], key).toBe(TOKENS_OF(RECORDED_USAGE)[key]);
+      expect(run.stages[0]!["missing_usage_calls"]).toBe(0);
     }
   });
 
@@ -6141,25 +6153,28 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       vi.useRealTimers();
     }
 
-    // 締切で未着手：入口が締切を決める最初の読みは 0、その後の読みは締切（60ms）を過ぎているので、行を作らない
+    // 締切で未着手：時計は値を返すだけ。入口が締切を決めたあと、門の生成という**明示した出来事**で
+    // 締切（60ms）の後へ進める。そのあと実開始の前に止まり、行を作らない
     {
-      let reads = 0;
-      const clock = {
-        now: (): number => {
-          reads += 1;
-          return reads === 1 ? 0 : 60;
-        },
-        onRequest: (): void => {},
-      };
-      const client = routedClient({ t2: makeT2("immediate").client, c2: [], c3: [], rest: [], restClient: c1Client([ok(LARGE_TABLE_RESPONSES.entities, RECORDED_USAGE)]) });
-      const run = await runLarge("r5-deadline-before", {
-        args: ["--stage-start", "vocabulary", "--stage-end", "test-spec", "--deadline", "0.001"],
-        clock,
-        client,
+      const clock = largeClock();
+      const original = callModule.createCallGate;
+      vi.spyOn(callModule, "createCallGate").mockImplementation((options) => {
+        clock.advance(60);
+        return original(options);
       });
-      expect(run.run.code).not.toBe(EXIT_OK);
-      expect(run.requests).toEqual([]);
-      expect(run.stages[0]!["attempts"]["not_started"]["deadline"]).toBe(1);
+      try {
+        const client = routedClient({ t2: makeT2("immediate").client, c2: [], c3: [], rest: [], restClient: c1Client([ok(LARGE_TABLE_RESPONSES.entities, RECORDED_USAGE)]) });
+        const run = await runLarge("r5-deadline-before", {
+          args: ["--stage-start", "vocabulary", "--stage-end", "test-spec", "--deadline", "0.001"],
+          clock,
+          client,
+        });
+        expect(run.run.code).not.toBe(EXIT_OK);
+        expect(run.requests).toEqual([]);
+        expect(run.stages[0]!["attempts"]["not_started"]["deadline"]).toBe(1);
+      } finally {
+        vi.restoreAllMocks();
+      }
     }
   });
 
@@ -6189,15 +6204,123 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     const t2Rows = run.requests.filter((request) => (request["stage_index"] as number) >= 5);
     expect(t2Rows.map((request) => request["end"])).toEqual(["response", "incomplete", "error", "response"]);
     // 束 0：usage なしの応答（missing 1）、束 1：未完了（usage あり）、束 2：誤り→応答（started 2・errors 1・responded 1）
+    for (const key of TOKEN_KEYS) expect(run.stages[5]![key], `5:${key}`).toBe(0);
     expect(run.stages[5]!["missing_usage_calls"]).toBe(1);
-    expect(run.stages[5]!["input_tokens"]).toBe(0);
-    expect(run.stages[6]!["input_tokens"]).toBe(11);
+    expect(run.stages[5]!["attempts"]).toMatchObject({ started: 1, responded: 1, errors: 0 });
+    for (const key of TOKEN_KEYS) expect(run.stages[6]![key], `6:${key}`).toBe(TOKENS_OF(LATE_USAGE)[key]);
     expect(run.stages[6]!["missing_usage_calls"]).toBe(0);
-    expect(run.stages[7]!["attempts"]["started"]).toBe(2);
-    expect(run.stages[7]!["attempts"]["errors"]).toBe(1);
-    expect(run.stages[7]!["attempts"]["responded"]).toBe(1);
-    expect(run.stages[7]!["input_tokens"]).toBe(2);
+    expect(run.stages[6]!["attempts"]).toMatchObject({ started: 1, responded: 1, errors: 0 });
+    for (const key of TOKEN_KEYS) expect(run.stages[7]![key], `7:${key}`).toBe(TOKENS_OF(NORMAL_USAGE)[key]);
+    expect(run.stages[7]!["missing_usage_calls"]).toBe(0);
+    expect(run.stages[7]!["attempts"]).toMatchObject({ started: 2, errors: 1, responded: 1 });
     calls = new Map();
+
+    // 未完了（usage なし）を並列の束で起こす：束 1 の行は tokens 0・missing 1・responded 1
+    const missingT2: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        const ids = requestListedIds(request);
+        const bundle = bundleOf(ids);
+        if (bundle === 1) throw new OpenAiIncompleteError("max_output_tokens", undefined, "未完了");
+        return t2Response(ids, NORMAL_USAGE) as LlmStructuredResponse<T>;
+      },
+      callWithTools: async () => {
+        throw new Error("呼ばない");
+      },
+    };
+    const missingRun = await runLarge("r5-parallel-missing", {
+      args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"],
+      client: routedClient({ t2: missingT2, c2: [LARGE_MAPPING], c3: [LARGE_JUDGMENTS], rest: [...LARGE_C1] }),
+    });
+    for (const key of TOKEN_KEYS) expect(missingRun.stages[6]![key], `parallel-missing:${key}`).toBe(0);
+    expect(missingRun.stages[6]!["missing_usage_calls"]).toBe(1);
+    expect(missingRun.stages[6]!["attempts"]).toMatchObject({ started: 1, responded: 1, errors: 0 });
+    expect(missingRun.requests.filter((request) => request["stage_index"] === 6).map((request) => request["end"])).toEqual(["incomplete"]);
+  });
+
+  it("R5 並列の束：実開始のあとの締切は deadline の行を残し、締切で未着手のときは束の行を作らない", async () => {
+    // 実開始のあとの締切：T2 の開始で時計を締切の直後へ進め、束 0 だけ返らない
+    vi.useFakeTimers();
+    try {
+      // 要求ごとの歩幅を小さくした時計（束 3 つが締切の手前で全部始まるように）
+      let now = 0;
+      const clock = { now: (): number => now, onRequest: (): void => void (now += 10), advance: (ms: number): void => void (now += ms) };
+      const original = testSpecModule.runTestSpec;
+      vi.spyOn(testSpecModule, "runTestSpec").mockImplementation(async (input) => {
+        clock.advance(599_970 - clock.now()); // 締切 600000ms の 30ms 前（絶対時刻）
+        return original(input);
+      });
+      let startedResolve!: () => void;
+      const started = new Promise<void>((done) => {
+        startedResolve = done;
+      });
+      const t2: LlmClient = {
+        async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+          const ids = requestListedIds(request);
+          const bundle = bundleOf(ids);
+          if (bundle === 0) {
+            startedResolve();
+            return new Promise<LlmStructuredResponse<T>>(() => {
+              /* 締切まで返らない */
+            });
+          }
+          return t2Response(ids, NORMAL_USAGE) as LlmStructuredResponse<T>;
+        },
+        callWithTools: async () => {
+          throw new Error("呼ばない");
+        },
+      };
+      const runPromise = runLarge("r5-parallel-deadline", {
+        args: ["--stage-start", "vocabulary", "--stage-end", "test-spec", "--deadline", "10", "--timeout", "0.001"],
+        clock,
+        client: routedClient({ t2, c2: [LARGE_MAPPING], c3: [LARGE_JUDGMENTS], rest: [...LARGE_C1] }),
+      });
+      await started;
+      // 束 1・2 の即時の応答を先に確定させ、束 0 の締切だけを動かす
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(30);
+      const run = await runPromise;
+      expect(run.run.code).not.toBe(EXIT_OK);
+      expect(run.requests.filter((request) => request["stage_index"] === 5).map((request) => request["end"])).toEqual(["deadline"]);
+      expect(run.stages[5]!["attempts"]["cancelled_deadline"]).toBe(1);
+      for (const key of TOKEN_KEYS) expect(run.stages[6]![key], `deadline:6:${key}`).toBe(TOKENS_OF(NORMAL_USAGE)[key]);
+      for (const key of TOKEN_KEYS) expect(run.stages[7]![key], `deadline:7:${key}`).toBe(TOKENS_OF(NORMAL_USAGE)[key]);
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+
+    // 締切で未着手：T2 の開始で時計を締切ちょうどへ進め、3 束とも始めない（行を作らない）
+    {
+      let now = 0;
+      const clock = { now: (): number => now, onRequest: (): void => void (now += 10), advance: (ms: number): void => void (now += ms) };
+      const original = testSpecModule.runTestSpec;
+      vi.spyOn(testSpecModule, "runTestSpec").mockImplementation(async (input) => {
+        clock.advance(600_000 - clock.now());
+        return original(input);
+      });
+      try {
+        const t2: LlmClient = {
+          callStructured: async () => {
+            throw new Error("前提が壊れた：締切で未着手なのに呼ばれた");
+          },
+          callWithTools: async () => {
+            throw new Error("呼ばない");
+          },
+        };
+        const run = await runLarge("r5-parallel-not-started", {
+          args: ["--stage-start", "vocabulary", "--stage-end", "test-spec", "--deadline", "10", "--timeout", "0.001"],
+          clock,
+          client: routedClient({ t2, c2: [LARGE_MAPPING], c3: [LARGE_JUDGMENTS], rest: [...LARGE_C1] }),
+        });
+        expect(run.run.code).not.toBe(EXIT_OK);
+        expect(run.requests.filter((request) => (request["stage_index"] as number) >= 5)).toEqual([]);
+        const t2Stages = run.stages.filter((stage) => stage["stage"] === "test-spec");
+        expect(t2Stages.length).toBeGreaterThan(0);
+        expect(t2Stages.reduce((sum, stage) => sum + (stage["attempts"]["not_started"]["deadline"] as number), 0)).toBe(3);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    }
   });
 
   /**
@@ -6365,6 +6488,35 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
         expect(b1Index).toBe(8);
         // 束 0：束の確定の前 → 自分の束の行（5）。束 1：確定のあと B1 の前（段と段の間）→ null。束 2：B1 の実行中 → B1 の行
         expect(cut.map((request) => request["late"]["metered_stage_index"])).toEqual([5, null, b1Index]);
+        // 元の終わり方・所属が遅着で変わらない（打ち切りの時点で確定したまま）
+        expect(cut.map((request) => [request["stage_index"], request["end"]])).toEqual([
+          [5, "timeout"],
+          [6, "timeout"],
+          [7, "timeout"],
+        ]);
+        // 元の時刻も遅着で変わらない（打ち切りの時点の値。出来事の時計から組んだ固定の表）
+        expect(cut.map((request) => [request["start_ms"], request["end_ms"]])).toEqual([
+          [900, 1_200],
+          [1_000, 1_300],
+          [1_100, 1_400],
+        ]);
+        // T2 の各束の行と B1 の行の全トークン・missing を、台本の usage から独立に組んだ表と照らす
+        const lateTokens = lateUsage === undefined ? null : TOKENS_OF(lateUsage);
+        const expectedT2 = [
+          addTokens(times(NORMAL_USAGE, 1), lateTokens),
+          times(NORMAL_USAGE, 1),
+          times(NORMAL_USAGE, 1),
+        ];
+        for (const [offset, index] of [5, 6, 7].entries()) {
+          for (const key of TOKEN_KEYS) expect(stages[index]![key], `T2 ${String(index)}:${key}`).toBe(expectedT2[offset]![key]);
+          expect(stages[index]!["missing_usage_calls"], `T2 ${String(index)}:missing`).toBe(
+            offset === 0 && lateUsage === undefined ? 1 : 0,
+          );
+        }
+        // 束 2 の遅着は B1 の行に入る（B1 の応答の usage に足す）
+        const expectedB1 = addTokens(TOKENS_OF(RECORDED_USAGE), lateTokens);
+        for (const key of TOKEN_KEYS) expect(stages[b1Index]![key], `B1:${key}`).toBe(expectedB1[key]);
+        expect(stages[b1Index]!["missing_usage_calls"]).toBe(lateUsage === undefined ? 1 : 0);
         for (const request of cut) {
           expect(request["late"]["usage"]).toEqual(lateUsage === undefined ? null : {
             input_tokens: 11,
