@@ -36,7 +36,7 @@ import * as factory from "./index.js";
 import { createFakeJudge } from "./judge-fake.js";
 import type { JudgeAnswer } from "./judge.js";
 import { FakeLlmSchemaMismatchError, uncheckedBecause, type RecordedCall } from "./llm-fake.js";
-import { createOpenAiLlmClient } from "./openai.js";
+import { createOpenAiLlmClient, OpenAiIncompleteError } from "./openai.js";
 import { FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "./v12/stages/field-repair.js";
 import {
   ENVELOPE_SCHEMA,
@@ -98,6 +98,7 @@ import {
   requestListedIds,
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
+import * as callModule from "./call.js";
 import type { LedgerView } from "./v12/ledger.js";
 import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
 import { isGeneratedTestId } from "./v12/generated-tests.js";
@@ -118,6 +119,7 @@ import { structuralReadingText } from "./v12/structural-meanings.js";
 import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
 import { MAPPING_SCHEMA_NAME } from "./v12/stages/mapping.js";
+import * as mappingModule from "./v12/stages/mapping.js";
 import type { NameTable } from "./v11a/names.js";
 import {
   BUNDLE_MANIFEST_FILE,
@@ -134,9 +136,9 @@ import {
 import * as runModule from "./run.js";
 import type { Judge, JudgeRequest } from "./judge.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse, LlmUsage } from "./llm.js";
-import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
+import { createRecordingClient, expectNoAcceptanceMaterial, ACCEPTANCE_MATERIAL_WORDS } from "./stages/__tests__/prompt.js";
 import { ATTEMPT_KEYS, FAILURE_KINDS, RETRY_KEYS, STAGE_IDS } from "./record.js";
-import { DESIGN_OUTPUT_MAPPED, SOURCE_TEXT, recordedRun, structured } from "./__tests__/run.js";
+import { DESIGN_OUTPUT_MAPPED, SOURCE_TEXT, recordedRun, structured, USAGE as RECORDED_USAGE } from "./__tests__/run.js";
 
 interface NodeFs {
   mkdtemp(prefix: string): Promise<string>;
@@ -3317,7 +3319,7 @@ describe("--pipeline を省いた入口は、凍結した比較元（2cd1586）�
       new URL("./__fixtures__/baseline-2cd1586/cli.json", import.meta.url).pathname,
       "utf8",
     );
-    for (const word of ["baseline-fake-key", "sk-", "Bearer", "持ち寄り", "当番表", "会費", "出欠", "貸し出し"]) {
+    for (const word of ["baseline-fake-key", "sk-", "Bearer", ...ACCEPTANCE_MATERIAL_WORDS]) {
       expect(text.includes(word), word).toBe(false);
     }
   });
@@ -3513,7 +3515,7 @@ describe("旗を省いた v1.1α の走りは、直す前（fb9e122）の記録�
       new URL("./__fixtures__/v11a-before-stage-range/run.json", import.meta.url).pathname,
       "utf8",
     );
-    for (const word of ["sk-FAKE", "Bearer", "持ち寄り", "当番表", "会費", "出欠", "貸し出し"]) {
+    for (const word of ["sk-FAKE", "Bearer", ...ACCEPTANCE_MATERIAL_WORDS]) {
       expect(text.includes(word), word).toBe(false);
     }
   });
@@ -4867,7 +4869,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     { name: "whole-v11a", kind: "whole", pipeline: "v1.1a", flags: null, calls: v11aStagnation },
   ];
   /** 1 つの走りの出力のダイジェスト（書いたファイル・要求の列・終了コード・1 行の要約）と、段の走りの記録が search_repair を持つか */
-  async function invariantDigest(entry: (typeof INVARIANT_RUNS)[number]): Promise<{ readonly digest: string; readonly hasSearch: boolean }> {
+  async function invariantDigest(entry: (typeof INVARIANT_RUNS)[number], keepSearch = false): Promise<{ readonly digest: string; readonly hasSearch: boolean }> {
     if (entry.flags !== null) {
       const flags = entry.flags;
       vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => flags);
@@ -4901,8 +4903,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       if (path === STAGE_RUN_RECORD_FILE) {
         const record = JSON.parse(text) as Json;
         hasSearch = "search_repair" in record;
-        delete record["search_repair"];
-        // Issue #748 で足した実試行の行・段全体の span も外して、直す前（99b6478）の記録と照らす
+        if (!keepSearch) delete record["search_repair"];
+        // Issue #748 で足した実試行の行・段全体の span も外して、直す前（4a80f4b）の記録と照らす
         revert748(record);
         text = stageJsonText(record);
       }
@@ -4921,6 +4923,43 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       searched[entry.name] = hasSearch;
     }
     expect(digests).toEqual(BEFORE_746);
+    for (const entry of INVARIANT_RUNS) {
+      expect(searched[entry.name], entry.name).toBe(entry.kind === "stage" && entry.flags === null && entry.pipeline === "v1.2");
+    }
+  });
+
+  /** 4a80f4b（比較元）の全出力のダイジェスト（search_repair を含む既存の欄をそのまま比較する。Issue #748 のレビュー R3） */
+  const BEFORE_748_BASE: Readonly<Record<string, string>> = {
+    "stage-stagnation": "0ef2fe8bc20c81f4a8dba870cdb2103f14ba42b0c064cccd68f01c3c163008f8",
+    "stage-adopting": "d40f0f31882cd2b83f5d93b308283cf18ba0b63b9a1cd72f31d332fd31fcf8d1",
+    "stage-sets": "a3969eaa6be4fe49cbffbebc81010fbb5df3312b0d325cbf3b873ad9c92cbf05",
+    "stage-mixed": "1f029859b4af94df617d1a67f23ddfc7113dae32bc5079615943b28e24b467c6",
+    "stage-returned": "a2f5dad9b7cefe9e2e530c3517774be719f2cefb24d4db19864174b2cde09429",
+    "stage-recounts": "adbcd1aa9c7f452cb352d11cd873eab96966a1be4f155479a67b3444f844d004",
+    "stage-stop-repair": "1bd073e2d94a519d53762e8e0b6fecb78f9731ff306e4422377288a9eee681bb",
+    "stage-stop-first-eval": "df320daf50a2c3e343c582894f57af6874bee3bd02d881ad445e36734f8d490f",
+    "stage-stop-commit": "1bbfcba658904ff0c2aa4fbe935e00cbcb427a466928b678b81c2017695a3373",
+    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
+    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
+    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
+    "whole-mixed": "175e38f8f70ca325904c33cad04d27aede2d8cd1005ebef141c9825ab4acf572",
+    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
+    "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
+    "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
+    "stage-search-repair-off": "5dc5994e2dffc41aab246647e4b9b5d61d281194cf7cfff32d01525c95c311cd",
+    "whole-search-repair-off": "b54b883dcc61c988952fbce4d66ff2bc6cdd8174f24d797824d4bde1371875bb",
+    "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
+    "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
+  };
+  it("不変（4a80f4b の全出力・search_repair を含む）：ids on の段の記録だけ requests・stage_spans を除き、ほかの欄は 1 つも落とさずに比較元と同じ", async () => {
+    const digests: Record<string, string> = {};
+    const searched: Record<string, boolean> = {};
+    for (const entry of INVARIANT_RUNS) {
+      const { digest, hasSearch } = await invariantDigest(entry, true);
+      digests[entry.name] = digest;
+      searched[entry.name] = hasSearch;
+    }
+    expect(digests).toEqual(BEFORE_748_BASE);
     for (const entry of INVARIANT_RUNS) {
       expect(searched[entry.name], entry.name).toBe(entry.kind === "stage" && entry.flags === null && entry.pipeline === "v1.2");
     }
@@ -5267,15 +5306,20 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       confirmation: { sha256: "0".repeat(64), confirmed_at: "2026-09-16T12:00:00+09:00", confirmed_by: "tester" },
     };
   }
-  async function largeEnvelope(): Promise<Record<string, unknown>> {
+  async function largeEnvelope(extraText = ""): Promise<Record<string, unknown>> {
     const plan = largePlanBody();
-    const confirmed: ConfirmedPlan = { ...plan, confirmation: { ...plan.confirmation, sha256: await planDigest(plan) } };
+    const source = `${LARGE_SOURCE}${extraText}`;
+    const withSource: ConfirmedPlan = {
+      ...plan,
+      inputs: plan.inputs.map((input) => ("text" in input ? { ...input, text: `${input.text}${extraText}` } : input)),
+    };
+    const confirmed: ConfirmedPlan = { ...withSource, confirmation: { ...withSource.confirmation, sha256: await planDigest(withSource) } };
     return {
       schema_version: PLAN_ONLY_RESULT_SCHEMA,
       outcome: "confirmed",
       plan: confirmed,
       plan_sha256: await planDigest(confirmed),
-      source_sha256: await sha256Hex(LARGE_SOURCE),
+      source_sha256: await sha256Hex(source),
       conditions: null,
       stop: null,
     };
@@ -5370,6 +5414,47 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     return { promise, resolve };
   }
 
+  const flush = async (turns = 20): Promise<void> => {
+    for (let turn = 0; turn < turns; turn += 1) await Promise.resolve();
+  };
+
+  /** 述語が真になるまで、microtask と出来事の巡（ファイルの読み書き）を進める（時計は進めない） */
+  const waitFor = async (predicate: () => boolean): Promise<void> => {
+    for (let turn = 0; turn < 1_000 && !predicate(); turn += 1) {
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+    }
+    if (!predicate()) throw new Error("前提が壊れた：待っていた出来事が起きない");
+  };
+
+  /** 束の口の応答を保留し、試験の出来事で 1 つずつ完了させる（Issue #748 のレビュー R4） */
+  function held(inner: LlmClient) {
+    const pending: {
+      readonly request: LlmStructuredRequest;
+      readonly response: Promise<LlmStructuredResponse<unknown>>;
+      readonly resolve: (response: LlmStructuredResponse<unknown>) => void;
+    }[] = [];
+    const client: LlmClient = {
+      callStructured: <T>(request: LlmStructuredRequest) => {
+        const response = inner.callStructured<unknown>(request);
+        return new Promise<LlmStructuredResponse<T>>((resolve) => {
+          pending.push({ request, response, resolve: (value) => resolve(value as LlmStructuredResponse<T>) });
+        });
+      },
+      callWithTools: (request) => inner.callWithTools(request),
+    };
+    return {
+      client,
+      pending,
+      release: async (index: number): Promise<void> => {
+        const entry = pending[index];
+        if (entry === undefined) throw new Error("前提が壊れた：保留した束が無い");
+        entry.resolve(await entry.response);
+      },
+    };
+  }
+
   /** T2 の応答を、束の要件だけに絞る（分類と場合の両方） */
   function t2Response(ids: readonly string[], usage: LlmUsage | undefined): LlmStructuredResponse<unknown> {
     const output = LARGE_T2_OUTPUT as { readonly classifications: readonly Json[]; readonly cases: readonly Json[] };
@@ -5438,21 +5523,88 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     };
   }
 
-  /** schema 別に応答を配る偽物の口（C1・C2・C3・T2 と、B1・B3' の記録） */
+  /** 束の C2 の応答を、その束の要件の entry だけに絞る */
+  function mappingFor(ids: readonly string[], usage: LlmUsage | undefined): LlmStructuredResponse<unknown> {
+    const full = LARGE_TABLE_RESPONSES.mapping as { readonly requirements: readonly Json[] };
+    return {
+      output: { requirements: full.requirements.filter((entry) => ids.includes(entry["requirementId"] as string)) },
+      usage,
+    };
+  }
+
+  /** 通常の段（C2）の親の口。最初の実試行を保留し、timeout のあとの再試行で通す（レビュー R6） */
+  function makeParentTimeout(lateUsage: LlmUsage | undefined) {
+    const first = new Map<number, ReturnType<typeof deferred<LlmStructuredResponse<unknown>>>>();
+    const idsOf = new Map<number, readonly string[]>();
+    const calls = new Map<number, number>();
+    const started = new Set<number>();
+    let allStartedResolve!: () => void;
+    const allStarted = new Promise<void>((done) => {
+      allStartedResolve = done;
+    });
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        const ids = requestListedIds(request);
+        const bundle = bundleOf(ids);
+        idsOf.set(bundle, ids);
+        const count = calls.get(bundle) ?? 0;
+        calls.set(bundle, count + 1);
+        if (count === 0) {
+          started.add(bundle);
+          if (started.size === 3) allStartedResolve();
+          const pending = deferred<LlmStructuredResponse<unknown>>();
+          first.set(bundle, pending);
+          return pending.promise as Promise<LlmStructuredResponse<T>>;
+        }
+        // 束 0 の遅着は、再試行のときに返す（段の確定の前）
+        if (bundle === 0) first.get(0)?.resolve(mappingFor(idsOf.get(0) ?? [], lateUsage));
+        return mappingFor(ids, NORMAL_USAGE) as LlmStructuredResponse<T>;
+      },
+      callWithTools: async () => {
+        throw new Error("C2 の試験で道具は呼ばない");
+      },
+    };
+    return {
+      client,
+      allStarted,
+      resolveLate: (bundle: number): void => {
+        first.get(bundle)?.resolve(mappingFor(idsOf.get(bundle) ?? [], lateUsage));
+      },
+    };
+  }
+
+  const TOKENS_OF = (usage: LlmUsage): Record<string, number> => ({
+    input_tokens: usage.inputTokens,
+    cached_input_tokens: usage.cachedInputTokens,
+    cache_write_tokens: usage.cacheWriteTokens ?? 0,
+    output_tokens: usage.outputTokens,
+    reasoning_tokens: usage.reasoningTokens,
+  });
+  const addTokens = (base: Record<string, number>, extra: Record<string, number> | null): Record<string, number> =>
+    Object.fromEntries(TOKEN_KEYS.map((key) => [key, (base[key] ?? 0) + (extra?.[key] ?? 0)]));
+  const times = (usage: LlmUsage, count: number): Record<string, number> =>
+    Object.fromEntries(TOKEN_KEYS.map((key) => [key, TOKENS_OF(usage)[key]! * count]));
   function routedClient(input: {
     readonly t2: LlmClient;
     readonly c2: readonly RecordedCall[];
     readonly c3: readonly RecordedCall[];
     readonly rest: readonly RecordedCall[];
+    readonly c2Client?: LlmClient;
+    readonly c3Client?: LlmClient;
+    readonly restClient?: LlmClient;
+    readonly onSemantic?: () => void;
     readonly onWrite?: () => void;
   }): LlmClient {
-    const c2 = bundledC2Client(createCheckedRecordingClient(input.c2).client);
-    const c3 = bundledC3Client(createCheckedRecordingClient(input.c3).client);
-    const rest = createCheckedRecordingClient(input.rest).client;
+    const c2 = input.c2Client ?? bundledC2Client(createCheckedRecordingClient(input.c2).client);
+    const c3 = input.c3Client ?? bundledC3Client(createCheckedRecordingClient(input.c3).client);
+    const rest = input.restClient ?? createCheckedRecordingClient(input.rest).client;
     return {
       callStructured: <T>(request: LlmStructuredRequest) => {
         if (request.schemaName === MAPPING_SCHEMA_NAME) return c2.callStructured<T>(request);
-        if (request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME) return c3.callStructured<T>(request);
+        if (request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME) {
+          input.onSemantic?.();
+          return c3.callStructured<T>(request);
+        }
         if (request.schemaName === TEST_SPEC_SCHEMA_NAME) return input.t2.callStructured<T>(request);
         if (request.schemaName === WRITE_V11A_SCHEMA_NAME) input.onWrite?.();
         return rest.callStructured<T>(request);
@@ -5468,6 +5620,8 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       readonly client: LlmClient;
       readonly clock?: { readonly now: () => number; readonly onRequest: (schemaName: string) => void };
       readonly judge?: Judge;
+      readonly envelope?: Record<string, unknown>;
+      readonly source?: string;
     },
   ) {
     const dir = `${directory}/requests-748-large-${name}`;
@@ -5476,8 +5630,8 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       args: options.args,
       calls: [],
       pipeline: "v1.2",
-      envelope: await largeEnvelope(),
-      source: LARGE_SOURCE,
+      envelope: options.envelope ?? (await largeEnvelope()),
+      source: options.source ?? LARGE_SOURCE,
       ...(options.clock === undefined ? {} : { clock: options.clock }),
       client: options.client,
       judge: options.judge ?? largeJudge(),
@@ -5529,9 +5683,6 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     });
     // T2 の束 3 つが同時に始まるのを待ち、束 2 → 1 → 0 の順に完了させる（逆の順）
     await t2.allStarted;
-    const flush = async (): Promise<void> => {
-      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
-    };
     clock.advance(10);
     t2.resolve(2);
     await flush();
@@ -5572,35 +5723,107 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     expectNoAcceptanceMaterial([serialized]);
   });
 
-  it("(2) 要件 12 件の C3 が束 3 つで 2 回あり、span が回ごとに別で、段の行を指す", async () => {
+  it("(2) 要件 12 件の C3 が束 3 つで 2 回あり、C2 の初回と C3 の各回の複数束を別々の出来事で完了させ、行と span の開始・終わりが固定の期待の表のとおり", async () => {
     const clock = largeClock();
     const t2 = makeT2("immediate");
+    const c2 = bundledC2Client(createCheckedRecordingClient([LARGE_MAPPING, LARGE_MAPPING_R3]).client);
+    const c3 = bundledC3Client(createCheckedRecordingClient([LARGE_JUDGMENTS_REJECT_R3, LARGE_JUDGMENTS]).client);
+    const heldC2 = held(c2);
+    const heldC3 = held(c3);
     const client = routedClient({
       t2: t2.client,
-      c2: [LARGE_MAPPING, LARGE_MAPPING_R3],
-      c3: [LARGE_JUDGMENTS_REJECT_R3, LARGE_JUDGMENTS],
+      c2: [],
+      c3: [],
       rest: [...LARGE_C1],
+      c2Client: heldC2.client,
+      c3Client: heldC3.client,
     });
-    const { run, record, requests, spans, stages } = await runLarge("two-rounds", {
+    const runPromise = runLarge("two-rounds", {
       args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"],
       clock,
       client,
     });
+    // C2 の初回（束 3 つ）を、束 2 → 0 → 1 の順に完了させる（「別々の出来事で完了させる」）
+    await waitFor(() => heldC2.pending.length === 3);
+    clock.advance(10);
+    await heldC2.release(2);
+    await flush();
+    clock.advance(10);
+    await heldC2.release(0);
+    await flush();
+    clock.advance(10);
+    await heldC2.release(1);
+    await flush();
+    // C3 の 1 回目（束 3 つ）を、束 0 → 2 → 1 の順に完了させる
+    await waitFor(() => heldC3.pending.length === 3);
+    clock.advance(10);
+    await heldC3.release(0);
+    await flush();
+    clock.advance(10);
+    await heldC3.release(2);
+    await flush();
+    clock.advance(10);
+    await heldC3.release(1);
+    await flush();
+    // C2 の 2 回目（R3 だけの書き直し。1 束）
+    await waitFor(() => heldC2.pending.length === 4);
+    clock.advance(10);
+    await heldC2.release(3);
+    await flush();
+    // C3 の 2 回目（束 3 つ）を、束 1 → 0 → 2 の順に完了させる
+    await waitFor(() => heldC3.pending.length === 6);
+    clock.advance(10);
+    await heldC3.release(3);
+    await flush();
+    clock.advance(10);
+    await heldC3.release(4);
+    await flush();
+    clock.advance(10);
+    await heldC3.release(5);
+    await flush();
+    const { run, record, requests, spans, stages } = await runPromise;
     expect(run.code, JSON.stringify(record["stopped"])).toBe(EXIT_OK);
     expect(stages.map((stage) => stage["stage"])).toEqual([
       "vocabulary", "vocabulary", "vocabulary", "mapping", "semantic-check", "mapping", "semantic-check",
     ]);
-    // C2 の初回も C3 の各回も束 3 つ（3 行）で、全部その段の行を指す
-    expect(requests.map((request) => request["stage_index"])).toEqual([0, 1, 2, 3, 3, 3, 4, 4, 4, 5, 6, 6, 6]);
-    expect(spans.map((span) => [span["stage"], span["round"], span["stage_indices"]])).toEqual([
-      ["mapping", 1, [3]],
-      ["semantic-check", 1, [4]],
-      ["semantic-check", 2, [6]],
+    // 各要求の行（段の行・開始・終わり）を、出来事の順から独立に組んだ期待と照らす
+    expect(requests.map((request) => [request["stage_index"], request["start_ms"], request["end_ms"]])).toEqual([
+      [0, 0, 100],
+      [1, 100, 200],
+      [2, 200, 300],
+      // C2 の初回：3 束が 300/400/500 に始まり、束 2 → 0 → 1 の出来事の順（610/620/630）で終わる
+      [3, 300, 620],
+      [3, 400, 630],
+      [3, 500, 610],
+      // C3 の 1 回目：3 束が 630/730/830 に始まり、束 0 → 2 → 1 の順（940/950/960）で終わる
+      [4, 630, 940],
+      [4, 730, 960],
+      [4, 830, 950],
+      // C2 の 2 回目（R3 だけ）
+      [5, 960, 1_070],
+      // C3 の 2 回目：3 束が 1_070/1_170/1_270 に始まり、束 0 → 1 → 2 の順（1_380/1_390/1_400）で終わる
+      [6, 1_070, 1_380],
+      [6, 1_170, 1_390],
+      [6, 1_270, 1_400],
+    ]);
+    expect(spans).toEqual([
+      // C2 の初回の span は、いちばん遅い束（束 1）の終わりまで
+      { stage: "mapping", round: 1, start_ms: 300, end_ms: 630, stage_indices: [3] },
+      // C3 の 1 回目の span は、いちばん遅い束（束 1）の終わりまで
+      { stage: "semantic-check", round: 1, start_ms: 630, end_ms: 960, stage_indices: [4] },
+      { stage: "semantic-check", round: 2, start_ms: 1_070, end_ms: 1_400, stage_indices: [6] },
     ]);
     expect(spans.filter((span) => span["stage"] === "semantic-check").map((span) => span["round"])).toEqual([1, 2]);
-    for (const span of spans) {
+    // 段の時間（= span の時間）は、行の時間の和とは違う（C3 の両 round とも）
+    for (const span of spans.filter((entry) => entry["stage"] === "semantic-check")) {
       const [index] = span["stage_indices"] as readonly number[];
-      expect((span["end_ms"] as number) - (span["start_ms"] as number)).toBe(stages[index!]!["duration_ms"]);
+      const rows = requests.filter((request) => request["stage_index"] === index);
+      const sum = rows.reduce((total, request) => total + ((request["end_ms"] as number) - (request["start_ms"] as number)), 0);
+      const spanMs = (span["end_ms"] as number) - (span["start_ms"] as number);
+      expect(spanMs).toBe(stages[index!]!["duration_ms"]);
+      expect(spanMs).not.toBe(sum);
+      const slowest = Math.max(...rows.map((request) => request["end_ms"] as number));
+      expect(span["end_ms"]).toBe(slowest);
     }
   });
 
@@ -5641,6 +5864,419 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       expect(spansMs).not.toBe(outer);
     } finally {
       vi.restoreAllMocks();
+    }
+  });
+
+  /**
+   * R2（独立レビュー）：初期化（門・判定の口）に時間がかかっても、既存の `duration_secs` の基準は
+   * 4a80f4b の位置（初期化の後）のままで、観測器だけが基準を後から受け取る。
+   */
+  it("R2 初期化に 5000ms かかっても既存の duration_secs はそれを含まず、実試行の行と span だけがその基準から測る", async () => {
+    const clock = largeClock();
+    const original = callModule.createCallGate;
+    vi.spyOn(callModule, "createCallGate").mockImplementation((options) => {
+      // 門の初期化で時計が 5000ms 進む（4a80f4b の基準の位置より前）
+      clock.advance(5_000);
+      return original(options);
+    });
+    try {
+      const t2 = makeT2("immediate");
+      const client = routedClient({ t2: t2.client, c2: [LARGE_MAPPING], c3: [LARGE_JUDGMENTS], rest: [...LARGE_C1] });
+      const { run, record, requests, spans } = await runLarge("r2-init", {
+        args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"],
+        clock,
+        client,
+      });
+      expect(run.code).toBe(EXIT_OK);
+      // 12 要求 × 100ms。初期化の 5000ms は既存の duration_secs に入らない
+      expect(requests[0]!["start_ms"]).toBe(0);
+      expect(record["duration_secs"]).toBe(1.2);
+      expect((record["stages"] as Json[])[0]!["duration_ms"]).toBe(100);
+      // 観測器の span も、初期化の後の基準を 0 とする
+      expect(spans[0]!["start_ms"]).toBe(300);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  /**
+   * R6（独立レビュー）：前の段（C2）で実際に打ち切った同じ試行を、通常の段の 3 つの条件
+   * （段の確定の前・次の段の実行中・段と段の間）で遅着させる。usage あり・なしの 2 回。
+   */
+  for (const [label, lateUsage] of [
+    ["usage", LATE_USAGE],
+    ["missing", undefined],
+  ] as const) {
+    it(`R6 通常の段（C2）で打ち切った同じ試行の遅着（${label}）が、確定の前は自分の段・次の段の中はその段・段の間は null に数えられ、全トークンと missing が台本の表のとおり`, async () => {
+      vi.useFakeTimers();
+      const original = mappingModule.runMapping;
+      let mappingReturned = false;
+      vi.spyOn(mappingModule, "runMapping").mockImplementation(async (input) => {
+        const value = await original(input);
+        mappingReturned = true;
+        return value;
+      });
+      try {
+        const base = largeClock();
+        const parent = makeParentTimeout(lateUsage);
+        const clock = {
+          now: (): number => {
+            // C2 の `runMapping` が返った直後（段を積む前、C3 を始める前）に、束 1 の遅着を返す
+            if (mappingReturned) {
+              mappingReturned = false;
+              parent.resolveLate(1);
+            }
+            return base.now();
+          },
+          onRequest: base.onRequest,
+        };
+        const c3 = bundledC3Client(createCheckedRecordingClient([LARGE_JUDGMENTS]).client);
+        const client = routedClient({
+          t2: makeT2("immediate").client,
+          c2: [],
+          c3: [],
+          rest: [...LARGE_C1],
+          c2Client: parent.client,
+          c3Client: c3,
+          onSemantic: () => parent.resolveLate(2),
+        });
+        const runPromise = runLarge(`r6-${label}`, {
+          args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check", "--timeout", "0.001"],
+          clock,
+          client,
+        });
+        await parent.allStarted;
+        // callTimeout 60ms で C2 の 3 束の最初の実試行を打ち切る
+        await vi.advanceTimersByTimeAsync(60);
+        const { run, record, requests, stages } = await runPromise;
+        expect(run.code, JSON.stringify(record["stopped"])).toBe(EXIT_OK);
+        expect(stages.map((stage) => stage["stage"])).toEqual(["vocabulary", "vocabulary", "vocabulary", "mapping", "semantic-check"]);
+        const cut = requests.filter((request) => request["end"] === "timeout");
+        expect(cut).toHaveLength(3);
+        expect(cut.map((request) => request["stage_index"])).toEqual([3, 3, 3]);
+        expect(cut.map((request) => request["late"]["metered_stage_index"])).toEqual([3, null, 4]);
+        // 段ごとの全トークンと missing を、台本（応答の usage）から独立に組んだ表と照らす
+        const lateTokens = lateUsage === undefined ? null : TOKENS_OF(lateUsage);
+        const expected = [
+          TOKENS_OF(RECORDED_USAGE),
+          TOKENS_OF(RECORDED_USAGE),
+          TOKENS_OF(RECORDED_USAGE),
+          addTokens(times(NORMAL_USAGE, 3), lateTokens),
+          addTokens(times(RECORDED_USAGE, 3), lateTokens),
+        ];
+        const expectedMissing = [0, 0, 0, lateUsage === undefined ? 1 : 0, lateUsage === undefined ? 1 : 0];
+        for (const [index, row] of stages.entries()) {
+          for (const key of TOKEN_KEYS) expect(row[key], `${String(index)}:${key}`).toBe(expected[index]![key]);
+          expect(row["missing_usage_calls"], `${String(index)}:missing`).toBe(expectedMissing[index]);
+        }
+        // 実試行の行の数は、段の行の開始の数と一致する
+        expect(requests.filter((request) => request["stage_index"] === 3)).toHaveLength(stages[3]!["attempts"]["started"]);
+        expect(requests.filter((request) => request["stage_index"] === 4)).toHaveLength(stages[4]!["attempts"]["started"]);
+      } finally {
+        vi.useRealTimers();
+        vi.restoreAllMocks();
+      }
+    });
+  }
+
+  /** C1 の口の台本（呼ばれた順に 1 つずつ返す・投げる） */
+  function c1Client(
+    script: readonly (() => Promise<LlmStructuredResponse<unknown>>)[],
+    onCall?: () => void,
+  ): LlmClient {
+    let index = 0;
+    return {
+      callStructured: async <T>() => {
+        onCall?.();
+        const call = script[index];
+        index += 1;
+        if (call === undefined) throw new Error("前提が壊れた：C1 の台本が尽きた");
+        return (await call()) as LlmStructuredResponse<T>;
+      },
+      callWithTools: async () => {
+        throw new Error("C1 の試験で道具は呼ばない");
+      },
+    };
+  }
+  const ok = (output: unknown, usage: LlmUsage | undefined) => async (): Promise<LlmStructuredResponse<unknown>> => ({ output, usage });
+  const network = () => async (): Promise<LlmStructuredResponse<unknown>> => {
+    throw Object.assign(new Error("通信の誤り"), { kind: "network" });
+  };
+
+  /**
+   * R5（独立レビュー）：usage なしの応答、usage あり・なしの未完了、通信の誤りからの再送を、
+   * 親の口（C1）で起こし、保存された行と段の attempts・トークンを独立の期待と照らす。
+   */
+  it("R5 親の口：usage なしの応答・未完了（usage あり・なし）・通信の誤りからの再送が、行と段の attempts・トークンに写る", async () => {
+    // usage なしの応答：行の usage は null、段の missing は 1
+    {
+      const client = routedClient({
+        t2: makeT2("immediate").client,
+        c2: [LARGE_MAPPING],
+        c3: [LARGE_JUDGMENTS],
+        rest: [],
+        restClient: c1Client([
+          ok(LARGE_TABLE_RESPONSES.entities, undefined),
+          ok(LARGE_TABLE_RESPONSES.fields, RECORDED_USAGE),
+          ok(LARGE_TABLE_RESPONSES.behaviors, RECORDED_USAGE),
+        ]),
+      });
+      const run = await runLarge("r5-no-usage", {
+        args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"],
+        client,
+      });
+      expect(run.run.code).toBe(EXIT_OK);
+      expect(run.requests[0]).toMatchObject({ stage_index: 0, end: "response", usage: null });
+      expect(run.stages[0]!["input_tokens"]).toBe(0);
+      expect(run.stages[0]!["missing_usage_calls"]).toBe(1);
+    }
+
+    // 未完了（usage あり）：行は incomplete で usage を持ち、段は responded 1・missing 0
+    {
+      const client = routedClient({
+        t2: makeT2("immediate").client,
+        c2: [LARGE_MAPPING],
+        c3: [LARGE_JUDGMENTS],
+        rest: [],
+        restClient: c1Client([
+          ok(LARGE_TABLE_RESPONSES.entities, RECORDED_USAGE),
+          async () => {
+            throw new OpenAiIncompleteError("max_output_tokens", LATE_USAGE, "未完了");
+          },
+        ]),
+      });
+      const run = await runLarge("r5-incomplete-usage", { args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"], client });
+      expect(run.run.code).not.toBe(EXIT_OK);
+      expect(run.requests.map((request) => request["end"])).toEqual(["response", "incomplete"]);
+      expect(run.requests[1]!["usage"]).toEqual(TOKENS_OF(LATE_USAGE));
+      expect(run.stages[1]!["attempts"]["responded"]).toBe(1);
+      expect(run.stages[1]!["input_tokens"]).toBe(11);
+      expect(run.stages[1]!["missing_usage_calls"]).toBe(0);
+    }
+
+    // 未完了（usage なし）：行の usage は null、段の missing は 1
+    {
+      const client = routedClient({
+        t2: makeT2("immediate").client,
+        c2: [LARGE_MAPPING],
+        c3: [LARGE_JUDGMENTS],
+        rest: [],
+        restClient: c1Client([
+          ok(LARGE_TABLE_RESPONSES.entities, RECORDED_USAGE),
+          async () => {
+            throw new OpenAiIncompleteError("max_output_tokens", undefined, "未完了");
+          },
+        ]),
+      });
+      const run = await runLarge("r5-incomplete-missing", { args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"], client });
+      expect(run.requests[1]!["end"]).toBe("incomplete");
+      expect(run.requests[1]!["usage"]).toBeNull();
+      expect(run.stages[1]!["missing_usage_calls"]).toBe(1);
+    }
+
+    // 通信の誤りからの再送：誤りの行と応答の行が並び、段は started 2・errors 1・responded 1
+    {
+      const client = routedClient({
+        t2: makeT2("immediate").client,
+        c2: [LARGE_MAPPING],
+        c3: [LARGE_JUDGMENTS],
+        rest: [],
+        restClient: c1Client([network(), ok(LARGE_TABLE_RESPONSES.entities, RECORDED_USAGE), ok(LARGE_TABLE_RESPONSES.fields, RECORDED_USAGE), ok(LARGE_TABLE_RESPONSES.behaviors, RECORDED_USAGE)]),
+      });
+      const run = await runLarge("r5-network", { args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"], client });
+      expect(run.run.code).toBe(EXIT_OK);
+      expect(run.requests.slice(0, 2).map((request) => [request["end"], request["error_kind"]])).toEqual([
+        ["error", "network"],
+        ["response", null],
+      ]);
+      expect(run.stages[0]!["attempts"]["started"]).toBe(2);
+      expect(run.stages[0]!["attempts"]["errors"]).toBe(1);
+      expect(run.stages[0]!["attempts"]["responded"]).toBe(1);
+    }
+  });
+
+  it("R5 親の口：実開始のあとの締切は行を deadline で残し、締切で未着手のときは行を作らない", async () => {
+    // 実開始のあとの締切：呼び出しは始まり、締切の残りで打ち切られる
+    vi.useFakeTimers();
+    try {
+      let startedResolve!: () => void;
+      const started = new Promise<void>((done) => {
+        startedResolve = done;
+      });
+      const client = routedClient({
+        t2: makeT2("immediate").client,
+        c2: [],
+        c3: [],
+        rest: [],
+        restClient: c1Client(
+          [
+            () =>
+              new Promise<LlmStructuredResponse<unknown>>(() => {
+                /* 打ち切られるまで返らない */
+              }),
+          ],
+          () => startedResolve(),
+        ),
+      });
+      const runPromise = runLarge("r5-deadline-after", {
+        args: ["--stage-start", "vocabulary", "--stage-end", "test-spec", "--deadline", "0.001"],
+        client,
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(60);
+      const run = await runPromise;
+      expect(run.run.code).not.toBe(EXIT_OK);
+      expect(run.requests).toHaveLength(1);
+      expect(run.requests[0]).toMatchObject({ end: "deadline", stage_index: 0 });
+      expect(run.stages[0]!["attempts"]["cancelled_deadline"]).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // 締切で未着手：入口が締切を決める最初の読みは 0、その後の読みは締切（60ms）を過ぎているので、行を作らない
+    {
+      let reads = 0;
+      const clock = {
+        now: (): number => {
+          reads += 1;
+          return reads === 1 ? 0 : 60;
+        },
+        onRequest: (): void => {},
+      };
+      const client = routedClient({ t2: makeT2("immediate").client, c2: [], c3: [], rest: [], restClient: c1Client([ok(LARGE_TABLE_RESPONSES.entities, RECORDED_USAGE)]) });
+      const run = await runLarge("r5-deadline-before", {
+        args: ["--stage-start", "vocabulary", "--stage-end", "test-spec", "--deadline", "0.001"],
+        clock,
+        client,
+      });
+      expect(run.run.code).not.toBe(EXIT_OK);
+      expect(run.requests).toEqual([]);
+      expect(run.stages[0]!["attempts"]["not_started"]["deadline"]).toBe(1);
+    }
+  });
+
+  it("R5 並列の束：T2 の束ごとに usage なしの応答・未完了・通信の誤りからの再送が起きても、行と attempts・トークンが独立の期待のとおり", async () => {
+    let calls = new Map<number, number>();
+    const scriptedT2: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        const ids = requestListedIds(request);
+        const bundle = bundleOf(ids);
+        const count = calls.get(bundle) ?? 0;
+        calls.set(bundle, count + 1);
+        if (bundle === 0) return t2Response(ids, undefined) as LlmStructuredResponse<T>;
+        if (bundle === 1) throw new OpenAiIncompleteError("max_output_tokens", LATE_USAGE, "未完了");
+        if (count === 0) throw Object.assign(new Error("通信の誤り"), { kind: "network" });
+        return t2Response(ids, NORMAL_USAGE) as LlmStructuredResponse<T>;
+      },
+      callWithTools: async () => {
+        throw new Error("呼ばない");
+      },
+    };
+    const client = routedClient({ t2: scriptedT2, c2: [LARGE_MAPPING], c3: [LARGE_JUDGMENTS], rest: [...LARGE_C1] });
+    const run = await runLarge("r5-parallel", {
+      args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"],
+      client,
+    });
+    expect(run.run.code).not.toBe(EXIT_OK);
+    const t2Rows = run.requests.filter((request) => (request["stage_index"] as number) >= 5);
+    expect(t2Rows.map((request) => request["end"])).toEqual(["response", "incomplete", "error", "response"]);
+    // 束 0：usage なしの応答（missing 1）、束 1：未完了（usage あり）、束 2：誤り→応答（started 2・errors 1・responded 1）
+    expect(run.stages[5]!["missing_usage_calls"]).toBe(1);
+    expect(run.stages[5]!["input_tokens"]).toBe(0);
+    expect(run.stages[6]!["input_tokens"]).toBe(11);
+    expect(run.stages[6]!["missing_usage_calls"]).toBe(0);
+    expect(run.stages[7]!["attempts"]["started"]).toBe(2);
+    expect(run.stages[7]!["attempts"]["errors"]).toBe(1);
+    expect(run.stages[7]!["attempts"]["responded"]).toBe(1);
+    expect(run.stages[7]!["input_tokens"]).toBe(2);
+    calls = new Map();
+  });
+
+  /**
+   * R7（独立レビュー）：要求・応答・例外・ID にそれぞれ違う番兵を置き、成功・誤り・遅着の行を含む
+   * `requests`・`stage_spans` の全体を走査する。題材の言葉の走査範囲に今回の記録・試験を入れる。
+   */
+  it("R7 要求・応答・例外・ID の番兵は、成功・誤り・遅着の requests・stage_spans に漏れない", async () => {
+    vi.useFakeTimers();
+    try {
+      const base = largeClock();
+      const extra = "SENTINEL-REQ";
+      const calls = new Map<number, number>();
+      let first0: ReturnType<typeof deferred<LlmStructuredResponse<unknown>>> | undefined;
+      /** T2 の応答に、応答の番兵を 1 つだけ混ぜる（値は文字列なので段の形は通る） */
+      const sentinelResponse = (ids: readonly string[], usage: LlmUsage | undefined): LlmStructuredResponse<unknown> => {
+        const output = LARGE_T2_OUTPUT as { readonly classifications: readonly Json[]; readonly cases: readonly Json[] };
+        return {
+          output: {
+            ...output,
+            classifications: output.classifications.filter((entry) => ids.includes(entry["requirementId"] as string)),
+            cases: output.cases
+              .filter((entry) => ids.includes(entry["requirementId"] as string))
+              .map((entry, index) => (index === 0 ? { ...entry, expected: { kind: "ok", value: "SENTINEL-RESP" } } : entry)),
+          },
+          usage,
+        };
+      };
+      const t2: LlmClient = {
+        async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+          const ids = requestListedIds(request);
+          const bundle = bundleOf(ids);
+          const count = calls.get(bundle) ?? 0;
+          calls.set(bundle, count + 1);
+          if (bundle === 0) {
+            if (count === 0) {
+              first0 = deferred<LlmStructuredResponse<unknown>>();
+              return first0.promise as Promise<LlmStructuredResponse<T>>;
+            }
+            // 打ち切った最初の試行に、遅着の応答（応答の番兵を含む）を返す
+            first0?.resolve(sentinelResponse(ids, LATE_USAGE));
+            return sentinelResponse(ids, NORMAL_USAGE) as LlmStructuredResponse<T>;
+          }
+          if (bundle === 1) {
+            if (count === 0) throw Object.assign(new Error("SENTINEL-EXC"), { kind: "network" });
+            return t2Response(ids, NORMAL_USAGE) as LlmStructuredResponse<T>;
+          }
+          throw Object.assign(new Error("要求が不正"), { kind: "invalidRequest", code: "SENTINEL-ID" });
+        },
+        callWithTools: async () => {
+          throw new Error("呼ばない");
+        },
+      };
+      const client = routedClient({ t2, c2: [LARGE_MAPPING], c3: [LARGE_JUDGMENTS], rest: [...LARGE_C1] });
+      const runPromise = runLarge("r7-sentinels", {
+        args: ["--stage-start", "vocabulary", "--stage-end", "test-spec", "--timeout", "0.001"],
+        clock: { now: base.now, onRequest: base.onRequest },
+        client,
+        envelope: await largeEnvelope(extra),
+        source: `${LARGE_SOURCE}${extra}`,
+      });
+      // T2 の最初の実試行が始まった時点で timeout が動く。到達を待たずに時計を進める
+      for (let turn = 0; turn < 20; turn += 1) {
+        await vi.advanceTimersByTimeAsync(60);
+        await Promise.resolve();
+      }
+      const { run, record, requests, spans } = await runPromise;
+      expect(run.code, JSON.stringify(record["stopped"])).not.toBe(EXIT_OK);
+      // 成功・誤り（通信・要求の不正）・遅着の行がそろっている
+      expect(requests.some((request) => request["end"] === "response")).toBe(true);
+      expect(requests.some((request) => request["end"] === "error" && request["error_kind"] === "network")).toBe(true);
+      expect(requests.some((request) => request["end"] === "error" && request["error_kind"] === "invalid-request")).toBe(true);
+      expect(requests.some((request) => request["end"] === "timeout")).toBe(true);
+      expect(requests.some((request) => request["late"]["usage"] !== null)).toBe(true);
+      const serialized = JSON.stringify({ requests, stage_spans: spans });
+      for (const sentinel of [extra, "SENTINEL-RESP", "SENTINEL-EXC", "SENTINEL-ID"]) {
+        expect(serialized, sentinel).not.toContain(sentinel);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("R7 題材の言葉が、今回変更した記録・試験（call.ts・call.test.ts・record.ts・record.test.ts・cli.test.ts）に無い", async () => {
+    const root = new URL("./", import.meta.url).pathname;
+    for (const name of ["call.ts", "call.test.ts", "record.ts", "record.test.ts", "cli.test.ts"]) {
+      const text = await fs.readFile(`${root}${name}`, "utf8");
+      for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text.includes(word), `${name}: ${word}`).toBe(false);
     }
   });
 

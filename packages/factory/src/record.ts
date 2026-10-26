@@ -17,6 +17,7 @@ import {
 import {
   cacheWriteTokensOf,
   isIncompleteResponseError,
+  runNoteHook,
   type AttemptCounts,
   type CallAttemptEnd,
   type CallAttemptObservation,
@@ -443,11 +444,15 @@ export class UsageMeter {
         try {
           const response = await client.callStructured<T>(request);
           this.note(response.usage);
+          runNoteHook(request.signal);
           return response;
         } catch (error) {
           // 未完了の応答は例外として現れるが、usage は付くことがある（§1.5）。呼び出しの数と
           // トークンを数えてから投げ直す——usage が無ければ「usage が欠けた呼び出し」として数える。
-          if (isIncompleteResponseError(error)) this.note(error.usage);
+          if (isIncompleteResponseError(error)) {
+            this.note(error.usage);
+            runNoteHook(request.signal);
+          }
           throw error;
         }
       },
@@ -455,9 +460,13 @@ export class UsageMeter {
         try {
           const response = await client.callWithTools(request);
           this.note(response.usage);
+          runNoteHook(request.signal);
           return response;
         } catch (error) {
-          if (isIncompleteResponseError(error)) this.note(error.usage);
+          if (isIncompleteResponseError(error)) {
+            this.note(error.usage);
+            runNoteHook(request.signal);
+          }
           throw error;
         }
       },
@@ -543,6 +552,9 @@ interface MutableCallRequestRow {
   lateUsage: CallRequestUsage | null;
   /** 遅着の加算を含んだ段の行の単位（まだ行の位置が決まっていなければ null でない単位のまま） */
   lateUnit: CallRequestUnit | null;
+  /** 計量の加算の時点で採った所属（`note` を渡さない単体の試験では使わない） */
+  noteUnit: CallRequestUnit | null;
+  noted: boolean;
 }
 
 /** 段全体の span の積み途中の状態（`openSpan` が返す。Issue #748） */
@@ -571,18 +583,19 @@ export function callRequestUsageOf(usage: LlmUsage | undefined): CallRequestUsag
  *
  * 単位（`beginUnit`）は、段の行を積むもとになる区間である。単位の中で始まった実試行の行は、その単位の
  * 段の行を指す。T2 の束は `beginBoundUnit` で**全体の単位にしない**——同時に走る束が互いの行を指さないため。
- * 遅着の加算の帰属は、行の単位が開いている間ならその単位、閉じたあとなら**いま開いている全体の単位**、
- * どちらも無ければ null とする（今の計量の前後のスナップショットの差に実際に含まれる行と一致する）。
+ * 遅着の加算の帰属は、`note`（計量の加算の時点）で採った所属——行の単位が開いている間ならその単位、
+ * 閉じていれば**その時点で開いている全体の単位**、どちらも無ければ null——から解く（今の計量の前後の
+ * スナップショットの差に実際に含まれる行と一致する）。観測の callback が動いた時点では解かない（レビュー R1）。
  */
 export class CallRequestLog {
-  readonly #startedAt: number;
+  readonly #startedAt: () => number;
   readonly #now: () => number;
   readonly #rows: MutableCallRequestRow[] = [];
   readonly #spans: StageSpanState[] = [];
   #globalUnit: CallRequestUnit | null = null;
 
-  constructor(startedAt: number, now: () => number) {
-    this.#startedAt = startedAt;
+  constructor(startedAt: number | (() => number), now: () => number) {
+    this.#startedAt = typeof startedAt === "function" ? startedAt : () => startedAt;
     this.#now = now;
   }
 
@@ -659,7 +672,7 @@ export class CallRequestLog {
   }
 
   #begin(unit: CallRequestUnit | null): CallAttemptObservation {
-    const startMs = this.#now() - this.#startedAt;
+    const startMs = this.#now() - this.#startedAt();
     const row: MutableCallRequestRow = {
       unit,
       startMs,
@@ -669,23 +682,34 @@ export class CallRequestLog {
       usage: null,
       lateUsage: null,
       lateUnit: null,
+      noteUnit: null,
+      noted: false,
     };
     this.#rows.push(row);
     return {
       settle: (end: CallAttemptEnd): void => {
         // 行はちょうど 1 度だけ確定する（2 度目以降は打ち切りのあとの遅着として扱う）
         if (row.end !== null) return;
-        row.endMs = this.#now() - this.#startedAt;
+        row.endMs = this.#now() - this.#startedAt();
         row.end = end.kind;
         if (end.kind === "response" || end.kind === "incomplete") row.usage = callRequestUsageOf(end.usage);
         else if (end.kind === "error") row.errorKind = end.errorKind;
+      },
+      note: (): void => {
+        // 計量がこの試行の加算をした時点の所属を採る（観測の callback の時点ではない。Issue #748 のレビュー R1）
+        row.noted = true;
+        row.noteUnit = row.unit !== null && row.unit.open ? row.unit : this.#globalUnit;
       },
       late: (usage: LlmUsage | undefined): void => {
         // 打ち切りのあとに返った応答・未完了だけが遅着。行の終わり方・時刻・所属は変えない
         if (row.end !== "timeout" && row.end !== "deadline") return;
         row.lateUsage = callRequestUsageOf(usage);
-        const owner = row.unit;
-        row.lateUnit = owner !== null && owner.open ? owner : this.#globalUnit;
+        // 計量の加算の時点の印があればそれを使う。無ければ（印を渡さない単体の試験）従来どおりこの時点で解く
+        row.lateUnit = row.noted
+          ? row.noteUnit
+          : row.unit !== null && row.unit.open
+            ? row.unit
+            : this.#globalUnit;
       },
     };
   }

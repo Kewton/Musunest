@@ -603,15 +603,17 @@ describe("実試行の行と段全体の span（Issue #748）：行は開始の�
     expect(log.requests()[0]?.end).toBe("response");
   });
 
-  it("遅着の usage は行の終わり方を変えず、加算を含んだ段の行の位置を解く（段の中・段と段の間・次の段の中）", () => {
+  it("遅着の usage は行の終わり方を変えず、加算を含んだ段の行の位置を解く（段の中・段と段の間・次の段の中。同じ試行が遅着する）", () => {
     const clock = clockAt();
     const log = new CallRequestLog(1_000, clock.now);
 
-    // 段 1 の中の遅着 → 段 1 の行
+    // 段 1 の中で 2 本を打ち切る。1 本は段 1 の中で遅着し、もう 1 本は段 2 に遅着する（同じ試行）
     const unit1 = log.beginUnit();
     const observer = log.observer();
     const row1 = observer.beginAttempt();
     row1.settle({ kind: "timeout" });
+    const rowLate = observer.beginAttempt();
+    rowLate.settle({ kind: "timeout" });
     clock.set(1_010);
     row1.late({ inputTokens: 1, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 2, reasoningTokens: 0 } as LlmUsage);
     log.finishUnit(unit1, 0);
@@ -621,21 +623,22 @@ describe("実試行の行と段全体の span（Issue #748）：行は開始の�
     row2.settle({ kind: "timeout" });
     clock.set(1_020);
     row2.late(undefined);
-    // この行は単位の外（前の段の確定後）。段の行の位置は null
-    expect(log.requests()[1]?.stage_index).toBeNull();
+    expect(log.requests()[2]?.stage_index).toBeNull();
 
-    // 段 2 の中の遅着（段 1 の行の遅着）→ 段 2 の行
+    // 段 2 の中の遅着（段 1 で打ち切った同じ試行）→ 段 2 の行
     const unit2 = log.beginUnit();
     const row3 = observer.beginAttempt();
     row3.settle({ kind: "timeout" });
     clock.set(1_030);
-    row3.late(undefined);
+    rowLate.late({ inputTokens: 4, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 5, reasoningTokens: 0 } as LlmUsage);
     log.finishUnit(unit2, 2);
 
     const requests = log.requests();
     expect(requests[0]).toMatchObject({ stage_index: 0, end: "timeout", late: { usage: { input_tokens: 1, output_tokens: 2 }, metered_stage_index: 0 } });
-    expect(requests[1]).toMatchObject({ stage_index: null, late: { usage: null, metered_stage_index: null } });
-    expect(requests[2]).toMatchObject({ stage_index: 2, late: { usage: null, metered_stage_index: 2 } });
+    // 段 1 で打ち切った同じ試行が、段 2 の行に遅着する
+    expect(requests[1]).toMatchObject({ stage_index: 0, end: "timeout", late: { usage: { input_tokens: 4, output_tokens: 5 }, metered_stage_index: 2 } });
+    expect(requests[2]).toMatchObject({ stage_index: null, end: "timeout", late: { usage: null, metered_stage_index: null } });
+    expect(requests[3]).toMatchObject({ stage_index: 2, end: "timeout", late: { usage: null, metered_stage_index: null } });
   });
 
   it("T2 の束の遅着は、束の確定の前ならその束の行、確定のあとなら後続の段の行、どの行にも入らなければ null", () => {
