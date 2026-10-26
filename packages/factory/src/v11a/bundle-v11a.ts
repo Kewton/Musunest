@@ -49,6 +49,7 @@ import { semanticCheckTargets } from "./stages/semantic-check.js";
 import { testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
 import { UPSTREAM_LEDGER_BOUNDARY, type V12PublicFlags } from "../v12/ledger.js";
 import type { SearchEvent, SearchRepairRecord, StageSearchRepairLog, VersionViolations } from "../v12/search-repair.js";
+import type { CallRequestRecord, StageSpanRecord } from "../record.js";
 
 /** v1.1α の記録の置き場所（成果物の置き場所の下。v1 の成果物と重ならない） */
 export const V11A_ARTIFACT_NAMES = {
@@ -843,6 +844,12 @@ export interface StageRunOutcome {
    * 探索に入ったあとで早期停止した走りの両方。探索に入らなかった走りは持たない。記録に載せるかは呼ぶ側が決める。Issue #746）
    */
   readonly searchRepair?: StageSearchRepairLog;
+  /**
+   * 旗 `v12.ids` の段の走りだけ、実試行ごとの行（開始の順）と、束に分けた段（C2 の初回・C3・T2）の
+   * 全体の開始と終わり（Issue #748）。段の行は変えず、記録の末尾に足す。合計には足さない。
+   */
+  readonly requests?: readonly CallRequestRecord[];
+  readonly stageSpans?: readonly StageSpanRecord[];
 }
 
 /**
@@ -1004,6 +1011,9 @@ export function buildStageRunRecord(input: {
     ...(v12 === undefined || outcome.verification === undefined ? {} : { verification: outcome.verification }),
     // 探索に入った v1.2 の段の走りだけ、探索の出来事の列を末尾に足す（v1.1α の記録・探索に入らなかった走りは欄を持たない。Issue #746）
     ...(v12 === undefined || outcome.searchRepair === undefined ? {} : { search_repair: stageSearchRepairJson(outcome.searchRepair) }),
+    // 旗 `v12.ids` の段の走りだけ、実試行の行と段全体の span を末尾に足す（ids off・v1.1α の記録は欄を持たない。Issue #748）
+    ...(v12 === undefined || outcome.requests === undefined ? {} : { requests: outcome.requests }),
+    ...(v12 === undefined || outcome.stageSpans === undefined ? {} : { stage_spans: outcome.stageSpans }),
   });
 }
 

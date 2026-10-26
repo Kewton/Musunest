@@ -50,7 +50,7 @@ import {
   buildStageBranch,
   type EnvelopeId,
 } from "./schema-envelope.js";
-import { requirementsFromPlan, type RequirementList } from "./pipeline.js";
+import { requirementsFromPlan, type Requirement, type RequirementList } from "./pipeline.js";
 import { captureCliBaseline, type BaselineCliCapture, type BaselineCliScenarios } from "./__tests__/baseline-capture.js";
 import {
   STAGE_DECLARATION_FILE,
@@ -74,6 +74,8 @@ import {
   LEDGER_VIEW_2C,
   WHEN_NON_REQUIREMENT_REQUEST_DIFF,
   createCheckedRecordingClient,
+  bundledC2Client,
+  bundledC3Client,
   draftOf,
   fixtureList,
   fixtureTable,
@@ -93,6 +95,7 @@ import {
   withoutRequiredValidations,
   revert735,
   revertBundleFiles735,
+  requestListedIds,
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
 import type { LedgerView } from "./v12/ledger.js";
@@ -114,6 +117,7 @@ import { SEMANTIC_CHECK_SCHEMA_NAME, semanticCheckRuleDefinitionsOf } from "./v1
 import { structuralReadingText } from "./v12/structural-meanings.js";
 import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
+import { MAPPING_SCHEMA_NAME } from "./v12/stages/mapping.js";
 import type { NameTable } from "./v11a/names.js";
 import {
   BUNDLE_MANIFEST_FILE,
@@ -129,7 +133,7 @@ import {
 } from "./bundle.js";
 import * as runModule from "./run.js";
 import type { Judge, JudgeRequest } from "./judge.js";
-import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "./llm.js";
+import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse, LlmUsage } from "./llm.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
 import { ATTEMPT_KEYS, FAILURE_KINDS, RETRY_KEYS, STAGE_IDS } from "./record.js";
 import { DESIGN_OUTPUT_MAPPED, SOURCE_TEXT, recordedRun, structured } from "./__tests__/run.js";
@@ -1819,7 +1823,8 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     expect(conditions["v12_flags"]).toEqual(factory.V12_PIPELINE_FLAGS);
     expect(conditions["v12_call_limits"]).toEqual(CALL_LIMITS);
     // 既存の欄の並びは今のまま（v1.2 の欄を末尾に足すだけ）
-    expect(Object.keys(record).slice(-2)).toEqual(["exit_code", "v12_calls"]);
+    // 末尾は既存の v12 の 2 欄と、Issue #748 で足した実試行の行・段全体の span
+    expect(Object.keys(record).slice(-4)).toEqual(["exit_code", "v12_calls", "requests", "stage_spans"]);
     // 門は生成 5 回（C1 の 3 束・C2・C3）と判定の枝（J4）を 1 つの数で数える
     const calls = record["v12_calls"] as { real_attempts: { limit: number; used: number }; judge_branch: { limit: number; used: number } };
     expect(calls.real_attempts.limit).toBe(V12_CALL_LIMITS.realAttempts);
@@ -2104,7 +2109,7 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
       dropped_tests: fakeDropped.length,
       coverage_units: (checkpoint["test_spec"]["coverage_units"] as readonly unknown[]).length,
     });
-    expect(Object.keys(record).slice(-3)).toEqual(["exit_code", "v12_calls", "test_spec"]);
+    expect(Object.keys(record).slice(-5)).toEqual(["exit_code", "v12_calls", "test_spec", "requests", "stage_spans"]);
     expect(record["v12_calls"]).toHaveProperty("test_spec");
   });
 
@@ -2236,6 +2241,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
       const revertedRecord = await stageRecordOf(dir);
       expect((revertedRecord["v12_calls"] as Record<string, unknown>)["semantic_check"]).toEqual({ rounds: [{ round: 1, bundles: 1 }], shape_retries: { limit: 1, used: 0, remaining: 1, by: [] } });
       revert735(revertedRecord);
+      revert748(revertedRecord);
       (revertedRecord["checkpoints"] as { output_digest: string }[])[0]!.output_digest = await stageOutputDigest(checkpoint);
       expect([await sha256Hex(stageJsonText(revertedRecord)), await sha256Hex(stageJsonText(checkpoint))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_735);
     }
@@ -2244,12 +2250,14 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
       const reverted = { ...checkpoint, versions: { ...checkpoint["versions"], ledger_upstream: V12_UPSTREAM_BEFORE_725 } };
       const revertedRecord = await stageRecordOf(dir);
       revert735(revertedRecord);
+      revert748(revertedRecord);
       (revertedRecord["checkpoints"] as { output_digest: string }[])[0]!.output_digest = await stageOutputDigest(reverted);
       expect([await sha256Hex(stageJsonText(revertedRecord)), await sha256Hex(stageJsonText(reverted))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_725);
     }
     delete checkpoint["versions"]["ledger_upstream"];
     const record = await stageRecordOf(dir);
     revert735(record);
+    revert748(record);
     const before = record["checkpoints"] as { output_digest: string }[];
     before[0]!.output_digest = await stageOutputDigest(checkpoint);
     expect([await sha256Hex(stageJsonText(record)), await sha256Hex(stageJsonText(checkpoint))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_713);
@@ -2301,6 +2309,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
       const reverted = await stageRecordOf(dir);
       expect(reverted["v12_calls"]).not.toHaveProperty("semantic_check");
       revert735(reverted);
+      revert748(reverted);
       expect([await sha256Hex(stageJsonText(reverted))]).toEqual(V12_STAGE_C2_STOP_DIGESTS_BEFORE_735);
     }
     expect(run.written).toEqual([STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
@@ -2440,7 +2449,10 @@ const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
   // logical_calls が変わり、記録の v12_calls に C3 の束の欄 semantic_check を足したため。旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_735`
   // に残し、`revert735` で欄を旧の値に戻せば一致することを試験で確かめる。旧 9e94a228cc565b2d77e210828065bfa74cc337bd6c05cab330e8bbdbd5b09a3d・
   // 8cad6abfb8cd5659407e25934411c26fb9ca537adae3e88a6b4a9cd327258a5a）
-  "c22cffe09c359a3e98eee0885efd47c9c3d2ab2c6158a731442e27f62572fc9b",
+  // Issue #748 で取り直した（ids on の段の走りの記録の末尾に実試行の行 `requests` と段全体の span `stage_spans` を足したため。
+  // checkpoint は変わらない。旧の値は c22cffe09c359a3e98eee0885efd47c9c3d2ab2c6158a731442e27f62572fc9b・
+  // 3646122573cce8254ad727db2d194021b54e683dbf9f98166cbdd36faadbf92d で、`revert748` で 2 欄を外せば一致する）
+  "96fa815fe904db51703079e76135d2ef3ee420bdcd1049847acbf9cb816273af",
   "3646122573cce8254ad727db2d194021b54e683dbf9f98166cbdd36faadbf92d",
 ];
 
@@ -2479,8 +2491,11 @@ const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_713: readonly string[] = [
  * 段の走り：C2 が 2 回落ちて止まる走りの記録の SHA-256（Issue #683）。Issue #735 で取り直した（論理の枠 L-v12-01 を 72 → 80 にして
  * 条件の記録の v12_call_limits の logical_calls が変わったため。C3 に届かないので v12_calls は変わらない。旧の値は
  * `V12_STAGE_C2_STOP_DIGESTS_BEFORE_735` に残し、`revert735` で戻せば一致することを試験で確かめる）
+ *
+ * Issue #748 で取り直した（ids on の段の走りの記録の末尾に実試行の行 `requests` と段全体の span `stage_spans` を足したため。
+ * 旧の値は 4edd73d295d2105783e7da7cbe36ff0a3aa6c13c32e3b1436ca3ae79caf1ed91 で、`revert748` で 2 欄を外せば一致する）
  */
-const V12_STAGE_C2_STOP_DIGESTS: readonly string[] = ["4edd73d295d2105783e7da7cbe36ff0a3aa6c13c32e3b1436ca3ae79caf1ed91"];
+const V12_STAGE_C2_STOP_DIGESTS: readonly string[] = ["09f2f6ed6828f5c76c062fac1a65f3cfde01e4f4a01b8f9e548438f7608d7962"];
 
 /** fa21c65（直す前）の段の走り：C2 が 2 回落ちて止まる走りの記録の SHA-256（Issue #683。Issue #735 の前の値） */
 const V12_STAGE_C2_STOP_DIGESTS_BEFORE_735: readonly string[] = ["00443168d1b3bc21efa0d78604fe89bcea391c54e545a67db4e1d68f61eb7367"];
@@ -2497,6 +2512,15 @@ const V11A_STAGE_RUN_DIGESTS: readonly string[] = [
   "50dde03644297779f6259db18fe73422c80f2aaa48439be189ea472bfb93ec33",
   "0d3d1378e80402c9f7e6625191e1e9b4821b1a75a4872b62716bbc0e125eecb2",
 ];
+
+/**
+ * Issue #748 で足した段の走りの記録の欄 `requests`・`stage_spans` を外す（新しく足した欄を持つ ids on の段の走りの記録を、
+ * 直す前の記録とバイト列で照らすため。ids off・一気通貫の記録は欄を持たないので何も起きない）
+ */
+function revert748(record: Record<string, unknown>): void {
+  delete record["requests"];
+  delete record["stage_spans"];
+}
 
 describe("旗 v12.ids の C3 の構造の検査の読み方（Issue #732）：一気通貫と段の走りの C3 の要求が同じ文を持ち、ids off の走りには無い", () => {
   afterEach(() => {
@@ -2796,6 +2820,8 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
         expect(serialize(record), path).toBe(text);
         // Issue #735 で変わった論理の枠の値と C3 の束の欄も旧の値に戻す（#725 の前の値と照らすため）
         revert735(record);
+        // Issue #748 で足した実試行の行・段全体の span を外す（ids on の段の走りの記録だけが持つ）
+        revert748(record);
         for (const entry of (record["checkpoints"] ?? []) as { path: string; output_digest: string }[]) {
           expect(entry.output_digest, path).toBe(await stageOutputDigest(JSON.parse(await run.textOf(entry.path))));
           entry.output_digest = digestOf.get(entry.path) ?? "";
@@ -2832,8 +2858,9 @@ describe("v1.2 の段の走りが ⑦ まで流したとき、判定した宣言
     const record = await stageRecordOf(dir);
     expect(record["stage_judge_verdict"]).toBe("full");
     expect(record["declaration"]).toEqual({ file: STAGE_DECLARATION_FILE, sha256: await sha256Hex(text), static_check_passed: true });
-    // 既存の欄の並びは今のまま（v1.2 の欄の末尾に宣言と検証の数を足す。その後ろに探索の出来事の列。Issue #746 で末尾に 1 つ足した）
-    expect(Object.keys(record).slice(-4)).toEqual(["v12_calls", "declaration", "verification", "search_repair"]);
+    // 既存の欄の並びは今のまま（v1.2 の欄の末尾に宣言と検証の数を足す。その後ろに探索の出来事の列と、Issue #748 で足した
+    // 実試行の行・段全体の span）
+    expect(Object.keys(record).slice(-6)).toEqual(["v12_calls", "declaration", "verification", "search_repair", "requests", "stage_spans"]);
     const verification = record["verification"] as Record<string, unknown>;
     const v11a = await readJson(`${whole}/${V11A_ARTIFACT_NAMES.verification}`);
     expect(verification).toEqual({
@@ -3508,10 +3535,15 @@ async function runStageCli(input: {
   readonly pipeline?: "v1.1a" | "v1.2";
   /** 偽物の時計（省けば 0 のまま）と、要求ごとに時計を進める口（出来事で進める。時刻を読む回数では進めない。Issue #746） */
   readonly clock?: { readonly now: () => number; readonly onRequest: (schemaName: string) => void };
+  /** 入口に渡す LLM（省けば `calls` の記録。Issue #748 の順序・打ち切りの試験で差し替える） */
+  readonly client?: LlmClient;
+  /** 判定の偽物（省けば `v11aJudge`） */
+  readonly judge?: Judge;
 }) {
   const planPath = `${input.dir}-plan.json`;
   const planText = JSON.stringify(input.envelope ?? (await v11aEnvelope()));
   const recording = createCheckedRecordingClient(input.calls);
+  const base = input.client ?? recording.client;
   const order: string[] = [];
   const structuredRequests: LlmStructuredRequest[] = [];
   const clientErrors: unknown[] = [];
@@ -3520,12 +3552,12 @@ async function runStageCli(input: {
       order.push(requestText(request));
       structuredRequests.push(request);
       input.clock?.onRequest(request.schemaName);
-      return keepingErrors(clientErrors, () => recording.client.callStructured<T>(request));
+      return keepingErrors(clientErrors, () => base.callStructured<T>(request));
     },
     async callWithTools(request) {
       order.push(requestText(request));
       input.clock?.onRequest("tools");
-      return keepingErrors(clientErrors, () => recording.client.callWithTools(request));
+      return keepingErrors(clientErrors, () => base.callWithTools(request));
     },
   };
   const makeClient = vi.fn((_options: { readonly envelope?: EnvelopeId }) => client);
@@ -3551,7 +3583,7 @@ async function runStageCli(input: {
     },
     loadDocuments: async () => FIXTURE_DOCUMENTS,
     makeClient,
-    makeLlmJudge: () => v11aJudge(),
+    makeLlmJudge: () => input.judge ?? v11aJudge(),
     now: input.clock?.now ?? (() => 0),
     log: (line) => lines.push(line),
     logError: (line) => errors.push(line),
@@ -4870,6 +4902,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
         const record = JSON.parse(text) as Json;
         hasSearch = "search_repair" in record;
         delete record["search_repair"];
+        // Issue #748 で足した実試行の行・段全体の span も外して、直す前（99b6478）の記録と照らす
+        revert748(record);
         text = stageJsonText(record);
       }
       files.push([path, await sha256Hex(text)]);
@@ -4949,4 +4983,750 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const stopped = runs.at(-1)?.record["stopped"] as Json;
     expect((stopped["problems"] as readonly unknown[]).length).toBeGreaterThan(0);
   });
+});
+
+// ── 旗 v12.ids の段の走り：実試行の行と段全体の span（Issue #748）──────────────────────────────
+//
+// 実際に段の走りを流し、CLI が書いた stage-run.json の末尾の `requests`（実試行の行）と
+// `stage_spans`（C2 の初回・C3 の各回・T2 の段全体）を読む。偽物の LLM・判定と、出来事で進める
+// 偽物の時計で閉じる（外部の API・鍵は使わない）。
+describe("旗 v12.ids の段の走りの記録：実試行の行と段全体の span（Issue #748）", () => {
+  type Json = Record<string, any>;
+  const ARGS = ["--stage-start", "vocabulary", "--stage-end", "semantic-check"] as const;
+  const TOKEN_KEYS = ["input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens"] as const;
+
+  /** 出来事で進める偽物の時計（要求ごとに進む。既定は 100 ミリ秒） */
+  function eventClock748(step = 100) {
+    let now = 0;
+    return { now: () => now, onRequest: (): void => void (now += step), advance: (ms: number): void => void (now += ms) };
+  }
+
+  async function run748(
+    name: string,
+    calls: readonly RecordedCall[],
+    options: {
+      readonly args?: readonly string[];
+      readonly clock?: { readonly now: () => number; readonly onRequest: (schemaName: string) => void };
+      readonly client?: LlmClient;
+      readonly judge?: Judge;
+    } = {},
+  ) {
+    const dir = `${directory}/requests-748-${name}`;
+    const run = await runStageCli({
+      dir,
+      args: options.args ?? ARGS,
+      calls,
+      pipeline: "v1.2",
+      ...(options.clock === undefined ? {} : { clock: options.clock }),
+      ...(options.client === undefined ? {} : { client: options.client }),
+      ...(options.judge === undefined ? {} : { judge: options.judge }),
+    });
+    const record = JSON.parse(await fs.readFile(`${dir}/${STAGE_RUN_RECORD_FILE}`, "utf8")) as Json;
+    return {
+      run,
+      dir,
+      record,
+      requests: record["requests"] as Json[],
+      spans: record["stage_spans"] as Json[],
+      stages: record["stages"] as Json[],
+    };
+  }
+
+  /** 段の行ごとに、行の usage（遅着は metered_stage_index、それ以外は stage_index）の和をトークンごとに出す */
+  const reconciled = (stages: readonly Json[], requests: readonly Json[]): readonly Record<string, number>[] =>
+    stages.map((_stage, index) =>
+      Object.fromEntries(
+        TOKEN_KEYS.map((key) => [
+          key,
+          requests.reduce((sum, request) => {
+            const late = request["late"] as { readonly usage: Json | null; readonly metered_stage_index: number | null };
+            const usage = (late["metered_stage_index"] === index ? late["usage"] : null) ??
+              (request["end"] === "timeout" || request["end"] === "deadline" || late["metered_stage_index"] !== null
+                ? null
+                : request["stage_index"] === index
+                  ? (request["usage"] as Json | null)
+                  : null);
+            return sum + (usage === null ? 0 : (usage[key] as number));
+          }, 0),
+        ]),
+      ),
+    );
+
+  it("(2)(5) C1・C2・C3 の行が自分の段の行を指し、行の和が段の行のトークンと一致する。C2 の初回・C3 の各回の span が段の行を指す", async () => {
+    const clock = eventClock748();
+    const { run, requests, spans, stages } = await run748("simple", [...v12TableCalls(), structured(v11aJudgments())], { clock });
+    expect(run.code).toBe(EXIT_OK);
+    expect(stages.map((stage) => stage["stage"])).toEqual([
+      "vocabulary", "vocabulary", "vocabulary", "mapping", "semantic-check",
+    ]);
+    // 実試行の行は開始の順で、それぞれ自分の段の行を指す
+    expect(requests.map((request) => request["stage_index"])).toEqual([0, 1, 2, 3, 4]);
+    expect(requests.map((request) => [request["start_ms"], request["end_ms"]])).toEqual([
+      [0, 100], [100, 200], [200, 300], [300, 400], [400, 500],
+    ]);
+    for (const request of requests) expect(request["end"]).toBe("response");
+    // C2 の初回と C3 の 1 回目の span は、それぞれの段の行を指し、その行の時間と同じ
+    expect(spans).toEqual([
+      { stage: "mapping", round: 1, start_ms: 300, end_ms: 400, stage_indices: [3] },
+      { stage: "semantic-check", round: 1, start_ms: 400, end_ms: 500, stage_indices: [4] },
+    ]);
+    expect(spans.map((span) => (span["end_ms"] as number) - (span["start_ms"] as number))).toEqual([
+      stages[3]!["duration_ms"], stages[4]!["duration_ms"],
+    ]);
+    // (5) 段の行ごとに、行の usage の和が段の行のトークンと一致する（段の行に足していない）
+    const sums = reconciled(stages, requests);
+    for (const [index, stage] of stages.entries()) {
+      for (const key of TOKEN_KEYS) expect(sums[index]![key], `${String(index)}:${key}`).toBe(stage[key]);
+    }
+    // 漏えい：行と span には固定の値と数だけ（題材の言葉・要件 ID・例外の文が無い）
+    const serialized = JSON.stringify({ requests, stage_spans: spans });
+    for (const requirement of V11A_BASE_LIST.requirements) {
+      expect(serialized).not.toContain(requirement.id);
+      expect(serialized).not.toContain(requirement.text);
+    }
+    expectNoAcceptanceMaterial([serialized]);
+  });
+
+  it("(2) C2 の初回と C3 の 2 回の span が別々にあり、C3 の段の行は各回の span を指す", async () => {
+    const clock = eventClock748();
+    // C3 の 1 回目が R3 を拒否 → C2 の 2 回目 → C3 の 2 回目は受理。C2・C3 は束ごとに記録を読む偽物で、
+    // 書き直しの要求（R3 だけ）には R3 の entry だけを返す（一気通貫と同じ読み方）
+    const c1 = createCheckedRecordingClient(v12TableCalls().slice(0, 3)).client;
+    const mapping = v12TableCalls().at(-1)! as Extract<RecordedCall, { readonly kind: "structured" }>;
+    const mappingOutput = mapping.output as { readonly requirements: readonly Record<string, unknown>[] };
+    const mappingCalls: RecordedCall[] = [
+      mapping,
+      structured({ requirements: mappingOutput.requirements.filter((entry) => entry["requirementId"] === "R3") }),
+    ];
+    const semanticCalls = [
+      structured(v11aJudgments({ R3: ["missing-target", "金額が 0 より大きい項目だけ"] })),
+      structured(v11aJudgments()),
+    ];
+    const c2 = bundledC2Client(createCheckedRecordingClient(mappingCalls).client);
+    const c3 = bundledC3Client(createCheckedRecordingClient(semanticCalls).client);
+    const client: LlmClient = {
+      callStructured: <T>(request: LlmStructuredRequest) =>
+        request.schemaName === "mapping"
+          ? c2.callStructured<T>(request)
+          : request.schemaName === "semantic-check"
+            ? c3.callStructured<T>(request)
+            : c1.callStructured<T>(request),
+      callWithTools: (request) => c1.callWithTools(request),
+    };
+    const { run, record, requests, spans, stages } = await run748("two-rounds", [...v12TableCalls(), ...semanticCalls], { clock, client });
+    expect(run.code, JSON.stringify(record["stopped"])).toBe(EXIT_OK);
+    expect(stages.map((stage) => stage["stage"]), JSON.stringify(stages.map((stage) => [stage["stage"], stage["status"]]))).toEqual([
+      "vocabulary", "vocabulary", "vocabulary", "mapping", "semantic-check", "mapping", "semantic-check",
+    ]);
+    expect(requests.map((request) => request["stage_index"])).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    // C2 の初回（回 1）・C3 の回 1・C3 の回 2 が、それぞれ別の span
+    expect(spans).toEqual([
+      { stage: "mapping", round: 1, start_ms: 300, end_ms: 400, stage_indices: [3] },
+      { stage: "semantic-check", round: 1, start_ms: 400, end_ms: 500, stage_indices: [4] },
+      { stage: "semantic-check", round: 2, start_ms: 600, end_ms: 700, stage_indices: [6] },
+    ]);
+    // 2 回の C3 を 1 つにまとめていない（span が 2 つ）
+    expect(spans.filter((span) => span["stage"] === "semantic-check").map((span) => span["round"])).toEqual([1, 2]);
+    for (const span of spans) {
+      const [index] = span["stage_indices"] as readonly number[];
+      expect((span["end_ms"] as number) - (span["start_ms"] as number)).toBe(stages[index!]!["duration_ms"]);
+    }
+  });
+
+  it("(6) 早期停止した走りでも止まるまでの行と span が出て、途中で止まった段の span は終わりが null・到達しなかった段は span を持たない", async () => {
+    const clock = eventClock748();
+    // C2 が形で 2 回続けて落ちて止まる（C3 に到達しない）
+    const calls = [...v12TableCalls().slice(0, 3), structured({ requirements: [] }), structured({ requirements: [] })];
+    const { run, requests, spans, stages } = await run748("early-stop", calls, { clock });
+    expect(run.code).toBe(EXIT_RUN_FAILED);
+    expect(stages.map((stage) => stage["stage"])).toEqual(["vocabulary", "vocabulary", "vocabulary", "mapping"]);
+    expect(requests.map((request) => request["stage_index"])).toEqual([0, 1, 2, 3, 3]);
+    // 止まった段（C2 の初回）の span はあるが、終わりは null。C3 の span は無い
+    expect(spans).toEqual([{ stage: "mapping", round: 1, start_ms: 300, end_ms: null, stage_indices: [3] }]);
+  });
+
+  it("(1) 範囲に T2 を含む走りでも T2 の実試行が全部行になり、T2 の行を指す。T2 の span が束の行を指す", async () => {
+    const clock = eventClock748();
+    const { run, requests, spans, stages } = await run748(
+      "t2",
+      [...v12TableCalls(), structured(v11aJudgments()), structured(v11aRenamed(v12TestSpec()))],
+      { args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"], clock },
+    );
+    expect(run.code).toBe(EXIT_OK);
+    const t2Rows = stages.map((stage, index) => ({ stage, index })).filter((entry) => entry.stage["stage"] === "test-spec");
+    expect(t2Rows.length).toBeGreaterThan(0);
+    // T2 の実試行の行は漏れなく T2 の束の行を指す
+    const t2Requests = requests.filter((request) => t2Rows.some((entry) => entry.index === request["stage_index"]));
+    expect(t2Requests.length).toBe(t2Rows.reduce((sum, entry) => sum + (entry.stage["attempts"]["started"] as number), 0));
+    expect(t2Requests.length).toBeGreaterThan(0);
+    const t2Span = spans.find((span) => span["stage"] === "test-spec");
+    expect(t2Span).toBeDefined();
+    expect(t2Span!["stage_indices"]).toEqual(t2Rows.map((entry) => entry.index));
+    expect(t2Span!["end_ms"]).not.toBeNull();
+  });
+
+  it("(3) T2 全体の span は、束の準備・合併・内容の検査に足した時間を含み、行の和・最長の束・行の外縁のどれとも違う", async () => {
+    const clock = eventClock748();
+    // T2 の外側（束の準備と、合併・内容の検査）に、出来事で進める偽物の時計で時間を足す
+    const original = testSpecModule.runTestSpec;
+    vi.spyOn(testSpecModule, "runTestSpec").mockImplementation(async (input) => {
+      clock.advance(500);
+      const value = await original(input);
+      clock.advance(700);
+      return value;
+    });
+    try {
+      const { run, requests, spans, stages } = await run748(
+        "t2-span",
+        [...v12TableCalls(), structured(v11aJudgments()), structured(v11aRenamed(v12TestSpec()))],
+        { args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"], clock },
+      );
+      expect(run.code).toBe(EXIT_OK);
+      const t2Rows = stages.map((stage, index) => ({ stage, index })).filter((entry) => entry.stage["stage"] === "test-spec");
+      const t2Span = spans.find((span) => span["stage"] === "test-spec")!;
+      const spanMs = (t2Span["end_ms"] as number) - (t2Span["start_ms"] as number);
+      const rowStarts = t2Rows.map((entry) => requests.filter((request) => request["stage_index"] === entry.index).map((request) => request["start_ms"] as number)).flat();
+      const rowEnds = t2Rows.map((entry) => requests.filter((request) => request["stage_index"] === entry.index).map((request) => request["end_ms"] as number)).flat();
+      const rowSum = rowEnds.reduce((sum, end, index) => sum + (end - (rowStarts[index] ?? end)), 0);
+      const longest = Math.max(...rowEnds.map((end, index) => end - (rowStarts[index] ?? end)));
+      const outer = Math.max(...rowEnds) - Math.min(...rowStarts);
+      expect(spanMs).toBe(1_300);
+      expect(spanMs).not.toBe(rowSum);
+      expect(spanMs).not.toBe(longest);
+      expect(spanMs).not.toBe(outer);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+// ── 旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748 の窓口の判断）────────────────────────
+//
+// 完了条件 (1)(2)(3)(5) を、cli.test の中で組んだ要件 12 件の入力（11〜15 件）で確かめる。C2・C3・T2 は
+// 束 3 つになる。fixture のファイルは足さず、schema 別に応答を配る偽物の口と、client・judge の差し替え口、
+// 出来事で進める偽物の時計を使う。CLI が書いた stage-run.json を独立に組んだ期待と照らす。
+describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748）", () => {
+  type Json = Record<string, any>;
+  const TOKEN_KEYS = ["input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens"] as const;
+  const NORMAL_USAGE: LlmUsage = { inputTokens: 2, cachedInputTokens: 1, cacheWriteTokens: 1, outputTokens: 3, reasoningTokens: 1 };
+  const LATE_USAGE: LlmUsage = { inputTokens: 11, cachedInputTokens: 3, cacheWriteTokens: 2, outputTokens: 7, reasoningTokens: 1 };
+
+  /** 要件 12 件（基本の R1〜R4 と、抽象的な文の R6〜R13。R5 は書けないので使わない） */
+  const ADDED: readonly (readonly [string, string])[] = [
+    ["R6", "項目の題名は、前後の空白を除いて保存される。"],
+    ["R7", "項目の日付は、登録した日より後でもよい。"],
+    ["R8", "項目の担当者は、別の担当者に付け替えられる。"],
+    ["R9", "項目の区分は、二つの値のどちらかである。"],
+    ["R10", "項目の金額は、小数を受け付けない。"],
+    ["R11", "まとめの画面は、件数を数で見せる。"],
+    ["R12", "一覧の画面は、題名を文字で見せる。"],
+    ["R13", "項目の題名は、重複しても登録できる。"],
+  ];
+  const requirementOf = (id: string, text: string): Requirement => ({
+    id,
+    text,
+    quote: text,
+    position: { start: 0, end: text.length },
+  });
+  const LARGE_REQUIREMENTS: readonly Requirement[] = [
+    ...V11A_BASE_LIST.requirements.map((requirement) => requirementOf(requirement.id, requirement.text)),
+    ...ADDED.map(([id, text]) => requirementOf(id, text)),
+  ];
+  const LARGE_LIST: RequirementList = { requirements: LARGE_REQUIREMENTS, decisions: [], unresolved: [] };
+  const LARGE_IDS = LARGE_REQUIREMENTS.map((requirement) => requirement.id);
+  const LARGE_SOURCE = LARGE_REQUIREMENTS.map((requirement) => requirement.text).join("");
+  const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
+  /** 基本の表（行は変えない）に、足した要件の所属・fixed-test・ruled を足した表 */
+  const LARGE_TABLE: NameTable = {
+    rows: V11A_TABLE.rows,
+    ownership: [...V11A_TABLE.ownership, ...ADDED.map(([id]) => ({ requirementId: id, roles: [stated("f.item.amount")] }))],
+    verification: [...V11A_TABLE.verification, ...ADDED.map(([id]) => ({ requirementId: id, kind: "fixed-test" as const }))],
+    classification: [...V11A_TABLE.classification, ...ADDED.map(([id]) => ({ requirementId: id, nature: "ruled" as const }))],
+  };
+  const LARGE_TABLE_IDS = withCodeIds(withAggregates(LARGE_TABLE));
+  const LARGE_RENAME = codeIdRenameOf(LARGE_TABLE);
+  const largeRenamed = <T,>(value: T): T => renameIds(value, LARGE_RENAME);
+
+  function largePlanBody(): ConfirmedPlan {
+    return {
+      schema_version: PLAN_SPEC_SCHEMA_VERSION,
+      plan_id: "plan-748-large",
+      revision: 1,
+      vocabulary_version: "v1",
+      inputs: [{ id: "in-1", kind: "source", text: LARGE_SOURCE }],
+      requirements: LARGE_REQUIREMENTS.map((requirement) => ({
+        id: requirement.id,
+        text: requirement.text,
+        kind: "constraining" as const,
+        origin: { input_id: "in-1", quote: requirement.quote },
+        parts: [{ id: `${requirement.id}-p1`, text: requirement.text, disposition: "met" as const }],
+      })),
+      open_issues: [],
+      decisions: [],
+      accepted_unwritable: [],
+      confirmation: { sha256: "0".repeat(64), confirmed_at: "2026-09-16T12:00:00+09:00", confirmed_by: "tester" },
+    };
+  }
+  async function largeEnvelope(): Promise<Record<string, unknown>> {
+    const plan = largePlanBody();
+    const confirmed: ConfirmedPlan = { ...plan, confirmation: { ...plan.confirmation, sha256: await planDigest(plan) } };
+    return {
+      schema_version: PLAN_ONLY_RESULT_SCHEMA,
+      outcome: "confirmed",
+      plan: confirmed,
+      plan_sha256: await planDigest(confirmed),
+      source_sha256: await sha256Hex(LARGE_SOURCE),
+      conditions: null,
+      stop: null,
+    };
+  }
+
+  const LARGE_TABLE_RESPONSES = idsResponsesOf(LARGE_LIST, LARGE_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW);
+  const LARGE_C1: readonly RecordedCall[] = [
+    structured(LARGE_TABLE_RESPONSES.entities),
+    structured(LARGE_TABLE_RESPONSES.fields),
+    structured(LARGE_TABLE_RESPONSES.behaviors),
+  ];
+  const LARGE_MAPPING: RecordedCall = structured(LARGE_TABLE_RESPONSES.mapping);
+  /** C2 の 2 回目（中身のやり直し）の応答（拒否の R3 だけ） */
+  const LARGE_MAPPING_R3: RecordedCall = structured({
+    requirements: (LARGE_TABLE_RESPONSES.mapping["requirements"] as readonly Json[]).filter((entry) => entry["requirementId"] === "R3"),
+  });
+  const LARGE_JUDGMENTS = structured({ judgments: LARGE_IDS.map((requirementId) => ({ requirementId, verdict: "accept", kind: null, quote: null })) });
+  const LARGE_JUDGMENTS_REJECT_R3 = structured({
+    judgments: LARGE_IDS.map((requirementId) =>
+      requirementId === "R3"
+        ? { requirementId, verdict: "reject", kind: "missing-target", quote: "金額が 0 より大きい項目だけを締められる。" }
+        : { requirementId, verdict: "accept", kind: null, quote: null },
+    ),
+  });
+  /** C3・B3' の応答（`rejects` の要件だけ拒否） */
+  const largeJudgments = (rejects: Readonly<Record<string, readonly [string, string]>> = {}): Record<string, unknown> => ({
+    judgments: LARGE_IDS.map((requirementId) => {
+      const found = rejects[requirementId];
+      return found === undefined
+        ? { requirementId, verdict: "accept", kind: null, quote: null }
+        : { requirementId, verdict: "reject", kind: found[0], quote: found[1] };
+    }),
+  });
+
+  /** 足した要件の固定した試験（f.item.amount の validate。R1 の試験と同じ値） */
+  const addedTests = ADDED.flatMap(([requirementId]) =>
+    V11A_KINDS.map((kind) =>
+      v11aTest({
+        id: `${requirementId.toLowerCase()}-${kind}`,
+        requirementId,
+        targetKind: "field",
+        roleId: "f.item.amount",
+        kind,
+        operation: "validate",
+        observes: "validation",
+        input: { "f.item.amount": kind === "abnormal" ? -1 : kind === "boundary" ? 1 : 5 },
+        expected: kind === "abnormal" ? { kind: "error", value: null, code: "E_INVALID" } : okValue("true"),
+      }),
+    ),
+  );
+  /** 旗 v12.ids の T2 の応答（全要件。R2 は構造なので書かない） */
+  const LARGE_T2_OUTPUT = (() => {
+    const base = v11aTestSpec() as {
+      readonly classifications: readonly { readonly requirementId: string }[];
+      readonly tests: readonly { readonly target: { readonly requirementId: string } }[];
+    };
+    return largeRenamed(
+      casesResponseOf({
+        classifications: [
+          ...base.classifications.filter((entry) => entry.requirementId !== "R2"),
+          ...ADDED.map(([requirementId]) => ({ requirementId, nature: "ruled" })),
+        ],
+        tests: [...base.tests.filter((test) => test.target.requirementId !== "R2"), ...addedTests],
+      }),
+    );
+  })();
+  const LARGE_YAML = V11A_YAML;
+
+  /** 判定の偽物（足した所属の組にも必要の値 0.9。raw とコードの形の ID の両方） */
+  function largeJudge() {
+    const answers: Record<string, JudgeAnswer> = {};
+    for (const entry of LARGE_TABLE.ownership) {
+      for (const role of entry.roles) {
+        answers[`need:${entry.requirementId}:${role.id}`] = { kind: "noul", noul: 0.9 };
+        answers[`need:${entry.requirementId}:${LARGE_RENAME.get(role.id) ?? role.id}`] = { kind: "noul", noul: 0.9 };
+      }
+    }
+    return createFakeJudge(answers);
+  }
+
+  /** 出来事で進める偽物の時計（要求ごとに進む。既定は 100 ミリ秒） */
+  function largeClock(step = 100) {
+    let now = 0;
+    return { now: () => now, onRequest: (): void => void (now += step), advance: (ms: number): void => void (now += ms) };
+  }
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  /** T2 の応答を、束の要件だけに絞る（分類と場合の両方） */
+  function t2Response(ids: readonly string[], usage: LlmUsage | undefined): LlmStructuredResponse<unknown> {
+    const output = LARGE_T2_OUTPUT as { readonly classifications: readonly Json[]; readonly cases: readonly Json[] };
+    return {
+      output: {
+        ...output,
+        classifications: output.classifications.filter((entry) => ids.includes(entry["requirementId"] as string)),
+        cases: output.cases.filter((entry) => ids.includes(entry["requirementId"] as string)),
+      },
+      usage,
+    };
+  }
+
+  /** 要件 ID から T2 の束の番号（先頭の要件 ID で見分ける。束は 5 件ずつ） */
+  const bundleOf = (ids: readonly string[]): number => Math.floor(LARGE_IDS.indexOf(ids[0] ?? "") / 5);
+
+  /**
+   * T2 の偽物の口。`ordered` は最初の実試行を保留して試験が逆の順に完了させ、`immediate` はすぐ返し、
+   * `timeout` は最初の実試行を保留したまま打ち切らせ、遅着を試験の出来事で返す。
+   */
+  function makeT2(mode: "ordered" | "immediate" | "timeout", lateUsage?: LlmUsage) {
+    const first = new Map<number, ReturnType<typeof deferred<LlmStructuredResponse<unknown>>>>();
+    const idsOf = new Map<number, readonly string[]>();
+    const calls = new Map<number, number>();
+    const started = new Set<number>();
+    let allStartedResolve!: () => void;
+    const allStarted = new Promise<void>((done) => {
+      allStartedResolve = done;
+    });
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        const ids = requestListedIds(request);
+        const bundle = bundleOf(ids);
+        idsOf.set(bundle, ids);
+        const count = calls.get(bundle) ?? 0;
+        calls.set(bundle, count + 1);
+        if (count === 0) {
+          started.add(bundle);
+          if (started.size === 3) allStartedResolve();
+          if (mode === "immediate") return t2Response(ids, NORMAL_USAGE) as LlmStructuredResponse<T>;
+          const pending = deferred<LlmStructuredResponse<unknown>>();
+          first.set(bundle, pending);
+          return pending.promise as Promise<LlmStructuredResponse<T>>;
+        }
+        // 打ち切ったあとの再試行のときに、束 0 の遅着を返す（束の確定の前）
+        if (mode === "timeout" && bundle === 0) first.get(0)?.resolve(t2Response(idsOf.get(0) ?? [], lateUsage));
+        return t2Response(ids, NORMAL_USAGE) as LlmStructuredResponse<T>;
+      },
+      callWithTools: async () => {
+        throw new Error("T2 の試験で道具は呼ばない");
+      },
+    };
+    return {
+      client,
+      allStarted,
+      /** 最初の実試行を、その束の応答で完了させる（`ordered`） */
+      resolve: (bundle: number): void => {
+        const ids = idsOf.get(bundle) ?? [];
+        first.get(bundle)?.resolve(t2Response(ids, NORMAL_USAGE));
+      },
+      /** 打ち切った最初の実試行に、遅着の応答を返す（`timeout`） */
+      resolveLate: (bundle: number): void => {
+        const ids = idsOf.get(bundle) ?? [];
+        first.get(bundle)?.resolve(t2Response(ids, lateUsage));
+      },
+    };
+  }
+
+  /** schema 別に応答を配る偽物の口（C1・C2・C3・T2 と、B1・B3' の記録） */
+  function routedClient(input: {
+    readonly t2: LlmClient;
+    readonly c2: readonly RecordedCall[];
+    readonly c3: readonly RecordedCall[];
+    readonly rest: readonly RecordedCall[];
+    readonly onWrite?: () => void;
+  }): LlmClient {
+    const c2 = bundledC2Client(createCheckedRecordingClient(input.c2).client);
+    const c3 = bundledC3Client(createCheckedRecordingClient(input.c3).client);
+    const rest = createCheckedRecordingClient(input.rest).client;
+    return {
+      callStructured: <T>(request: LlmStructuredRequest) => {
+        if (request.schemaName === MAPPING_SCHEMA_NAME) return c2.callStructured<T>(request);
+        if (request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME) return c3.callStructured<T>(request);
+        if (request.schemaName === TEST_SPEC_SCHEMA_NAME) return input.t2.callStructured<T>(request);
+        if (request.schemaName === WRITE_V11A_SCHEMA_NAME) input.onWrite?.();
+        return rest.callStructured<T>(request);
+      },
+      callWithTools: (request) => rest.callWithTools(request),
+    };
+  }
+
+  async function runLarge(
+    name: string,
+    options: {
+      readonly args: readonly string[];
+      readonly client: LlmClient;
+      readonly clock?: { readonly now: () => number; readonly onRequest: (schemaName: string) => void };
+      readonly judge?: Judge;
+    },
+  ) {
+    const dir = `${directory}/requests-748-large-${name}`;
+    const run = await runStageCli({
+      dir,
+      args: options.args,
+      calls: [],
+      pipeline: "v1.2",
+      envelope: await largeEnvelope(),
+      source: LARGE_SOURCE,
+      ...(options.clock === undefined ? {} : { clock: options.clock }),
+      client: options.client,
+      judge: options.judge ?? largeJudge(),
+    });
+    const record = JSON.parse(await fs.readFile(`${dir}/${STAGE_RUN_RECORD_FILE}`, "utf8")) as Json;
+    return { run, dir, record, requests: record["requests"] as Json[], spans: record["stage_spans"] as Json[], stages: record["stages"] as Json[] };
+  }
+
+  /** 段の行ごとに、行の usage の和（遅着は metered_stage_index、それ以外は stage_index） */
+  const reconciled = (stages: readonly Json[], requests: readonly Json[]): readonly Record<string, number>[] =>
+    stages.map((_stage, index) =>
+      Object.fromEntries(
+        TOKEN_KEYS.map((key) => [
+          key,
+          requests.reduce((sum, request) => {
+            const late = request["late"] as { readonly usage: Json | null; readonly metered_stage_index: number | null };
+            const usage = (late["metered_stage_index"] === index ? late["usage"] : null) ??
+              (request["end"] === "timeout" || request["end"] === "deadline" || late["metered_stage_index"] !== null
+                ? null
+                : request["stage_index"] === index
+                  ? (request["usage"] as Json | null)
+                  : null);
+            return sum + (usage === null ? 0 : (usage[key] as number));
+          }, 0),
+        ]),
+      ),
+    );
+  /** 段の行ごとに、usage の無い応答（遅着は metered_stage_index）の数 */
+  const missingReconciled = (stages: readonly Json[], requests: readonly Json[]): readonly number[] =>
+    stages.map((_stage, index) =>
+      requests.reduce((sum, request) => {
+        const late = request["late"] as { readonly usage: Json | null; readonly metered_stage_index: number | null };
+        if (late["metered_stage_index"] === index) return sum + (late["usage"] === null ? 1 : 0);
+        if (request["end"] === "timeout" || request["end"] === "deadline" || late["metered_stage_index"] !== null) return sum;
+        if (request["stage_index"] !== index) return sum;
+        if (request["end"] !== "response" && request["end"] !== "incomplete") return sum;
+        return sum + (request["usage"] === null ? 1 : 0);
+      }, 0),
+    );
+
+  it("(1) 要件 12 件で T2 が束 3 つになり、逆の順に完了しても各行が自分の束の段の行を指す", async () => {
+    const clock = largeClock();
+    const t2 = makeT2("ordered");
+    const client = routedClient({ t2: t2.client, c2: [LARGE_MAPPING], c3: [LARGE_JUDGMENTS], rest: [...LARGE_C1] });
+    const runPromise = runLarge("ordered", {
+      args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"],
+      clock,
+      client,
+    });
+    // T2 の束 3 つが同時に始まるのを待ち、束 2 → 1 → 0 の順に完了させる（逆の順）
+    await t2.allStarted;
+    const flush = async (): Promise<void> => {
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+    };
+    clock.advance(10);
+    t2.resolve(2);
+    await flush();
+    clock.advance(10);
+    t2.resolve(1);
+    await flush();
+    clock.advance(10);
+    t2.resolve(0);
+    const { run, record, requests, spans, stages } = await runPromise;
+    expect(run.code, JSON.stringify(record["stopped"])).toBe(EXIT_OK);
+    expect(stages.map((stage) => stage["stage"])).toEqual([
+      "vocabulary", "vocabulary", "vocabulary", "mapping", "semantic-check", "test-spec", "test-spec", "test-spec",
+    ]);
+    // (1) T2 の実試行の行は漏れなく、自分の束の段の行を指す（開始の順は 0・1・2 の束）
+    expect(requests.map((request) => request["stage_index"])).toEqual([0, 1, 2, 3, 3, 3, 4, 4, 4, 5, 6, 7]);
+    const t2Requests = requests.filter((request) => (request["stage_index"] as number) >= 5);
+    for (const request of t2Requests) expect(request["end"]).toBe("response");
+    // 完了は逆の順（束 2 → 1 → 0）。行の位置は束の順のまま
+    const ends = t2Requests.map((request) => request["end_ms"] as number);
+    expect(ends[2]).toBeLessThan(ends[1]!);
+    expect(ends[1]).toBeLessThan(ends[0]!);
+    expect(spans.map((span) => [span["stage"], span["round"], span["stage_indices"]])).toEqual([
+      ["mapping", 1, [3]],
+      ["semantic-check", 1, [4]],
+      ["test-spec", null, [5, 6, 7]],
+    ]);
+    expect(spans[2]!["end_ms"]).not.toBeNull();
+    // 束の行ごとの実試行の数は、その行の attempts.started と同じ（漏れなし）
+    for (const index of [5, 6, 7]) {
+      expect(requests.filter((request) => request["stage_index"] === index)).toHaveLength(stages[index]!["attempts"]["started"]);
+    }
+    // 漏えい：要件 ID・要件の文・題材の言葉が行と span に無い
+    const serialized = JSON.stringify({ requests, stage_spans: spans });
+    for (const requirement of LARGE_REQUIREMENTS) {
+      expect(serialized).not.toContain(requirement.id);
+      expect(serialized).not.toContain(requirement.text);
+    }
+    expectNoAcceptanceMaterial([serialized]);
+  });
+
+  it("(2) 要件 12 件の C3 が束 3 つで 2 回あり、span が回ごとに別で、段の行を指す", async () => {
+    const clock = largeClock();
+    const t2 = makeT2("immediate");
+    const client = routedClient({
+      t2: t2.client,
+      c2: [LARGE_MAPPING, LARGE_MAPPING_R3],
+      c3: [LARGE_JUDGMENTS_REJECT_R3, LARGE_JUDGMENTS],
+      rest: [...LARGE_C1],
+    });
+    const { run, record, requests, spans, stages } = await runLarge("two-rounds", {
+      args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"],
+      clock,
+      client,
+    });
+    expect(run.code, JSON.stringify(record["stopped"])).toBe(EXIT_OK);
+    expect(stages.map((stage) => stage["stage"])).toEqual([
+      "vocabulary", "vocabulary", "vocabulary", "mapping", "semantic-check", "mapping", "semantic-check",
+    ]);
+    // C2 の初回も C3 の各回も束 3 つ（3 行）で、全部その段の行を指す
+    expect(requests.map((request) => request["stage_index"])).toEqual([0, 1, 2, 3, 3, 3, 4, 4, 4, 5, 6, 6, 6]);
+    expect(spans.map((span) => [span["stage"], span["round"], span["stage_indices"]])).toEqual([
+      ["mapping", 1, [3]],
+      ["semantic-check", 1, [4]],
+      ["semantic-check", 2, [6]],
+    ]);
+    expect(spans.filter((span) => span["stage"] === "semantic-check").map((span) => span["round"])).toEqual([1, 2]);
+    for (const span of spans) {
+      const [index] = span["stage_indices"] as readonly number[];
+      expect((span["end_ms"] as number) - (span["start_ms"] as number)).toBe(stages[index!]!["duration_ms"]);
+    }
+  });
+
+  it("(3) 要件 12 件の T2（束 3 つ）の span が、準備・合併・検査に足した時間を含み、行の和・最長の束・外縁のどれとも違う", async () => {
+    const clock = largeClock();
+    const original = testSpecModule.runTestSpec;
+    vi.spyOn(testSpecModule, "runTestSpec").mockImplementation(async (input) => {
+      clock.advance(500);
+      const value = await original(input);
+      clock.advance(700);
+      return value;
+    });
+    try {
+      const t2 = makeT2("immediate");
+      const client = routedClient({ t2: t2.client, c2: [LARGE_MAPPING], c3: [LARGE_JUDGMENTS], rest: [...LARGE_C1] });
+      const { run, requests, spans, stages } = await runLarge("t2-span", {
+        args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"],
+        clock,
+        client,
+      });
+      expect(run.code).toBe(EXIT_OK);
+      const t2Rows = stages.map((stage, index) => ({ stage, index })).filter((entry) => entry.stage["stage"] === "test-spec");
+      expect(t2Rows).toHaveLength(3);
+      const t2Span = spans.find((span) => span["stage"] === "test-spec")!;
+      expect(t2Span["stage_indices"]).toEqual([5, 6, 7]);
+      const spansMs = (t2Span["end_ms"] as number) - (t2Span["start_ms"] as number);
+      const rowTimes = t2Rows.map((entry) =>
+        requests
+          .filter((request) => request["stage_index"] === entry.index)
+          .map((request) => [request["start_ms"] as number, request["end_ms"] as number] as const),
+      );
+      const rowSum = rowTimes.flat().reduce((sum, [start, end]) => sum + (end - start), 0);
+      const longest = Math.max(...rowTimes.flat().map(([start, end]) => end - start));
+      const outer = Math.max(...rowTimes.flat().map(([, end]) => end)) - Math.min(...rowTimes.flat().map(([start]) => start));
+      expect(spansMs).toBe(1_500);
+      expect(spansMs).not.toBe(rowSum);
+      expect(spansMs).not.toBe(longest);
+      expect(spansMs).not.toBe(outer);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  /**
+   * (5) T2 の束の遅着を、確定の前・確定のあとの B1 の実行中・段と段の間で起こし、`late.metered_stage_index`
+   * と、段の行のトークン・usage の無い応答の数の照合の規則で確かめる。usage あり・なしの 2 回。
+   */
+  for (const [label, lateUsage] of [
+    ["usage", LATE_USAGE],
+    ["missing", undefined],
+  ] as const) {
+    it(`(5) T2 の遅着（${label}）が、束の確定の前は自分の束の行・確定のあとの B1 は B1 の行・段と段の間は null に数えられ、行の和が段の行と一致する`, async () => {
+      vi.useFakeTimers();
+      const original = testSpecModule.runTestSpec;
+      let t2Returned = false;
+      vi.spyOn(testSpecModule, "runTestSpec").mockImplementation(async (input) => {
+        const value = await original(input);
+        t2Returned = true;
+        return value;
+      });
+      try {
+        const base = largeClock();
+        const t2 = makeT2("timeout", lateUsage);
+        const clock = {
+          now: (): number => {
+            // T2 の `run` が返った直後（束を積む前、B1 を始める前）の時刻を読むときに、束 1 の遅着を返す
+            if (t2Returned) {
+              t2Returned = false;
+              t2.resolveLate(1);
+            }
+            return base.now();
+          },
+          onRequest: base.onRequest,
+        };
+        const client = routedClient({
+          t2: t2.client,
+          c2: [LARGE_MAPPING],
+          c3: [LARGE_JUDGMENTS],
+          rest: [...LARGE_C1, structured({ declaration: LARGE_YAML }), structured(largeJudgments())],
+          onWrite: () => t2.resolveLate(2),
+        });
+        const runPromise = runLarge(`late-${label}`, {
+          args: ["--stage-start", "vocabulary", "--stage-end", "judge", "--timeout", "0.001"],
+          clock,
+          client,
+        });
+        await t2.allStarted;
+        // 呼び出し 1 回の timeout（0.001 分 = 60 ミリ秒）で、T2 の束 3 つの最初の実試行を打ち切る
+        await vi.advanceTimersByTimeAsync(60);
+        const { run, record, requests, spans, stages } = await runPromise;
+        expect(run.code, JSON.stringify(record["stopped"])).toBe(EXIT_OK);
+        // T2 の最初の実試行は 3 本とも打ち切りで、遅着の行はその 3 本
+        const cut = requests.filter((request) => request["end"] === "timeout");
+        expect(cut).toHaveLength(3);
+        expect(cut.map((request) => request["stage_index"])).toEqual([5, 6, 7]);
+        // 実経路の行は、どの段の走りでも段の行への数の参照を持つ（null にしない）
+        for (const request of requests) expect(typeof request["stage_index"]).toBe("number");
+        const b1Index = stages.findIndex((stage) => stage["stage"] === "write");
+        expect(b1Index).toBe(8);
+        // 束 0：束の確定の前 → 自分の束の行（5）。束 1：確定のあと B1 の前（段と段の間）→ null。束 2：B1 の実行中 → B1 の行
+        expect(cut.map((request) => request["late"]["metered_stage_index"])).toEqual([5, null, b1Index]);
+        for (const request of cut) {
+          expect(request["late"]["usage"]).toEqual(lateUsage === undefined ? null : {
+            input_tokens: 11,
+            cached_input_tokens: 3,
+            cache_write_tokens: 2,
+            output_tokens: 7,
+            reasoning_tokens: 1,
+          });
+        }
+        // 照合の規則：段の行ごとに、行の usage の和（遅着は metered_stage_index）が段の行のトークンと同じ
+        const sums = reconciled(stages, requests);
+        for (const [index, stage] of stages.entries()) {
+          for (const key of TOKEN_KEYS) expect(sums[index]![key], `${String(index)}:${key}`).toBe(stage[key]);
+        }
+        // usage の無い応答の数も同じ規則で合う
+        const missing = missingReconciled(stages, requests);
+        for (const [index, stage] of stages.entries()) {
+          expect(missing[index], String(index)).toBe(stage["missing_usage_calls"]);
+        }
+        // T2 の span は束の行を指したまま
+        expect(spans.find((span) => span["stage"] === "test-spec")!["stage_indices"]).toEqual([5, 6, 7]);
+      } finally {
+        vi.useRealTimers();
+        vi.restoreAllMocks();
+      }
+    });
+  }
 });
