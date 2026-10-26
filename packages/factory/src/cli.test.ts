@@ -5454,7 +5454,9 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
         const wrapper = new Promise<LlmStructuredResponse<T>>((resolve) => {
           resolveOuter = (value) => resolve(value as LlmStructuredResponse<T>);
         });
-        // 応答が CLI に届き、その microtask の処理が終わったあとの約束（時刻の読み取りを出来事で待つ）
+        // 応答が CLI に届き、その microtask の処理が終わったあとの約束（時刻の読み取りを出来事で待つ）。
+        // 応答から終わりの時刻の読み取りまでに I/O もタイマーも無い（call.ts:903-906 の `.then` が
+        // 同期的に `observation.settle` を呼び、record.ts:702 で `#now()` を読む）。
         const processed = new Promise<void>((done) => {
           void wrapper.then(() => {
             setImmediate(done);
@@ -5527,7 +5529,9 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
           if (started.size === 3) allStartedResolve();
           if (mode === "immediate") return t2Response(ids, NORMAL_USAGE) as LlmStructuredResponse<T>;
           const pending = deferred<LlmStructuredResponse<unknown>>();
-          // 応答が CLI に届き、その microtask の処理が終わったあとの約束（時刻の読み取りを出来事で待つ）
+          // 応答が CLI に届き、その microtask の処理が終わったあとの約束（時刻の読み取りを出来事で待つ）。
+          // 応答から終わりの時刻の読み取りまでに I/O もタイマーも無い（call.ts:903-906 の `.then` が
+          // 同期的に `observation.settle` を呼び、record.ts:702 で `#now()` を読む）。
           const processed = new Promise<void>((done) => {
             void pending.promise.then(() => {
               setImmediate(done);
@@ -6286,7 +6290,8 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
         client: routedClient({ t2, c2: [LARGE_MAPPING], c3: [LARGE_JUDGMENTS], rest: [...LARGE_C1] }),
       });
       await started;
-      // 束 1・2 の即時の応答は、締切の時計を進める前の microtask で確定する（advanceTimersByTimeAsync が先に流す）
+      // 偽の時計の advanceTimersByTimeAsync は、タイマーを動かす前に保留中の microtask を流す。
+      // 束 1・2 の即時の応答は microtask だけで確定し、そのあと締切のタイマーが動く（call.ts:903-906）
       await vi.advanceTimersByTimeAsync(30);
       const run = await runPromise;
       expect(run.run.code).not.toBe(EXIT_OK);
