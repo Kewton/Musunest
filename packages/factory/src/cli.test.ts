@@ -5431,43 +5431,57 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     return { promise, resolve };
   }
 
-  const flush = async (turns = 20): Promise<void> => {
-    for (let turn = 0; turn < turns; turn += 1) await Promise.resolve();
-  };
-
-  /** 述語が真になるまで、microtask と出来事の巡（ファイルの読み書き）を進める（時計は進めない） */
-  const waitFor = async (predicate: () => boolean): Promise<void> => {
-    for (let turn = 0; turn < 1_000 && !predicate(); turn += 1) {
-      await new Promise<void>((done) => {
-        setImmediate(done);
-      });
-    }
-    if (!predicate()) throw new Error("前提が壊れた：待っていた出来事が起きない");
-  };
-
   /** 束の口の応答を保留し、試験の出来事で 1 つずつ完了させる（Issue #748 のレビュー R4） */
   function held(inner: LlmClient) {
+    const waiters: { readonly count: number; readonly resolve: () => void }[] = [];
     const pending: {
       readonly request: LlmStructuredRequest;
       readonly response: Promise<LlmStructuredResponse<unknown>>;
+      readonly processed: Promise<void>;
       readonly resolve: (response: LlmStructuredResponse<unknown>) => void;
     }[] = [];
+    const notify = (): void => {
+      for (const waiter of [...waiters]) {
+        if (pending.length < waiter.count) continue;
+        waiters.splice(waiters.indexOf(waiter), 1);
+        waiter.resolve();
+      }
+    };
     const client: LlmClient = {
       callStructured: <T>(request: LlmStructuredRequest) => {
         const response = inner.callStructured<unknown>(request);
-        return new Promise<LlmStructuredResponse<T>>((resolve) => {
-          pending.push({ request, response, resolve: (value) => resolve(value as LlmStructuredResponse<T>) });
+        let resolveOuter!: (value: LlmStructuredResponse<unknown>) => void;
+        const wrapper = new Promise<LlmStructuredResponse<T>>((resolve) => {
+          resolveOuter = (value) => resolve(value as LlmStructuredResponse<T>);
         });
+        // 応答が CLI に届き、その microtask の処理が終わったあとの約束（時刻の読み取りを出来事で待つ）
+        const processed = new Promise<void>((done) => {
+          void wrapper.then(() => {
+            setImmediate(done);
+          });
+        });
+        pending.push({ request, response, processed, resolve: resolveOuter });
+        // 要求を受けた**その時点**で待っている約束を解く（巡の数で諦めない。PR #755 の CI の落ち）
+        notify();
+        return wrapper;
       },
       callWithTools: (request) => inner.callWithTools(request),
     };
     return {
       client,
       pending,
+      /** 保留が `count` 件そろうまで待つ（ファイルの読み書きの速さに依らない） */
+      whenPending: (count: number): Promise<void> => {
+        if (pending.length >= count) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          waiters.push({ count, resolve });
+        });
+      },
       release: async (index: number): Promise<void> => {
         const entry = pending[index];
         if (entry === undefined) throw new Error("前提が壊れた：保留した束が無い");
         entry.resolve(await entry.response);
+        await entry.processed;
       },
     };
   }
@@ -5493,7 +5507,7 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
    * `timeout` は最初の実試行を保留したまま打ち切らせ、遅着を試験の出来事で返す。
    */
   function makeT2(mode: "ordered" | "immediate" | "timeout", lateUsage?: LlmUsage) {
-    const first = new Map<number, ReturnType<typeof deferred<LlmStructuredResponse<unknown>>>>();
+    const first = new Map<number, { readonly pending: ReturnType<typeof deferred<LlmStructuredResponse<unknown>>>; readonly processed: Promise<void> }>();
     const idsOf = new Map<number, readonly string[]>();
     const calls = new Map<number, number>();
     const started = new Set<number>();
@@ -5513,11 +5527,17 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
           if (started.size === 3) allStartedResolve();
           if (mode === "immediate") return t2Response(ids, NORMAL_USAGE) as LlmStructuredResponse<T>;
           const pending = deferred<LlmStructuredResponse<unknown>>();
-          first.set(bundle, pending);
+          // 応答が CLI に届き、その microtask の処理が終わったあとの約束（時刻の読み取りを出来事で待つ）
+          const processed = new Promise<void>((done) => {
+            void pending.promise.then(() => {
+              setImmediate(done);
+            });
+          });
+          first.set(bundle, { pending, processed });
           return pending.promise as Promise<LlmStructuredResponse<T>>;
         }
         // 打ち切ったあとの再試行のときに、束 0 の遅着を返す（束の確定の前）
-        if (mode === "timeout" && bundle === 0) first.get(0)?.resolve(t2Response(idsOf.get(0) ?? [], lateUsage));
+        if (mode === "timeout" && bundle === 0) first.get(0)?.pending.resolve(t2Response(idsOf.get(0) ?? [], lateUsage));
         return t2Response(ids, NORMAL_USAGE) as LlmStructuredResponse<T>;
       },
       callWithTools: async () => {
@@ -5527,15 +5547,18 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     return {
       client,
       allStarted,
-      /** 最初の実試行を、その束の応答で完了させる（`ordered`） */
-      resolve: (bundle: number): void => {
+      /** 最初の実試行を、その束の応答で完了させる（`ordered`）。CLI の処理が終わるまで待つ */
+      resolve: async (bundle: number): Promise<void> => {
         const ids = idsOf.get(bundle) ?? [];
-        first.get(bundle)?.resolve(t2Response(ids, NORMAL_USAGE));
+        const entry = first.get(bundle);
+        if (entry === undefined) throw new Error("前提が壊れた：保留した束が無い");
+        entry.pending.resolve(t2Response(ids, NORMAL_USAGE));
+        await entry.processed;
       },
       /** 打ち切った最初の実試行に、遅着の応答を返す（`timeout`） */
       resolveLate: (bundle: number): void => {
         const ids = idsOf.get(bundle) ?? [];
-        first.get(bundle)?.resolve(t2Response(ids, lateUsage));
+        first.get(bundle)?.pending.resolve(t2Response(ids, lateUsage));
       },
     };
   }
@@ -5701,11 +5724,9 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     // T2 の束 3 つが同時に始まるのを待ち、束 2 → 1 → 0 の順に完了させる（逆の順）
     await t2.allStarted;
     clock.advance(10);
-    t2.resolve(2);
-    await flush();
+    await t2.resolve(2);
     clock.advance(10);
-    t2.resolve(1);
-    await flush();
+    await t2.resolve(1);
     clock.advance(10);
     t2.resolve(0);
     const { run, record, requests, spans, stages } = await runPromise;
@@ -5761,43 +5782,33 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       client,
     });
     // C2 の初回（束 3 つ）を、束 2 → 0 → 1 の順に完了させる（「別々の出来事で完了させる」）
-    await waitFor(() => heldC2.pending.length === 3);
+    await heldC2.whenPending(3);
     clock.advance(10);
     await heldC2.release(2);
-    await flush();
     clock.advance(10);
     await heldC2.release(0);
-    await flush();
     clock.advance(10);
     await heldC2.release(1);
-    await flush();
     // C3 の 1 回目（束 3 つ）を、束 0 → 2 → 1 の順に完了させる
-    await waitFor(() => heldC3.pending.length === 3);
+    await heldC3.whenPending(3);
     clock.advance(10);
     await heldC3.release(0);
-    await flush();
     clock.advance(10);
     await heldC3.release(2);
-    await flush();
     clock.advance(10);
     await heldC3.release(1);
-    await flush();
     // C2 の 2 回目（R3 だけの書き直し。1 束）
-    await waitFor(() => heldC2.pending.length === 4);
+    await heldC2.whenPending(4);
     clock.advance(10);
     await heldC2.release(3);
-    await flush();
     // C3 の 2 回目（束 3 つ）を、束 1 → 0 → 2 の順に完了させる
-    await waitFor(() => heldC3.pending.length === 6);
+    await heldC3.whenPending(6);
     clock.advance(10);
     await heldC3.release(3);
-    await flush();
     clock.advance(10);
     await heldC3.release(4);
-    await flush();
     clock.advance(10);
     await heldC3.release(5);
-    await flush();
     const { run, record, requests, spans, stages } = await runPromise;
     expect(run.code, JSON.stringify(record["stopped"])).toBe(EXIT_OK);
     expect(stages.map((stage) => stage["stage"])).toEqual([
@@ -6275,8 +6286,7 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
         client: routedClient({ t2, c2: [LARGE_MAPPING], c3: [LARGE_JUDGMENTS], rest: [...LARGE_C1] }),
       });
       await started;
-      // 束 1・2 の即時の応答を先に確定させ、束 0 の締切だけを動かす
-      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+      // 束 1・2 の即時の応答は、締切の時計を進める前の microtask で確定する（advanceTimersByTimeAsync が先に流す）
       await vi.advanceTimersByTimeAsync(30);
       const run = await runPromise;
       expect(run.run.code).not.toBe(EXIT_OK);
