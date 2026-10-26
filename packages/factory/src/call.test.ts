@@ -25,6 +25,9 @@ import {
   structuredInputParts,
   toolInputParts,
   type CallErrorKind,
+  type CallAttemptEnd,
+  type CallAttemptObservation,
+  type CallAttemptObserver,
   type CallResult,
   type LlmInputParts,
 } from "./call.js";
@@ -1546,5 +1549,175 @@ describe("段の名前で引いた口（段ごとの effort。Issue #664）", ()
     expect(view.callTimeoutMs).toBe(90_000);
     expect(view.effort).toBe("low");
     expect(view.maxOutputTokens("name-table")).toBe(STAGE_MAX_OUTPUT_TOKENS.low["name-table"]);
+  });
+});
+
+// ── 実試行の観測の口（Issue #748）──────────────────────────────────────
+//
+// 口が確定した分類だけを観測の口へ渡す。開始しなかった試行は行を作らず、打ち切りのあとの完了は
+// 終わり方を変えずに遅着として渡る。
+describe("実試行の観測の口（Issue #748）：口が確定した分類・打ち切りの時点の確定・遅着", () => {
+  interface RecordedObservation {
+    started: number;
+    end: CallAttemptEnd | undefined;
+    late: (LlmUsage | undefined)[];
+  }
+  function recordingObserver(): { readonly rows: RecordedObservation[]; readonly observer: CallAttemptObserver } {
+    const rows: RecordedObservation[] = [];
+    return {
+      rows,
+      observer: {
+        beginAttempt(): CallAttemptObservation {
+          const row: RecordedObservation = { started: rows.length, end: undefined, late: [] };
+          rows.push(row);
+          return {
+            settle: (end) => {
+              if (row.end !== undefined) return;
+              row.end = end;
+            },
+            late: (usage) => row.late.push(usage),
+          };
+        },
+      },
+    };
+  }
+
+  const usage = (input: number): LlmUsage => ({
+    inputTokens: input,
+    cachedInputTokens: 0,
+    cacheWriteTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+  });
+  const structuredResponse = (value: unknown, use?: LlmUsage): LlmStructuredResponse<unknown> =>
+    ({ output: value, usage: use }) as LlmStructuredResponse<unknown>;
+
+  it("応答（usage あり・なし）・未完了（usage あり・なし）・要求の不正・通信の誤りからの再送を、口の分類のとおりに 1 試行 1 行で告げる", async () => {
+    let index = 0;
+    const script: (() => Promise<LlmStructuredResponse<unknown>>)[] = [
+      async () => structuredResponse({ ok: 1 }, usage(1)),
+      async () => structuredResponse({ ok: 2 }, undefined),
+      async () => {
+        throw new OpenAiIncompleteError("max_output_tokens", usage(2), "未完了");
+      },
+      async () => {
+        throw new OpenAiIncompleteError("max_output_tokens", undefined, "未完了");
+      },
+      async () => {
+        throw Object.assign(new Error("要求が不正"), { kind: "invalidRequest", code: "invalid_json_schema" });
+      },
+      async () => {
+        throw Object.assign(new Error("通信の誤り"), { kind: "network" });
+      },
+      async () => structuredResponse({ ok: 3 }, usage(3)),
+    ];
+    const client: LlmClient = {
+      callStructured: <T>() => script[index++]!() as Promise<LlmStructuredResponse<T>>,
+      callWithTools: () => {
+        throw new Error("呼ばない");
+      },
+    };
+    const recording = recordingObserver();
+    const gateway = new CallGateway({
+      client,
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      observer: recording.observer,
+    });
+    for (let call = 0; call < 6; call += 1) await gateway.callStructured(STRUCTURED_REQUEST);
+
+    expect(recording.rows.map((row) => row.end)).toEqual([
+      { kind: "response", usage: usage(1) },
+      { kind: "response", usage: undefined },
+      { kind: "incomplete", usage: usage(2) },
+      { kind: "incomplete", usage: undefined },
+      { kind: "error", errorKind: "invalid-request" },
+      { kind: "error", errorKind: "network" },
+      { kind: "response", usage: usage(3) },
+    ]);
+    // 行の数は口の実開始の数と一致し、終わり方は attempts の数と一致する
+    expect(recording.rows).toHaveLength(gateway.attempts.started);
+    expect(gateway.attempts.started).toBe(7);
+    expect(gateway.attempts.responded).toBe(5);
+    expect(gateway.attempts.errors).toBe(2);
+  });
+
+  it("timeout の打ち切りは打ち切りの時点で確定し、あとから来た応答は遅着として渡り、行を変えない", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish: ((response: LlmStructuredResponse<unknown>) => void) | undefined;
+      const client: LlmClient = {
+        callStructured: <T>() =>
+          new Promise<LlmStructuredResponse<T>>((resolve) => {
+            finish = (response) => resolve(response as LlmStructuredResponse<T>);
+          }),
+        callWithTools: () => {
+          throw new Error("呼ばない");
+        },
+      };
+      const recording = recordingObserver();
+      const gateway = new CallGateway({
+        client,
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => 0,
+        deadline: 600_000,
+        callTimeoutMs: 1_000,
+        maxAttempts: 1,
+        observer: recording.observer,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await pending).toEqual({ kind: "failed", errorKind: "timeout", attempts: 1 });
+      expect(recording.rows.map((row) => row.end)).toEqual([{ kind: "timeout" }]);
+      // 打ち切ったあとに client が応答を返す（遅着）
+      finish!(structuredResponse({ late: true }, usage(9)));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(recording.rows[0]?.end).toEqual({ kind: "timeout" });
+      expect(recording.rows[0]?.late).toEqual([usage(9)]);
+      expect(gateway.attempts.cancelled_timeout).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("締切の打ち切りは deadline として確定し、締切で未着手の試行は行を作らない", async () => {
+    vi.useFakeTimers();
+    try {
+      let now = 0;
+      const client: LlmClient = {
+        callStructured: <T>() => new Promise<LlmStructuredResponse<T>>(() => {}),
+        callWithTools: () => {
+          throw new Error("呼ばない");
+        },
+      };
+      const recording = recordingObserver();
+      const gateway = new CallGateway({
+        client,
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => now,
+        deadline: 1_000,
+        callTimeoutMs: 5_000,
+        maxAttempts: 1,
+        observer: recording.observer,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      now = 1_000;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await pending).toEqual({ kind: "deadlineExceeded" });
+      expect(recording.rows.map((row) => row.end)).toEqual([{ kind: "deadline" }]);
+      expect(gateway.attempts.cancelled_deadline).toBe(1);
+
+      // 締切を過ぎてから呼ぶ＝未着手。行は作らない
+      expect(await gateway.callStructured(STRUCTURED_REQUEST)).toEqual({ kind: "deadlineExceeded" });
+      expect(recording.rows).toHaveLength(1);
+      expect(gateway.attempts.not_started.deadline).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -106,9 +106,11 @@ import {
 import {
   buildRunRecord,
   buildSummary,
+  CallRequestLog,
   makeStageRecord,
   usageDelta,
   UsageMeter,
+  type CallRequestUnit,
   type FailureAttribution,
   type FailureKind,
   type RunRecord,
@@ -773,6 +775,10 @@ async function runV11a(
   const limits = input.limits ?? AGENT_LIMITS;
   const meter = new UsageMeter();
   const budget = new JobBudget(input.budgetUsd);
+  // 走りの開始（実試行の行と span の時刻の基準。旗 `v12.ids` の段の走りだけ使う。Issue #748）
+  const startedAt = input.now();
+  // 旗 `v12.ids` の**段の走り**だけ、入口の client を使う全部の経路が共有する観測器を置く（一気通貫・ids off は作らない）
+  const requestLog = stageControl !== undefined && flags.ids ? new CallRequestLog(startedAt, input.now) : undefined;
   // 旗 `v12.ids` の走りだけ、生成と判定で共有する実試行の門と判定の枝を置く（off は門を作らない＝今の配線。Issue #592）
   const callLimits: V12CallLimits | undefined = flags.ids ? { ...V12_CALL_LIMITS, ...input.v12CallLimits } : undefined;
   const callGate: CallGate | undefined =
@@ -788,6 +794,7 @@ async function runV11a(
     ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
     ...(callGate === undefined ? {} : { gate: callGate }),
     ...(input.stageEfforts === undefined ? {} : { stageEfforts: input.stageEfforts }),
+    ...(requestLog === undefined ? {} : { observer: requestLog.observer() }),
   });
   // 判定の口（渡されたときだけ）を、この生成の予算に結び付けた包みで包む（v1 と同じ）。J4・J2 に渡す。旗 `v12.ids` の走りは
   // 共有の門と判定の枝も渡す
@@ -851,7 +858,6 @@ async function runV11a(
   /** 段の失敗を記録の失敗の帰属に写す（旗 `v12.ids` の走りだけ上限の名前と数を足す。Issue #665） */
   const attributionOf = (stage: StageId, failure: StageFailure): FailureAttribution =>
     stageFailureAttribution(stage, failure, flags.ids);
-  const startedAt = input.now();
   const stages: StageRecord[] = [];
   // 段の行ごとの開始と終わりの時刻（`stages` と同じ添字。段の行を組むときに読んだ値をそのまま持つだけで、時刻を読む回数を足さない。
   // 段の走りの探索の出来事の列の時間に使う。Issue #746）
@@ -1021,8 +1027,9 @@ async function runV11a(
     start: number,
     failureKind: FailureKind | null,
     references?: ReferenceCounts,
-  ): void => {
+  ): { readonly index: number; readonly end: number } => {
     const end = input.now();
+    const index = stages.length;
     stageTimes.push({ start, end });
     stages.push(
       makeStageRecord(
@@ -1043,36 +1050,56 @@ async function runV11a(
             },
       ),
     );
+    return { index, end };
   };
 
-  /** 値を返す段（コードの段）を回し、所要時間とトークンを記録する */
+  /**
+   * 値を返す段（コードの段）を回し、所要時間とトークンを記録する。旗 `v12.ids` の段の走りでは、
+   * この区間の実試行の行がこの段の行を指す（Issue #748）
+   */
   const runStage = async <T>(stage: StageId, fn: () => Promise<T>): Promise<T> => {
     const before = meterState();
     const start = input.now();
+    const unit = requestLog?.beginUnit();
     try {
       const value = await fn();
-      pushRecord(stage, "ok", before, start, null);
+      const record = pushRecord(stage, "ok", before, start, null);
+      requestLog?.finishUnit(unit, record.index);
       return value;
     } catch (error) {
-      pushRecord(stage, "failed", before, start, error instanceof RunStop ? error.attribution.kind : null);
+      const record = pushRecord(stage, "failed", before, start, error instanceof RunStop ? error.attribution.kind : null);
+      requestLog?.finishUnit(unit, record.index);
       throw error;
     }
   };
 
-  /** LLM の段を回す。段の失敗は、記録してから早期停止にする */
-  const runStageOk = async <T>(stage: StageId, fn: () => Promise<StageOutcome<T>>): Promise<T> => {
+  /**
+   * LLM の段を回す。段の失敗は、記録してから早期停止にする。`spanOf` を渡した段（C3）は、段全体の
+   * 開始と終わりを別の欄にも残す（Issue #748）
+   */
+  const runStageOk = async <T>(
+    stage: StageId,
+    fn: () => Promise<StageOutcome<T>>,
+    spanOf?: { readonly stage: "semantic-check"; readonly round: number },
+  ): Promise<T> => {
     const before = meterState();
     const start = input.now();
+    const unit = requestLog?.beginUnit();
+    const span = requestLog === undefined || spanOf === undefined ? undefined : requestLog.openSpan(spanOf.stage, spanOf.round, start - startedAt);
     let value: T;
     try {
       const outcome = await fn();
       if (!outcome.ok) throw new RunStop(attributionOf(stage, outcome.failure));
       value = outcome.value;
     } catch (error) {
-      pushRecord(stage, "failed", before, start, error instanceof RunStop ? error.attribution.kind : null);
+      const record = pushRecord(stage, "failed", before, start, error instanceof RunStop ? error.attribution.kind : null);
+      requestLog?.finishUnit(unit, record.index);
+      requestLog?.failSpan(span, [record.index]);
       throw error;
     }
-    pushRecord(stage, "ok", before, start, null);
+    const record = pushRecord(stage, "ok", before, start, null);
+    requestLog?.finishUnit(unit, record.index);
+    requestLog?.closeSpan(span, [record.index], record.end - startedAt);
     return value;
   };
 
@@ -1258,6 +1285,8 @@ async function runV11a(
           const log = searchLogOf(stopped);
           return log === undefined ? {} : { searchRepair: log };
         })(),
+        // 旗 `v12.ids` の段の走りだけ、実試行の行（開始の順）と段全体の span（⑦ まで届いた走りと早期停止の両方。Issue #748）
+        ...(requestLog === undefined ? {} : { requests: requestLog.requests(), stageSpans: requestLog.stageSpans() }),
       },
     };
   };
@@ -1313,29 +1342,34 @@ async function runV11a(
         semanticBundleRounds.push({ round, bundles: Math.ceil(targets.length / V12_T2_BUNDLE.size) });
       }
       const shapeRetries = semanticShapeRetries;
-      const semantic = await runStageOk("semantic-check", async (): Promise<StageOutcome<SemanticCheckOutput>> => {
-        const checked = await runSemanticCheck({
-          plan: input.plan,
-          list,
-          table: output.table,
-          advice: marks,
-          documents: input.documents,
-          gateway: gateway.forStage("semantic-check"),
-          ...withLedger,
-          // 旗 `v12.ids`：R-sc-02 に構造の検査の読み方を足す（off は渡さない＝今の文のまま。表の targets の有無で推測しない。Issue #732）
-          // 旗 `v12.ids`：対象を束に分けて同時に呼び、形のやり直しは 2 回の点検で共有した予算から使う（Issue #735）
-          ...(flags.ids && shapeRetries !== undefined ? { ids: true, round, shapeRetries } : {}),
-        });
-        if (!checked.ok) return checked;
-        const problems: Problem[] = [];
-        if (checked.value.tableSha256 !== output.tableSha256) {
-          problems.push({ field: "tableSha256", message: "表の意味の点検の結果が、採用した表の SHA-256 と合わない" });
-        }
-        if (!coversExactly(checked.value.judgments, targets)) {
-          problems.push({ field: "judgments", message: "表の意味の点検の判定が、対象の要件にちょうど 1 つずつでない" });
-        }
-        return problems.length > 0 ? { ok: false, failure: { kind: "malformed", attempts: 1, problems } } : checked;
-      });
+      const semantic = await runStageOk(
+        "semantic-check",
+        async (): Promise<StageOutcome<SemanticCheckOutput>> => {
+          const checked = await runSemanticCheck({
+            plan: input.plan,
+            list,
+            table: output.table,
+            advice: marks,
+            documents: input.documents,
+            gateway: gateway.forStage("semantic-check"),
+            ...withLedger,
+            // 旗 `v12.ids`：R-sc-02 に構造の検査の読み方を足す（off は渡さない＝今の文のまま。表の targets の有無で推測しない。Issue #732）
+            // 旗 `v12.ids`：対象を束に分けて同時に呼び、形のやり直しは 2 回の点検で共有した予算から使う（Issue #735）
+            ...(flags.ids && shapeRetries !== undefined ? { ids: true, round, shapeRetries } : {}),
+          });
+          if (!checked.ok) return checked;
+          const problems: Problem[] = [];
+          if (checked.value.tableSha256 !== output.tableSha256) {
+            problems.push({ field: "tableSha256", message: "表の意味の点検の結果が、採用した表の SHA-256 と合わない" });
+          }
+          if (!coversExactly(checked.value.judgments, targets)) {
+            problems.push({ field: "judgments", message: "表の意味の点検の判定が、対象の要件にちょうど 1 つずつでない" });
+          }
+          return problems.length > 0 ? { ok: false, failure: { kind: "malformed", attempts: 1, problems } } : checked;
+        },
+        // C3 は各回の段全体の span を別の欄にも残す（Issue #748）
+        requestLog === undefined ? undefined : { stage: "semantic-check", round },
+      );
       semanticRounds.push({
         round,
         tableSha256: semantic.tableSha256,
@@ -1355,6 +1389,7 @@ async function runV11a(
       for (const [index, bundle] of VOCABULARY_BUNDLES.entries()) {
         const before = meterState();
         const start = input.now();
+        const unit = requestLog?.beginUnit();
         let outcome: Awaited<ReturnType<typeof runVocabularyBundle>>;
         try {
           outcome = await runVocabularyBundle({
@@ -1368,15 +1403,18 @@ async function runV11a(
             ...withLedger,
           });
         } catch (error) {
-          pushRecord("vocabulary", "failed", before, start, null);
+          const record = pushRecord("vocabulary", "failed", before, start, null);
+          requestLog?.finishUnit(unit, record.index);
           throw error;
         }
         if (!outcome.ok) {
           const attribution = attributionOf("vocabulary", outcome.failure);
-          pushRecord("vocabulary", "failed", before, start, attribution.kind, outcome.references);
+          const record = pushRecord("vocabulary", "failed", before, start, attribution.kind, outcome.references);
+          requestLog?.finishUnit(unit, record.index);
           throw new RunStop(attribution);
         }
-        pushRecord("vocabulary", "ok", before, start, null, outcome.references);
+        const record = pushRecord("vocabulary", "ok", before, start, null, outcome.references);
+        requestLog?.finishUnit(unit, record.index);
         rows = outcome.rows;
       }
       let mappingPrevious: MappingPrevious | undefined;
@@ -1404,6 +1442,9 @@ async function runV11a(
         tableRounds.push(tableRound);
         const before = meterState();
         const start = input.now();
+        const unit = requestLog?.beginUnit();
+        // C2 の初回（回 1）だけ、段全体の span を別の欄にも残す（Issue #748）
+        const span = requestLog !== undefined && round === 1 ? requestLog.openSpan("mapping", round, start - startedAt) : undefined;
         let outcome: MappingOutcome;
         try {
           // C3 の拒否のあとの 2 回目（中身のやり直し）を共通の口へ告げる（この段の記録の再試行に数える）
@@ -1419,13 +1460,17 @@ async function runV11a(
             ...withLedger,
           });
         } catch (error) {
-          pushRecord("mapping", "failed", before, start, null);
+          const record = pushRecord("mapping", "failed", before, start, null);
+          requestLog?.finishUnit(unit, record.index);
+          requestLog?.failSpan(span, [record.index]);
           throw error;
         }
         if (!outcome.ok) {
           tableRound.ok = outcome.failure.kind === "unmet" ? "unmet" : "failed";
           const attribution = attributionOf("mapping", outcome.failure);
-          pushRecord("mapping", "failed", before, start, attribution.kind, outcome.references);
+          const record = pushRecord("mapping", "failed", before, start, attribution.kind, outcome.references);
+          requestLog?.finishUnit(unit, record.index);
+          requestLog?.failSpan(span, [record.index]);
           // 2 回目が C2' に落ちても形の再試行は無く、前回の写像のまま拒否の要件を持ち越す（08 §4.1）
           if (retry !== undefined && firstRound !== undefined && outcome.failure.kind === "unmet") {
             adopted = firstRound;
@@ -1434,7 +1479,9 @@ async function runV11a(
           }
           throw new RunStop(attribution);
         }
-        pushRecord("mapping", "ok", before, start, null, outcome.references);
+        const mappingRecord = pushRecord("mapping", "ok", before, start, null, outcome.references);
+        requestLog?.finishUnit(unit, mappingRecord.index);
+        requestLog?.closeSpan(span, [mappingRecord.index], mappingRecord.end - startedAt);
         const output = outcome.value;
         tableRound.ok = "ok";
         tableRound.table = {
@@ -1566,9 +1613,19 @@ async function runV11a(
     ): Promise<TestSpecValue> => {
       const concurrency = input.v12T2Concurrency ?? V12_T2_BUNDLE.concurrency;
       const usageBefore = meter.snapshot;
-      const runs: { readonly gateway: CallGateway; readonly meter: UsageMeter; readonly start: number; readonly end: () => number }[] = [];
+      // T2 全体の span（束の準備・待ち合わせ・合併・内容の検査を含む。行の外縁とは別。Issue #748）
+      const span = requestLog?.openSpan("test-spec", null, input.now() - startedAt);
+      const runs: {
+        readonly gateway: CallGateway;
+        readonly meter: UsageMeter;
+        readonly unit: CallRequestUnit | undefined;
+        readonly start: number;
+        readonly end: () => number;
+      }[] = [];
       const bundleGateway = (bundle: number): CallGateway => {
         const bundleMeter = new UsageMeter();
+        // 束の単位（同時に走る束が互いの段の行を指さないよう、全体の単位にはしない。Issue #748）
+        const unit = requestLog?.beginBoundUnit();
         const start = input.now();
         // 束の終了＝その束の最後の呼び出しが返った時刻（呼ばなければ開始と同じ）
         let end = start;
@@ -1601,15 +1658,21 @@ async function runV11a(
           ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
           ...(callGate === undefined ? {} : { gate: callGate }),
           ...(input.stageEfforts === undefined ? {} : { stageEfforts: input.stageEfforts }),
+          ...(requestLog === undefined || unit === undefined ? {} : { observer: requestLog.observer(unit) }),
         }).forStage("test-spec");
-        runs[bundle] = { gateway: bundleGatewayOf, meter: bundleMeter, start, end: () => end };
+        runs[bundle] = { gateway: bundleGatewayOf, meter: bundleMeter, unit, start, end: () => end };
         return bundleGatewayOf;
       };
-      const settle = (status: StageStatus, failureKind: FailureKind | null): void => {
+      /** 束の段の行を束の順に積み、積んだ行の位置を返す（束ごとの単位をその行の位置で閉じる） */
+      const settle = (status: StageStatus, failureKind: FailureKind | null): readonly number[] => {
+        const indices: number[] = [];
         for (const entry of runs) {
           if (entry === undefined) continue;
+          const index = stages.length;
           stageTimes.push({ start: entry.start, end: entry.end() });
           stages.push(makeStageRecord("test-spec", status, entry.end() - entry.start, entry.meter.snapshot, entry.gateway.counts, failureKind));
+          requestLog?.finishUnit(entry.unit, index);
+          indices.push(index);
         }
         const made = runs.filter((entry): entry is (typeof runs)[number] => entry !== undefined);
         testSpecBundles = {
@@ -1617,20 +1680,25 @@ async function runV11a(
           concurrency: Math.min(concurrency, made.length),
           total: { ...usageDelta(usageBefore, meter.snapshot), ...sumCallCounts(made.map((entry) => entry.gateway.counts)) },
         };
+        return indices;
       };
       let outcome: StageOutcome<TestSpecValue>;
       try {
         outcome = await run(bundleGateway, concurrency);
       } catch (error) {
-        settle("failed", null);
+        const indices = settle("failed", null);
+        requestLog?.failSpan(span, indices);
         throw error;
       }
       if (!outcome.ok) {
         const attribution = attributionOf("test-spec", outcome.failure);
-        settle("failed", attribution.kind);
+        const indices = settle("failed", attribution.kind);
+        requestLog?.failSpan(span, indices);
         throw new RunStop(attribution);
       }
-      settle("ok", null);
+      const endedAt = input.now();
+      const indices = settle("ok", null);
+      requestLog?.closeSpan(span, indices, endedAt - startedAt);
       return outcome.value;
     };
     const runTestSpecStage = async (): Promise<FrozenTestSpec> => {

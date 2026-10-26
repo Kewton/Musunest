@@ -190,6 +190,40 @@ export interface CategorizedCallError {
 }
 
 /**
+ * 実試行 1 回の終わりの、**口が確定した分類**（Issue #748）。観測の口へは、例外の文・要求や応答の本文・
+ * ID の値を渡さない——分類と usage だけを渡す。未完了は応答の一種として分け、要求の不正は誤りの
+ * `invalid-request` として分ける（`CALL_ERROR_KINDS` は未完了・要求の不正を含まないため）。
+ */
+export type CallAttemptEnd =
+  | { readonly kind: "response"; readonly usage: LlmUsage | undefined }
+  | { readonly kind: "incomplete"; readonly usage: LlmUsage | undefined }
+  | { readonly kind: "error"; readonly errorKind: CallErrorKind | "invalid-request" }
+  /** 呼び出しごとの timeout で打ち切った */
+  | { readonly kind: "timeout" }
+  /** ジョブの締切で打ち切った */
+  | { readonly kind: "deadline" };
+
+/**
+ * 実試行 1 回の観測（Issue #748）。口は**始めなかった試行**（締切・上限・予算で未着手）では作らない。
+ * `settle` は**1 つの開始につき 1 度だけ**呼ばれる——打ち切りのあとに client が遅れて返ったときは
+ * `late` を呼び、行の終わり方は変えない。
+ */
+export interface CallAttemptObservation {
+  /** 終わりを確定する（2 度目以降の呼び出しは無視される） */
+  settle(end: CallAttemptEnd): void;
+  /** 打ち切りのあとに client が遅れて応答・未完了を返した（usage が無ければ `undefined`） */
+  late(usage: LlmUsage | undefined): void;
+}
+
+/**
+ * 実試行の観測器（Issue #748）。親の口と T2 の束ごとの口が**同じ 1 つ**を共有する。
+ * `beginAttempt` は実呼び出しを始める直前に呼ばれ、始めなかった試行では呼ばれない。
+ */
+export interface CallAttemptObserver {
+  beginAttempt(): CallAttemptObservation;
+}
+
+/**
  * 例外を、共通の口の種類に写す（§2.2・#302）。**口は adapter に依存しない**ので、型ではなく
  * `kind` の形で見分ける。分類できない例外は `unknown` として別に出す（拒否に混ぜない）。
  */
@@ -215,6 +249,16 @@ export function isRetryableCallError(error: CategorizedCallError): boolean {
   if (error.kind === "timeout" || error.kind === "network") return true;
   if (error.kind === "http") return error.status !== undefined && error.status >= 500;
   return false;
+}
+
+/**
+ * 試行が例外で終わったときの、観測の口へ渡す分類（Issue #748）。未完了・要求の不正を分け、
+ * 残りは adapter の種類をそのまま写す。**例外の文は写さない**。
+ */
+function attemptEndOfError(error: unknown): CallAttemptEnd {
+  if (isIncompleteResponseError(error)) return { kind: "incomplete", usage: error.usage };
+  if (isInvalidRequestError(error)) return { kind: "error", errorKind: "invalid-request" };
+  return { kind: "error", errorKind: categorizeCallError(error).kind };
 }
 
 /**
@@ -287,6 +331,11 @@ export interface CallGatewayOptions {
    * 引き、構造化の要求に effort を載せる。省けば、どの段の口も今の口と同じ。
    */
   readonly stageEfforts?: StageEfforts;
+  /**
+   * 実試行の観測器（Issue #748）。渡した口だけが、**実呼び出しを始めた試行**の始まりと終わりを告げる。
+   * 省けば何も告げない（今の振る舞いと同じ）。要求の wire・中断の合図・計量・予約・再送は変えない。
+   */
+  readonly observer?: CallAttemptObserver;
 }
 
 /** 口の計（試行・再試行・道具の数。段の名前で引いた口と共有する。Issue #446・#664） */
@@ -522,6 +571,8 @@ export class CallGateway {
   readonly #explicitCallTimeoutMs: number | undefined;
   /** 段ごとの effort の組（段の名前で引いた口の出所。Issue #664） */
   readonly #stageEfforts: StageEfforts;
+  /** 実試行の観測器（省けば観測しない。Issue #748） */
+  readonly #observer: CallAttemptObserver | undefined;
   /** 段の名前で引いた口の元の口（元の口では自分自身。Issue #664） */
   #root: CallGateway = this;
   /** 要求に載せる effort（段の名前で引いた口だけが持つ。無ければ載せない＝今の要求。Issue #664） */
@@ -550,6 +601,7 @@ export class CallGateway {
     this.#gate = options.gate;
     this.#explicitCallTimeoutMs = options.callTimeoutMs;
     this.#stageEfforts = options.stageEfforts ?? {};
+    this.#observer = options.observer;
   }
 
   /** 推論の effort（段の出力の上限の出所。§2） */
@@ -584,6 +636,7 @@ export class CallGateway {
       effort,
       ...(root.#explicitCallTimeoutMs === undefined ? {} : { callTimeoutMs: root.#explicitCallTimeoutMs }),
       ...(root.#gate === undefined ? {} : { gate: root.#gate }),
+      ...(root.#observer === undefined ? {} : { observer: root.#observer }),
     });
     view.#root = root;
     view.#requestEffort = effort;
@@ -724,8 +777,10 @@ export class CallGateway {
       this.#counts.attemptsStarted += 1;
       if (attempt > 1) this.#counts.retries += 1;
       attempts = attempt;
+      // 実試行の観測（Issue #748）。**始めた試行**だけ行を作る（未着手では呼ばない）。
+      const observation = this.#observer?.beginAttempt();
       try {
-        const outcome = await this.#attempt(invoke, timeoutMs, remaining);
+        const outcome = await this.#attempt(invoke, timeoutMs, remaining, observation);
         if (outcome.kind === "deadline") {
           this.#counts.attemptsCancelledDeadline += 1;
           return { kind: "deadlineExceeded" };
@@ -794,25 +849,50 @@ export class CallGateway {
    * 1 回の実呼び出しを、呼び出しごとの timeout（`timeoutMs`）で打ち切る（§1.5・#302）。
    * `timeoutMs` が締切の残りに達していれば、それはジョブの締切として返す（`deadline`）。
    * 途中で打ち切るときは合図（`signal`）を中断する——adapter は中断を timeout として返す。
+   *
+   * 観測の口（Issue #748）へは、**打ち切りの時点で**終わりを確定して渡す（戻った時点で行が未確定・
+   * 遅い完了で二重確定にならない）。打ち切りのあとに client が返したら `late` として渡し、行は変えない。
    */
   async #attempt<T>(
     invoke: (signal: AbortSignal) => Promise<Attempted<T>>,
     timeoutMs: number,
     remaining: number,
+    observation: CallAttemptObservation | undefined,
   ): Promise<AttemptOutcome<T>> {
     const atDeadline = timeoutMs >= remaining;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    /** 打ち切りの分類。abort の同期の拒否が `settle` より先に来ても、遅着として扱えるように先に置く */
+    let cancelled: "deadline" | "timeout" | undefined;
     const aborted = new Promise<"deadline" | "timeout">((resolve) => {
       timer = setTimeout(() => {
+        cancelled = atDeadline ? "deadline" : "timeout";
+        observation?.settle({ kind: cancelled });
         controller.abort();
-        resolve(atDeadline ? "deadline" : "timeout");
+        resolve(cancelled);
       }, timeoutMs);
     });
     try {
       const call = invoke(controller.signal);
-      // 打ち切ったあとに来る拒否を握る（待っていない側の拒否を、未処理のまま残さない）
-      void call.catch(() => {});
+      if (observation === undefined) {
+        // 打ち切ったあとに来る拒否を握る（待っていない側の拒否を、未処理のまま残さない）
+        void call.catch(() => {});
+      } else {
+        void call
+          .then(
+            (result) => {
+              if (cancelled === undefined) observation.settle({ kind: "response", usage: result.usage });
+              else observation.late(result.usage);
+            },
+            (error) => {
+              const end = attemptEndOfError(error);
+              if (cancelled === undefined) observation.settle(end);
+              else if (end.kind === "incomplete") observation.late(end.usage);
+            },
+          )
+          // 観測の口が投げても、待っていない側の拒否を未処理のまま残さない
+          .catch(() => {});
+      }
       const raced = await Promise.race([call, aborted]);
       if (raced === "deadline" || raced === "timeout") return { kind: raced };
       return { kind: "ok", result: raced };
