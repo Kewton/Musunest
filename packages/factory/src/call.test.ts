@@ -50,6 +50,7 @@ import type {
   LlmUsage,
 } from "./llm.js";
 import { createFakeLlmClient } from "./llm-fake.js";
+import { CallRequestLog, UsageMeter } from "./record.js";
 
 const RATES: TokenRates = { inputPerToken: 1, cachedInputPerToken: 0.5, outputPerToken: 2 };
 
@@ -1642,6 +1643,66 @@ describe("実試行の観測の口（Issue #748）：口が確定した分類・
     expect(gateway.attempts.started).toBe(7);
     expect(gateway.attempts.responded).toBe(5);
     expect(gateway.attempts.errors).toBe(2);
+  });
+
+  it("E1：再試行の応答の数 microtask 後に最初の試行が遅着しても、計量の加算の時点で印を採り、実際に差に含んだ段の行へ帰属する", async () => {
+    vi.useFakeTimers();
+    try {
+      const clock = { now: 1_000 };
+      const log = new CallRequestLog(1_000, () => clock.now);
+      const meter = new UsageMeter();
+      let resolveFirst: ((response: LlmStructuredResponse<unknown>) => void) | undefined;
+      let calls = 0;
+      const client: LlmClient = {
+        callStructured: <T>() => {
+          calls += 1;
+          if (calls === 1) {
+            return new Promise<LlmStructuredResponse<T>>((resolve) => {
+              resolveFirst = (response) => resolve(response as LlmStructuredResponse<T>);
+            });
+          }
+          return Promise.resolve(structuredResponse({ ok: true }, usage(1)) as LlmStructuredResponse<T>);
+        },
+        callWithTools: () => {
+          throw new Error("呼ばない");
+        },
+      };
+      const gateway = new CallGateway({
+        client: meter.wrap(client),
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => clock.now,
+        deadline: 600_000,
+        callTimeoutMs: 1_000,
+        maxAttempts: 2,
+        observer: log.observer(),
+      });
+      const unit = log.beginUnit();
+      const before = meter.snapshot;
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      // 1 回目を timeout で打ち切り、2 回目を usage 1 で返す
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+      expect(result.kind).toBe("ok");
+      // 打ち切った同じ試行が、再試行の応答の数 microtask 後に usage 11 で遅着する
+      resolveFirst?.(structuredResponse({ ok: false }, usage(11)));
+      // 計量の加算（印を採る時点）まで進め、そのあとで段の行を積んで単位を閉じる
+      for (let turn = 0; turn < 10 && meter.snapshot.input_tokens < 12; turn += 1) await Promise.resolve();
+      clock.now += 5;
+      const after = meter.snapshot;
+      log.finishUnit(unit, 0);
+      // 観測の callback が動くまで進める
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      // 加算は段の行の差に入っている（1 + 11）ので、遅着は段の行 0 に帰属する
+      expect(after.input_tokens - before.input_tokens).toBe(12);
+      expect(log.requests()[0]).toMatchObject({
+        stage_index: 0,
+        end: "timeout",
+        late: { usage: { input_tokens: 11 }, metered_stage_index: 0 },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("timeout の打ち切りは打ち切りの時点で確定し、あとから来た応答は遅着として渡り、行を変えない", async () => {

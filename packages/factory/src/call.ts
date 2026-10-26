@@ -213,6 +213,25 @@ export interface CallAttemptObservation {
   settle(end: CallAttemptEnd): void;
   /** 打ち切りのあとに client が遅れて応答・未完了を返した（usage が無ければ `undefined`） */
   late(usage: LlmUsage | undefined): void;
+  /**
+   * 計量（`UsageMeter.note`）がこの試行の usage を加算した**その時点**に呼ばれる（Issue #748 のレビュー R1）。
+   * 遅着の帰属は、観測の callback が動いた時点ではなく、この印の時点の単位から解く。
+   */
+  note?(): void;
+}
+
+/** 試行ごとの計量の印（実呼び出しの合図で引く。Issue #748 のレビュー R1） */
+const noteHooks = new WeakMap<object, () => void>();
+
+/** 計量の加算の時点で呼ぶ印を、その実呼び出しの合図に結び付ける */
+export function registerNoteHook(key: object, hook: () => void): void {
+  noteHooks.set(key, hook);
+}
+
+/** 計量の加算の時点で、その実呼び出しの印を呼ぶ（印が無ければ何もしない） */
+export function runNoteHook(key: object | undefined): void {
+  if (key === undefined) return;
+  noteHooks.get(key)?.();
 }
 
 /**
@@ -873,6 +892,8 @@ export class CallGateway {
       }, timeoutMs);
     });
     try {
+      // 計量の加算の時点の印（遅着の帰属を、観測の callback の時点でなく加算の時点から解く。Issue #748 のレビュー R1）
+      registerNoteHook(controller.signal, () => observation?.note?.());
       const call = invoke(controller.signal);
       if (observation === undefined) {
         // 打ち切ったあとに来る拒否を握る（待っていない側の拒否を、未処理のまま残さない）

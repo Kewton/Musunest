@@ -775,10 +775,11 @@ async function runV11a(
   const limits = input.limits ?? AGENT_LIMITS;
   const meter = new UsageMeter();
   const budget = new JobBudget(input.budgetUsd);
-  // 走りの開始（実試行の行と span の時刻の基準。旗 `v12.ids` の段の走りだけ使う。Issue #748）
-  const startedAt = input.now();
+  // 走りの開始。既存の `duration_secs`・`durationSecs` の基準は、初期化（門・判定の口）の**後**に読む
+  // （4a80f4b の位置のまま。Issue #748 のレビュー R2）。観測器には基準を後から渡す
+  const observationBase = { startedAt: 0 };
   // 旗 `v12.ids` の**段の走り**だけ、入口の client を使う全部の経路が共有する観測器を置く（一気通貫・ids off は作らない）
-  const requestLog = stageControl !== undefined && flags.ids ? new CallRequestLog(startedAt, input.now) : undefined;
+  const requestLog = stageControl !== undefined && flags.ids ? new CallRequestLog(() => observationBase.startedAt, input.now) : undefined;
   // 旗 `v12.ids` の走りだけ、生成と判定で共有する実試行の門と判定の枝を置く（off は門を作らない＝今の配線。Issue #592）
   const callLimits: V12CallLimits | undefined = flags.ids ? { ...V12_CALL_LIMITS, ...input.v12CallLimits } : undefined;
   const callGate: CallGate | undefined =
@@ -858,6 +859,9 @@ async function runV11a(
   /** 段の失敗を記録の失敗の帰属に写す（旗 `v12.ids` の走りだけ上限の名前と数を足す。Issue #665） */
   const attributionOf = (stage: StageId, failure: StageFailure): FailureAttribution =>
     stageFailureAttribution(stage, failure, flags.ids);
+  // 既存の所要時間の基準は 4a80f4b の位置（門・判定の口の初期化の後）で読む（Issue #748 のレビュー R2）
+  const startedAt = input.now();
+  observationBase.startedAt = startedAt;
   const stages: StageRecord[] = [];
   // 段の行ごとの開始と終わりの時刻（`stages` と同じ添字。段の行を組むときに読んだ値をそのまま持つだけで、時刻を読む回数を足さない。
   // 段の走りの探索の出来事の列の時間に使う。Issue #746）
