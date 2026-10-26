@@ -1627,7 +1627,8 @@ async function runV11a(
         readonly end: () => number;
       }[] = [];
       const bundleGateway = (bundle: number): CallGateway => {
-        const bundleMeter = new UsageMeter();
+        // 束の計量（T2 は束と全体の 2 つが同じ応答を数える。印を分けて採る。レビュー R1）
+        const bundleMeter = new UsageMeter(true);
         // 束の単位（同時に走る束が互いの段の行を指さないよう、全体の単位にはしない。Issue #748）
         const unit = requestLog?.beginBoundUnit();
         const start = input.now();
