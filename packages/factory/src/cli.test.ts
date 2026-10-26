@@ -4928,7 +4928,15 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     }
   });
 
-  /** 4a80f4b（比較元）の全出力のダイジェスト（search_repair を含む既存の欄をそのまま比較する。Issue #748 のレビュー R3） */
+  /**
+   * 4a80f4b（比較元）の全出力のダイジェスト（search_repair を含む既存の欄をそのまま比較する。Issue #748 のレビュー R3）。
+   *
+   * 採り方：この worktree で**製品のコードだけ**を 4a80f4b に戻し
+   * （call.ts・record.ts・v11a/bundle-v11a.ts・v11a/run.ts。試験のファイルは戻さない）、
+   * この試験の各経路を流して出た値をそのまま固定した。その後 `git checkout HEAD -- <同じ 4 本>` で戻し、
+   * 製品のファイルに差が無いことを確かめている。ids on の段の記録は新しい 2 欄（requests・stage_spans）を
+   * 除いて比べ、search_repair を含むほかの欄は比較に残す。
+   */
   const BEFORE_748_BASE: Readonly<Record<string, string>> = {
     "stage-stagnation": "0ef2fe8bc20c81f4a8dba870cdb2103f14ba42b0c064cccd68f01c3c163008f8",
     "stage-adopting": "d40f0f31882cd2b83f5d93b308283cf18ba0b63b9a1cd72f31d332fd31fcf8d1",
@@ -6278,6 +6286,9 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       const text = await fs.readFile(`${root}${name}`, "utf8");
       for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text.includes(word), `${name}: ${word}`).toBe(false);
     }
+    // 置き換え前の直書きの 5 語と**同じ集合**であることを、語を走査対象に書かずに集合の指紋で示す
+    expect(ACCEPTANCE_MATERIAL_WORDS).toHaveLength(5);
+    expect(await sha256Hex(ACCEPTANCE_MATERIAL_WORDS.join("・"))).toBe("e4cb9426e93a171e20821092d041bb621c5aa6f6a4455dc4cb239c0346abe7f7");
   });
 
   /**
