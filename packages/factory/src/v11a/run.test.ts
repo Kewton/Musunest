@@ -7305,6 +7305,18 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
   const BB769D6_HANDOFF_FIELD_BODY_SHA = [
     "2f938971e45be809c0a7e4f794e278286512b308fe7684be22aaff33b2df9f46",
   ] as const;
+  /**
+   * #761 の前（f9bf3b3）の、`HANDOFF_CALLS` と同じ台本の**同じ走りの中の**全文の直しの要求の body の SHA-256（**期待**）。
+   * 取り方：`git worktree add --detach <リポジトリの外の一時ディレクトリ> f9bf3b3` で作った一時の worktree に、`HANDOFF_CALLS`
+   * と同じ台本（同じ入力・同じ最良版・同じ応答・同じ adapter の設定。全文の直しの候補を採ったあと欄だけの直しへ入る）を
+   * 流す一時の試験を足し、偽物の fetch が実際に受けた body の `sha256(JSON.stringify(body))` を記録した（一気通貫と段の走りで
+   * 同じ値）。この台本の全文の直しは道具の呼び出しを挟まず最後の応答が 1 本なので、継続の要求は無い。測った後に一時の試験を
+   * 戻し、補助を消して `git status --porcelain` が空を確かめ、`git worktree remove`（force なし）で消した。今の body から診断を
+   * 取り除いて比べた値ではない。bb769d6 の同じ台本の全文の body は診断の塊があるので `ee74d20e…` で一致しない。
+   */
+  const F9BF3B3_HANDOFF_FULL_BODY_SHA = [
+    "6c62de47e0e97c6f20aeea9a0f8bfe7bc63cd6c0bb8e4c4e89e0b9e9d21ef23b",
+  ] as const;
   /** 同じ台本の版の (出所, 違反の数, 採ったか) の並び（bb769d6 の実測。修復 2 往復・全文→欄だけ・すべて採用） */
   const HANDOFF_TOTALS: readonly unknown[] = [
     ["write", 7, true],
@@ -7326,6 +7338,8 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
     expect(fields).toHaveLength(1);
     // 全文の直しの body に診断の塊は無い
     for (const sent of tools) expect(hasFullDiagnostic(sent)).toBe(false);
+    // 全文の直しの body は #761 の前（f9bf3b3）と同じ（診断の塊が無い body）
+    expect(await bodyShas(tools)).toEqual([...F9BF3B3_HANDOFF_FULL_BODY_SHA]);
     // 同じ走りの中の欄だけの直しの body は、同じ台本の bb769d6 の body と一致する（診断の塊がある）
     for (const sent of fields) expect(hasDiagnostic(sent)).toBe(true);
     expect(await bodyShas(fields)).toEqual([...BB769D6_HANDOFF_FIELD_BODY_SHA]);
@@ -7351,6 +7365,8 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
     expect(fields).toHaveLength(1);
     // 全文の直しの body に診断の塊は無い
     for (const sent of tools) expect(hasFullDiagnostic(sent)).toBe(false);
+    // 全文の直しの body は #761 の前（f9bf3b3）と同じ（診断の塊が無い body）
+    expect(await bodyShas(tools)).toEqual([...F9BF3B3_HANDOFF_FULL_BODY_SHA]);
     // 同じ走りの中の欄だけの直しの body は、同じ台本の bb769d6 の body と一致する（診断の塊がある）
     for (const sent of fields) expect(hasDiagnostic(sent)).toBe(true);
     expect(await bodyShas(fields)).toEqual([...BB769D6_HANDOFF_FIELD_BODY_SHA]);
