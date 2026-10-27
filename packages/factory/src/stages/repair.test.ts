@@ -13,7 +13,7 @@
 import { sha256Hex } from "@musunest/spec-engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobBudget } from "../budget.js";
-import { CallGateway, type CallGatewayOptions } from "../call.js";
+import { CallGateway, createCallGate, type CallGatewayOptions } from "../call.js";
 import { checkTestSuite, type TestSuite } from "../fixed-test.js";
 import { AGENT_LIMITS } from "../limits.js";
 import type { RecordedCall } from "../llm-fake.js";
@@ -1835,3 +1835,381 @@ describe("直す段のデータの末尾に診断を足す（旗 v12.ids と探�
     expect(input.endsWith(block)).toBe(true);
   });
 });
+
+// ── 最後の答えの枠を取っておく（旗 v12.ids の探索 on の全文の直し。Issue #768）──────────────
+//
+// 段の内側の配分だけを変える。上限（8）・道具の累計（24）・要求の数・門・採否は変えない。7 回目からは
+// 最後の答えだけを求める印を付けて呼び、印付きの要求に道具の束が返ったら 1 つも実行せず `unmet` で終える。
+
+describe("最後の答えの枠を取っておく（旗 v12.ids の探索 on の全文の直し。Issue #768）", () => {
+  /** 印付きの要求に返す、最後の答え（形が合う） */
+  const markedDone = (declaration = V2): RecordedCall => ({
+    kind: "tools",
+    finalAnswerOnly: true,
+    response: { kind: "done", declaration: { declaration, disputes: [] }, usage: undefined },
+  });
+  /** 印付きの要求に返す、最後の答え（形が合わない） */
+  const markedMalformed: RecordedCall = {
+    kind: "tools",
+    finalAnswerOnly: true,
+    response: { kind: "done", declaration: { declaration: 123 }, usage: undefined },
+  };
+  /** 印付きの要求に返す道具の束 */
+  const markedBundle = (calls: readonly { id: string; name: string; arguments: unknown }[]): RecordedCall => ({
+    kind: "tools",
+    finalAnswerOnly: true,
+    response: { kind: "toolCalls", toolCalls: calls, usage: undefined },
+  });
+  /** 印の無い道具の束（`count` 個の静的チェック） */
+  const bundle = (count: number, offset = 0): RecordedCall => toolCalls(toolBundle(count, V1, offset));
+  /** V1 から 1 回直す。口の値も集める */
+  const runStep = async (
+    recorded: readonly RecordedCall[],
+    extra: Partial<RepairStepInput> = {},
+    gatewayOptions: { readonly budgetAfter?: number; readonly clock?: () => number; readonly deadline?: number; readonly gateLimit?: number } = {},
+  ): Promise<{
+    readonly outcome: Awaited<ReturnType<typeof runRepairStep>>;
+    readonly counts: readonly RepairStepCounts[];
+    readonly requests: readonly LlmToolRequest[];
+    readonly gateway: CallGateway;
+  }> => {
+    const initial = await version(V1);
+    const recording = createRecordingClient(recorded);
+    // 予算・時計・実試行の門を、印付きの要求のところで尽きるように差し替える（門の種類は今と同じ）
+    const budget =
+      gatewayOptions.budgetAfter === undefined ? new JobBudget(10) : new BudgetAfter(gatewayOptions.budgetAfter);
+    const gateway = new CallGateway({
+      client: recording.client,
+      budget,
+      rates: { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 },
+      now: gatewayOptions.clock ?? (() => 0),
+      deadline: gatewayOptions.deadline ?? 60_000,
+      maxAttempts: 1,
+      ...(gatewayOptions.gateLimit === undefined
+        ? {}
+        : { gate: createCallGate({ now: () => 0, deadline: 60_000, limit: gatewayOptions.gateLimit }) }),
+    });
+    const counts: RepairStepCounts[] = [];
+    const outcome = await runRepairStep({
+      source: SOURCE,
+      list: LIST,
+      suite: SUITE,
+      current: initial,
+      correspondences: CORRESPONDENCES,
+      documents: SAMPLE_DOCUMENTS,
+      gateway,
+      stepLimitsData: true,
+      onCounts: (value) => counts.push(value),
+      ...extra,
+    });
+    return { outcome, counts, requests: recording.tools, gateway };
+  };
+  /** 予算の予約を、`allowed` 回だけ通す（そのあとは残高が足りない、として断る） */
+  class BudgetAfter extends JobBudget {
+    #allowed: number;
+    constructor(allowed: number) {
+      super(10);
+      this.#allowed = allowed;
+    }
+    override reserve(maxCostUsd: number) {
+      if (this.#allowed <= 0) return { reserved: false as const, maxCostUsd, remainingUsd: 0 };
+      this.#allowed -= 1;
+      return super.reserve(maxCostUsd);
+    }
+  }
+  /** 印が付いた要求の位置（印の無い要求は false） */
+  const markOf = (requests: readonly LlmToolRequest[]): readonly boolean[] =>
+    requests.map((request) => request.finalAnswerOnly === true);
+
+  it("(1) 道具の束 6 回 → 7 回目に done：7 回目だけに印が付き、段は done・応答 7", async () => {
+    const { outcome, counts, requests } = await runStep(
+      [...Array.from({ length: 6 }, (_, index) => bundle(1, index)), markedDone(V2)],
+      { reserveFinalAnswer: true },
+    );
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.declaration.source).toBe(V2);
+    expect(markOf(requests)).toEqual([false, false, false, false, false, false, true]);
+    expect(counts).toEqual([
+      {
+        responses: 7,
+        toolBundles: 6,
+        toolsExecuted: 6,
+        toolCallsAtStart: 0,
+        toolCallsAtEnd: 6,
+        shapeRetries: 0,
+        limit: null,
+        end: "done",
+        finalizeResponses: 1,
+        finalizeRefusedBundles: 0,
+      },
+    ]);
+  });
+
+  it("(1) 直す前の挙動：欄を渡さなければ 7 回目も印なしで道具を選べ、8 回目の done で終わる", async () => {
+    const { outcome, counts, requests } = await runStep([
+      ...Array.from({ length: 7 }, (_, index) => bundle(1, index)),
+      done(V2),
+    ]);
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.declaration.source).toBe(V2);
+    expect(requests).toHaveLength(8);
+    // 7 回目も道具を選べて、その束を実行している（最後の答えの枠は取っていない）
+    expect(markOf(requests)).toEqual([false, false, false, false, false, false, false, false]);
+    expect(counts).toEqual([
+      {
+        responses: 8,
+        toolBundles: 7,
+        toolsExecuted: 7,
+        toolCallsAtStart: 0,
+        toolCallsAtEnd: 7,
+        shapeRetries: 0,
+        limit: null,
+        end: "done",
+      },
+    ]);
+    // 印付きの要求の応答が無いので、足した 2 つの数は口に出さない（0 も出さない）
+    expect(counts[0]).not.toHaveProperty("finalizeResponses");
+    expect(counts[0]).not.toHaveProperty("finalizeRefusedBundles");
+  });
+
+  it("(2) 7 回目の done が形に合わない → 8 回目も印付きで done：形のやり直し 1", async () => {
+    const { outcome, counts, requests } = await runStep(
+      [...Array.from({ length: 6 }, (_, index) => bundle(1, index)), markedMalformed, markedDone(V2)],
+      { reserveFinalAnswer: true },
+    );
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.declaration.source).toBe(V2);
+    expect(markOf(requests)).toEqual([false, false, false, false, false, false, true, true]);
+    expect(counts).toEqual([
+      {
+        responses: 8,
+        toolBundles: 6,
+        toolsExecuted: 6,
+        toolCallsAtStart: 0,
+        toolCallsAtEnd: 6,
+        shapeRetries: 1,
+        limit: null,
+        end: "done",
+        finalizeResponses: 2,
+        finalizeRefusedBundles: 0,
+      },
+    ]);
+  });
+
+  it("(3) 印付きの要求に 3 種の道具の束が返る：1 つも実行せず unmet で終わり、8 回目を求めない", async () => {
+    const spy = vi.spyOn(repairTools, "executeRepairTool");
+    const threeKinds = [
+      staticCheckCall("c6", V1),
+      { id: "c7", name: "run-tests", arguments: { declaration: V1 } },
+      { id: "c8", name: "check-correspondence", arguments: { declaration: V1 } },
+    ];
+    const { outcome, counts, requests, gateway } = await runStep(
+      [...Array.from({ length: 6 }, (_, index) => bundle(1, index)), markedBundle(threeKinds)],
+      { reserveFinalAnswer: true },
+    );
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    // 往復の上限ではなく、求めた応答の契約への違反（固定の問題文 1 つ）
+    expect(outcome.failure).toEqual({
+      kind: "unmet",
+      attempts: 1,
+      problems: [{ field: "", message: "最後の答えだけを求めた要求に道具の呼び出しが返った" }],
+    });
+    // 印付きの応答の直前から、道具の実行は 1 つも増えない（6 回の束だけを実行した）
+    expect(spy).toHaveBeenCalledTimes(6);
+    // 共通の口は受信した束を数える（実行しなくても累計は 9）が、道具は実行していない
+    expect(gateway.toolCalls).toBe(9);
+    expect(requests).toHaveLength(7);
+    expect(counts).toEqual([
+      {
+        responses: 7,
+        toolBundles: 7,
+        toolsExecuted: 6,
+        toolCallsAtStart: 0,
+        toolCallsAtEnd: 9,
+        shapeRetries: 0,
+        limit: null,
+        end: "unmet",
+        finalizeResponses: 1,
+        finalizeRefusedBundles: 1,
+      },
+    ]);
+  });
+
+  it("(6) 締切は、印付きの要求を求める時点で尽きれば今と同じ締切の失敗になる", async () => {
+    const six = Array.from({ length: 6 }, (_, index) => bundle(1, index));
+    let clockCalls = 0;
+    // 6 回のあと、7 回目を求める時点で締切を過ぎている
+    const { outcome, requests, counts } = await runStep([...six, markedDone(V2)], { reserveFinalAnswer: true }, {
+      clock: () => (++clockCalls > 6 ? 100 : 0),
+      deadline: 100,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure).toEqual({ kind: "deadline" });
+    expect(requests).toHaveLength(6);
+    // 7 回目が未着手なので、印付きの応答は 1 つも受け取っていない（足した 2 つの数は出さない）
+    expect(counts).toHaveLength(1);
+    expect(counts[0]).not.toHaveProperty("finalizeResponses");
+    expect(counts[0]).not.toHaveProperty("finalizeRefusedBundles");
+  });
+
+  it("(6) 予算は、6 回の予約のあと印付きの要求の予約が通らなければ今と同じ予算の失敗になる", async () => {
+    const six = Array.from({ length: 6 }, (_, index) => bundle(1, index));
+    const { outcome, requests } = await runStep([...six, markedDone(V2)], { reserveFinalAnswer: true }, { budgetAfter: 6 });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("budget");
+    expect(requests).toHaveLength(6);
+  });
+
+  it("(6) 実試行の門は、印付きの要求でも今と同じ `callCount` の失敗になる（144 を試験では 6 に縮める）", async () => {
+    const six = Array.from({ length: 6 }, (_, index) => bundle(1, index));
+    const { outcome, requests } = await runStep([...six, markedDone(V2)], { reserveFinalAnswer: true }, { gateLimit: 6 });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure).toEqual({ kind: "callLimit", limit: "callCount", max: 6, actual: 6 });
+    expect(requests).toHaveLength(6);
+  });
+
+  it("(6) 印付きの束で道具の累計が 25 になるなら、`unmet` より先に累計の上限を当てる", async () => {
+    const spy = vi.spyOn(repairTools, "executeRepairTool");
+    // 束 4 個 × 6 回で累計 24（すべて実行する）、7 回目の印付きの束 1 個で 25 になる
+    const six = Array.from({ length: 6 }, (_, index) => bundle(4, index * 4));
+    const { outcome, counts, requests, gateway } = await runStep(
+      [...six, markedBundle(toolBundle(1, V1, 24))],
+      { reserveFinalAnswer: true },
+    );
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure).toEqual({ kind: "callLimit", limit: "toolCalls", max: 24, actual: 25 });
+    // 印付きの束は実行しない（実行したのは 6 束の 24 個だけ）
+    expect(spy).toHaveBeenCalledTimes(24);
+    expect(gateway.toolCalls).toBe(25);
+    expect(requests).toHaveLength(7);
+    expect(counts).toEqual([
+      {
+        responses: 7,
+        toolBundles: 7,
+        toolsExecuted: 24,
+        toolCallsAtStart: 0,
+        toolCallsAtEnd: 25,
+        shapeRetries: 0,
+        limit: { name: "toolCalls", max: 24, actual: 25 },
+        end: "callLimit",
+        finalizeResponses: 1,
+        finalizeRefusedBundles: 1,
+      },
+    ]);
+  });
+
+  it("(6) 印付きの要求の通信の再送と遅着：成功して受け取った応答だけを数え、遅着は数えない", async () => {
+    const initial = await version(V1);
+    let resolveReceived = (): void => undefined;
+    const received = new Promise<void>((resolve) => {
+      resolveReceived = resolve;
+    });
+    const requests: LlmToolRequest[] = [];
+    let logical = 0;
+    let finalizeAttempts = 0;
+    const client: LlmClient = {
+      async callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        throw new Error("使わない");
+      },
+      callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
+        requests.push(request);
+        logical += 1;
+        if (logical <= 6) {
+          return Promise.resolve({ kind: "toolCalls", toolCalls: [staticCheckCall(`c${String(logical)}`, V1)], usage: undefined });
+        }
+        // 7 回目の論理の要求。1 回目は打ち切り（30ms）の後に遅れて束（2 個）が返り、再送は done を返す。
+        // **印付きの要求が client に届いた時点で解く約束**で、外から順を待てるようにする。
+        if (request.finalAnswerOnly === true) resolveReceived();
+        finalizeAttempts += 1;
+        const first = finalizeAttempts === 1;
+        // 遅着（50ms）が再送の成功（30ms の打ち切り＋40ms）より先に返る幅を取る
+        const delay = first ? 50 : 40;
+        const response: LlmToolResponse = first
+          ? { kind: "toolCalls", toolCalls: toolBundle(2, V1, 6), usage: undefined }
+          : { kind: "done", declaration: { declaration: V2, disputes: [] }, usage: undefined };
+        return new Promise((resolve) => setTimeout(() => resolve(response), delay));
+      },
+    };
+    const gateway = new CallGateway({
+      client,
+      budget: new JobBudget(10),
+      rates: { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 },
+      now: () => 0,
+      deadline: 60_000,
+      maxAttempts: 2,
+      callTimeoutMs: 30,
+    });
+    const counts: RepairStepCounts[] = [];
+    const pending = runRepairStep({
+      source: SOURCE,
+      list: LIST,
+      suite: SUITE,
+      current: initial,
+      correspondences: CORRESPONDENCES,
+      documents: SAMPLE_DOCUMENTS,
+      gateway,
+      stepLimitsData: true,
+      onCounts: (value) => counts.push(value),
+      reserveFinalAnswer: true,
+    });
+    // 印付きの要求が client に届くまで待つ（時計を決まっただけ進めて「起きたはず」とみなさない）
+    await received;
+    const outcome = await pending;
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.declaration.source).toBe(V2);
+    expect(gateway.attempts.started).toBe(8);
+    expect(gateway.attempts.responded).toBe(7);
+    expect(gateway.attempts.cancelled_timeout).toBe(1);
+    expect(gateway.retryCounts.communication).toBe(1);
+    // 遅れて返った束も共通の口の累計には数えられる（6＋2）が、実行も、最後の答えの応答としても数えない
+    expect(gateway.toolCalls).toBe(8);
+    expect(counts).toEqual([
+      {
+        responses: 7,
+        toolBundles: 6,
+        toolsExecuted: 6,
+        toolCallsAtStart: 0,
+        toolCallsAtEnd: 8,
+        shapeRetries: 0,
+        limit: null,
+        end: "done",
+        finalizeResponses: 1,
+        finalizeRefusedBundles: 0,
+      },
+    ]);
+  });
+
+  it("(7) 足した 2 つの数は本文・引数・道具の名前を含まない（数だけ）", async () => {
+    const threeKinds = [
+      staticCheckCall("c6", V1),
+      { id: "c7", name: "run-tests", arguments: { declaration: V1 } },
+      { id: "c8", name: "check-correspondence", arguments: { declaration: V1 } },
+    ];
+    const { counts } = await runStep(
+      [...Array.from({ length: 6 }, (_, index) => bundle(1, index)), markedBundle(threeKinds)],
+      { reserveFinalAnswer: true },
+    );
+    const text = JSON.stringify(counts);
+    expect(text).not.toContain("entities");
+    expect(text).not.toContain(SOURCE);
+    expect(text).not.toContain("static-check");
+    expect(text).not.toContain("run-tests");
+    expect(text).not.toContain("check-correspondence");
+    expect(text).not.toContain("c6");
+  });
+});
+

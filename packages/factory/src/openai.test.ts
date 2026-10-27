@@ -285,6 +285,32 @@ describe("要求の組み立て（02 §2・§2.2）", () => {
     expect(format.strict).toBe(true);
   });
 
+  it("最後の答えだけを求める印があるときだけ道具を選ばせない指定を足し、履歴・schema・effort・道具の定義は印の無い body と同じ（Issue #768）", async () => {
+    const turns: readonly LlmTurn[] = [
+      { role: "assistant", toolCalls: [{ id: "call-1", name: "staticCheck", arguments: { where: "a" } }] },
+      { role: "tool", results: [{ toolCallId: "call-1", name: "staticCheck", output: { ok: true } }] },
+    ];
+    const request: LlmToolRequest = { ...TOOL_REQUEST, schemaName: "repair-answer", schema: SCHEMA, turns, effort: "medium" };
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ entity: "item" })), USAGE_WIRE)),
+    );
+    const client = createOpenAiLlmClient({ apiKey: "test-key", effort: "high", fetch });
+
+    await client.callWithTools(request);
+    await client.callWithTools({ ...request, finalAnswerOnly: true });
+    await client.callWithTools(request);
+
+    const plain = bodyOf(captured, 0);
+    const marked = bodyOf(captured, 1);
+    expect(plain).not.toHaveProperty("tool_choice");
+    expect(marked.tool_choice).toBe("none");
+    // 印は道具を選ばせない指定だけを足す（履歴・schema・effort・道具の定義・入力は同じ）
+    const { tool_choice: _choice, ...rest } = marked;
+    expect(rest).toEqual(plain);
+    // 印が無ければ今の body とバイト列で同じ
+    expect(JSON.stringify(bodyOf(captured, 2))).toBe(JSON.stringify(plain));
+  });
+
   it("往復（助手の呼び出し・道具の結果）を入力の項目に直して送る（R-2）", async () => {
     const turns: readonly LlmTurn[] = [
       { role: "assistant", toolCalls: [{ id: "call-1", name: "staticCheck", arguments: { where: "a" } }] },

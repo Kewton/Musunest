@@ -7608,3 +7608,245 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
     }
   });
 });
+
+// ── 最後の答えの枠を取っておく（旗 v12.ids の探索 on の全文の直し。Issue #768）──────────────
+//
+// 一気通貫と段の走りの両方の実行口から、実 adapter に偽物の fetch を当てて body まで通す。7 回目からは
+// 道具を選ばせない指定（`tool_choice: "none"`）が載り、6 回以内の要求と欄だけの直しの要求は今のまま。
+
+describe("最後の答えの枠を取っておく（旗 v12.ids の探索 on の全文の直し。Issue #768）：実行口から偽物の fetch の body まで", () => {
+  const FLAGS = { ledger: true, ids: true, searchRepair: true } as const;
+  /** closeItem の操作を宣言から外した版（場所なしの失敗だけになり、全文の直しへ流れる） */
+  const NO_CLOSE = replaced(
+    RUN_YAML,
+    "  - name: closeItem\n    entity: item\n    kind: update\n    set:\n      kind: beta\n    when: amount > 0\n",
+    "",
+  );
+  /** 印の無い道具の束（静的チェック 1 個） */
+  const bundle = (round: number): RecordedCall => repairToolCall(`b${String(round)}`, "static-check", RUN_YAML);
+  /** 最後の答えの形が合わない done（宣言が文字列でない） */
+  const malformedDone = (): RecordedCall => ({
+    kind: "tools",
+    response: { kind: "done", declaration: { declaration: 123 }, usage: undefined },
+  });
+  /** 印付きの要求に返る、3 種の道具を含む束 */
+  const threeKindBundle = (): RecordedCall => ({
+    kind: "tools",
+    response: {
+      kind: "toolCalls",
+      toolCalls: [
+        { id: "f0", name: "static-check", arguments: { declaration: RUN_YAML } },
+        { id: "f1", name: "run-tests", arguments: { declaration: RUN_YAML } },
+        { id: "f2", name: "check-correspondence", arguments: { declaration: RUN_YAML } },
+      ],
+      usage: undefined,
+    },
+  });
+  /** 全文の直しの要求に印（道具を選ばせない指定）が載っているか */
+  const markedOf = (sent: WireSent): boolean => sent.body["tool_choice"] === "none";
+  const six = (): RecordedCall[] => Array.from({ length: 6 }, (_, round) => bundle(round));
+
+  /** 直す段の記録の 1 行（一気通貫は要約の v12_calls、段の走りは結果の v12Calls） */
+  type Steps = readonly Record<string, unknown>[];
+  const generationSteps = (result: Awaited<ReturnType<typeof runGenerationV11a>>): Steps => {
+    const calls = (result.summary as unknown as { readonly v12_calls?: { readonly repair?: { readonly steps?: Steps } } }).v12_calls;
+    return calls?.repair?.steps ?? [];
+  };
+  const stageSteps = (outcome: Awaited<ReturnType<typeof runStageRangeV11a>>): Steps => {
+    const calls = outcome.v12Calls as { readonly repair?: { readonly steps?: Steps } } | undefined;
+    return calls?.repair?.steps ?? [];
+  };
+  /**
+   * 一気通貫と段の走りの両方の実行口を、同じ形の結果にそろえて流す（種類ごとに 1 本ずつ赤を測れるように、
+   * 試験は実行口ごとに分ける）。
+   */
+  const runPath = async (
+    execution: "generation" | "stage",
+    calls: readonly RecordedCall[],
+  ): Promise<{
+    readonly sent: readonly WireSent[];
+    readonly consumed: number;
+    readonly total: number;
+    readonly stopped: unknown;
+    readonly failure: unknown;
+    readonly verdict: string | null;
+    readonly outcome: { readonly result: string; readonly verdict: string } | undefined;
+    readonly steps: Steps;
+  }> => {
+    const wire = wireClientOf(calls, "v1.2-ids");
+    if (execution === "generation") {
+      const result = await runGenerationV11a(inputOf(wire.client, { flags: FLAGS }));
+      return {
+        sent: wire.sent,
+        consumed: wire.consumed(),
+        total: calls.length,
+        stopped: result.stopped,
+        failure: result.record.failure,
+        verdict: result.outcome.verdict,
+        outcome: result.outcome,
+        steps: generationSteps(result),
+      };
+    }
+    const outcome = await runStageRangeV11a({
+      ...inputOf(wire.client, { flags: FLAGS }),
+      range: { start: "name-table", end: "judge" },
+    });
+    return {
+      sent: wire.sent,
+      consumed: wire.consumed(),
+      total: calls.length,
+      stopped: outcome.stopped,
+      failure: outcome.stopped,
+      verdict: outcome.judgeVerdict,
+      outcome: undefined,
+      steps: stageSteps(outcome),
+    };
+  };
+  const EXECUTIONS = ["generation", "stage"] as const;
+
+  it.each(EXECUTIONS)("(1) 道具の束 6 回 → 7 回目に done：7 回目だけに印が載り、段は done（%s）", async (execution) => {
+    const calls = [...idsHead({ yaml: NO_CLOSE }), ...six(), repairDone(RUN_YAML), structured(acceptAll())];
+    const run = await runPath(execution, calls);
+
+    expect(run.consumed, "台本を使い切った").toBe(run.total);
+    const tools = run.sent.filter((sent) => sent.kind === "tools");
+    expect(tools).toHaveLength(7);
+    // 6 回目までは今の body（道具を選ばせない指定が無い）、7 回目だけに載る
+    expect(tools.map(markedOf)).toEqual([false, false, false, false, false, false, true]);
+    expect(JSON.stringify(tools[0]?.body)).not.toContain("tool_choice");
+    expect(run.stopped).toBeNull();
+    expect(run.verdict).toBe("full");
+    if (run.outcome !== undefined) expect(run.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(run.steps).toEqual([
+      {
+        responses: 7,
+        tool_bundles: 6,
+        tools_executed: 6,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 6,
+        shape_retries: 0,
+        limit: null,
+        end: "done",
+        finalize_responses: 1,
+        finalize_refused_bundles: 0,
+      },
+    ]);
+  });
+
+  it.each(EXECUTIONS)("(2) 7 回目の done が形に合わない → 8 回目も印付きで done：形のやり直し 1（%s）", async (execution) => {
+    const calls = [
+      ...idsHead({ yaml: NO_CLOSE }),
+      ...six(),
+      malformedDone(),
+      repairDone(RUN_YAML),
+      structured(acceptAll()),
+    ];
+    const run = await runPath(execution, calls);
+
+    expect(run.consumed, "台本を使い切った").toBe(run.total);
+    const tools = run.sent.filter((sent) => sent.kind === "tools");
+    expect(tools).toHaveLength(8);
+    expect(tools.map(markedOf)).toEqual([false, false, false, false, false, false, true, true]);
+    expect(run.stopped).toBeNull();
+    expect(run.verdict).toBe("full");
+    expect(run.steps).toEqual([
+      {
+        responses: 8,
+        tool_bundles: 6,
+        tools_executed: 6,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 6,
+        shape_retries: 1,
+        limit: null,
+        end: "done",
+        finalize_responses: 2,
+        finalize_refused_bundles: 0,
+      },
+    ]);
+  });
+
+  it.each(EXECUTIONS)("(3) 印付きの要求に 3 種の道具の束が返る：1 つも実行せず unmet で終わり、8 回目を求めない（%s）", async (execution) => {
+    const calls = [...idsHead({ yaml: NO_CLOSE }), ...six(), threeKindBundle()];
+    const run = await runPath(execution, calls);
+
+    // 求めた応答の契約への違反（固定の問題文 1 つ）で止まる。往復の上限ではないので limit は持たない
+    const stopped = {
+      stage: "repair",
+      kind: "unmet",
+      problems: [{ field: "", message: "最後の答えだけを求めた要求に道具の呼び出しが返った" }],
+    };
+    expect(run.consumed, "8 回目を求めない").toBe(run.total);
+    expect(run.stopped).toEqual(stopped);
+    expect(run.failure).toEqual(stopped);
+    if (run.outcome === undefined) {
+      // 段の走りは ⑦ に届かないので判定は無い（止まった段の帰属だけを持つ）
+      expect(run.verdict).toBeNull();
+    } else {
+      expect(run.outcome).toEqual({ result: "failed", verdict: "none" });
+    }
+    const tools = run.sent.filter((sent) => sent.kind === "tools");
+    expect(tools).toHaveLength(7);
+    expect(tools.map(markedOf)).toEqual([false, false, false, false, false, false, true]);
+    expect(run.steps).toEqual([
+      {
+        responses: 7,
+        tool_bundles: 7,
+        tools_executed: 6,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 9,
+        shape_retries: 0,
+        limit: null,
+        end: "unmet",
+        finalize_responses: 1,
+        finalize_refused_bundles: 1,
+      },
+    ]);
+  });
+
+  it.each(EXECUTIONS)("(5) 欄だけの直しの要求には印が載らない（%s）", async (execution) => {
+    const calls = [
+      ...idsHead({ yaml: W2 }),
+      structured(acceptAll()),
+      fieldRepair("amount > 1"),
+      structured(acceptAll()),
+      fieldRepair("amount > 0"),
+      structured(acceptAll()),
+    ];
+    const run = await runPath(execution, calls);
+
+    expect(run.consumed, "台本を使い切った").toBe(run.total);
+    const fields = run.sent.filter((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME);
+    expect(fields.length).toBeGreaterThan(0);
+    for (const sent of fields) expect(markedOf(sent)).toBe(false);
+    expect(run.stopped).toBeNull();
+    expect(run.verdict).toBe("full");
+  });
+
+  it("(7) 6 回以内に終わる段と探索 off の段の記録には、足した 2 つの数が出ない", async () => {
+    // 6 回以内に終わる全文の直し（探索 on）：印付きの要求は 7 回目からなので、応答は 1 回だけ
+    const short = [...idsHead({ yaml: NO_CLOSE }), repairDone(RUN_YAML), structured(acceptAll())];
+    const shortWire = wireClientOf(short, "v1.2-ids");
+    const shortRun = await runGenerationV11a(inputOf(shortWire.client, { flags: FLAGS }));
+    expect(shortRun.outcome).toEqual({ result: "pass", verdict: "full" });
+    const shortSteps = generationSteps(shortRun);
+    expect(shortSteps).toHaveLength(1);
+    expect(shortSteps[0]).not.toHaveProperty("finalize_responses");
+    expect(shortSteps[0]).not.toHaveProperty("finalize_refused_bundles");
+
+    // 探索 off の全文の直し（ids on）：8 回の道具の束で段内の上限に当たっても、欄は出ない
+    const offCalls = [
+      ...idsHead({ yaml: NO_CLOSE }),
+      ...Array.from({ length: AGENT_LIMITS.repairStepTurns }, (_, round) => bundle(round)),
+    ];
+    const wire = wireClientOf(offCalls, "v1.2-ids");
+    const off = await runGenerationV11a(inputOf(wire.client, { flags: { ledger: true, ids: true, searchRepair: false } }));
+    expect(off.stopped).toEqual({ stage: "repair", kind: "call-limit", limit: { name: "repairStepTurns", max: 8, actual: 9 } });
+    const offTools = wire.sent.filter((sent) => sent.kind === "tools");
+    expect(offTools).toHaveLength(8);
+    for (const sent of offTools) expect(markedOf(sent)).toBe(false);
+    const offSteps = generationSteps(off);
+    expect(offSteps).toHaveLength(1);
+    expect(offSteps[0]).not.toHaveProperty("finalize_responses");
+    expect(offSteps[0]).not.toHaveProperty("finalize_refused_bundles");
+  });
+});
