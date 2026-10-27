@@ -17,10 +17,13 @@ import { requiredValidationsOf } from "../../v11a/bind-by-id.js";
 import { canonicalJson } from "../../v11a/names.js";
 import type { TestObserves } from "../../v11a/stages/test-spec.js";
 import { expectNoAcceptanceMaterial } from "../../stages/__tests__/prompt.js";
-import { declarationSpans, locateFailures, type LocateInput } from "../locate.js";
+import { declarationSpans, buildRepairDiagnostic, locateFailures, type LocateInput, type RepairDiagnostic } from "../locate.js";
 import {
   FIELD_REPAIR_DATA_NAMES,
+  FIELD_REPAIR_DIAGNOSTIC_DATA_NAME,
+  FIELD_REPAIR_IDS_DIAGNOSTIC_RULE_DEFINITIONS,
   FIELD_REPAIR_IDS_R07_DEFINITION,
+  FIELD_REPAIR_IDS_R08_DEFINITION,
   FIELD_REPAIR_IDS_RULE_DEFINITIONS,
   FIELD_REPAIR_PROBLEMS,
   FIELD_REPAIR_RULE_DEFINITIONS,
@@ -476,5 +479,89 @@ describe("旗 v12.ids の欄だけの直し：追加の場所を enum とデー�
       ok: false,
       refusal: MERGE_REFUSALS.unknownLocation,
     });
+  });
+});
+
+// ── 診断の塊と規則（旗 v12.ids と探索がともに on。Issue #761）──────────────────────────
+
+describe("診断（Issue #761）：渡したときだけ既存の 4 つの塊の後に 1 つ増え、ids の規則の後ろに R-fr-08 が 1 つ増える", () => {
+  const EMPTY_YAML = fixtureYaml({ validation: false });
+  const vtest = (id: string, roleId: string): FixedTest => ({ ...test(id, "R1", "field", roleId, "validate") }) as FixedTest;
+  const DIAGNOSTIC_SUITE: TestSuite = { tests: [vtest("v-normal", "f.item.amount"), ...SUITE.tests] };
+  const DIAGNOSTIC_OBSERVES = new Map<string, TestObserves>([
+    ["v-normal", "validation"],
+    ["r3-when", "when"],
+    ["r4-rate", "value"],
+  ]);
+  const failuresOf = () =>
+    locateFailures({
+      ...locateInput(["v-normal", "r3-when"]),
+      source: EMPTY_YAML,
+      suite: DIAGNOSTIC_SUITE,
+      ids: { observes: DIAGNOSTIC_OBSERVES, requiredValidations: requiredValidationsOf(TABLE, DIAGNOSTIC_SUITE, DIAGNOSTIC_OBSERVES) },
+    });
+  const diagnosticOf = (): RepairDiagnostic =>
+    buildRepairDiagnostic({
+      table: TABLE,
+      suite: DIAGNOSTIC_SUITE,
+      observes: DIAGNOSTIC_OBSERVES,
+      mismatches: [
+        { testId: "v-normal", detail: "検査が落ちない（期待は落ちること）" },
+        { testId: "r3-when", detail: "操作 closeItem が無い" },
+      ],
+      unresolved: [],
+      correspondenceMisses: [],
+      rejections: [],
+      routes: [],
+    });
+  const requestOf = async (diagnostic?: RepairDiagnostic) => {
+    const recording = createRecordingClient([structured({ replacements: [], disputes: [] })]);
+    const outcome = await runFieldRepair({
+      source: SOURCE,
+      list: LIST,
+      suite: DIAGNOSTIC_SUITE,
+      declaration: EMPTY_YAML,
+      failures: failuresOf(),
+      ...(diagnostic === undefined ? {} : { diagnostic }),
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(recording.client),
+    });
+    expect(outcome.ok).toBe(true);
+    const [request] = recording.structured;
+    if (request === undefined) throw new Error("前提が壊れた：要求が無い");
+    return request;
+  };
+
+  it("診断を省いた要求は今の 4 つの塊と ids の規則のまま。渡すと入力の末尾に塊が 1 つだけ増え、前置き・文書・schema は同じ", async () => {
+    const plain = await requestOf();
+    const diagnostic = diagnosticOf();
+    const withDiagnostic = await requestOf(diagnostic);
+    expect(dataNamesOf(plain.input)).toEqual([...FIELD_REPAIR_DATA_NAMES]);
+    expect(dataNamesOf(withDiagnostic.input)).toEqual([...FIELD_REPAIR_DATA_NAMES, FIELD_REPAIR_DIAGNOSTIC_DATA_NAME]);
+    // 塊は既存の 4 つの後ろ（末尾）に 1 つだけ
+    const block = `<data name="${FIELD_REPAIR_DIAGNOSTIC_DATA_NAME}">\n${JSON.stringify(diagnostic, null, 2)}\n</data>`;
+    expect(withDiagnostic.input).toBe(`${plain.input}\n${block}`);
+    expect(JSON.parse(dataBlockOf(withDiagnostic.input, FIELD_REPAIR_DIAGNOSTIC_DATA_NAME))).toEqual(diagnostic);
+    expect(withDiagnostic.instructions).toBe(plain.instructions);
+    expect(withDiagnostic.documents).toEqual(plain.documents);
+    expect(withDiagnostic.schema).toEqual(plain.schema);
+    expect(withDiagnostic.maxOutputTokens).toBe(plain.maxOutputTokens);
+  });
+
+  it("規則は ids の 6+1 の後ろに R-fr-08 が 1 つ（文と順序は変えない）。id・why・since を持ち、不備 0", async () => {
+    const plain = await requestOf();
+    const withDiagnostic = await requestOf(diagnosticOf());
+    expect(plain.rules).toEqual(FIELD_REPAIR_IDS_RULE_DEFINITIONS.map((definition) => definition.text));
+    expect(withDiagnostic.rules).toEqual(FIELD_REPAIR_IDS_DIAGNOSTIC_RULE_DEFINITIONS.map((definition) => definition.text));
+    expect(withDiagnostic.rules).toEqual([...FIELD_REPAIR_IDS_RULE_DEFINITIONS.map((definition) => definition.text), FIELD_REPAIR_IDS_R08_DEFINITION.text]);
+    expect(FIELD_REPAIR_IDS_DIAGNOSTIC_RULE_DEFINITIONS).toEqual([...FIELD_REPAIR_IDS_RULE_DEFINITIONS, FIELD_REPAIR_IDS_R08_DEFINITION]);
+    expect(FIELD_REPAIR_IDS_RULE_DEFINITIONS).toEqual([...FIELD_REPAIR_RULE_DEFINITIONS, FIELD_REPAIR_IDS_R07_DEFINITION]);
+    expect(FIELD_REPAIR_IDS_R08_DEFINITION.id).toBe("R-fr-08");
+    expect(FIELD_REPAIR_IDS_R08_DEFINITION.since).toBe("Issue #761");
+    expect(FIELD_REPAIR_IDS_R08_DEFINITION.text).toBe(
+      "データ「診断」は、今の一番良い版の失敗の説明である。書き換えの対象ではない。示された試験・名前の表・要件・観測する性質を変えない。",
+    );
+    expect(ruleDefinitionDefects(FIELD_REPAIR_IDS_DIAGNOSTIC_RULE_DEFINITIONS)).toEqual([]);
+    expectNoAcceptanceMaterial([withDiagnostic.input, ...(withDiagnostic.rules ?? [])]);
   });
 });

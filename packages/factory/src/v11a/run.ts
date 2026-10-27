@@ -216,7 +216,7 @@ import {
   type StageRowSpan,
   type StageSearchRepairLog,
 } from "../v12/search-repair.js";
-import { canRepairFields, locateFailures } from "../v12/locate.js";
+import { buildRepairDiagnostic, canRepairFields, locateFailures, type RepairDiagnostic } from "../v12/locate.js";
 import { V12_CALL_LIMITS, V12_T2_BUNDLE, type V12CallLimits } from "../v12/limits.js";
 import { MERGE_REFUSALS, mergeReplacements, runFieldRepair, type MergeRefusal } from "../v12/stages/field-repair.js";
 import { VOCABULARY_BUNDLES, type ReferenceCounts } from "../v12/ids.js";
@@ -2239,6 +2239,27 @@ async function runV11a(
       };
       /** 段の走りの出来事の列の、今の一番良い状態の `seq`（列が無ければ null） */
       const bestSeqNow = (): number | null => searchLog?.bestSeq ?? null;
+      /**
+       * 修復の 2 つの入口へ渡す、一番良い版の失敗の診断（旗 `v12.ids` と探索がともに on の走りだけ。Issue #761）。**往復ごとに、
+       * その時点の一番良い版から作り直す**（宣言の SHA だけで使い回さない。捨てた候補・前の版の失敗を混ぜない）。要らなければ
+       * 欄を足さない（ids off の要求は今のまま）
+       */
+      const repairDiagnosticFor = (state: VersionState, suite: TestSuite): { readonly diagnostic?: RepairDiagnostic } =>
+        flags.ids
+          ? {
+              diagnostic: buildRepairDiagnostic({
+                table,
+                suite,
+                observes: testSpec.observes,
+                mismatches: state.report.testRun?.mismatches ?? [],
+                unresolved: state.report.testRun?.unresolved ?? [],
+                correspondenceMisses: state.report.correspondence?.misses ?? [],
+                rejections: state.rejections,
+                routes: state.report.routes,
+                ...(state.report.testRun?.structural === undefined ? {} : { structural: state.report.testRun.structural }),
+              }),
+            }
+          : {};
 
       while (!isSettled(best)) {
         if (searchLog !== undefined) closeSearchRound(searchLog, false);
@@ -2388,6 +2409,7 @@ async function runV11a(
               suite: context.suite,
               declaration: best.report.declaration.source,
               failures: located,
+              ...repairDiagnosticFor(best, context.suite),
               documents: input.documents,
               gateway: gateway.forStage("repair"),
             }),
@@ -2440,6 +2462,7 @@ async function runV11a(
             ...(best.rejections.length === 0 ? {} : { declRejections: best.rejections }),
             ...repairStepIds(),
             ...requiredValidationsFor(context.suite),
+            ...repairDiagnosticFor(best, context.suite),
           }),
         );
         const repairRow = requestReturned();

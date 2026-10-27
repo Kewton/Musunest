@@ -14,8 +14,8 @@ import { FIXTURE_DOCUMENTS, FIXTURE_YAML, fixtureList, fixtureTable, fixtureYaml
 import { requiredValidationsOf } from "../../v11a/bind-by-id.js";
 import type { TestObserves } from "../../v11a/stages/test-spec.js";
 import { DECLARATION_V11A_SCHEMA, WRITE_V11A_SCHEMA_NAME } from "../../v11a/stages/write.js";
-import { locateFailures } from "../locate.js";
-import { FIELD_REPAIR_SCHEMA_NAME, fieldRepairSchemaOf, runFieldRepair } from "./field-repair.js";
+import { locateFailures, buildRepairDiagnostic } from "../locate.js";
+import { FIELD_REPAIR_DIAGNOSTIC_DATA_NAME, FIELD_REPAIR_SCHEMA_NAME, fieldRepairSchemaOf, runFieldRepair } from "./field-repair.js";
 
 const LIST = fixtureList();
 const SOURCE = LIST.requirements.map((requirement) => requirement.text).join("");
@@ -77,6 +77,16 @@ const WRITE_OUTPUT = { result: { stage: WRITE_V11A_SCHEMA_NAME, declaration: "x"
 
 const closeItem = "- name: closeItem\n  entity: item\n  kind: update\n  set:\n    kind: beta\n  when: amount > 1";
 
+/** 送った body の入力（`input` の `input_text` を順につなぐ） */
+const inputTextOf = (body: Record<string, unknown> | undefined): string => {
+  const messages = body?.["input"] as readonly { readonly content?: readonly { readonly type: string; readonly text?: string }[] }[] | undefined;
+  return (messages ?? [])
+    .flatMap((message) => message.content ?? [])
+    .filter((part) => part.type === "input_text")
+    .map((part) => part.text ?? "")
+    .join("\n");
+};
+
 describe("通信：この段の要求は封筒の外で、往復ごとの動的な schema（場所の enum）がそのまま text.format に載る", () => {
   it("(1)(2)(3) 場所の集合が違う 2 往復で送った enum がそれぞれ違い、封筒の anyOf に置き換わらない。同じ client の v1.1α の封筒の段の body は前後で同じ", async () => {
     const answer = { replacements: [{ location: "action:item.closeItem", element: closeItem }], disputes: [] };
@@ -133,6 +143,68 @@ describe("通信：この段の要求は封筒の外で、往復ごとの動的�
     expect(JSON.stringify(writeAfter)).toBe(JSON.stringify(writeBefore));
     expect(formatOf(writeBefore).name).toBe(ENVELOPE_SCHEMA_NAME_V11A);
     expect(JSON.stringify(formatOf(writeBefore).schema)).toBe(JSON.stringify(ENVELOPE_SCHEMA_V11A));
+  });
+});
+
+describe("通信（旗 v12.ids と探索がともに on。Issue #761）：診断が adapter の body に届く", () => {
+  it("(1) 診断を渡すと、body の入力の末尾に「診断」の塊が 1 つあり、試験の観測する性質と表の行（実名へ引いた ID）が届く。渡さなければ届かない", async () => {
+    const table = fixtureTable();
+    const suite: TestSuite = {
+      tests: [test("v-amount", "R1", "field", "f.item.amount", "validate"), ...SUITE.tests],
+    };
+    const observes = new Map<string, TestObserves>([
+      ["v-amount", "validation"],
+      ["r3-when", "when"],
+      ["r4-rate", "value"],
+    ]);
+    const failures = locateFailures({
+      source: FIXTURE_YAML,
+      table,
+      suite,
+      staticCheckPassed: true,
+      diagnostics: [],
+      correspondenceMisses: [],
+      rejections: [],
+      unmarked: [],
+      mismatches: [{ testId: "v-amount" }, { testId: "r3-when" }],
+      unresolved: [],
+      ids: { observes, requiredValidations: requiredValidationsOf(table, suite, observes) },
+    });
+    const diagnostic = buildRepairDiagnostic({
+      table,
+      suite,
+      observes,
+      mismatches: [
+        { testId: "v-amount", detail: "検査 amount が落ちない（期待は落ちること）" },
+        { testId: "r3-when", detail: "操作 closeItem が無い" },
+      ],
+      unresolved: [],
+      correspondenceMisses: [],
+      rejections: [],
+      routes: [],
+    });
+    const answer = { replacements: [], disputes: [] };
+    const { fetch, bodies } = recordingFetch([answer, answer]);
+    const client = createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope: "v1.1a" });
+    const gateway = makeGateway(client);
+    const run = (extra: { readonly diagnostic?: typeof diagnostic }) =>
+      runFieldRepair({ source: SOURCE, list: LIST, suite, declaration: FIXTURE_YAML, failures, documents: FIXTURE_DOCUMENTS, gateway, ...extra });
+    expect((await run({ diagnostic })).ok).toBe(true);
+    expect((await run({})).ok).toBe(true);
+    const withDiagnostic = inputTextOf(bodies[0]);
+    const without = inputTextOf(bodies[1]);
+    const block = new RegExp(`<data name="${FIELD_REPAIR_DIAGNOSTIC_DATA_NAME}">\\n([\\s\\S]*?)\\n</data>`).exec(withDiagnostic);
+    if (block === null) throw new Error("前提が壊れた：診断の塊が body に無い");
+    expect(JSON.parse(block[1] ?? "null")).toEqual(diagnostic);
+    expect(withDiagnostic.endsWith(`<data name="${FIELD_REPAIR_DIAGNOSTIC_DATA_NAME}">`)).toBe(false);
+    expect(withDiagnostic.trimEnd().endsWith("</data>")).toBe(true);
+    // 観測する性質・表の行（所属は実名。表の ID の e.item は出さない）
+    const parsed = JSON.parse(block[1] ?? "null") as { readonly tests: readonly { readonly observes: string | null; readonly table: Record<string, unknown> | null }[] };
+    expect(parsed.tests.map((entry) => entry.observes)).toEqual(["validation", "when"]);
+    expect(parsed.tests[1]?.table).toMatchObject({ id: "o.closeItem", kind: "operation", entity: "item", name: "closeItem" });
+    expect(block[1]).not.toContain('"e.item"');
+    // 直す前の挙動：渡さなければ今の 4 つの塊のままで、診断は届かない
+    expect(without).not.toContain(`<data name="${FIELD_REPAIR_DIAGNOSTIC_DATA_NAME}">`);
   });
 });
 

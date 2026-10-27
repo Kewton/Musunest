@@ -20,9 +20,10 @@
 //   - 並びは決定的（失敗の並びの順・場所は最初に現れた順・重複なし）
 import { readSpecDocument } from "@musunest/spec-engine";
 import type { TestSuite } from "../fixed-test.js";
-import type { CorrespondenceMiss, DeclarationLocation } from "../pipeline.js";
+import type { CorrespondenceMiss, DeclarationLocation, StructuralCheckOutcome } from "../pipeline.js";
+import type { RoutedFailure } from "../stages/run-tests.js";
 import { requiredValidationLocation, rowLocation, type RequiredValidation } from "../v11a/bind-by-id.js";
-import { deriveOwnership, type NameTable } from "../v11a/names.js";
+import { deriveOwnership, type NameTable, type NameTableGroupBy, type NameTableKind, type NameTableRowType } from "../v11a/names.js";
 import type { TestObserves } from "../v11a/stages/test-spec.js";
 import { NAMED_FAILURE_MESSAGES, type NamedFailure, type NamedFailureKind } from "./search-repair.js";
 
@@ -493,4 +494,200 @@ function finish(
 /** 欄だけの直しを使えるか（場所に写した失敗が 1 つ以上あり、場所なしが 0。追加の場所は場所に写した側に数える） */
 export function canRepairFields(locations: FailureLocations): boolean {
   return locations.located.length > 0 && locations.unlocated.length === 0 && locations.locations.length > 0;
+}
+
+// ── 修復へ渡す診断（旗 `v12.ids` と探索がともに on の走りだけ。Issue #761）────────────────────
+//
+// 失敗を検出する側（C7 の試験・B3 の対応・B3' の点検）が持つ情報を、欄だけの直しと探索 on の全文の直しへ渡す。**純粋な関数**で、
+// 材料は一番良い版の状態と評価の入力・結果だけ（新しい評価をしない）。**構造化した actual は作らない**——`detail` は評価の返り値
+// のまま写し、文を解析しない・expected から補わない。試験の無い要件・未実施・参照の欠けで、ID や結果を作らない。
+
+/** 表に無い ID の参照材料を省いた印（固定文。型や所属を推測しない） */
+export const REPAIR_DIAGNOSTIC_OMITTED = "表にこの ID が無いため省いた";
+
+/** 診断の表の行（B1 の射影と同じ欄。所属・参照先・見出しの元の ID は表の実名へ引く） */
+export interface RepairDiagnosticRow {
+  readonly id: string;
+  readonly kind: NameTableKind;
+  readonly entity: string | null;
+  readonly name: string;
+  readonly type: NameTableRowType;
+  readonly options: readonly string[] | null;
+  readonly groupBy: NameTableGroupBy;
+  readonly refEntity: string | null;
+  readonly role: string;
+}
+
+/** C7（不一致・未解決）の試験 1 件の診断（試験 ID ごとに 1 件） */
+export interface RepairDiagnosticTest {
+  readonly testId: string;
+  /** 固定した試験から引いた要件 ID（試験が無ければ null） */
+  readonly requirementId: string | null;
+  /** 固定した試験の対象の行 ID（試験が無い・欄が無ければ null） */
+  readonly roleId: string | null;
+  /** その試験の観測する性質（写像に無ければ null） */
+  readonly observes: TestObserves | null;
+  /** 表の行（引けなければ null。`omitted` に固定の印） */
+  readonly table: RepairDiagnosticRow | null;
+  /** 参照材料を省いた印（省いていなければ null） */
+  readonly omitted: string | null;
+  /**
+   * 評価の返り値の `detail` を、不一致→未解決の順にそのまま並べる（同じ試験 ID が不一致と未解決の両方に出れば両方を持つ。
+   * 解析・再評価しない）
+   */
+  readonly details: readonly string[];
+  /** 経路（`routes` の該当の試験 ID。無ければ空の並び） */
+  readonly routes: readonly RoutedFailure[];
+  /** 構造の違い（`structural` の該当のうち、成り立たなかったもの。無ければ空の並び） */
+  readonly structural: readonly StructuralCheckOutcome[];
+}
+
+/** B3（対応の落ち）1 件（`location` の無い落ちもそのまま持つ） */
+export interface RepairDiagnosticMiss {
+  readonly requirementId: string;
+  readonly location: DeclarationLocation | null;
+  readonly detail: string;
+}
+
+/** B3'（拒否）1 件（種類と引用をそのまま。原文の全文は入れない） */
+export interface RepairDiagnosticRejection {
+  readonly requirementId: string;
+  readonly kind: string;
+  readonly quote: string;
+}
+
+/** 要件 ID ごとの B3 の落ち（要件の並びは最初に現れた順。落ちは全件） */
+export interface RepairDiagnosticRequirementMisses {
+  readonly requirementId: string;
+  readonly misses: readonly RepairDiagnosticMiss[];
+}
+
+/** 要件 ID ごとの B3' の拒否（試験を持たない拒否も要件 ID で結ぶ） */
+export interface RepairDiagnosticRequirementRejections {
+  readonly requirementId: string;
+  readonly rejections: readonly RepairDiagnosticRejection[];
+}
+
+/**
+ * 修復へ渡す、一番良い版の失敗の診断（C7・B3・B3' を結び付けた形）。**独立の型**であり、`NamedFailure`・`LocatedFailure`・
+ * 失敗集合の指紋・探索の記録・評価結果の型を変えない。
+ */
+export interface RepairDiagnostic {
+  readonly tests: readonly RepairDiagnosticTest[];
+  readonly correspondence: readonly RepairDiagnosticRequirementMisses[];
+  readonly rejections: readonly RepairDiagnosticRequirementRejections[];
+}
+
+/**
+ * 診断の材料（run.ts が持つ一番良い版の状態と評価の入力・結果）。**新しい評価をしない**——渡された値を写すだけ。
+ */
+export interface RepairDiagnosticInput {
+  /** 名前の表（表の行と、所属・参照先・見出しの元の実名を引く） */
+  readonly table: NameTable;
+  /** 今の固定した試験（要件 ID と対象の行 ID を引く） */
+  readonly suite: TestSuite;
+  /** 観測する性質の写像（T2） */
+  readonly observes: ReadonlyMap<string, TestObserves>;
+  readonly mismatches: readonly { readonly testId: string; readonly detail: string }[];
+  readonly unresolved: readonly { readonly testId: string; readonly detail: string }[];
+  readonly correspondenceMisses: readonly CorrespondenceMiss[];
+  readonly rejections: readonly { readonly requirementId: string; readonly kind: string; readonly quote: string }[];
+  /** 失敗の経路（`best.report.routes`） */
+  readonly routes: readonly RoutedFailure[];
+  /** 構造の検査の 1 件ごとの記録（`best.report.testRun.structural`。無ければ空） */
+  readonly structural?: readonly StructuralCheckOutcome[];
+}
+
+/** 表の行の ID から宣言の名前を引く（見つからなければ undefined） */
+const tableName = (table: NameTable, id: string): string | undefined => table.rows.find((row) => row.id === id)?.name;
+
+/**
+ * 試験の対象の行 ID から、診断の表の行を組む（B1 の射影と同じ欄・実名）。行が無い・所属や参照先や見出しの元の ID が表に無いときは
+ * 行を省き、固定の印を返す（型や所属を推測しない）。
+ */
+function diagnosticRowOf(
+  table: NameTable,
+  roleId: string | undefined,
+): { readonly row: RepairDiagnosticRow | null; readonly omitted: string | null } {
+  if (roleId === undefined) return { row: null, omitted: null };
+  const row = table.rows.find((candidate) => candidate.id === roleId);
+  if (row === undefined) return { row: null, omitted: REPAIR_DIAGNOSTIC_OMITTED };
+  const entity = row.entity === null ? null : tableName(table, row.entity);
+  const refEntity = row.refEntity === null ? null : tableName(table, row.refEntity);
+  const groupByName = row.groupBy === null ? null : tableName(table, row.groupBy.field);
+  if (
+    (row.entity !== null && entity === undefined) ||
+    (row.refEntity !== null && refEntity === undefined) ||
+    (row.groupBy !== null && groupByName === undefined)
+  ) {
+    return { row: null, omitted: REPAIR_DIAGNOSTIC_OMITTED };
+  }
+  return {
+    row: {
+      id: row.id,
+      kind: row.kind,
+      entity: entity ?? null,
+      name: row.name,
+      type: row.type,
+      options: row.options,
+      groupBy: row.groupBy === null ? null : { kind: row.groupBy.kind, field: groupByName as string },
+      refEntity: refEntity ?? null,
+      role: row.role,
+    },
+    omitted: null,
+  };
+}
+
+/**
+ * 一番良い版の失敗の診断を組む（純粋。同じ入力なら同じ結果）。C7 は試験 ID ごとに 1 件（不一致・未解決の順）、B3 は要件 ID ごとに
+ * 落ちを全件、B3' は要件 ID ごとに拒否を全件。`details`・引用は渡された値のままで、構造化した actual を作らない。
+ */
+export function buildRepairDiagnostic(input: RepairDiagnosticInput): RepairDiagnostic {
+  const testById = new Map(input.suite.tests.map((test) => [test.id, test] as const));
+  const structural = input.structural ?? [];
+  // 試験 ID ごとに 1 件。detail は不一致→未解決の順に全部残す（同じ試験 ID が両方に出ても後の detail を捨てない）
+  const testIds: string[] = [];
+  const detailsById = new Map<string, string[]>();
+  for (const failure of [...input.mismatches, ...input.unresolved]) {
+    const details = detailsById.get(failure.testId);
+    if (details === undefined) {
+      detailsById.set(failure.testId, [failure.detail]);
+      testIds.push(failure.testId);
+    } else {
+      details.push(failure.detail);
+    }
+  }
+  const tests: RepairDiagnosticTest[] = testIds.map((testId) => {
+    const test = testById.get(testId);
+    const roleId = test?.target.roleId;
+    const row = diagnosticRowOf(input.table, roleId);
+    return {
+      testId,
+      requirementId: test?.target.requirementId ?? null,
+      roleId: roleId ?? null,
+      observes: input.observes.get(testId) ?? null,
+      table: row.row,
+      omitted: row.omitted,
+      details: detailsById.get(testId) ?? [],
+      routes: input.routes.filter((route) => route.testId === testId),
+      structural: structural.filter((entry) => entry.testId === testId && entry.result !== "pass"),
+    };
+  });
+  const missesByRequirement = new Map<string, RepairDiagnosticMiss[]>();
+  for (const miss of input.correspondenceMisses) {
+    const misses = missesByRequirement.get(miss.requirementId) ?? [];
+    misses.push({ requirementId: miss.requirementId, location: miss.location ?? null, detail: miss.detail });
+    missesByRequirement.set(miss.requirementId, misses);
+  }
+  const rejectionsByRequirement = new Map<string, RepairDiagnosticRejection[]>();
+  for (const rejection of input.rejections) {
+    const rejections = rejectionsByRequirement.get(rejection.requirementId) ?? [];
+    rejections.push({ requirementId: rejection.requirementId, kind: rejection.kind, quote: rejection.quote });
+    rejectionsByRequirement.set(rejection.requirementId, rejections);
+  }
+  return {
+    tests,
+    correspondence: [...missesByRequirement].map(([requirementId, misses]) => ({ requirementId, misses })),
+    rejections: [...rejectionsByRequirement].map(([requirementId, rejections]) => ({ requirementId, rejections })),
+  };
 }

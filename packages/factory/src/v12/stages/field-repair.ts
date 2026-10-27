@@ -43,7 +43,7 @@ import {
 import { REPAIR_ANSWER_SCHEMA, checkRepairAnswer } from "../../stages/repair.js";
 import { utf8ByteLength } from "../../stages/write.js";
 import { canonicalJson } from "../../v11a/names.js";
-import { declarationSpans, type DeclarationSpan, type FailureLocations, type ValidationAddition } from "../locate.js";
+import { declarationSpans, type DeclarationSpan, type FailureLocations, type RepairDiagnostic, type ValidationAddition } from "../locate.js";
 
 /** この段の schema の名前（どの封筒にも登録しない。`text.format.name` にそのまま載る） */
 export const FIELD_REPAIR_SCHEMA_NAME = "field-repair";
@@ -133,6 +133,20 @@ export const FIELD_REPAIR_IDS_R07_DEFINITION: RuleDefinition = {
 /** 旗 `v12.ids` の走りの規則（off の規則の後ろに R-fr-07 を足す。off の規則はそのまま） */
 export const FIELD_REPAIR_IDS_RULE_DEFINITIONS: readonly RuleDefinition[] = [...FIELD_REPAIR_RULE_DEFINITIONS, FIELD_REPAIR_IDS_R07_DEFINITION];
 
+/** 旗 `v12.ids` と探索がともに on の走りだけ足す規則（診断。Issue #761） */
+export const FIELD_REPAIR_IDS_R08_DEFINITION: RuleDefinition = {
+  id: "R-fr-08",
+  text: "データ「診断」は、今の一番良い版の失敗の説明である。書き換えの対象ではない。示された試験・名前の表・要件・観測する性質を変えない。",
+  why: "検出側が持つ観測する性質・表の行・経路を欄だけの直しへ送っておらず、親と同じ失敗集合への直しが続いた（#761 の前提の観測。方法論 03 の H2・H3・H4）",
+  since: "Issue #761",
+};
+
+/** 旗 `v12.ids` と探索がともに on の走りの規則（ids の規則の後ろに R-fr-08 を足す。ids の規則はそのまま） */
+export const FIELD_REPAIR_IDS_DIAGNOSTIC_RULE_DEFINITIONS: readonly RuleDefinition[] = [
+  ...FIELD_REPAIR_IDS_RULE_DEFINITIONS,
+  FIELD_REPAIR_IDS_R08_DEFINITION,
+];
+
 /** 場所の種類（旗 `v12.ids` の走りのデータだけ。置換・追加） */
 export type FieldLocationKind = "replace" | "add";
 
@@ -141,6 +155,9 @@ const VALIDATION_ELEMENT_KEYS = ["name", "entity", "expression", "message"] as c
 
 /** データの塊の名前（この順に並べる） */
 export const FIELD_REPAIR_DATA_NAMES = ["宣言", "失敗の一覧", "固定した試験", "要件の一覧"] as const;
+
+/** 診断の塊の名前（旗 `v12.ids` と探索がともに on の走りだけ、既存の 4 つの塊の後に足す。Issue #761） */
+export const FIELD_REPAIR_DIAGNOSTIC_DATA_NAME = "診断" as const;
 
 /** 置き換え 1 つ */
 export interface FieldReplacement {
@@ -298,15 +315,23 @@ export interface FieldRepairInput {
   readonly declaration: string;
   /** 一番良い版の失敗の場所（場所なしが 0・場所が 1 つ以上のものだけを渡す） */
   readonly failures: FailureLocations;
+  /**
+   * 一番良い版の失敗の診断（旗 `v12.ids` と探索がともに on の走りだけ。Issue #761）。渡したときだけ、既存の 4 つの塊の後に
+   * 「診断」の塊を 1 つ足し、規則 R-fr-08 を 1 つ足す。省けば今の要求のまま
+   */
+  readonly diagnostic?: RepairDiagnostic;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
 }
 
 /**
  * この段のデータ（見せる範囲は今の直す段を超えない。前の版の失敗・会話を積まない）。旗 `v12.ids` の走り（場所の結果が `additions`
- * を持つ）だけ、失敗の一覧の各場所を場所の名前と種類（replace・add）の組にする（Issue #667）
+ * を持つ）だけ、失敗の一覧の各場所を場所の名前と種類（replace・add）の組にする（Issue #667）。診断は渡されたときだけ、既存の
+ * 4 つの塊の後に足す（Issue #761）
  */
-export function buildFieldRepairData(input: Pick<FieldRepairInput, "list" | "suite" | "declaration" | "failures">): readonly PromptData[] {
+export function buildFieldRepairData(
+  input: Pick<FieldRepairInput, "list" | "suite" | "declaration" | "failures"> & { readonly diagnostic?: RepairDiagnostic },
+): readonly PromptData[] {
   const additions = input.failures.additions;
   const failures = input.failures.located.map((failure) => ({
     testId: failure.testId,
@@ -327,6 +352,9 @@ export function buildFieldRepairData(input: Pick<FieldRepairInput, "list" | "sui
     { name: failureList, text: serializeJson(failures) },
     { name: suite, text: serializeJson(input.suite) },
     { name: list, text: serializeJson(input.list) },
+    ...(input.diagnostic === undefined
+      ? []
+      : [{ name: FIELD_REPAIR_DIAGNOSTIC_DATA_NAME, text: serializeJson(input.diagnostic) }]),
   ];
 }
 
@@ -340,8 +368,14 @@ export async function runFieldRepair(input: FieldRepairInput): Promise<StageOutc
     throw new Error("欄だけの直し：場所の無い失敗が残る往復では呼ばない（回す部分の前提が壊れた）");
   }
   const additions = input.failures.additions;
+  const rules =
+    additions === undefined
+      ? FIELD_REPAIR_RULE_DEFINITIONS
+      : input.diagnostic === undefined
+        ? FIELD_REPAIR_IDS_RULE_DEFINITIONS
+        : FIELD_REPAIR_IDS_DIAGNOSTIC_RULE_DEFINITIONS;
   const request = buildStructuredRequest({
-    rules: ruleTexts(additions === undefined ? FIELD_REPAIR_RULE_DEFINITIONS : FIELD_REPAIR_IDS_RULE_DEFINITIONS),
+    rules: ruleTexts(rules),
     documents: input.documents,
     data: buildFieldRepairData(input),
     schemaName: FIELD_REPAIR_SCHEMA_NAME,
