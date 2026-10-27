@@ -183,6 +183,33 @@ describe("偽物の LlmClient（02 §2.1・R-2）", () => {
   });
 });
 
+// ── 最後の答えだけを求める印を、記録に照らす（Issue #768）──────────────────────────
+
+describe("偽物の LlmClient：最後の答えだけを求める印を記録に照らす（Issue #768）", () => {
+  const marked = { ...TOOL_REQUEST, finalAnswerOnly: true };
+
+  it("印を期待した記録は印付きの要求で返り、印の無い記録は印の無い要求で返る", async () => {
+    const client = createFakeLlmClient([
+      { kind: "tools", finalAnswerOnly: true, response: { kind: "done", declaration: {}, usage: undefined } },
+      { kind: "tools", response: { kind: "done", declaration: {}, usage: undefined } },
+    ]);
+    await expect(client.callWithTools(marked)).resolves.toMatchObject({ kind: "done" });
+    await expect(client.callWithTools(TOOL_REQUEST)).resolves.toMatchObject({ kind: "done" });
+  });
+
+  it("期待した印と要求の印が食い違えば、往復の順の誤りとして止める（有無の両方向）", async () => {
+    const expectingMark = createFakeLlmClient([
+      { kind: "tools", finalAnswerOnly: true, response: { kind: "done", declaration: {}, usage: undefined } },
+    ]);
+    await expect(expectingMark.callWithTools(TOOL_REQUEST)).rejects.toBeInstanceOf(FakeLlmOrderError);
+
+    const expectingNone = createFakeLlmClient([
+      { kind: "tools", response: { kind: "done", declaration: {}, usage: undefined } },
+    ]);
+    await expect(expectingNone.callWithTools(marked)).rejects.toBeInstanceOf(FakeLlmOrderError);
+  });
+});
+
 // ── 記録した応答を要求の schema に照らす（Issue #590）──────────────────────────
 
 describe("偽物の LlmClient：記録を要求の schema に照らす選択肢（Issue #590）", () => {

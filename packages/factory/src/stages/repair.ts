@@ -259,6 +259,9 @@ export const REPAIR_DIAGNOSTIC_DATA_NAME = "診断" as const;
  *   - `shapeRetries` … 最後の答えの形のやり直しの数
  *   - `limit` … 当たった上限（名前・上限値・実際の値）。当たらなければ `null`
  *   - `end` … 終わり方（`done` か、段の失敗の種類）
+ *
+ * `finalizeResponses`・`finalizeRefusedBundles` は、最後の答えの枠を取っておく段（Issue #768）だけが持つ。
+ * **印付きの要求の応答を 1 つも受け取らなかった段では両方の欄を省く**（0 を出さない）。
  */
 export interface RepairStepCounts {
   readonly responses: number;
@@ -269,6 +272,10 @@ export interface RepairStepCounts {
   readonly shapeRetries: number;
   readonly limit: { readonly name: LimitName; readonly max: number; readonly actual: number } | null;
   readonly end: "done" | StageFailure["kind"];
+  /** 印付きの要求に対し、共通の口から成功して受け取った応答の数（Issue #768。再送・遅着・未着手は数えない） */
+  readonly finalizeResponses?: number;
+  /** 印付きの要求に返った道具の束のうち、実行しなかったもの（Issue #768） */
+  readonly finalizeRefusedBundles?: number;
 }
 
 /** ⑥ の応答（done）を、共通の口を通して取るための計画 */
@@ -330,6 +337,12 @@ export interface RepairStepInput {
    * 規則・道具の定義・schema は変えない。省けば今の要求のまま。**製品の実行口（一気通貫・段の走り）からは渡さない（この Issue）**
    */
   readonly diagnostic?: RepairDiagnostic;
+  /**
+   * 真なら（旗 `v12.ids` の探索 on の全文の直し。Issue #768）、**最後の答えの枠を上限の手前 2 回ぶん取っておく**。
+   * 次に求める応答の番号が `repairStepTurns − 1`（7）以上なら、最後の答えだけを求める印を付けて呼ぶ。
+   * 印付きの要求に道具の束が返ったら、1 つも実行せず `unmet` で段を終える。**省けば今の要求・回数・結果のまま**。
+   */
+  readonly reserveFinalAnswer?: boolean;
 }
 
 /** ⑥ のデータ（その段に渡すと決めた文脈だけ。§2.2） */
@@ -457,6 +470,9 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
   let toolBundles = 0;
   let toolsExecuted = 0;
   let shapeRetries = 0;
+  // 最後の答えの枠を取っておく段の数（Issue #768。印付きの要求の応答を 1 つも受け取らなければ口へ出さない）
+  let finalizeResponses = 0;
+  let finalizeRefusedBundles = 0;
   const finish = (outcome: StageOutcome<RepairResult>): StageOutcome<RepairResult> => {
     if (input.onCounts !== undefined) {
       const failure = outcome.ok ? undefined : outcome.failure;
@@ -472,6 +488,8 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
             ? { name: failure.limit, max: failure.max, actual: failure.actual }
             : null,
         end: failure === undefined ? "done" : failure.kind,
+        // 印付きの要求の応答を 1 つも受け取らなかった段では、両方の欄を省く（0 を出さない。Issue #768）
+        ...(finalizeResponses === 0 ? {} : { finalizeResponses, finalizeRefusedBundles }),
       });
     }
     return outcome;
@@ -487,10 +505,23 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
         failure: { kind: "callLimit", limit: turnLimit.limit, max: turnLimit.max, actual: turnLimit.actual },
       });
     }
-    const result = await input.gateway.callWithTools({ ...plan, input: answerInput, turns });
+    // 最後の答えの枠を取っておく段では、上限の手前 2 回（7 回目から）は最後の答えだけを求める（Issue #768）。
+    // **要求の数を増やさない**——同じ往復の中で、道具を選ばせないだけである。7 回目の `done` が形に
+    // 合わなければ、今の形のやり直しのまま 8 回目も印付きで求める。
+    const finalAnswerOnly =
+      input.reserveFinalAnswer === true && responses + 1 >= AGENT_LIMITS.repairStepTurns - 1;
+    const result = await input.gateway.callWithTools({
+      ...plan,
+      input: answerInput,
+      turns,
+      // 印の無い往復の要求は今と同じ（欄を足さない。Issue #768）
+      ...(finalAnswerOnly ? { finalAnswerOnly: true } : {}),
+    });
     if (result.kind !== "ok") return finish({ ok: false, failure: mapGatewayFailure(result) });
     const response = result.value;
     responses += 1;
+    // 印付きの要求に対し、共通の口から成功して受け取った応答だけを数える（再送・遅着・未着手は数えない）
+    if (finalAnswerOnly) finalizeResponses += 1;
     if (response.kind === "done") {
       const checked = checkRepairAnswer(response.declaration, input.source, testIds);
       if (checked.ok) return finish({ ok: true, value: checked.value });
@@ -506,6 +537,25 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
       continue;
     }
     toolBundles += 1;
+
+    // 印付きの要求に道具の束が返ったら、1 つも実行せずに段を終える（Issue #768）。往復の上限ではなく、
+    // **求めた応答の契約への違反**として `unmet` に分ける。ただし、その束で共通の口の累計が上限を超えるなら、
+    // 今のとおり累計の上限（`callLimit`）を先に当てる。
+    if (finalAnswerOnly) {
+      finalizeRefusedBundles += 1;
+      const budget = checkToolCallBudget(input.gateway.toolCalls);
+      if (budget !== undefined) {
+        return finish({ ok: false, failure: { kind: "callLimit", limit: budget.limit, max: budget.max, actual: budget.actual } });
+      }
+      return finish({
+        ok: false,
+        failure: {
+          kind: "unmet",
+          attempts: 1,
+          problems: [{ field: "", message: "最後の答えだけを求めた要求に道具の呼び出しが返った" }],
+        },
+      });
+    }
 
     // 実行する**前**に、**共通の口の累計そのもの**（この応答の束を含む）を上限に照らす（§1.5・Issue #429）。
     // 超えていれば 1 つも実行せず、累計の上限として段を終える。累計は**応答の後**に読む——timeout で

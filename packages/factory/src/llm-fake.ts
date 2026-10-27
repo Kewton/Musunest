@@ -49,6 +49,11 @@ export interface RecordedStructuredCall {
 /** 記録した道具付きの 1 回（応答は「続く」か「終わる」のどちらか） */
 export interface RecordedToolCall {
   readonly kind: "tools";
+  /**
+   * この応答を求めた要求に「最後の答えだけを求める印」があったか（Issue #768）。**省けば印の無い要求**を
+   * 期待する——試験は、印の有無を記録で観測できる（違えば往復の順の誤りとして止める）。
+   */
+  readonly finalAnswerOnly?: boolean;
   readonly response: LlmToolResponse;
 }
 
@@ -190,6 +195,10 @@ export function createFakeLlmClient(recorded: readonly RecordedCall[], options?:
       const call = recorded[index];
       if (call === undefined) throw exhausted(index);
       if (call.kind !== "tools") throw kindMismatch("tools", call.kind);
+      // 印の有無を記録に照らす（Issue #768）。省いた記録は印の無い要求を期待する。
+      if ((request.finalAnswerOnly === true) !== (call.finalAnswerOnly === true)) {
+        throw new FakeLlmOrderError("最後の答えだけを求める印の有無が、記録した要求と違います");
+      }
       checkTurnOrder(request.turns, expectedTurns, lastToolCallIds);
       index += 1;
       if (call.response.kind === "toolCalls") {
