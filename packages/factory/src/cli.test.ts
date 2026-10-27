@@ -4868,8 +4868,10 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     { name: "stage-v11a", kind: "stage", pipeline: "v1.1a", flags: null, args: [], calls: v11aStagnation },
     { name: "whole-v11a", kind: "whole", pipeline: "v1.1a", flags: null, calls: v11aStagnation },
   ];
+  /** 経路ごとの所要時間（S1：失敗したときに、どの経路のどこで時間を使ったかを残す） */
+  type InvariantTiming = { ioMs: number; runMs: number; hashMs: number };
   /** 1 つの走りの出力のダイジェスト（書いたファイル・要求の列・終了コード・1 行の要約）と、段の走りの記録が search_repair を持つか */
-  async function invariantDigest(entry: (typeof INVARIANT_RUNS)[number], keepSearch = false): Promise<{ readonly digest: string; readonly hasSearch: boolean }> {
+  async function invariantDigest(entry: (typeof INVARIANT_RUNS)[number], keepSearch = false, timing?: InvariantTiming): Promise<{ readonly digest: string; readonly hasSearch: boolean }> {
     if (entry.flags !== null) {
       const flags = entry.flags;
       vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => flags);
@@ -4880,6 +4882,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     let requests: unknown;
     let code: number;
     let line: string;
+    const runStart = performance.now();
     if (entry.kind === "stage") {
       const args = entry.args ?? ["--stage-start", "write", "--stage-input", checkpoint746];
       const run = await runStageCli({ dir, args, calls: entry.calls(), pipeline: entry.pipeline, clock: eventClock() });
@@ -4895,11 +4898,15 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       };
       line = JSON.stringify(run.summary);
     }
+    if (timing !== undefined) timing.runMs += performance.now() - runStart;
     vi.restoreAllMocks();
     let hasSearch = false;
     const files: [string, string][] = [];
     for (const path of [...written].sort()) {
-      let text = (await fs.readFile(`${dir}/${path}`, "utf8")).replaceAll(directory, "<tmp>");
+      const ioStart = performance.now();
+      const raw = await fs.readFile(`${dir}/${path}`, "utf8");
+      if (timing !== undefined) timing.ioMs += performance.now() - ioStart;
+      let text = raw.replaceAll(directory, "<tmp>");
       if (path === STAGE_RUN_RECORD_FILE) {
         const record = JSON.parse(text) as Json;
         hasSearch = "search_repair" in record;
@@ -4917,10 +4924,15 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
           expect(stageJsonText(record), path).toBe(text);
         }
       }
+      const hashStart = performance.now();
       files.push([path, await sha256Hex(text)]);
+      if (timing !== undefined) timing.hashMs += performance.now() - hashStart;
     }
     const body = JSON.stringify({ files, requests, code, line }).replaceAll(directory, "<tmp>");
-    return { digest: await sha256Hex(body), hasSearch };
+    const bodyHashStart = performance.now();
+    const digest = await sha256Hex(body);
+    if (timing !== undefined) timing.hashMs += performance.now() - bodyHashStart;
+    return { digest, hasSearch };
   }
 
   it("不変：v1・v1.1a・ids off の v1.2・search-repair off の走りと、ids on・search-repair on の一気通貫・段の走り（search_repair を除く）の全出力が直す前（99b6478）とバイト列で同じ。欄を持つのは ids on・search-repair on の段の走りで探索に入ったものだけ", async () => {
@@ -4968,11 +4980,24 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
-  it("不変（4a80f4b の全出力・search_repair を含む）：ids on の段の記録だけ requests・stage_spans を除き、ほかの欄は 1 つも落とさずに比較元と同じ", async () => {
+  it("不変（4a80f4b の全出力・search_repair を含む）：ids on の段の記録だけ requests・stage_spans を除き、ほかの欄は 1 つも落とさずに比較元と同じ", async (ctx) => {
     const digests: Record<string, string> = {};
     const searched: Record<string, boolean> = {};
-    for (const entry of INVARIANT_RUNS) {
-      const { digest, hasSearch } = await invariantDigest(entry, true);
+    let current = "開始前";
+    let currentTiming: InvariantTiming = { ioMs: 0, runMs: 0, hashMs: 0 };
+    const timings: ({ readonly name: string } & InvariantTiming)[] = [];
+    // 失敗（timeout を含む）のときだけ、処理中の経路と経路ごとの I/O・実行・ハッシュの時間を残す（S1）
+    ctx.onTestFailed(() => {
+      console.error(`[S1] 処理中の経路: ${current}`);
+      console.error(`[S1] 現在の経路の所要 ms: ${JSON.stringify(currentTiming)}`);
+      console.error(`[S1] 完了した経路: ${JSON.stringify(timings)}`);
+    });
+    for (let index = 0; index < INVARIANT_RUNS.length; index += 1) {
+      const entry = INVARIANT_RUNS[index]!;
+      current = `${entry.name}（${index + 1}/${INVARIANT_RUNS.length}）`;
+      currentTiming = { ioMs: 0, runMs: 0, hashMs: 0 };
+      const { digest, hasSearch } = await invariantDigest(entry, true, currentTiming);
+      timings.push({ name: entry.name, ...currentTiming });
       digests[entry.name] = digest;
       searched[entry.name] = hasSearch;
     }
@@ -5716,6 +5741,42 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       }, 0),
     );
 
+  /** 行の終わり方の全部（0 の種類も残す） */
+  const END_KINDS = ["response", "incomplete", "error", "timeout", "deadline"] as const;
+  const endsTable = (overrides: Partial<Record<(typeof END_KINDS)[number], number>> = {}): Record<string, number> =>
+    Object.fromEntries(END_KINDS.map((kind) => [kind, overrides[kind] ?? 0]));
+  const endsOf = (requests: readonly Json[], stageIndex: number): Record<string, number> =>
+    Object.fromEntries(END_KINDS.map((kind) => [kind, requests.filter((request) => request["stage_index"] === stageIndex && request["end"] === kind).length]));
+  /** 段の attempts の全部（0 の欄も残す） */
+  const attemptsOf = (overrides: Record<string, unknown> = {}, notStarted: Record<string, number> = {}): Record<string, unknown> => ({
+    started: 0,
+    responded: 0,
+    errors: 0,
+    cancelled_deadline: 0,
+    cancelled_timeout: 0,
+    ...overrides,
+    not_started: { deadline: 0, budget: 0, limit: 0, timeout: 0, ...notStarted },
+  });
+  /** 5 種のトークンの全部（usage を省けば 0 の種類も残す） */
+  const tokensOfUsage = (usage?: LlmUsage): Record<string, number> =>
+    Object.fromEntries(TOKEN_KEYS.map((key) => [key, usage === undefined ? 0 : TOKENS_OF(usage)[key]!]));
+  /** 段の行を、台本から独立に組んだ行数・終わり方・attempts・トークン・missing の表と照らす */
+  const expectStageTable = (
+    run: { readonly requests: readonly Json[]; readonly stages: readonly Json[] },
+    index: number,
+    attempts: Record<string, unknown>,
+    ends: Record<string, number>,
+    tokens: Record<string, number>,
+    missing: number,
+  ): void => {
+    const rows = run.requests.filter((request) => request["stage_index"] === index);
+    expect(rows, `stage ${index} の行数`).toHaveLength(attempts["started"] as number);
+    expect(endsOf(run.requests, index), `stage ${index} の終わり方`).toEqual(ends);
+    expect(run.stages[index]!["attempts"], `stage ${index} の attempts`).toEqual(attempts);
+    for (const key of TOKEN_KEYS) expect(run.stages[index]![key], `stage ${index}:${key}`).toBe(tokens[key]);
+    expect(run.stages[index]!["missing_usage_calls"], `stage ${index} の missing`).toBe(missing);
+  };
+
   it("(1) 要件 12 件で T2 が束 3 つになり、逆の順に完了しても各行が自分の束の段の行を指す", async () => {
     const clock = largeClock();
     const t2 = makeT2("ordered");
@@ -6164,6 +6225,7 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       expect(run.requests).toHaveLength(1);
       expect(run.requests[0]).toMatchObject({ end: "deadline", stage_index: 0 });
       expect(run.stages[0]!["attempts"]["cancelled_deadline"]).toBe(1);
+      expectStageTable(run, 0, attemptsOf({ started: 1, cancelled_deadline: 1 }), endsTable({ deadline: 1 }), tokensOfUsage(), 0);
     } finally {
       vi.useRealTimers();
     }
@@ -6187,6 +6249,7 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
         expect(run.run.code).not.toBe(EXIT_OK);
         expect(run.requests).toEqual([]);
         expect(run.stages[0]!["attempts"]["not_started"]["deadline"]).toBe(1);
+        expectStageTable(run, 0, attemptsOf({}, { deadline: 1 }), endsTable(), tokensOfUsage(), 0);
       } finally {
         vi.restoreAllMocks();
       }
@@ -6228,6 +6291,9 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     for (const key of TOKEN_KEYS) expect(run.stages[7]![key], `7:${key}`).toBe(TOKENS_OF(NORMAL_USAGE)[key]);
     expect(run.stages[7]!["missing_usage_calls"]).toBe(0);
     expect(run.stages[7]!["attempts"]).toMatchObject({ started: 2, errors: 1, responded: 1 });
+    expectStageTable(run, 5, attemptsOf({ started: 1, responded: 1 }), endsTable({ response: 1 }), tokensOfUsage(), 1);
+    expectStageTable(run, 6, attemptsOf({ started: 1, responded: 1 }), endsTable({ incomplete: 1 }), tokensOfUsage(LATE_USAGE), 0);
+    expectStageTable(run, 7, attemptsOf({ started: 2, errors: 1, responded: 1 }), endsTable({ response: 1, error: 1 }), tokensOfUsage(NORMAL_USAGE), 0);
     calls = new Map();
 
     // 未完了（usage なし）を並列の束で起こす：束 1 の行は tokens 0・missing 1・responded 1
@@ -6250,6 +6316,7 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     expect(missingRun.stages[6]!["missing_usage_calls"]).toBe(1);
     expect(missingRun.stages[6]!["attempts"]).toMatchObject({ started: 1, responded: 1, errors: 0 });
     expect(missingRun.requests.filter((request) => request["stage_index"] === 6).map((request) => request["end"])).toEqual(["incomplete"]);
+    expectStageTable(missingRun, 6, attemptsOf({ started: 1, responded: 1 }), endsTable({ incomplete: 1 }), tokensOfUsage(), 1);
   });
 
   it("R5 並列の束：実開始のあとの締切は deadline の行を残し、締切で未着手のときは束の行を作らない", async () => {
@@ -6297,8 +6364,9 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       expect(run.run.code).not.toBe(EXIT_OK);
       expect(run.requests.filter((request) => request["stage_index"] === 5).map((request) => request["end"])).toEqual(["deadline"]);
       expect(run.stages[5]!["attempts"]["cancelled_deadline"]).toBe(1);
-      for (const key of TOKEN_KEYS) expect(run.stages[6]![key], `deadline:6:${key}`).toBe(TOKENS_OF(NORMAL_USAGE)[key]);
-      for (const key of TOKEN_KEYS) expect(run.stages[7]![key], `deadline:7:${key}`).toBe(TOKENS_OF(NORMAL_USAGE)[key]);
+      expectStageTable(run, 5, attemptsOf({ started: 1, cancelled_deadline: 1 }), endsTable({ deadline: 1 }), tokensOfUsage(), 0);
+      expectStageTable(run, 6, attemptsOf({ started: 1, responded: 1 }), endsTable({ response: 1 }), tokensOfUsage(NORMAL_USAGE), 0);
+      expectStageTable(run, 7, attemptsOf({ started: 1, responded: 1 }), endsTable({ response: 1 }), tokensOfUsage(NORMAL_USAGE), 0);
     } finally {
       vi.useRealTimers();
       vi.restoreAllMocks();
@@ -6332,6 +6400,7 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
         const t2Stages = run.stages.filter((stage) => stage["stage"] === "test-spec");
         expect(t2Stages.length).toBeGreaterThan(0);
         expect(t2Stages.reduce((sum, stage) => sum + (stage["attempts"]["not_started"]["deadline"] as number), 0)).toBe(3);
+        for (const index of [5, 6, 7]) expectStageTable(run, index, attemptsOf({}, { deadline: 1 }), endsTable(), tokensOfUsage(), 0);
       } finally {
         vi.restoreAllMocks();
       }
