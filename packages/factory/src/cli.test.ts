@@ -4132,6 +4132,53 @@ describe("段ごとの effort の口（`--pipeline v1.2` の `--stage-effort`。
     expect(tuned.lines).toEqual(plain.lines);
   });
 
+  it("(3) CLI の入口：段の走りに --stage-effort repair=medium を渡すと、修復（欄だけの直し）の要求の effort と上限が medium になり、ほかの段の要求は今のまま（引数の解析から run へ repair が落ちない）", async () => {
+    // 条件の違う宣言から、欄だけの直し 2 回で元の条件へ戻す（旗 v12.ids・v12.search-repair の走り）
+    const BAD_YAML = V11A_YAML.replace("when: amount > 0", "when: amount > 5");
+    const closeBody = (expression: string): string =>
+      ["- name: closeItem", "  entity: item", "  kind: update", "  set:", "    kind: beta", `  when: ${expression}`].join("\n");
+    const fieldRepair = (expression: string): RecordedCall => ({
+      kind: "structured",
+      output: { replacements: [{ location: "action:item.closeItem", element: closeBody(expression) }], disputes: [] },
+      usage: undefined,
+    });
+    const calls = (): RecordedCall[] => [
+      ...v12Head().slice(0, -1),
+      structured({ declaration: BAD_YAML }),
+      structured(v11aJudgments()),
+      fieldRepair("amount > 1"),
+      structured(v11aJudgments()),
+      fieldRepair("amount > 0"),
+      structured(v11aJudgments()),
+    ];
+    const args = ["--stage-start", "vocabulary", "--stage-end", "judge"];
+    const plainDir = `${directory}/v12-stage-effort-repair-plain`;
+    const tunedDir = `${directory}/v12-stage-effort-repair-tuned`;
+    const plain = await runStageCli({ dir: plainDir, args, calls: calls(), pipeline: "v1.2" });
+    const tuned = await runStageCli({ dir: tunedDir, args: [...args, "--stage-effort", "repair=medium"], calls: calls(), pipeline: "v1.2" });
+    expect(tuned.code).toBe(EXIT_OK);
+    expect(plain.code).toBe(EXIT_OK);
+    // 修復（欄だけの直し）が実際に呼ばれ、その要求の effort と上限が repair の指定から出る
+    const repairs = tuned.structuredRequests.filter((request) => request.schemaName === FIELD_REPAIR_SCHEMA_NAME);
+    expect(repairs.length).toBeGreaterThan(0);
+    for (const request of repairs) {
+      expect(request.effort).toBe("medium");
+      expect(request.maxOutputTokens).toBe(maxOutputTokensForEffort("medium", "repair"));
+    }
+    // ほかの段の要求は今のまま（effort の欄が無く、口なしの走りの要求と深く等しい）
+    expect(tuned.structuredRequests.filter((request) => request.schemaName !== FIELD_REPAIR_SCHEMA_NAME).some((request) => "effort" in request)).toBe(false);
+    expect(plain.structuredRequests.some((request) => "effort" in request)).toBe(false);
+    expect(
+      tuned.structuredRequests.filter((request) => request.schemaName !== FIELD_REPAIR_SCHEMA_NAME).map(withoutEffort),
+    ).toEqual(plain.structuredRequests.filter((request) => request.schemaName !== FIELD_REPAIR_SCHEMA_NAME).map(withoutEffort));
+    // 引数の解析から run へ repair が落ちていない（条件の記録の末尾に載る）・修復の段が記録に在る
+    const tunedRecord = await stageRecordOf(tunedDir);
+    const conditions = tunedRecord["conditions"] as Record<string, unknown>;
+    expect(conditions["stage_efforts"]).toEqual({ repair: "medium" });
+    expect(Object.keys(conditions).at(-1)).toBe("stage_efforts");
+    expect((tunedRecord["stages"] as readonly { readonly stage: string }[]).filter((stage) => stage.stage === "repair").length).toBeGreaterThan(0);
+  });
+
   it("引数：繰り返しを付けた順に段 → 値で読み、省けば欄が無い。一気通貫と段の走りの両方で受ける", () => {
     const base = ["--", "request.txt", "--out", "out", "--pipeline", "v1.2", "--plan-file", "plan.json"];
     const parsed = parseCliArguments([...base, "--stage-effort", "write=medium", "--stage-effort", "vocabulary=low"]);
@@ -4141,12 +4188,18 @@ describe("段ごとの effort の口（`--pipeline v1.2` の `--stage-effort`。
     expect("error" in staged ? staged.error : [staged.stageRange, staged.stageEfforts]).toEqual([{ start: "name-table", end: "semantic-check" }, { "semantic-check": "low" }]);
     expect(parseCliArguments(base)).not.toHaveProperty("stageEfforts");
     expect(parseStageEfforts([])).toEqual({ stageEfforts: {} });
+    // 今は repair を 7 番目の段として受け、知らない段・知らない値・重複は今までどおり断る
+    expect(parseStageEfforts(["repair=medium"])).toEqual({ stageEfforts: { repair: "medium" } });
+    for (const effort of ["low", "medium", "high"] as const) expect(parseStageEfforts([`repair=${effort}`])).toEqual({ stageEfforts: { repair: effort } });
+    expect(parseStageEfforts(["repair=extreme"])).toEqual({ code: "stage-effort:value" });
+    expect(parseStageEfforts(["repair=low", "repair=high"])).toEqual({ code: "stage-effort:duplicate" });
+    expect(STAGE_EFFORT_USAGE).toContain("repair");
   });
 
   const usageCases: readonly { readonly name: string; readonly argv: readonly string[]; readonly code: string }[] = [
     { name: "知らない段", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "unknown-stage=low"], code: "stage-effort:stage" },
     { name: "配線していない段（name-table）", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "name-table=low"], code: "stage-effort:stage" },
-    { name: "配線していない段（repair）", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "repair=low"], code: "stage-effort:stage" },
+    { name: "配線していない段（arbitration）", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "arbitration=low"], code: "stage-effort:stage" },
     { name: "知らない値", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "semantic-check=extreme"], code: "stage-effort:value" },
     { name: "空の値", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "semantic-check="], code: "stage-effort:value" },
     {

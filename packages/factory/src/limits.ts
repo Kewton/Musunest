@@ -265,9 +265,10 @@ export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage
 /**
  * 段ごとに effort を指定できる段（`--stage-effort <段>=<値>`。Issue #664）。**実際に配線する段だけ**を置く——
  * C1 語彙・C2 要件の写像・C3 表の意味の点検・T2 試験の仕様（束の口を含む）・B1 書く・B3' 宣言の意味の点検。
+ * 加えて、⑥ 直す（`repair`。宣言の全文を直す道具付きの要求と、欄だけの直しの構造化の要求の両方。Issue #751）。
  * ここに無い段は入口で断る（既定へ黙って倒さない）。段の口は共通の口（`CallGateway.forStage`）が引く。
  */
-export const STAGE_EFFORT_STAGES = ["vocabulary", "mapping", "semantic-check", "test-spec", "write", "decl-check"] as const;
+export const STAGE_EFFORT_STAGES = ["vocabulary", "mapping", "semantic-check", "test-spec", "write", "decl-check", "repair"] as const;
 export type StageEffortStage = (typeof STAGE_EFFORT_STAGES)[number];
 
 /** 段ごとの effort の組（段 → 値。指定の無い段は口の 1 つの effort のまま。Issue #664） */

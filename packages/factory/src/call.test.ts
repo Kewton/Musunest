@@ -1553,6 +1553,265 @@ describe("段の名前で引いた口（段ごとの effort。Issue #664）", ()
   });
 });
 
+// ── ⑥ 直すの段の口（`repair`。Issue #751）──────────────────────────────────
+//
+// repair は構造化（欄だけの直し）と道具付き（宣言の全文の直し）の 2 つの経路で呼ぶ。段の口は**どちらの要求にも**
+// 同じ effort を載せ、出力の上限と呼び出しごとの timeout の基準をその effort から引く。計は元の口と共有する。
+
+describe("⑥ 直すの段の口（repair。Issue #751）：道具付きの要求にも段の effort を載せ、上限と timeout を同じ effort から引く", () => {
+  it("repair の口は道具付きの要求に effort を載せ、上限と timeout も repair の値。ほかの段（B1 の作り直し）は write の指定に従い、計は元の口と共有する", async () => {
+    const structured: LlmStructuredRequest[] = [];
+    const tools: LlmToolRequest[] = [];
+    const client: LlmClient = {
+      callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        structured.push(request);
+        return Promise.resolve({ output: {} as T, usage: USAGE });
+      },
+      callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
+        tools.push(request);
+        return Promise.resolve({ kind: "done", declaration: {}, usage: USAGE });
+      },
+    };
+    const gateway = new CallGateway({
+      client,
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "high",
+      stageEfforts: { repair: "medium", write: "low" },
+    });
+    const repair = gateway.forStage("repair");
+    expect(repair.effort).toBe("medium");
+    expect(repair.maxOutputTokens("repair")).toBe(STAGE_MAX_OUTPUT_TOKENS.medium.repair);
+    expect(repair.callTimeoutMs).toBe(CALL_TIMEOUT_BY_EFFORT.medium);
+    // 道具付き（宣言の全文の直し）と構造化（欄だけの直し）のどちらの要求にも effort を載せる
+    await repair.callWithTools({ ...TOOL_REQUEST, maxOutputTokens: repair.maxOutputTokens("repair") });
+    await repair.callStructured({ ...STRUCTURED_REQUEST, maxOutputTokens: repair.maxOutputTokens("repair") });
+    expect(tools[0]?.effort).toBe("medium");
+    expect(tools[0]?.maxOutputTokens).toBe(STAGE_MAX_OUTPUT_TOKENS.medium.repair);
+    expect(structured[0]?.effort).toBe("medium");
+    expect(structured[0]?.maxOutputTokens).toBe(STAGE_MAX_OUTPUT_TOKENS.medium.repair);
+    // B1 の作り直し（write の段の口）は write の指定に従う。元の口の要求は今のまま（effort の欄が無い）
+    await gateway.forStage("write").callStructured({ ...STRUCTURED_REQUEST, maxOutputTokens: gateway.maxOutputTokens("write") });
+    await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(structured[1]?.effort).toBe("low");
+    expect("effort" in (structured[2] ?? {})).toBe(false);
+    // 計は共有：どちらの口から見ても同じ数
+    expect(repair.calls).toBe(4);
+    expect(gateway.calls).toBe(4);
+    expect(repair.counts).toEqual(gateway.counts);
+    // 段の口から段の口を引いても、元の口の組から引く
+    expect(repair.forStage("write").effort).toBe("low");
+    expect(repair.forStage("repair").effort).toBe("medium");
+  });
+
+  it("(6) repair の口と元の口を交互に使っても、道具の呼び出しの累計・共有の門・予算の境界は 1 つの数で掛かる。8 応答と道具の累計の上限の値は変えない", async () => {
+    /** 道具の呼び出しを `count` 個返す偽物（`usage: undefined` を明示すると予約を残し、費用を実際に消費する） */
+    const toolClient = (count: number, options: { readonly usage?: LlmUsage | undefined } = { usage: USAGE }): { readonly client: LlmClient; readonly calls: () => number } => {
+      let calls = 0;
+      return {
+        calls: () => calls,
+        client: {
+          callStructured: () => Promise.reject(new Error("使わない")),
+          callWithTools(): Promise<LlmToolResponse> {
+            calls += 1;
+            return Promise.resolve({
+              kind: "toolCalls",
+              toolCalls: Array.from({ length: count }, (_, index) => ({ id: `c${String(index)}`, name: "static-check", arguments: {} })),
+              usage: options.usage,
+            });
+          },
+        },
+      };
+    };
+    // 道具の呼び出しの累計は、repair・write の段の口から見ても元の口から見ても 1 つの数（門の無い口でも共有する）
+    const counted = toolClient(2);
+    const counting = new CallGateway({
+      client: counted.client,
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "high",
+      stageEfforts: { repair: "medium", write: "low" },
+    });
+    await counting.forStage("repair").callWithTools(TOOL_REQUEST);
+    await counting.forStage("write").callWithTools(TOOL_REQUEST);
+    await counting.callWithTools(TOOL_REQUEST);
+    expect(counted.calls()).toBe(3);
+    expect(counting.toolCalls).toBe(6);
+    expect(counting.forStage("repair").toolCalls).toBe(6);
+    expect(counting.forStage("write").toolCalls).toBe(6);
+
+    // 正の予算：repair の口・write の口・元の口で交互に消費し、次の 1 回を断る（予約は usage が返らない前提で残す）
+    const perCall = maxCostOf(toolInputParts(TOOL_REQUEST), TOOL_REQUEST.maxOutputTokens);
+    const sharedBudget = new JobBudget(perCall * 3.5);
+    const spendingClient = toolClient(1, { usage: undefined });
+    const spending = new CallGateway({
+      client: spendingClient.client,
+      budget: sharedBudget,
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "high",
+      stageEfforts: { repair: "medium", write: "low" },
+    });
+    const kinds = [
+      (await spending.forStage("repair").callWithTools(TOOL_REQUEST)).kind,
+      (await spending.forStage("write").callWithTools(TOOL_REQUEST)).kind,
+      (await spending.callWithTools(TOOL_REQUEST)).kind,
+      (await spending.forStage("repair").callWithTools(TOOL_REQUEST)).kind,
+    ];
+    expect(kinds).toEqual(["ok", "ok", "ok", "budgetExceeded"]);
+    expect(sharedBudget.reservedUsd).toBeCloseTo(perCall * 3, 12);
+    expect(sharedBudget.remainingUsd).toBeCloseTo(perCall * 0.5, 12);
+    expect(spending.attempts.not_started.budget).toBe(1);
+    // 4 回目は始めていないので、道具の累計はどの口から見ても 3
+    expect(spending.toolCalls).toBe(3);
+    expect(spending.forStage("repair").toolCalls).toBe(3);
+    expect(spending.forStage("write").toolCalls).toBe(3);
+    // 元の口だけを使った走りでも、同じ判定・同じ累計になる
+    const plainBudget = new JobBudget(perCall * 3.5);
+    const plainClient = toolClient(1, { usage: undefined });
+    const plain = new CallGateway({
+      client: plainClient.client,
+      budget: plainBudget,
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "high",
+    });
+    const plainKinds: string[] = [];
+    for (let index = 0; index < 4; index += 1) plainKinds.push((await plain.callWithTools(TOOL_REQUEST)).kind);
+    expect(plainKinds).toEqual(kinds);
+    expect(plain.toolCalls).toBe(3);
+    expect(plainBudget.remainingUsd).toBeCloseTo(sharedBudget.remainingUsd, 12);
+    // 共有の門：段の口が 1 つ使えば、元の口の次の試行は上限で未着手になる
+    const gate = createCallGate({ now: () => 0, deadline: 600_000, limit: 1 });
+    const gatedClient = toolClient(1);
+    const gated = new CallGateway({
+      client: gatedClient.client,
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "high",
+      gate,
+      stageEfforts: { repair: "medium" },
+    });
+    expect((await gated.forStage("repair").callWithTools(TOOL_REQUEST)).kind).toBe("ok");
+    expect(await gated.callWithTools(TOOL_REQUEST)).toEqual({ kind: "limitExceeded", limit: "callCount", max: 1, actual: 1 });
+    expect(gated.attempts.not_started.limit).toBe(1);
+    // 予算の境界：段の口でも元の口でも、残高が足りなければ呼ばない（同じ判定）
+    const broke = toolClient(1);
+    const noBudget = new CallGateway({
+      client: broke.client,
+      budget: new JobBudget(0),
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "high",
+      stageEfforts: { repair: "medium" },
+    });
+    const stageResult = await noBudget.forStage("repair").callWithTools(TOOL_REQUEST);
+    const baseResult = await noBudget.callWithTools(TOOL_REQUEST);
+    expect(stageResult.kind).toBe("budgetExceeded");
+    expect(baseResult.kind).toBe("budgetExceeded");
+    expect(broke.calls()).toBe(0);
+    expect(noBudget.attempts.not_started.budget).toBe(2);
+    // 1 回の修復の中の 8 応答の上限と、道具の呼び出しの累計の上限は変えない
+    expect(AGENT_LIMITS.repairStepTurns).toBe(8);
+    expect(AGENT_LIMITS.toolCalls).toBe(24);
+    expect(AGENT_LIMITS.repairRoundTrips).toBe(6);
+  });
+
+  it("呼ぶ側が timeout の基準を指定した口では、repair の口もその指定が勝つ（上限と要求の effort は repair の値）", () => {
+    const gateway = new CallGateway({
+      client: spyClient(() => {}),
+      budget: new JobBudget(1),
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "high",
+      callTimeoutMs: 90_000,
+      stageEfforts: { repair: "medium" },
+    });
+    const repair = gateway.forStage("repair");
+    expect(repair.callTimeoutMs).toBe(90_000);
+    expect(repair.effort).toBe("medium");
+    expect(repair.maxOutputTokens("repair")).toBe(STAGE_MAX_OUTPUT_TOKENS.medium.repair);
+  });
+
+  it("道具付きの実試行は repair の medium の基準（120 秒）で 1 回ごとに打ち切り、再送で倍（240 秒）に伸びる。締切の残りが伸ばせなければ、試行を重ねずに止まる", async () => {
+    /** 決して返らない道具付きの偽物（打ち切りの合図で数える） */
+    const hangingTools = () => {
+      let aborts = 0;
+      const client: LlmClient = {
+        callStructured: () => Promise.reject(new Error("使わない")),
+        callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
+          request.signal?.addEventListener("abort", () => {
+            aborts += 1;
+          });
+          return new Promise<never>(() => {});
+        },
+      };
+      return { client, aborts: () => aborts };
+    };
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const stretched = hangingTools();
+      const gateway = new CallGateway({
+        client: stretched.client,
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => Date.now(),
+        deadline: 600_000,
+        effort: "high",
+        maxAttempts: 2,
+        stageEfforts: { repair: "medium" },
+      });
+      const pending = gateway.forStage("repair").callWithTools(TOOL_REQUEST);
+      await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_BY_EFFORT.medium - 1);
+      expect(stretched.aborts()).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(stretched.aborts()).toBe(1);
+      // 2 回目は 240 秒：120 秒を過ぎても打ち切られない
+      await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_BY_EFFORT.medium - 1);
+      expect(stretched.aborts()).toBe(1);
+      await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_BY_EFFORT.medium + 1);
+      expect(stretched.aborts()).toBe(2);
+      const result = await pending;
+      expect(result.kind).toBe("failed");
+      if (result.kind === "failed") expect(result.attempts).toBe(2);
+
+      // 締切の残り（30 秒）は 120 秒より短いので、2 回目を始めずに 1 回で止まる
+      vi.setSystemTime(0);
+      const capped = hangingTools();
+      const short = new CallGateway({
+        client: capped.client,
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => Date.now(),
+        deadline: 150_000,
+        effort: "high",
+        maxAttempts: 2,
+        stageEfforts: { repair: "medium" },
+      });
+      const shortPending = short.forStage("repair").callWithTools(TOOL_REQUEST);
+      await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_BY_EFFORT.medium);
+      expect(capped.aborts()).toBe(1);
+      const shortResult = await shortPending;
+      expect(shortResult.kind).toBe("failed");
+      if (shortResult.kind === "failed") expect(shortResult.attempts).toBe(1);
+      expect(short.attempts.not_started.timeout).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 // ── 実試行の観測の口（Issue #748）──────────────────────────────────────
 //
 // 口が確定した分類だけを観測の口へ渡す。開始しなかった試行は行を作らず、打ち切りのあとの完了は

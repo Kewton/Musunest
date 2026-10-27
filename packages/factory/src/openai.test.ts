@@ -199,7 +199,7 @@ describe("要求の組み立て（02 §2・§2.2）", () => {
     expect(body.reasoning).toEqual({ effort: "high" });
   });
 
-  it("段ごとの effort（Issue #664）：要求に effort があれば reasoning はその値、無ければ設定の値。要求に無ければ body はバイト列で今と同じ。道具の要求の body は不変", async () => {
+  it("段ごとの effort（Issue #664・#751）：構造化と道具付きのどちらの要求も、effort があれば reasoning はその値、無ければ設定の値。要求に無ければ body はバイト列で今と同じ", async () => {
     const { fetch, captured } = recordingFetch(() =>
       jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
     );
@@ -225,10 +225,27 @@ describe("要求の組み立て（02 §2・§2.2）", () => {
     expect(bodyOf(bare.captured, 0).reasoning).toBeUndefined();
     expect(bodyOf(bare.captured, 1).reasoning).toEqual({ effort: "medium" });
 
-    // 道具の要求は今の設定の値のまま（要求の型に effort の欄は無い）
+    // 道具付きの要求も構造化と同じ規則：要求の effort があればそれを、無ければ設定の値を送る（Issue #751）
     const tools = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ entity: "item" })), USAGE_WIRE)));
-    await createOpenAiLlmClient({ apiKey: "test-key", effort: "high", fetch: tools.fetch }).callWithTools(TOOL_REQUEST);
-    expect(bodyOf(tools.captured).reasoning).toEqual({ effort: "high" });
+    const toolClient = createOpenAiLlmClient({ apiKey: "test-key", effort: "high", fetch: tools.fetch });
+    await toolClient.callWithTools(TOOL_REQUEST);
+    await toolClient.callWithTools({ ...TOOL_REQUEST, effort: "medium" });
+    await toolClient.callWithTools(TOOL_REQUEST);
+    expect(bodyOf(tools.captured, 0).reasoning).toEqual({ effort: "high" });
+    expect(bodyOf(tools.captured, 1).reasoning).toEqual({ effort: "medium" });
+    expect(JSON.stringify(bodyOf(tools.captured, 2))).toBe(JSON.stringify(bodyOf(tools.captured, 0)));
+    expect(Object.keys(bodyOf(tools.captured, 1))).toEqual(Object.keys(bodyOf(tools.captured, 0)));
+    // 要求の effort は reasoning にだけ現れ、ほかの欄（tools・input・max_output_tokens）は同じ
+    const { reasoning: _toolMedium, ...toolWithMedium } = bodyOf(tools.captured, 1);
+    const { reasoning: _toolHigh, ...toolWithHigh } = bodyOf(tools.captured, 0);
+    expect(JSON.stringify(toolWithMedium)).toBe(JSON.stringify(toolWithHigh));
+    // adapter の設定に effort が無ければ、要求の effort だけを送る
+    const bareTools = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ entity: "item" })), USAGE_WIRE)));
+    const bareToolClient = createOpenAiLlmClient({ apiKey: "test-key", fetch: bareTools.fetch });
+    await bareToolClient.callWithTools(TOOL_REQUEST);
+    await bareToolClient.callWithTools({ ...TOOL_REQUEST, effort: "medium" });
+    expect(bodyOf(bareTools.captured, 0).reasoning).toBeUndefined();
+    expect(bodyOf(bareTools.captured, 1).reasoning).toEqual({ effort: "medium" });
   });
 
   it("道具付きの要求に、store: false・max_output_tokens・instructions・tools が入る", async () => {

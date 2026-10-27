@@ -7,8 +7,8 @@
 // 決めごと（§2・§2.2）：
 //   * 構造化出力は Responses API の JSON Schema の出力（`text.format`）、道具付きは function calling。
 //   * どちらも `store: false` と `max_output_tokens` を必ず送る。
-//   * 推論の effort（`reasoning`）は、構造化の要求に effort があればそれ（段の名前で引いた口が載せる。Issue #664）、無ければ
-//     設定の値を送る。道具付きの要求は設定の値のまま。
+//   * 推論の effort（`reasoning`）は、構造化と道具付きのどちらの要求も、effort があればそれ（段の名前で引いた口が載せる。
+//     Issue #664・#751）、無ければ設定の値を送る。
 //   * 規則（`instructions`）は**毎回**送る。会話はこちらで組み立てて `input` に並べる
 //     （`previous_response_id` は送らない。§2 の「会話の状態」）。
 //   * 依頼文などのデータは、規則とは別の入力として `<data>` で囲んで送る（§2.2「規則とデータを分ける」）。
@@ -318,7 +318,7 @@ function baseBody(
     prompt_cache_options: { mode: "explicit" },
     input,
   };
-  // 要求に effort があればそれを、無ければ設定の値を送る（段ごとの effort。要求に無ければ body は今と同じ。Issue #664）
+  // 要求に effort があればそれを、無ければ設定の値を送る（段ごとの effort。要求に無ければ body は今と同じ。Issue #664・#751）
   const effort = requestEffort ?? config.effort;
   if (effort !== undefined) body.reasoning = { effort };
   return body;
@@ -385,7 +385,7 @@ function buildToolBody(config: WireConfig, request: LlmToolRequest): Record<stri
     ...buildInput(request.documents, request.rules ?? [], request.input),
     ...turnsToInput(request.turns),
   ];
-  const body = baseBody(config, request.instructions, input, request.maxOutputTokens);
+  const body = baseBody(config, request.instructions, input, request.maxOutputTokens, request.effort);
   body.tools = request.tools.map(toFunctionTool);
   if (request.schema !== undefined) {
     body.text = {
