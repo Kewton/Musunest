@@ -7260,6 +7260,122 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
     ]);
   });
 
+  /** closeItem を外し、率の式も違う版（場所なしの失敗と R4 の 3 本が残る。全文→欄だけの切り替え用） */
+  const NO_CLOSE_R4 = replaced(NO_CLOSE, "    expression: base * 2", "    expression: base * 3");
+  /**
+   * 全文の直しで場所なしの失敗（closeItem の欠け）を直した候補（R4_BAD。率の式はまだ違う）を採ったあと、
+   * **同じ走りの中で**残った R4 の 3 本（すべて場所に写せる）を欄だけの直しで直す台本（完了条件 (2)）。
+   */
+  const HANDOFF_CALLS = (): RecordedCall[] => [
+    ...idsHead({ yaml: NO_CLOSE_R4 }),
+    repairDone(R4_BAD),
+    structured(acceptAll()),
+    rateRepair("base * 2"),
+    structured(acceptAll()),
+  ];
+  /** 段の走りの探索の記録から、往復の方式の並び（記録が無ければ空） */
+  const stageHandsOf = (outcome: Awaited<ReturnType<typeof runStageRangeV11a>>): readonly string[] =>
+    (outcome.searchRepair?.events ?? []).flatMap((event) => (event.kind === "round" ? [event.hand] : []));
+  /** 段の走りの探索の記録から、版の (出所, 違反の数, 採ったか) の並び（`totalsOf` と同じ形） */
+  const stageTotalsOf = (outcome: Awaited<ReturnType<typeof runStageRangeV11a>>): readonly unknown[] =>
+    (outcome.searchRepair?.events ?? []).flatMap((event) =>
+      event.kind === "version"
+        ? [
+            [
+              event.origin,
+              event.violations === null
+                ? null
+                : event.violations.kind === "counted"
+                  ? event.violations.knownTotal
+                  : event.violations.kind,
+              event.adoption === "adopted",
+            ],
+          ]
+        : [],
+    );
+
+  /**
+   * 直す前（bb769d6）の、下の `HANDOFF_CALLS` と同じ台本の**同じ走りの中の**欄だけの直しの body の SHA-256（**期待**）。
+   * 取り方：`git worktree add --detach <リポジトリの外の一時ディレクトリ> bb769d6` で作った一時の worktree に、`HANDOFF_CALLS`
+   * と同じ台本（同じ入力・同じ最良版・同じ応答・同じ adapter の設定。全文の直しの候補を採ったあと欄だけの直しへ入る）を
+   * 流す一時の試験を足し、偽物の fetch が実際に受けた body の `sha256(JSON.stringify(body))` を記録した（一気通貫と段の走りで
+   * 同じ値）。測った後に一時の試験を戻し、補助（node_modules・dist の link）を消してから `git worktree remove`（force なし）で
+   * 消した。診断の塊を含む body なので #764 の後もこの値のまま。
+   */
+  const BB769D6_HANDOFF_FIELD_BODY_SHA = [
+    "2f938971e45be809c0a7e4f794e278286512b308fe7684be22aaff33b2df9f46",
+  ] as const;
+  /**
+   * #761 の前（f9bf3b3）の、`HANDOFF_CALLS` と同じ台本の**同じ走りの中の**全文の直しの要求の body の SHA-256（**期待**）。
+   * 取り方：`git worktree add --detach <リポジトリの外の一時ディレクトリ> f9bf3b3` で作った一時の worktree に、`HANDOFF_CALLS`
+   * と同じ台本（同じ入力・同じ最良版・同じ応答・同じ adapter の設定。全文の直しの候補を採ったあと欄だけの直しへ入る）を
+   * 流す一時の試験を足し、偽物の fetch が実際に受けた body の `sha256(JSON.stringify(body))` を記録した（一気通貫と段の走りで
+   * 同じ値）。この台本の全文の直しは道具の呼び出しを挟まず最後の応答が 1 本なので、継続の要求は無い。測った後に一時の試験を
+   * 戻し、補助を消して `git status --porcelain` が空を確かめ、`git worktree remove`（force なし）で消した。今の body から診断を
+   * 取り除いて比べた値ではない。bb769d6 の同じ台本の全文の body は診断の塊があるので `ee74d20e…` で一致しない。
+   */
+  const F9BF3B3_HANDOFF_FULL_BODY_SHA = [
+    "6c62de47e0e97c6f20aeea9a0f8bfe7bc63cd6c0bb8e4c4e89e0b9e9d21ef23b",
+  ] as const;
+  /** 同じ台本の版の (出所, 違反の数, 採ったか) の並び（bb769d6 の実測。修復 2 往復・全文→欄だけ・すべて採用） */
+  const HANDOFF_TOTALS: readonly unknown[] = [
+    ["write", 7, true],
+    ["repair", 3, true],
+    ["repair", 0, true],
+  ];
+
+  it("(2) 同じ走りの中で全文の直しの候補を採ったあと残った失敗を欄だけの直しで直す（一気通貫）：両方式が呼ばれ、全文に診断が無く、欄だけの body は bb769d6 と同じ", async () => {
+    const calls = HANDOFF_CALLS();
+    const wire = wireClientOf(calls, "v1.2-ids");
+    const result = await runGenerationV11a(inputOf(wire.client, { flags: FLAGS }));
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(wire.consumed(), "台本を使い切った").toBe(calls.length);
+    const tools = wire.sent.filter((sent) => sent.kind === "tools");
+    const fields = wire.sent.filter((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME);
+    // 同じ走りの中で両方式が実際に呼ばれる（全文の直し 1・欄だけの直し 1）
+    expect(tools).toHaveLength(1);
+    expect(fields).toHaveLength(1);
+    // 全文の直しの body に診断の塊は無い
+    for (const sent of tools) expect(hasFullDiagnostic(sent)).toBe(false);
+    // 全文の直しの body は #761 の前（f9bf3b3）と同じ（診断の塊が無い body）
+    expect(await bodyShas(tools)).toEqual([...F9BF3B3_HANDOFF_FULL_BODY_SHA]);
+    // 同じ走りの中の欄だけの直しの body は、同じ台本の bb769d6 の body と一致する（診断の塊がある）
+    for (const sent of fields) expect(hasDiagnostic(sent)).toBe(true);
+    expect(await bodyShas(fields)).toEqual([...BB769D6_HANDOFF_FIELD_BODY_SHA]);
+    // 採否と回数の並びは同じ台本の等値（修復の段は 2 回。全文→欄だけの順）
+    expect(result.record.stages.filter((stage) => stage.stage === "repair")).toHaveLength(2);
+    expect(roundsOf(result.bundle).map((round) => round.hand)).toEqual(["repair", "field-repair"]);
+    expect(totalsOf(result.bundle)).toEqual(HANDOFF_TOTALS);
+  });
+
+  it("(2) 同じ走りの中で全文の直しの候補を採ったあと残った失敗を欄だけの直しで直す（段の走り）：両方式が呼ばれ、全文に診断が無く、欄だけの body は bb769d6 と同じ", async () => {
+    const calls = HANDOFF_CALLS();
+    const wire = wireClientOf(calls, "v1.2-ids");
+    const outcome = await runStageRangeV11a({
+      ...inputOf(wire.client, { flags: FLAGS }),
+      range: { start: "name-table", end: "judge" },
+    });
+    expect(outcome.stopped).toBeNull();
+    expect(wire.consumed(), "台本を使い切った").toBe(calls.length);
+    const tools = wire.sent.filter((sent) => sent.kind === "tools");
+    const fields = wire.sent.filter((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME);
+    // 同じ走りの中で両方式が実際に呼ばれる（全文の直し 1・欄だけの直し 1）
+    expect(tools).toHaveLength(1);
+    expect(fields).toHaveLength(1);
+    // 全文の直しの body に診断の塊は無い
+    for (const sent of tools) expect(hasFullDiagnostic(sent)).toBe(false);
+    // 全文の直しの body は #761 の前（f9bf3b3）と同じ（診断の塊が無い body）
+    expect(await bodyShas(tools)).toEqual([...F9BF3B3_HANDOFF_FULL_BODY_SHA]);
+    // 同じ走りの中の欄だけの直しの body は、同じ台本の bb769d6 の body と一致する（診断の塊がある）
+    for (const sent of fields) expect(hasDiagnostic(sent)).toBe(true);
+    expect(await bodyShas(fields)).toEqual([...BB769D6_HANDOFF_FIELD_BODY_SHA]);
+    // 採否と回数の並びは同じ台本の等値（修復の段は 2 回。全文→欄だけの順）
+    expect(outcome.stages.filter((record) => record.stage === "repair")).toHaveLength(2);
+    expect(stageHandsOf(outcome)).toEqual(["repair", "field-repair"]);
+    expect(stageTotalsOf(outcome)).toEqual(HANDOFF_TOTALS);
+  });
+
   it("(1) 直す前の挙動：ids off の欄だけの直しには、診断の塊も規則も届かない", async () => {
     const calls = [
       ...head({ yaml: W2 }),
