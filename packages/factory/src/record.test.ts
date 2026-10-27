@@ -29,8 +29,10 @@ import {
   REFERENCE_COUNT_KEYS,
   REFERENCE_COUNT_STAGES,
   type StageReferenceCounts,
+  CallRequestLog,
 } from "./record.js";
 import type { CallCounts } from "./call.js";
+import type { LlmUsage } from "./llm.js";
 
 const USAGE: OpenAiUsage = {
   inputTokens: 10,
@@ -559,5 +561,169 @@ describe("段の識別子は v1 の並びを保ち、v1.1α の段を末尾に�
       "unknown",
     ]);
     expect(STAGE_OPERATIONS).toEqual(["redo-design"]);
+  });
+});
+
+// ── 実試行の行と段全体の span（旗 v12.ids の段の走りだけ。Issue #748）──────────────────────────────
+
+describe("実試行の行と段全体の span（Issue #748）：行は開始の順に段の行を指し、遅着の加算を含んだ段の行を解く", () => {
+  /** 出来事で進める偽物の時計（時刻を読む回数では進まない） */
+  function clockAt(start = 1_000) {
+    let now = start;
+    return { now: () => now, set: (value: number) => (now = value) };
+  }
+
+  it("行は開始の順に、開始・終わり・終わり方・トークンを持ち、段の行の位置を指す", () => {
+    const clock = clockAt();
+    const log = new CallRequestLog(1_000, clock.now);
+    const unit = log.beginUnit();
+    const observer = log.observer();
+    clock.set(1_005);
+    const first = observer.beginAttempt();
+    first.settle({ kind: "response", usage: USAGE });
+    clock.set(1_012);
+    const second = observer.beginAttempt();
+    second.settle({ kind: "incomplete", usage: undefined });
+    clock.set(1_020);
+    const third = observer.beginAttempt();
+    third.settle({ kind: "error", errorKind: "network" });
+    clock.set(1_030);
+    const fourth = observer.beginAttempt();
+    fourth.settle({ kind: "timeout" });
+    log.finishUnit(unit, 4);
+
+    expect(log.requests()).toEqual([
+      { stage_index: 4, start_ms: 5, end_ms: 5, end: "response", error_kind: null, usage: { input_tokens: 10, cached_input_tokens: 2, cache_write_tokens: 3, output_tokens: 4, reasoning_tokens: 1 }, late: { usage: null, metered_stage_index: null } },
+      { stage_index: 4, start_ms: 12, end_ms: 12, end: "incomplete", error_kind: null, usage: null, late: { usage: null, metered_stage_index: null } },
+      { stage_index: 4, start_ms: 20, end_ms: 20, end: "error", error_kind: "network", usage: null, late: { usage: null, metered_stage_index: null } },
+      { stage_index: 4, start_ms: 30, end_ms: 30, end: "timeout", error_kind: null, usage: null, late: { usage: null, metered_stage_index: null } },
+    ]);
+    // 行はちょうど 1 度だけ確定する（2 度目の settle は無視）
+    first.settle({ kind: "error", errorKind: "unknown" });
+    expect(log.requests()[0]?.end).toBe("response");
+  });
+
+  it("遅着の usage は行の終わり方を変えず、加算を含んだ段の行の位置を解く（段の中・段と段の間・次の段の中。同じ試行が遅着する）", () => {
+    const clock = clockAt();
+    const log = new CallRequestLog(1_000, clock.now);
+
+    // 段 1 の中で 2 本を打ち切る。1 本は段 1 の中で遅着し、もう 1 本は段 2 に遅着する（同じ試行）
+    const unit1 = log.beginUnit();
+    const observer = log.observer();
+    const row1 = observer.beginAttempt();
+    row1.settle({ kind: "timeout" });
+    const rowLate = observer.beginAttempt();
+    rowLate.settle({ kind: "timeout" });
+    clock.set(1_010);
+    row1.late({ inputTokens: 1, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 2, reasoningTokens: 0 } as LlmUsage);
+    log.finishUnit(unit1, 0);
+
+    // 段 1 の確定と段 2 の開始の間の遅着 → どの行にも入らない（null）
+    const row2 = observer.beginAttempt();
+    row2.settle({ kind: "timeout" });
+    clock.set(1_020);
+    row2.late(undefined);
+    expect(log.requests()[2]?.stage_index).toBeNull();
+
+    // 段 2 の中の遅着（段 1 で打ち切った同じ試行）→ 段 2 の行
+    const unit2 = log.beginUnit();
+    const row3 = observer.beginAttempt();
+    row3.settle({ kind: "timeout" });
+    clock.set(1_030);
+    rowLate.late({ inputTokens: 4, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 5, reasoningTokens: 0 } as LlmUsage);
+    log.finishUnit(unit2, 2);
+
+    const requests = log.requests();
+    expect(requests[0]).toMatchObject({ stage_index: 0, end: "timeout", late: { usage: { input_tokens: 1, output_tokens: 2 }, metered_stage_index: 0 } });
+    // 段 1 で打ち切った同じ試行が、段 2 の行に遅着する
+    expect(requests[1]).toMatchObject({ stage_index: 0, end: "timeout", late: { usage: { input_tokens: 4, output_tokens: 5 }, metered_stage_index: 2 } });
+    expect(requests[2]).toMatchObject({ stage_index: null, end: "timeout", late: { usage: null, metered_stage_index: null } });
+    expect(requests[3]).toMatchObject({ stage_index: 2, end: "timeout", late: { usage: null, metered_stage_index: null } });
+  });
+
+  it("T2 の束の遅着は、束の確定の前ならその束の行、確定のあとなら後続の段の行、どの行にも入らなければ null", () => {
+    const clock = clockAt();
+    const log = new CallRequestLog(1_000, clock.now);
+
+    // 束 A：確定の前の遅着 → 束 A の行
+    const bundleA = log.beginBoundUnit();
+    const a = log.observer(bundleA);
+    const rowA = a.beginAttempt();
+    clock.set(1_010);
+    rowA.settle({ kind: "timeout" });
+    clock.set(1_020);
+    rowA.late(undefined);
+    log.finishUnit(bundleA, 6);
+
+    // 束 B：確定のあとに遅着し、次の段（B1）の中に来る → B1 の行
+    const bundleB = log.beginBoundUnit();
+    const b = log.observer(bundleB);
+    const rowB = b.beginAttempt();
+    clock.set(1_030);
+    rowB.settle({ kind: "timeout" });
+    log.finishUnit(bundleB, 7);
+    const b1 = log.beginUnit();
+    clock.set(1_040);
+    rowB.late(undefined);
+    log.finishUnit(b1, 8);
+
+    // 束 C：確定のあと、どの段も開いていない間の遅着 → null
+    const bundleC = log.beginBoundUnit();
+    const c = log.observer(bundleC);
+    const rowC = c.beginAttempt();
+    clock.set(1_050);
+    rowC.settle({ kind: "timeout" });
+    log.finishUnit(bundleC, 9);
+    clock.set(1_060);
+    rowC.late(undefined);
+
+    const requests = log.requests();
+    expect(requests[0]).toMatchObject({ stage_index: 6, late: { metered_stage_index: 6 } });
+    expect(requests[1]).toMatchObject({ stage_index: 7, late: { metered_stage_index: 8 } });
+    expect(requests[2]).toMatchObject({ stage_index: 9, late: { metered_stage_index: null } });
+  });
+
+  it("段全体の span は開始の順に、対応する段の行の位置と終わり（途中で止まれば null）を持つ", () => {
+    const clock = clockAt();
+    const log = new CallRequestLog(1_000, clock.now);
+    const mapping = log.openSpan("mapping", 1, 0);
+    log.closeSpan(mapping, [3], 50);
+    const c3 = log.openSpan("semantic-check", 1, 60);
+    log.failSpan(c3, [4]);
+    const t2 = log.openSpan("test-spec", null, 70);
+    log.closeSpan(t2, [5, 6, 7], 240);
+    expect(log.stageSpans()).toEqual([
+      { stage: "mapping", round: 1, start_ms: 0, end_ms: 50, stage_indices: [3] },
+      { stage: "semantic-check", round: 1, start_ms: 60, end_ms: null, stage_indices: [4] },
+      { stage: "test-spec", round: null, start_ms: 70, end_ms: 240, stage_indices: [5, 6, 7] },
+    ]);
+  });
+
+  it("T2 の 3 つの束が逆の順で終わっても、各行は自分の束の段の行を指す（漏れなし・取り違えなし）", () => {
+    const clock = clockAt();
+    const log = new CallRequestLog(1_000, clock.now);
+    const units = [0, 1, 2].map(() => log.beginBoundUnit());
+    const observers = units.map((unit) => log.observer(unit));
+    // 開始は束 0・1・2 の順
+    const rows = observers.map((observer, index) => {
+      clock.set(1_010 + index * 10);
+      return observer.beginAttempt();
+    });
+    // 完了は束 2・1・0 の順（逆）。行の数は開始の数と同じで、漏れがない
+    clock.set(1_110);
+    rows[2]!.settle({ kind: "response", usage: USAGE });
+    clock.set(1_120);
+    rows[1]!.settle({ kind: "response", usage: USAGE });
+    clock.set(1_130);
+    rows[0]!.settle({ kind: "response", usage: USAGE });
+    // 段の行は束の順に積む（T2 の settle と同じ）
+    units.forEach((unit, index) => log.finishUnit(unit, 10 + index));
+
+    expect(log.requests()).toHaveLength(3);
+    expect(log.requests().map((request) => request.stage_index)).toEqual([10, 11, 12]);
+    // 終わった時刻は完了の順（逆）で、開始は束の順（完了の順で番号を振っていない）
+    expect(log.requests().map((request) => [request.start_ms, request.end_ms])).toEqual([
+      [10, 130], [20, 120], [30, 110],
+    ]);
   });
 });

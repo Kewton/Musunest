@@ -17,8 +17,13 @@ import {
 import {
   cacheWriteTokensOf,
   isIncompleteResponseError,
+  runNoteHook,
   type AttemptCounts,
+  type CallAttemptEnd,
+  type CallAttemptObservation,
+  type CallAttemptObserver,
   type CallCounts,
+  type CallErrorKind,
   type RetryCounts,
 } from "./call.js";
 import type { LimitName } from "./limits.js";
@@ -397,6 +402,7 @@ export function usageDelta(before: UsageSnapshot, after: UsageSnapshot): UsageSn
  * usage が返らない呼び出しも数える（「usage が欠けた呼び出しの数」）。
  */
 export class UsageMeter {
+  readonly #bound: boolean;
   #calls = 0;
   #missing = 0;
   #inputTokens = 0;
@@ -404,6 +410,11 @@ export class UsageMeter {
   #cacheWriteTokens = 0;
   #outputTokens = 0;
   #reasoningTokens = 0;
+
+  /** `bound` は束の計量（T2 の束ごとの口）か。束と全体の 2 つが加算するので、印を分けて採る（レビュー R1） */
+  constructor(bound = false) {
+    this.#bound = bound;
+  }
 
   /** いまの計（段の前後で取って差を出す） */
   get snapshot(): UsageSnapshot {
@@ -439,11 +450,15 @@ export class UsageMeter {
         try {
           const response = await client.callStructured<T>(request);
           this.note(response.usage);
+          runNoteHook(request.signal, this.#bound);
           return response;
         } catch (error) {
           // 未完了の応答は例外として現れるが、usage は付くことがある（§1.5）。呼び出しの数と
           // トークンを数えてから投げ直す——usage が無ければ「usage が欠けた呼び出し」として数える。
-          if (isIncompleteResponseError(error)) this.note(error.usage);
+          if (isIncompleteResponseError(error)) {
+            this.note(error.usage);
+            runNoteHook(request.signal, this.#bound);
+          }
           throw error;
         }
       },
@@ -451,11 +466,264 @@ export class UsageMeter {
         try {
           const response = await client.callWithTools(request);
           this.note(response.usage);
+          runNoteHook(request.signal, this.#bound);
           return response;
         } catch (error) {
-          if (isIncompleteResponseError(error)) this.note(error.usage);
+          if (isIncompleteResponseError(error)) {
+            this.note(error.usage);
+            runNoteHook(request.signal, this.#bound);
+          }
           throw error;
         }
+      },
+    };
+  }
+}
+
+// ── 実試行の行と段全体の span（旗 `v12.ids` の段の走りだけ。Issue #748）──────────────
+//
+// 段の行（`StageRecord`）は段ごとの合計だけを持ち、並列の区間では「段の行の時間」「実試行の時間の合計」
+// 「段全体の壁時計」が別物になる。ここは**内訳**を残すだけで、合計（段の行）には足さない（二重に数えない）。
+// 行は、入口の client を使う全部の経路（親の口と T2 の束ごとの口）が共有する 1 つの観測器が積む。
+
+/** 実試行 1 行の終わりの分類（口が確定した分類。Issue #748） */
+export const CALL_REQUEST_END_KINDS = ["response", "incomplete", "error", "timeout", "deadline"] as const;
+export type CallRequestEndKind = (typeof CALL_REQUEST_END_KINDS)[number];
+
+/** 誤りで終わった行の分類（要求の不正は口の分類に無いので別に持つ。Issue #748） */
+export type CallRequestErrorKind = CallErrorKind | "invalid-request";
+
+/** 行のトークン（usage が無ければ行の `usage` が null） */
+export interface CallRequestUsage {
+  readonly input_tokens: number;
+  readonly cached_input_tokens: number;
+  readonly cache_write_tokens: number;
+  readonly output_tokens: number;
+  readonly reasoning_tokens: number;
+}
+
+/**
+ * 遅着の欄（Issue #748）。打ち切りのあとに client が応答・未完了を返したとき、行の終わり方は変えず、
+ * ここに usage（無ければ null）と、**今の計量がその加算を実際に含んだ段の行の位置**を残す。
+ * どの行の差にも入らなければ `metered_stage_index` は null。
+ */
+export interface CallRequestLate {
+  readonly usage: CallRequestUsage | null;
+  readonly metered_stage_index: number | null;
+}
+
+/** 実試行 1 行（`stage_index` は段の行への参照。Issue #748） */
+export interface CallRequestRecord {
+  readonly stage_index: number | null;
+  /** 走りの開始からのミリ秒 */
+  readonly start_ms: number;
+  /** 走りの開始からのミリ秒 */
+  readonly end_ms: number;
+  readonly end: CallRequestEndKind;
+  readonly error_kind: CallRequestErrorKind | null;
+  readonly usage: CallRequestUsage | null;
+  readonly late: CallRequestLate;
+}
+
+/** 段全体の span を持てる段（束に分けて並列に呼ぶ段。Issue #748） */
+export const CALL_SPAN_STAGES = ["mapping", "semantic-check", "test-spec"] as const;
+export type CallSpanStage = (typeof CALL_SPAN_STAGES)[number];
+
+/**
+ * 束に分けた段の全体の開始と終わり（Issue #748）。段の行は変えず、別の欄に残す。
+ * `stage_indices` は対応する段の行の位置（C2・C3 は各回の行 1 つ、T2 は束の各行）。
+ * 途中で止まった段は `end_ms` が null、到達しなかった段は span そのものを持たない。
+ */
+export interface StageSpanRecord {
+  readonly stage: CallSpanStage;
+  readonly round: number | null;
+  readonly start_ms: number;
+  readonly end_ms: number | null;
+  readonly stage_indices: readonly number[];
+}
+
+/** 段の行のもとになる単位（この中の実試行が、あとで決まる段の行の位置を指す。Issue #748） */
+export interface CallRequestUnit {
+  rowIndex: number | null;
+  open: boolean;
+}
+
+interface MutableCallRequestRow {
+  readonly unit: CallRequestUnit | null;
+  readonly startMs: number;
+  endMs: number;
+  end: CallRequestEndKind | null;
+  errorKind: CallRequestErrorKind | null;
+  usage: CallRequestUsage | null;
+  lateUsage: CallRequestUsage | null;
+  /** 遅着の加算を含んだ段の行の単位（まだ行の位置が決まっていなければ null でない単位のまま） */
+  lateUnit: CallRequestUnit | null;
+  /** 束の計量が加算した時点で開いていた束の単位（確定後は採らない。レビュー R1） */
+  boundUnit: CallRequestUnit | null;
+  /** 全体の計量が加算した時点で開いていた全体の単位（レビュー R1） */
+  globalUnit: CallRequestUnit | null;
+  noted: boolean;
+}
+
+/** 段全体の span の積み途中の状態（`openSpan` が返す。Issue #748） */
+export interface StageSpanState {
+  readonly stage: CallSpanStage;
+  readonly round: number | null;
+  readonly startMs: number;
+  endMs: number | null;
+  stageIndices: readonly number[];
+}
+
+/** usage を、行のトークンの欄に写す（usage が無ければ null。 Issue #748） */
+export function callRequestUsageOf(usage: LlmUsage | undefined): CallRequestUsage | null {
+  if (usage === undefined) return null;
+  return {
+    input_tokens: usage.inputTokens,
+    cached_input_tokens: usage.cachedInputTokens,
+    cache_write_tokens: cacheWriteTokensOf(usage),
+    output_tokens: usage.outputTokens,
+    reasoning_tokens: usage.reasoningTokens,
+  };
+}
+
+/**
+ * 実試行の行と段全体の span を積む観測器（Issue #748）。親の口と T2 の束ごとの口が**同じ 1 つ**を共有する。
+ *
+ * 単位（`beginUnit`）は、段の行を積むもとになる区間である。単位の中で始まった実試行の行は、その単位の
+ * 段の行を指す。T2 の束は `beginBoundUnit` で**全体の単位にしない**——同時に走る束が互いの行を指さないため。
+ * 遅着の加算の帰属は、`note`（計量の加算の時点）で採った所属——行の単位が開いている間ならその単位、
+ * 閉じていれば**その時点で開いている全体の単位**、どちらも無ければ null——から解く（今の計量の前後の
+ * スナップショットの差に実際に含まれる行と一致する）。観測の callback が動いた時点では解かない（レビュー R1）。
+ */
+export class CallRequestLog {
+  readonly #startedAt: () => number;
+  readonly #now: () => number;
+  readonly #rows: MutableCallRequestRow[] = [];
+  readonly #spans: StageSpanState[] = [];
+  #globalUnit: CallRequestUnit | null = null;
+
+  constructor(startedAt: number | (() => number), now: () => number) {
+    this.#startedAt = typeof startedAt === "function" ? startedAt : () => startedAt;
+    this.#now = now;
+  }
+
+  /** 全体の単位（runStage・runStageOk・C1・C2 の直接の記録）を始める */
+  beginUnit(): CallRequestUnit {
+    const unit: CallRequestUnit = { rowIndex: null, open: true };
+    this.#globalUnit = unit;
+    return unit;
+  }
+
+  /** T2 の束の単位を始める（全体の単位にはしない） */
+  beginBoundUnit(): CallRequestUnit {
+    return { rowIndex: null, open: true };
+  }
+
+  /** 段の行を積んだあと、その行の位置で単位を閉じる */
+  finishUnit(unit: CallRequestUnit | undefined, rowIndex: number): void {
+    if (unit === undefined) return;
+    unit.rowIndex = rowIndex;
+    unit.open = false;
+    if (this.#globalUnit === unit) this.#globalUnit = null;
+  }
+
+  /** 観測の口を作る（単位を渡せばその単位に、渡さなければ始めた時点の全体の単位に属する） */
+  observer(unit?: CallRequestUnit): CallAttemptObserver {
+    return { beginAttempt: () => this.#begin(unit ?? this.#globalUnit) };
+  }
+
+  /** 束に分けた段の全体の span を開く（`startMs` は走りの開始からのミリ秒） */
+  openSpan(stage: CallSpanStage, round: number | null, startMs: number): StageSpanState {
+    const span: StageSpanState = { stage, round, startMs, endMs: null, stageIndices: [] };
+    this.#spans.push(span);
+    return span;
+  }
+
+  /** span を閉じる（成功した段だけ。`stageIndices` は対応する段の行の位置） */
+  closeSpan(span: StageSpanState | undefined, stageIndices: readonly number[], endMs: number): void {
+    if (span === undefined) return;
+    span.stageIndices = stageIndices.slice();
+    span.endMs = endMs;
+  }
+
+  /** 途中で止まった span を閉じる（終わりは null のまま。到達した行だけを持つ） */
+  failSpan(span: StageSpanState | undefined, stageIndices: readonly number[]): void {
+    if (span === undefined) return;
+    span.stageIndices = stageIndices.slice();
+  }
+
+  /** 行（開始の順）。遅着の加算を含んだ行の位置は、段の行の位置が決まってから解く */
+  requests(): readonly CallRequestRecord[] {
+    return this.#rows.map((row) => ({
+      stage_index: row.unit?.rowIndex ?? null,
+      start_ms: row.startMs,
+      end_ms: row.endMs,
+      end: row.end ?? "error",
+      error_kind: row.errorKind,
+      usage: row.usage,
+      late: {
+        usage: row.lateUsage,
+        metered_stage_index: row.lateUnit?.rowIndex ?? null,
+      },
+    }));
+  }
+
+  /** 段全体の span（開始の順。到達しなかった段は無い） */
+  stageSpans(): readonly StageSpanRecord[] {
+    return this.#spans.map((span) => ({
+      stage: span.stage,
+      round: span.round,
+      start_ms: span.startMs,
+      end_ms: span.endMs,
+      stage_indices: span.stageIndices.slice(),
+    }));
+  }
+
+  #begin(unit: CallRequestUnit | null): CallAttemptObservation {
+    const startMs = this.#now() - this.#startedAt();
+    const row: MutableCallRequestRow = {
+      unit,
+      startMs,
+      endMs: startMs,
+      end: null,
+      errorKind: null,
+      usage: null,
+      lateUsage: null,
+      lateUnit: null,
+      boundUnit: null,
+      globalUnit: null,
+      noted: false,
+    };
+    this.#rows.push(row);
+    return {
+      settle: (end: CallAttemptEnd): void => {
+        // 行はちょうど 1 度だけ確定する（2 度目以降は打ち切りのあとの遅着として扱う）
+        if (row.end !== null) return;
+        row.endMs = this.#now() - this.#startedAt();
+        row.end = end.kind;
+        if (end.kind === "response" || end.kind === "incomplete") row.usage = callRequestUsageOf(end.usage);
+        else if (end.kind === "error") row.errorKind = end.errorKind;
+      },
+      note: (bound: boolean): void => {
+        // 計量がこの試行の加算をした時点の所属を採る（観測の callback の時点ではない。Issue #748 のレビュー R1）。
+        // T2 は束と全体の 2 つの計量が同じ応答を数えるので、束は開いている束の単位、全体は全体の単位で**別々に**採る
+        row.noted = true;
+        if (bound) {
+          if (row.unit !== null && row.unit.open) row.boundUnit = row.unit;
+        } else {
+          row.globalUnit = this.#globalUnit;
+        }
+      },
+      late: (usage: LlmUsage | undefined): void => {
+        // 打ち切りのあとに返った応答・未完了だけが遅着。行の終わり方・時刻・所属は変えない
+        if (row.end !== "timeout" && row.end !== "deadline") return;
+        row.lateUsage = callRequestUsageOf(usage);
+        // 計量の加算の時点の印があればそれを使う。無ければ（印を渡さない単体の試験）従来どおりこの時点で解く
+        row.lateUnit = row.noted
+          ? (row.boundUnit ?? row.globalUnit)
+          : row.unit !== null && row.unit.open
+            ? row.unit
+            : this.#globalUnit;
       },
     };
   }
