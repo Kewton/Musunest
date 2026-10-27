@@ -4856,6 +4856,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    *   stage-stop-repair 4e17820e…→c6d4b2e4…／stage-stop-commit ab11a902…→288415f3…／
    *   whole-stagnation 248017e1…→883aa1dd…／whole-adopting ca3074eb…→092a3533…／whole-sets acd0d9b6…→e13e5689…／
    *   whole-mixed 175e38f8…→25b33209…／whole-recounts 0a657756…→ad7ebe0d…
+   *   新値は #763 で取り直され、表の値（bb769d6）が正。注の新値は 6ee1208 時点のもの
    *
    * **Issue #764 の取り直し（旧値と理由）**：ids on・search-repair on の**探索 on の全文の直し**から診断の塊を外し、#761 の前（f9bf3b3）の
    * 要求に戻したので、全文の直しだけを呼ぶ次の 11 経路は #761 の取り直しの前の値に戻った（旧値＝上の #761 の取り直しの値：
