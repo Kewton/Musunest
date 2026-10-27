@@ -2462,7 +2462,6 @@ async function runV11a(
             ...(best.rejections.length === 0 ? {} : { declRejections: best.rejections }),
             ...repairStepIds(),
             ...requiredValidationsFor(context.suite),
-            ...repairDiagnosticFor(best, context.suite),
           }),
         );
         const repairRow = requestReturned();

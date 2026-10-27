@@ -243,8 +243,8 @@ export const REPAIR_STEP_LIMITS_DATA_NAME = "直す段の上限" as const;
 export const REPAIR_REQUIRED_VALIDATIONS_DATA_NAME = "要る検査の骨組み" as const;
 
 /**
- * 一番良い版の失敗の診断を置くデータの塊の名前（入力の末尾に足す。旗 `v12.ids` と探索がともに on の走りだけ。Issue #761）。
- * 既存の任意の塊（意味の点検の拒否・直す段の上限・要る検査の骨組み）の**後**に足す
+ * 一番良い版の失敗の診断を置くデータの塊の名前（入力の末尾に足す。Issue #761）。既存の任意の塊（意味の点検の拒否・
+ * 直す段の上限・要る検査の骨組み）の**後**に足す。**製品の実行口（一気通貫・段の走り）からは渡さない（この Issue）**
  */
 export const REPAIR_DIAGNOSTIC_DATA_NAME = "診断" as const;
 
@@ -326,8 +326,8 @@ export interface RepairStepInput {
    */
   readonly requiredValidations?: readonly RequiredValidation[];
   /**
-   * 一番良い版の失敗の診断（旗 `v12.ids` と探索がともに on の走りだけが渡す。Issue #761）。渡したときだけ、データの塊「診断」を
-   * 既存の任意の塊の**後**（入力の末尾）に足す。規則・道具の定義・schema は変えない。省けば今の要求のまま
+   * 一番良い版の失敗の診断（Issue #761）。渡したときだけ、データの塊「診断」を既存の任意の塊の**後**（入力の末尾）に足す。
+   * 規則・道具の定義・schema は変えない。省けば今の要求のまま。**製品の実行口（一気通貫・段の走り）からは渡さない（この Issue）**
    */
   readonly diagnostic?: RepairDiagnostic;
 }
@@ -374,7 +374,7 @@ function buildRepairData(input: RepairStepInput, toolCallsAtStart: number): read
   if (input.requiredValidations !== undefined) {
     data.push({ name: REPAIR_REQUIRED_VALIDATIONS_DATA_NAME, text: serializeJson(input.requiredValidations) });
   }
-  // 診断は、渡されたときだけ既存の任意の塊の後ろに足す（旗 `v12.ids` と探索がともに on の走りだけ。Issue #761）
+  // 診断は、渡されたときだけ既存の任意の塊の後ろに足す（Issue #761。製品の実行口からは渡さない。この Issue）
   if (input.diagnostic !== undefined) {
     data.push({ name: REPAIR_DIAGNOSTIC_DATA_NAME, text: serializeJson(input.diagnostic) });
   }
