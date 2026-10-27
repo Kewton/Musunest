@@ -5006,6 +5006,83 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     };
   }
 
+  /** 費用の値の固定の印（キーが budget_ で始まる値だけをこれに替える） */
+  const BUDGET_MARKER = "<budget>";
+
+  /**
+   * 写像・並びを辿り、**キーの位置で決めた** `budget_` で始まるキーの値だけを印に替える（ほかのキーの値は替えない）。
+   * 替えたキーの名前を `keys` に集める（budget_* 以外が混ざっていないことを試験で確かめる）。
+   */
+  function withBudgetMarkers(value: unknown, keys: string[]): unknown {
+    if (Array.isArray(value)) return value.map((item) => withBudgetMarkers(item, keys));
+    if (typeof value === "object" && value !== null) {
+      const out: Record<string, unknown> = {};
+      for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+        if (key.startsWith("budget_")) {
+          keys.push(key);
+          out[key] = BUDGET_MARKER;
+        } else {
+          out[key] = withBudgetMarkers(inner, keys);
+        }
+      }
+      return out;
+    }
+    return value;
+  }
+
+  /** JSON の本文の budget_* の値だけを印に替える（キーの名前で位置を決める。文字列の置換で広く消さない）。JSON でなければそのまま */
+  function withBudgetMarkersInText(text: string, keys: string[]): string {
+    if (!text.includes('"budget_')) return text;
+    try {
+      return JSON.stringify(withBudgetMarkers(JSON.parse(text), keys));
+    } catch {
+      return text;
+    }
+  }
+
+  /** 費用の印への置換の結果（全ファイルの指紋・印に替えたキー・manifest で導出し直した欄） */
+  interface BudgetNormalizedFiles {
+    readonly files: [string, string][];
+    readonly keys: string[];
+    readonly derived: { readonly path: string; readonly fields: readonly string[] }[];
+  }
+
+  /**
+   * 全ファイルを、budget_* の値だけを印に替えた内容にする。manifest（`bundle-manifest.json`）の各ファイルの `sha256`・
+   * `size_bytes` は**そのファイルの budget を替えた内容から導出し直す**（要約の費用が変われば manifest のその行も変わるため。
+   * ほかのファイルの行・ほかのキーは替えない）。印に替えたキーと、導出し直した行を返して試験で照らす。
+   */
+  async function budgetNormalizedFiles(sources: readonly { readonly path: string; readonly text: string }[]): Promise<BudgetNormalizedFiles> {
+    const keys: string[] = [];
+    const normalized = new Map<string, { readonly text: string; readonly hash: string; readonly size: number }>();
+    for (const { path, text } of sources) {
+      if (path === BUNDLE_MANIFEST_FILE) continue;
+      const normalizedText = withBudgetMarkersInText(text, keys);
+      normalized.set(path, { text: normalizedText, hash: await sha256Hex(normalizedText), size: new TextEncoder().encode(normalizedText).length });
+    }
+    const derived: { readonly path: string; readonly fields: readonly string[] }[] = [];
+    const files: [string, string][] = [];
+    for (const { path, text } of sources) {
+      if (path !== BUNDLE_MANIFEST_FILE) {
+        const entry = normalized.get(path);
+        if (entry === undefined) throw new Error(`前提が壊れた：正規化したファイルが無い（${path}）`);
+        files.push([path, entry.hash]);
+        continue;
+      }
+      const marked = withBudgetMarkers(JSON.parse(text), keys) as { readonly files?: { path: string; sha256: string; size_bytes: number }[] };
+      for (const entry of marked.files ?? []) {
+        const source = sources.find((candidate) => candidate.path === entry.path);
+        const replaced = normalized.get(entry.path);
+        if (source === undefined || replaced === undefined || replaced.text === source.text) continue;
+        entry.sha256 = replaced.hash;
+        entry.size_bytes = replaced.size;
+        derived.push({ path: entry.path, fields: ["sha256", "size_bytes"] });
+      }
+      files.push([path, await sha256Hex(JSON.stringify(marked))]);
+    }
+    return { files, keys, derived };
+  }
+
   /**
    * 1 つの走りの出力のダイジェスト（書いたファイル・要求の列・終了コード・1 行の要約）と、診断と R-fr-08 を外した同じダイジェスト、
    * 段の走りの記録が search_repair を持つか。
@@ -5014,7 +5091,15 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     entry: (typeof INVARIANT_RUNS)[number],
     keepSearch = false,
     timing?: InvariantTiming,
-  ): Promise<{ readonly digest: string; readonly stripped: string; readonly strippedRequests: string; readonly hasSearch: boolean }> {
+  ): Promise<{
+    readonly digest: string;
+    readonly stripped: string;
+    readonly strippedRequests: string;
+    readonly budgetNormalized: string;
+    readonly budgetKeys: readonly string[];
+    readonly budgetDerived: BudgetNormalizedFiles["derived"];
+    readonly hasSearch: boolean;
+  }> {
     if (entry.flags !== null) {
       const flags = entry.flags;
       vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => flags);
@@ -5044,6 +5129,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     if (timing !== undefined) timing.runMs += performance.now() - runStart;
     vi.restoreAllMocks();
     let hasSearch = false;
+    /** 費用の印への置換に使う、ディレクトリを目印に置き換えた全ファイルの本文 */
+    const budgetSources: { readonly path: string; readonly text: string }[] = [];
     const files: [string, string][] = [];
     for (const path of [...written].sort()) {
       const ioStart = performance.now();
@@ -5069,6 +5156,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       }
       const hashStart = performance.now();
       files.push([path, await sha256Hex(text)]);
+      budgetSources.push({ path, text });
       if (timing !== undefined) timing.hashMs += performance.now() - hashStart;
     }
     const body = JSON.stringify({ files, requests, code, line }).replaceAll(directory, "<tmp>");
@@ -5078,8 +5166,22 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const strippedRequests = withoutDiagnostics(requests);
     const strippedRequestsDigest = await sha256Hex(JSON.stringify(strippedRequests));
     const stripped = await sha256Hex(JSON.stringify({ files, requests: strippedRequests, code, line }).replaceAll(directory, "<tmp>"));
+    // 費用（budget_*）の値だけを印に替えた全出力の指紋（入力長で正当に変わる費用を除き、ほかの欄を旧値と照らす）
+    const budgetFiles = await budgetNormalizedFiles(budgetSources);
+    const budgetLine = line.includes('"budget_') ? withBudgetMarkersInText(line, budgetFiles.keys) : line;
+    const budgetNormalized = await sha256Hex(
+      JSON.stringify({ files: budgetFiles.files, requests: strippedRequests, code, line: budgetLine }).replaceAll(directory, "<tmp>"),
+    );
     if (timing !== undefined) timing.hashMs += performance.now() - bodyHashStart;
-    return { digest, stripped, strippedRequests: strippedRequestsDigest, hasSearch };
+    return {
+      digest,
+      stripped,
+      strippedRequests: strippedRequestsDigest,
+      budgetNormalized,
+      budgetKeys: [...new Set(budgetFiles.keys)].sort(),
+      budgetDerived: budgetFiles.derived,
+      hasSearch,
+    };
   }
 
   /**
@@ -5112,16 +5214,55 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
   };
   /** 一気通貫の全出力の指紋が、診断の入力長に由来する費用（budget_*）で変わる 4 経路（要求の列で裏付ける） */
   const WHOLE_COST_AFFECTED = new Set(["whole-stagnation", "whole-adopting", "whole-sets", "whole-recounts"]);
+  /**
+   * #761 の前（f9bf3b3）の、**診断の塊と R-fr-08 を外し、budget_* の値だけを固定の印に替えた**全出力の指紋（期待）。
+   *
+   * 測り方：`git worktree add --detach <リポジトリの外の一時ディレクトリ> f9bf3b3` で作った一時の worktree に、この試験の補助と同じ
+   * 変換（キーの位置で決めた `budget_` で始まる値だけを `<budget>` に替える。要求はそのまま）を掛ける一時の試験を足して測った
+   * （f9bf3b3 には診断が無いので取り除きは無い）。測った後に worktree は remove した。台本は下の INVARIANT_RUNS と同じ 4 経路。
+   */
+  const BEFORE_761_BUDGET: Readonly<Record<string, string>> = {
+    "whole-stagnation": "15a09455bcb63ed4ed3828cf4ea8115c288fcd186a8a60f52a0bda049bb0c6b0",
+    "whole-adopting": "f66f806648b8f86506dd2d1e5c0086c72567d1a15a5a0be2be700b73b4139d19",
+    "whole-sets": "afb63e0962c9ab0fd031b88cd71814c4042961bbebc44353c48d2dbcda3f834f",
+    "whole-recounts": "af26e804452f3d711e529a5c9671f6276341e70b03a39844847f7ee6344157d0",
+  };
+  /** 費用の印に替えるキー（f9bf3b3 の 4 経路の出力に現れた budget_*。ほかのキーを替えていないことをこの集合で照らす） */
+  const BUDGET_KEYS = ["budget_remaining_usd", "budget_reserved_usd", "budget_usd"];
+  it("budget_* の印への置換はキーの位置だけで、隣のキーや値の文字列を替えない", () => {
+    const keys: string[] = [];
+    const replaced = withBudgetMarkers(
+      { budget_remaining_usd: 0.1, reserved_usd: 0.2, size_bytes: 9, nested: { budget_reserved_usd: 0.3, other: 0.4, text: "budget_usd 0.5" } },
+      keys,
+    );
+    expect(keys).toEqual(["budget_remaining_usd", "budget_reserved_usd"]);
+    expect(replaced).toEqual({
+      budget_remaining_usd: BUDGET_MARKER,
+      reserved_usd: 0.2,
+      size_bytes: 9,
+      nested: { budget_reserved_usd: BUDGET_MARKER, other: 0.4, text: "budget_usd 0.5" },
+    });
+    // 文字列の中の "budget_usd" はキーではないので替えない（JSON の本文でも同じ）
+    expect(withBudgetMarkersInText(JSON.stringify({ budget_usd: 0.3, note: "budget_usd 0.3" }), keys)).toBe(
+      JSON.stringify({ budget_usd: BUDGET_MARKER, note: "budget_usd 0.3" }),
+    );
+  });
   it("不変：v1・v1.1a・ids off の v1.2・search-repair off の走りと、ids on・search-repair on の一気通貫・段の走り（search_repair を除く）の全出力が比較元とバイト列で同じ（修復を呼ぶ ids on の経路だけ #761 の診断の塊の分を取り直した）。診断の塊と R-fr-08 を位置で外した指紋は #761 の前（f9bf3b3）の値と一致し、この照合は完了条件 (7)（往復の数・採否の並び・要求の数が直す前と等値）も覆う。欄を持つのは ids on・search-repair on の段の走りで探索に入ったものだけ", async () => {
     const digests: Record<string, string> = {};
     const strippedDigests: Record<string, string> = {};
     const strippedRequestDigests: Record<string, string> = {};
+    const budgetDigests: Record<string, string> = {};
+    const budgetKeySets: Record<string, readonly string[]> = {};
+    const budgetDerivedSets: Record<string, BudgetNormalizedFiles["derived"]> = {};
     const searched: Record<string, boolean> = {};
     for (const entry of INVARIANT_RUNS) {
-      const { digest, stripped, strippedRequests, hasSearch } = await invariantDigest(entry);
+      const { digest, stripped, strippedRequests, budgetNormalized, budgetKeys, budgetDerived, hasSearch } = await invariantDigest(entry);
       digests[entry.name] = digest;
       strippedDigests[entry.name] = stripped;
       strippedRequestDigests[entry.name] = strippedRequests;
+      budgetDigests[entry.name] = budgetNormalized;
+      budgetKeySets[entry.name] = budgetKeys;
+      budgetDerivedSets[entry.name] = budgetDerived;
       searched[entry.name] = hasSearch;
     }
     expect(digests).toEqual(BEFORE_746);
@@ -5132,6 +5273,15 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     }
     // 費用が入力長で変わる 4 経路を含む全部の要求の列は、旧値（f9bf3b3）と一致する
     expect(strippedRequestDigests).toEqual(BEFORE_761_REQUESTS);
+    // 4 経路は、診断と R-fr-08 を外し budget_* の値だけを印に替えた全出力（記録・納品物・要約のほかの欄・終了コード・往復の数と
+    // 採否の並び）が f9bf3b3 と一致する。印に替えたキーが budget_* だけであることも照らす
+    for (const entry of INVARIANT_RUNS) {
+      if (!WHOLE_COST_AFFECTED.has(entry.name)) continue;
+      expect(budgetDigests[entry.name], entry.name).toBe(BEFORE_761_BUDGET[entry.name]);
+      expect(budgetKeySets[entry.name], entry.name).toEqual(BUDGET_KEYS);
+      // 印に替えたのは budget_* だけで、導出し直したのは manifest の要約の行（sha256・size_bytes）だけ
+      expect(budgetDerivedSets[entry.name], entry.name).toEqual([{ path: "artifacts/summary.json", fields: ["sha256", "size_bytes"] }]);
+    }
     for (const entry of INVARIANT_RUNS) {
       expect(searched[entry.name], entry.name).toBe(entry.kind === "stage" && entry.flags === null && entry.pipeline === "v1.2");
     }
@@ -5204,6 +5354,9 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const digests: Record<string, string> = {};
     const strippedDigests: Record<string, string> = {};
     const strippedRequestDigests: Record<string, string> = {};
+    const budgetDigests: Record<string, string> = {};
+    const budgetKeySets: Record<string, readonly string[]> = {};
+    const budgetDerivedSets: Record<string, BudgetNormalizedFiles["derived"]> = {};
     const searched: Record<string, boolean> = {};
     let current = "開始前";
     let currentTiming: InvariantTiming = { ioMs: 0, runMs: 0, hashMs: 0 };
@@ -5218,11 +5371,14 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       const entry = INVARIANT_RUNS[index]!;
       current = `${entry.name}（${index + 1}/${INVARIANT_RUNS.length}）`;
       currentTiming = { ioMs: 0, runMs: 0, hashMs: 0 };
-      const { digest, stripped, strippedRequests, hasSearch } = await invariantDigest(entry, true, currentTiming);
+      const { digest, stripped, strippedRequests, budgetNormalized, budgetKeys, budgetDerived, hasSearch } = await invariantDigest(entry, true, currentTiming);
       timings.push({ name: entry.name, ...currentTiming });
       digests[entry.name] = digest;
       strippedDigests[entry.name] = stripped;
       strippedRequestDigests[entry.name] = strippedRequests;
+      budgetDigests[entry.name] = budgetNormalized;
+      budgetKeySets[entry.name] = budgetKeys;
+      budgetDerivedSets[entry.name] = budgetDerived;
       searched[entry.name] = hasSearch;
     }
     expect(digests).toEqual(BEFORE_748_BASE);
@@ -5233,6 +5389,13 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     }
     // 費用が入力長で変わる 4 経路を含む全部の要求の列は、旧値（f9bf3b3）と一致する
     expect(strippedRequestDigests).toEqual(BEFORE_761_REQUESTS);
+    // 4 経路は、診断と R-fr-08 を外し budget_* の値だけを印に替えた全出力が f9bf3b3 と一致する（印のキーも budget_* だけ）
+    for (const entry of INVARIANT_RUNS) {
+      if (!WHOLE_COST_AFFECTED.has(entry.name)) continue;
+      expect(budgetDigests[entry.name], entry.name).toBe(BEFORE_761_BUDGET[entry.name]);
+      expect(budgetKeySets[entry.name], entry.name).toEqual(BUDGET_KEYS);
+      expect(budgetDerivedSets[entry.name], entry.name).toEqual([{ path: "artifacts/summary.json", fields: ["sha256", "size_bytes"] }]);
+    }
     for (const entry of INVARIANT_RUNS) {
       expect(searched[entry.name], entry.name).toBe(entry.kind === "stage" && entry.flags === null && entry.pipeline === "v1.2");
     }
