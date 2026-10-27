@@ -6677,7 +6677,9 @@ function wireClientOf(calls: readonly RecordedCall[], envelope: EnvelopeId, opti
       return adapter.callWithTools(request);
     },
   };
-  return { client, sent };
+  /** 記録を消費した数（通信の失敗では消費しない。台本の余り・不足を等値で見る） */
+  const consumed = (): number => index;
+  return { client, sent, consumed };
 }
 
 /** 送った body の `reasoning.effort`（無ければ undefined） */
@@ -6695,7 +6697,24 @@ describe("⑥ 直すの段の effort の口（repair。Issue #751）：実行口
   async function runWire(calls: readonly RecordedCall[], envelope: EnvelopeId, overrides: Partial<GenerationInputV11a> = {}, options: { readonly failToolOnce?: boolean } = {}) {
     const wire = wireClientOf(calls, envelope, options);
     const result = await runGenerationV11a(inputOf(wire.client, overrides));
-    return { result, sent: wire.sent };
+    return { result, sent: wire.sent, consumed: wire.consumed() };
+  }
+
+  /**
+   * 修復の走りが**成功して止まらず**、台本を**使い切った**ことを等値で固定する（R1）。修復が起きた回数・
+   * 修復の wire の数も >0 ではなく等値で見る。
+   */
+  function expectWireRunDone(
+    run: Awaited<ReturnType<typeof runWire>>,
+    calls: readonly RecordedCall[],
+    expected: { readonly repairStages: number; readonly tools: number; readonly fields: number },
+  ): void {
+    expect(run.result.stopped).toBeNull();
+    expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(run.consumed, "台本を使い切った").toBe(calls.length);
+    expect(run.result.record.stages.filter((stage) => stage.stage === "repair")).toHaveLength(expected.repairStages);
+    expect(run.sent.filter((sent) => sent.kind === "tools")).toHaveLength(expected.tools);
+    expect(run.sent.filter((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME)).toHaveLength(expected.fields);
   }
 
   it("(1)(3) 探索 off の全文の直し（ids off）：道具の往復の全部のターン（道具の呼び出し → 結果 → 最後の応答）と、形の再要求・通信の再送の wire の reasoning.effort が medium。ほかの段の body は口なしの走りと同じ", async () => {
@@ -6709,17 +6728,15 @@ describe("⑥ 直すの段の effort の口（repair。Issue #751）：実行口
     ];
     const plain = await runWire(calls, "v1.1a", { deadline: 600_000 });
     const tuned = await runWire(calls, "v1.1a", { stageEfforts: EFFORTS, deadline: 600_000 }, { failToolOnce: true });
-    expect(tuned.result.stopped).toBeNull();
-    expect(tuned.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    // 修復 1 回・道具の wire 4 本（道具の呼び出し・HTTP の誤りで始めなかった応答の再送・形の再要求・最後の応答）・台本を使い切る
+    expectWireRunDone(tuned, calls, { repairStages: 1, tools: 4, fields: 0 });
+    expect(plain.result.stopped).toBeNull();
     expect(plain.result.outcome).toEqual(tuned.result.outcome);
     // 全文の直し（道具付き）が実際に呼ばれ、通信の再送と形の再要求の数が記録に残る
-    expect(tuned.result.record.stages.filter((stage) => stage.stage === "repair")).toHaveLength(1);
     const repairStageRecord = tuned.result.record.stages.find((stage) => stage.stage === "repair");
     expect(repairStageRecord?.retries.shape).toBe(1);
     expect(repairStageRecord?.retries.communication).toBe(1);
     const tools = tuned.sent.filter((sent) => sent.kind === "tools");
-    // 道具の呼び出し・（HTTP の誤りで始めなかった応答の）再送・形の再要求・最後の応答
-    expect(tools.length).toBe(4);
     for (const sent of tools) {
       expect(wireEffortOf(sent), "道具付きの往復の全部のターン").toBe("medium");
       expect(sent.body["max_output_tokens"]).toBe(maxOutputTokensForEffort("medium", "repair"));
@@ -6744,7 +6761,8 @@ describe("⑥ 直すの段の effort の口（repair。Issue #751）：実行口
     ];
     const plain = await runWire(calls, "v1.1a", { flags: { searchRepair: true } });
     const tuned = await runWire(calls, "v1.1a", { flags: { searchRepair: true }, stageEfforts: EFFORTS });
-    expect(tuned.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expectWireRunDone(tuned, calls, { repairStages: 2, tools: 0, fields: 2 });
+    expect(plain.result.stopped).toBeNull();
     expect(tuned.result.outcome).toEqual(plain.result.outcome);
     expect(tuned.sent.filter((sent) => sent.kind === "tools")).toEqual([]);
     const fields = tuned.sent.filter((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME);
@@ -6763,10 +6781,8 @@ describe("⑥ 直すの段の effort の口（repair。Issue #751）：実行口
   it("(3) 探索 on の全文の直し（ids off）：場所なしの失敗がある往復は道具付きの直す段になり、その wire は全部 medium", async () => {
     const calls = [...head({ yaml: W1, table: TABLE_R4_ENTITY }), structured(judgments(IDS, REJECT_R4)), repairDone(RUN_YAML), structured(acceptAll())];
     const tuned = await runWire(calls, "v1.1a", { flags: { searchRepair: true }, stageEfforts: EFFORTS });
-    expect(tuned.result.outcome).toEqual({ result: "pass", verdict: "full" });
-    const tools = tuned.sent.filter((sent) => sent.kind === "tools");
-    expect(tools.length).toBeGreaterThan(0);
-    for (const sent of tools) expect(wireEffortOf(sent)).toBe("medium");
+    expectWireRunDone(tuned, calls, { repairStages: 1, tools: 1, fields: 0 });
+    for (const sent of tuned.sent.filter((candidate) => candidate.kind === "tools")) expect(wireEffortOf(sent)).toBe("medium");
     expect(tuned.sent.some((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME)).toBe(false);
   });
 
@@ -6774,10 +6790,8 @@ describe("⑥ 直すの段の effort の口（repair。Issue #751）：実行口
     // 探索 off（全文の直し。道具付き）
     const fullCalls = [...idsHead({ yaml: BAD_YAML }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())];
     const full = await runWire(fullCalls, "v1.2-ids", { flags: { ledger: true, ids: true }, stageEfforts: EFFORTS });
-    expect(full.result.outcome).toEqual({ result: "pass", verdict: "full" });
-    const fullTools = full.sent.filter((sent) => sent.kind === "tools");
-    expect(fullTools.length).toBeGreaterThan(0);
-    for (const sent of fullTools) expect(wireEffortOf(sent)).toBe("medium");
+    expectWireRunDone(full, fullCalls, { repairStages: 1, tools: 1, fields: 0 });
+    for (const sent of full.sent.filter((candidate) => candidate.kind === "tools")) expect(wireEffortOf(sent)).toBe("medium");
     // 探索 on（欄だけの直し。構造化）
     const fieldCalls = [
       ...idsHead({ yaml: W2 }),
@@ -6788,21 +6802,19 @@ describe("⑥ 直すの段の effort の口（repair。Issue #751）：実行口
       structured(acceptAll()),
     ];
     const field = await runWire(fieldCalls, "v1.2-ids", { flags: { ledger: true, ids: true, searchRepair: true }, stageEfforts: EFFORTS });
-    expect(field.sent.filter((sent) => sent.kind === "tools")).toEqual([]);
-    const fields = field.sent.filter((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME);
-    expect(fields.length).toBeGreaterThan(0);
-    for (const sent of fields) expect(wireEffortOf(sent)).toBe("medium");
+    expectWireRunDone(field, fieldCalls, { repairStages: 2, tools: 0, fields: 2 });
+    for (const sent of field.sent.filter((candidate) => candidate.schemaName === FIELD_REPAIR_SCHEMA_NAME)) expect(wireEffortOf(sent)).toBe("medium");
   });
 
   it("(3) 探索 on の全文の直し（ids on）：場所なしの失敗がある往復は道具付きの直す段になり、その wire は全部 medium", async () => {
     // 検査の節を読めない形（validations: [amount]）にすると静的チェックに落ち、場所を作らずに全文の直し（道具付き）へ流れる
     const NOVAL = replaced(RUN_YAML, "validations:\n  - name: amount\n    entity: item\n    expression: amount > 0\n", "validations: []\n");
     const FLOW = replaced(NOVAL, "validations: []\n", "validations: [amount]\n");
-    const calls = [...idsHead({ yaml: FLOW }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())];
+    // 初版は静的チェックに落ちるので B3'（宣言の意味の点検）を呼ばない。余分な B3' の応答を置かない
+    const calls = [...idsHead({ yaml: FLOW }), repairDone(RUN_YAML), structured(acceptAll())];
     const tuned = await runWire(calls, "v1.2-ids", { flags: { ledger: true, ids: true, searchRepair: true }, stageEfforts: EFFORTS });
-    const tools = tuned.sent.filter((sent) => sent.kind === "tools");
-    expect(tools.length).toBeGreaterThan(0);
-    for (const sent of tools) {
+    expectWireRunDone(tuned, calls, { repairStages: 1, tools: 1, fields: 0 });
+    for (const sent of tuned.sent.filter((candidate) => candidate.kind === "tools")) {
       expect(wireEffortOf(sent)).toBe("medium");
       expect(sent.body["max_output_tokens"]).toBe(maxOutputTokensForEffort("medium", "repair"));
     }
@@ -6814,9 +6826,10 @@ describe("⑥ 直すの段の effort の口（repair。Issue #751）：実行口
     const wire = wireClientOf(calls, "v1.1a");
     const outcome = await runStageRangeV11a({ ...inputOf(wire.client, { stageEfforts: EFFORTS }), range: { start: "name-table", end: "judge" } });
     expect(outcome.stopped).toBeNull();
-    const tools = wire.sent.filter((sent) => sent.kind === "tools");
-    expect(tools.length).toBeGreaterThan(0);
-    for (const sent of tools) expect(wireEffortOf(sent)).toBe("medium");
+    expect(wire.consumed(), "台本を使い切った").toBe(calls.length);
+    expect(outcome.stages.filter((stage) => stage.stage === "repair")).toHaveLength(1);
+    expect(wire.sent.filter((sent) => sent.kind === "tools")).toHaveLength(1);
+    for (const sent of wire.sent.filter((candidate) => candidate.kind === "tools")) expect(wireEffortOf(sent)).toBe("medium");
   });
 
   it("(4) ほかの段の effort は変わらない：repair を指定しても B1 の作り直しは write の指定に従い、B3' は adapter の設定のまま", async () => {
@@ -6836,6 +6849,11 @@ describe("⑥ 直すの段の effort の口（repair。Issue #751）：実行口
       flags: { ledger: true, ids: true, searchRepair: true },
       stageEfforts: { repair: "medium", write: "low" },
     });
+    // 台本の余り・不足が無いこと（修復は欄だけの直しの空振り 2 回）
+    expect(tuned.result.stopped).toBeNull();
+    expect(tuned.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(tuned.consumed, "台本を使い切った").toBe(calls.length);
+    expect(tuned.result.record.stages.filter((stage) => stage.stage === "repair")).toHaveLength(2);
     const writes = tuned.sent.filter((sent) => sent.schemaName === WRITE_V11A_SCHEMA_NAME);
     expect(writes).toHaveLength(2);
     expect(wireEffortOf(writes[0] as WireSent)).toBe("low");
@@ -6847,5 +6865,65 @@ describe("⑥ 直すの段の effort の口（repair。Issue #751）：実行口
     const declChecks = tuned.sent.filter((sent) => sent.schemaName === DECL_CHECK_SCHEMA_NAME);
     expect(declChecks.length).toBeGreaterThan(0);
     for (const sent of declChecks) expect(wireEffortOf(sent)).toBe("high");
+  });
+
+  /** 道具付きの応答（1 つの束に `count` 個の static-check）。識別子は束の中で一意にする */
+  function repairToolBundle(round: number, count: number): RecordedCall {
+    return {
+      kind: "tools",
+      response: {
+        kind: "toolCalls",
+        toolCalls: Array.from({ length: count }, (_, index) => ({
+          id: `b${String(round)}-${String(index)}`,
+          name: "static-check",
+          arguments: { declaration: RUN_YAML },
+        })),
+        usage: undefined,
+      },
+    };
+  }
+
+  it("(6) 道具の呼び出しの累計が 24 を越える（24→25）：段の口を通した走りは toolCalls の上限で止まり、口なしの走りと同じ判定。台本を使い切る", async () => {
+    // 束 4 個 × 6 回で累計 24、次の束 1 個で 25 になり、実行する前に断る（ids on は停止に上限の名前と数を残す）
+    const calls = [
+      ...idsHead({ yaml: BAD_YAML }),
+      structured(acceptAll()),
+      ...Array.from({ length: 6 }, (_, index) => repairToolBundle(index, 4)),
+      repairToolBundle(6, 1),
+    ];
+    const flags = { ledger: true, ids: true } as const;
+    const plain = await runWire(calls, "v1.2-ids", { flags });
+    const tuned = await runWire(calls, "v1.2-ids", { flags, stageEfforts: EFFORTS });
+    const limit = { name: "toolCalls", max: AGENT_LIMITS.toolCalls, actual: AGENT_LIMITS.toolCalls + 1 };
+    expect(tuned.result.stopped).toEqual({ stage: "repair", kind: "call-limit", limit });
+    expect(tuned.result.record.failure).toEqual({ stage: "repair", kind: "call-limit", limit });
+    expect(tuned.result.outcome).toEqual({ result: "failed", verdict: "none" });
+    expect(tuned.consumed, "台本を使い切った").toBe(calls.length);
+    // 口なしの走り（元の口だけ）と同じ判定
+    expect(plain.result.stopped).toEqual(tuned.result.stopped);
+    expect(plain.result.record.failure).toEqual(tuned.result.record.failure);
+    expect(plain.result.outcome).toEqual(tuned.result.outcome);
+    expect(plain.result.summary).toEqual(tuned.result.summary);
+  });
+
+  it("(6) 1 回の修復の応答が 8 を越える（8→9）：段の口を通した走りは repairStepTurns の上限で止まり、口なしの走りと同じ判定。台本を使い切る", async () => {
+    const calls = [
+      ...idsHead({ yaml: BAD_YAML }),
+      structured(acceptAll()),
+      ...Array.from({ length: AGENT_LIMITS.repairStepTurns }, (_, index) => repairToolBundle(index, 1)),
+    ];
+    const flags = { ledger: true, ids: true } as const;
+    const plain = await runWire(calls, "v1.2-ids", { flags });
+    const tuned = await runWire(calls, "v1.2-ids", { flags, stageEfforts: EFFORTS });
+    const limit = { name: "repairStepTurns", max: AGENT_LIMITS.repairStepTurns, actual: AGENT_LIMITS.repairStepTurns + 1 };
+    expect(tuned.result.stopped).toEqual({ stage: "repair", kind: "call-limit", limit });
+    expect(tuned.result.record.failure).toEqual({ stage: "repair", kind: "call-limit", limit });
+    expect(tuned.result.outcome).toEqual({ result: "failed", verdict: "none" });
+    expect(tuned.consumed, "台本を使い切った").toBe(calls.length);
+    // 口なしの走り（元の口だけ）と同じ判定
+    expect(plain.result.stopped).toEqual(tuned.result.stopped);
+    expect(plain.result.record.failure).toEqual(tuned.result.record.failure);
+    expect(plain.result.outcome).toEqual(tuned.result.outcome);
+    expect(plain.result.summary).toEqual(tuned.result.summary);
   });
 });
