@@ -7012,7 +7012,8 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
       expect(JSON.stringify(diagnostic)).not.toContain('"e.item"');
     }
     for (const sent of fields) expect(wireEffortOf(sent)).toBe("medium");
-    // 修復の回数と採否の並びは直す前と同じ（2 往復・2 → 1 → 0）
+    // 修復の回数と採否の並びは直す前と同じ（2 往復・2 → 1 → 0）。完了条件 (7) はこのほか、cli.test の取り除きの照合が
+    // 記録・要求の列・要求の数・終了コードを同じ指紋で旧値（f9bf3b3）と照らして覆う
     expect(run.result.record.stages.filter((stage) => stage.stage === "repair")).toHaveLength(2);
     expect(totalsOf(run.result.bundle)).toEqual([
       ["write", 2, true],
@@ -7176,7 +7177,7 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
     expect(diagnosticOf(second).tests.map((entry) => entry.testId)).toEqual([...R4_CASES]);
   });
 
-  it("(5)(6) 段の走りの実行口からも、全文の直しの body に診断が届き、repair=medium が載る。ほかの段の要求の写しは同じ", async () => {
+  it("(5)(6) 段の走りの実行口からも、全文の直しの body に診断が届き、repair=medium が載る。同じ台本で診断が載らない走り（探索 off）と、修復以外の段の要求の body が同じ", async () => {
     const calls = [...idsHead({ yaml: NO_CLOSE }), repairDone(RUN_YAML), structured(acceptAll())];
     const wire = wireClientOf(calls, "v1.2-ids");
     const outcome = await runStageRangeV11a({
@@ -7191,5 +7192,22 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
     if (sent === undefined) throw new Error("前提が壊れた");
     expect(diagnosticOf(sent).tests).toHaveLength(3);
     expect(wireEffortOf(sent)).toBe("medium");
+
+    // 同じ台本で診断が載らない比較の走り（探索 off）。修復以外の段の要求の body は同じで、修復の body だけが診断の分で違う
+    const plainWire = wireClientOf(calls, "v1.2-ids");
+    const plain = await runStageRangeV11a({
+      ...inputOf(plainWire.client, { flags: { ledger: true, ids: true, searchRepair: false }, stageEfforts: { repair: "medium" } }),
+      range: { start: "name-table", end: "judge" },
+    });
+    expect(plain.stopped).toBeNull();
+    expect(plainWire.consumed(), "台本を使い切った").toBe(calls.length);
+    const nonRepair = (wireSent: readonly WireSent[]): readonly string[] =>
+      wireSent.filter((candidate) => !isRepairWire(candidate)).map((candidate) => JSON.stringify(candidate.body));
+    expect(nonRepair(wire.sent).length).toBeGreaterThan(0);
+    expect(nonRepair(wire.sent)).toEqual(nonRepair(plainWire.sent));
+    const plainTools = plainWire.sent.filter((candidate) => candidate.kind === "tools");
+    expect(plainTools).toHaveLength(1);
+    for (const candidate of plainTools) expect(hasDiagnostic(candidate)).toBe(false);
+    expect(hasDiagnostic(sent)).toBe(true);
   });
 });

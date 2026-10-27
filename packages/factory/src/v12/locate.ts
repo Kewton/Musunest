@@ -531,8 +531,11 @@ export interface RepairDiagnosticTest {
   readonly table: RepairDiagnosticRow | null;
   /** 参照材料を省いた印（省いていなければ null） */
   readonly omitted: string | null;
-  /** 評価の返り値の `detail` をそのまま（解析・再評価しない） */
-  readonly detail: string;
+  /**
+   * 評価の返り値の `detail` を、不一致→未解決の順にそのまま並べる（同じ試験 ID が不一致と未解決の両方に出れば両方を持つ。
+   * 解析・再評価しない）
+   */
+  readonly details: readonly string[];
   /** 経路（`routes` の該当の試験 ID。無ければ空の並び） */
   readonly routes: readonly RoutedFailure[];
   /** 構造の違い（`structural` の該当のうち、成り立たなかったもの。無ければ空の並び） */
@@ -637,31 +640,39 @@ function diagnosticRowOf(
 
 /**
  * 一番良い版の失敗の診断を組む（純粋。同じ入力なら同じ結果）。C7 は試験 ID ごとに 1 件（不一致・未解決の順）、B3 は要件 ID ごとに
- * 落ちを全件、B3' は要件 ID ごとに拒否を全件。`detail`・引用は渡された値のままで、構造化した actual を作らない。
+ * 落ちを全件、B3' は要件 ID ごとに拒否を全件。`details`・引用は渡された値のままで、構造化した actual を作らない。
  */
 export function buildRepairDiagnostic(input: RepairDiagnosticInput): RepairDiagnostic {
   const testById = new Map(input.suite.tests.map((test) => [test.id, test] as const));
   const structural = input.structural ?? [];
-  const tests: RepairDiagnosticTest[] = [];
-  const seenTests = new Set<string>();
+  // 試験 ID ごとに 1 件。detail は不一致→未解決の順に全部残す（同じ試験 ID が両方に出ても後の detail を捨てない）
+  const testIds: string[] = [];
+  const detailsById = new Map<string, string[]>();
   for (const failure of [...input.mismatches, ...input.unresolved]) {
-    if (seenTests.has(failure.testId)) continue;
-    seenTests.add(failure.testId);
-    const test = testById.get(failure.testId);
+    const details = detailsById.get(failure.testId);
+    if (details === undefined) {
+      detailsById.set(failure.testId, [failure.detail]);
+      testIds.push(failure.testId);
+    } else {
+      details.push(failure.detail);
+    }
+  }
+  const tests: RepairDiagnosticTest[] = testIds.map((testId) => {
+    const test = testById.get(testId);
     const roleId = test?.target.roleId;
     const row = diagnosticRowOf(input.table, roleId);
-    tests.push({
-      testId: failure.testId,
+    return {
+      testId,
       requirementId: test?.target.requirementId ?? null,
       roleId: roleId ?? null,
-      observes: input.observes.get(failure.testId) ?? null,
+      observes: input.observes.get(testId) ?? null,
       table: row.row,
       omitted: row.omitted,
-      detail: failure.detail,
-      routes: input.routes.filter((route) => route.testId === failure.testId),
-      structural: structural.filter((entry) => entry.testId === failure.testId && entry.result !== "pass"),
-    });
-  }
+      details: detailsById.get(testId) ?? [],
+      routes: input.routes.filter((route) => route.testId === testId),
+      structural: structural.filter((entry) => entry.testId === testId && entry.result !== "pass"),
+    };
+  });
   const missesByRequirement = new Map<string, RepairDiagnosticMiss[]>();
   for (const miss of input.correspondenceMisses) {
     const misses = missesByRequirement.get(miss.requirementId) ?? [];

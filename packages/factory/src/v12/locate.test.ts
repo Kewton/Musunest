@@ -659,8 +659,8 @@ describe("修復へ渡す診断（純粋。Issue #761）：C7・B3・B3' を、�
     expect(diagnostic.tests).toHaveLength(1);
     const entry = diagnostic.tests[0];
     if (entry === undefined) throw new Error("前提が壊れた");
-    // detail は評価の返り値と完全に一致（解析・再評価・expected からの補完をしない）
-    expect(entry.detail).toBe(detail);
+    // details は評価の返り値と完全に一致（解析・再評価・expected からの補完をしない）
+    expect(entry.details).toEqual([detail]);
     expect(entry.requirementId).toBe("R1");
     expect(entry.roleId).toBe("f.item.amount");
     // 構造化した actual の欄は作らない
@@ -754,25 +754,36 @@ describe("修復へ渡す診断（純粋。Issue #761）：C7・B3・B3' を、�
     expect(diagnostic.tests.map((entry) => entry.roleId)).toEqual(["f.item.none", "f.item.title", null]);
   });
 
-  it("同じ入力から 2 回同じ結果（決定的）。C7 は不一致・未解決で同じ試験 ID を 1 件にし、順は評価の返り値の順", () => {
+  it("同じ入力から 2 回同じ結果（決定的）。C7 は試験 ID ごとに 1 件にし、順は不一致・未解決の順", () => {
     const inputValue = diagnosticInput({
       mismatches: [
         { testId: "r3-when", detail: "不一致 1" },
-        { testId: "r3-when", detail: "不一致 1" },
         { testId: "r1-validate", detail: "不一致 2" },
       ],
-      unresolved: [
-        { testId: "r4-rate", detail: "未解決" },
-        { testId: "r1-validate", detail: "未解決（不一致と同じ ID）" },
-      ],
+      unresolved: [{ testId: "r4-rate", detail: "未解決" }],
     });
     const first = buildRepairDiagnostic(inputValue);
     expect(JSON.stringify(buildRepairDiagnostic(inputValue))).toBe(JSON.stringify(first));
-    expect(first.tests.map((entry) => [entry.testId, entry.detail])).toEqual([
-      ["r3-when", "不一致 1"],
-      ["r1-validate", "不一致 2"],
-      ["r4-rate", "未解決"],
+    expect(first.tests.map((entry) => [entry.testId, entry.details])).toEqual([
+      ["r3-when", ["不一致 1"]],
+      ["r1-validate", ["不一致 2"]],
+      ["r4-rate", ["未解決"]],
     ]);
+  });
+
+  it("(1) 同じ試験 ID が不一致と未解決の両方に出たら、1 件の中に両方の detail を不一致→未解決の順で残す（後の detail を捨てない）", () => {
+    const diagnostic = buildRepairDiagnostic(
+      diagnosticInput({
+        mismatches: [{ testId: "r1-validate", detail: "不一致の detail（実際 3・期待 5）" }],
+        unresolved: [{ testId: "r1-validate", detail: "未解決の detail（入力の型が違う）" }],
+      }),
+    );
+    expect(diagnostic.tests).toHaveLength(1);
+    const entry = diagnostic.tests[0];
+    if (entry === undefined) throw new Error("前提が壊れた");
+    expect(entry.details).toEqual(["不一致の detail（実際 3・期待 5）", "未解決の detail（入力の型が違う）"]);
+    // 1 件のまま（detail ごとに 2 件に増やさない）
+    expect(diagnostic.tests.map((candidate) => candidate.testId)).toEqual(["r1-validate"]);
   });
 });
 

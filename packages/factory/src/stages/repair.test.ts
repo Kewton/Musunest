@@ -1772,7 +1772,7 @@ describe("直す段のデータの末尾に診断を足す（旗 v12.ids と探�
         observes: "value",
         table: null,
         omitted: null,
-        detail: "計算 total が期待と違う（期待 42、実際 21）",
+        details: ["計算 total が期待と違う（期待 42、実際 21）"],
         routes: [{ testId: "t1", route: "missing-element", detail: "計算 total が期待と違う（期待 42、実際 21）" }],
         structural: [],
       },
