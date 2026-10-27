@@ -4880,19 +4880,20 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
   /**
-   * #761 の前（f9bf3b3）の全出力のダイジェスト（**期待**。注ではない）。上の BEFORE_746 との差は、修復を呼ぶ ids on の
-   * 12 経路だけ。現在の出力から診断の塊 1 つと規則 R-fr-08 1 つを位置で外した指紋が、この値と一致することを照らす。
+   * #761 の前（f9bf3b3）の**生出力**のダイジェスト（**期待**。注ではない）。段の走りの記録の `search_repair`・`requests`・
+   * `stage_spans` を残したまま、診断の塊 1 つと規則 R-fr-08 1 つを位置で外した指紋が、この値と一致することを照らす
+   * （f9bf3b3 は診断を持たないので、その出力がそのまま旧値）。BEFORE_746・BEFORE_748_BASE の 2 つの試験で同じ値。
    */
-  const BEFORE_761_746: Readonly<Record<string, string>> = {
-    "stage-stagnation": "055ebe51378e8035e4ea152c509710fc84473c6d954be3d1168cb17b4ced9a1f",
-    "stage-adopting": "584eaf3e017350fb46a395f74ac640038a782c7b306b572e7ccbe6890fecd313",
-    "stage-sets": "25a22183c57cdbb64fe6b74e699063c6356201a037265d561f2731a1ac437146",
-    "stage-mixed": "c49884f9b7a556c4e0c9afd90d1a22f37b5828e44fee9d58399437dbaf5798d4",
-    "stage-returned": "7669c971267262ebc921bd61046f1d9e3540a12d3892a48d9508e281b544af78",
-    "stage-recounts": "de005c953d91b30fc27a7a24c2d41292be6cabf35242a0525a03804d1bd33252",
-    "stage-stop-repair": "4e17820e9cd8415b24850f555bed05d332ce45a3c79eb1d6eedb93ee1a892dac",
-    "stage-stop-first-eval": "fd323bfcc9d82f0f102dbf43d9ce14db17bc05cc9b8c0ff84c91939270710948",
-    "stage-stop-commit": "ab11a902ec436a60193e2b2b4c5ab3bf4afd6ae88b338dbb74bc042944100909",
+  const BEFORE_761_RAW: Readonly<Record<string, string>> = {
+    "stage-stagnation": "9881cad9402ddada5a41e32251ab276c3f8ea30e9f3995cb76ef9840d6570dc6",
+    "stage-adopting": "b5a003ecc6ed093a02658d2c7131c50a995e4071e668bfafe15e794bc3dd6fdd",
+    "stage-sets": "927605dd5db8f00b8d3c01d8dbc498db25c00ad98168d4f85949ad4983760c09",
+    "stage-mixed": "6c50138f61543037914fc0ad84010d6ab44ade09389e09ee83f3e925586ddf13",
+    "stage-returned": "b8cfd4984dc2d78ac70adbb2f1686c7c9d5feeed2ab2d593923e2acd5ac7caed",
+    "stage-recounts": "2ca966f9ad83f63022c7cc683b0b4c8223382ccd27c975b280fb8c6653f276f4",
+    "stage-stop-repair": "7712f4bcdc71c8d0b0a6db298fc5af17e8d487bb2aec7bd1722ba2df0122bcca",
+    "stage-stop-first-eval": "9d868b963803251c0d9509d03425b7bd1204a60c4f80d9b7612c2dad9168a2e9",
+    "stage-stop-commit": "217b9efd70d5b6490d9f152b510fd0ed7b09046d8691a2725adfe1c64628294a",
     "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
     "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
     "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
@@ -4900,7 +4901,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
-    "stage-search-repair-off": "5dc5994e2dffc41aab246647e4b9b5d61d281194cf7cfff32d01525c95c311cd",
+    "stage-search-repair-off": "7058e57fd0e39a0ff8ffb1cd08a2812f9e25c015da58601838336b9b3157e8a9",
     "whole-search-repair-off": "b54b883dcc61c988952fbce4d66ff2bc6cdd8174f24d797824d4bde1371875bb",
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
@@ -5132,11 +5133,14 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     /** 費用の印への置換に使う、ディレクトリを目印に置き換えた全ファイルの本文 */
     const budgetSources: { readonly path: string; readonly text: string }[] = [];
     const files: [string, string][] = [];
+    /** 段の走りの記録に search_repair・requests・stage_spans を残したままの本文（#761 の取り除きの照合） */
+    const rawFiles: [string, string][] = [];
     for (const path of [...written].sort()) {
       const ioStart = performance.now();
       const raw = await fs.readFile(`${dir}/${path}`, "utf8");
       if (timing !== undefined) timing.ioMs += performance.now() - ioStart;
       let text = raw.replaceAll(directory, "<tmp>");
+      const rawText = text;
       if (path === STAGE_RUN_RECORD_FILE) {
         const record = JSON.parse(text) as Json;
         hasSearch = "search_repair" in record;
@@ -5156,16 +5160,18 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       }
       const hashStart = performance.now();
       files.push([path, await sha256Hex(text)]);
+      rawFiles.push([path, await sha256Hex(rawText)]);
       budgetSources.push({ path, text });
       if (timing !== undefined) timing.hashMs += performance.now() - hashStart;
     }
     const body = JSON.stringify({ files, requests, code, line }).replaceAll(directory, "<tmp>");
     const bodyHashStart = performance.now();
     const digest = await sha256Hex(body);
-    // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外した要求の列で、同じ指紋を取り直す（これが f9bf3b3 の旧値と一致する）
+    // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外した指紋（段の走りの記録の search_repair・requests・stage_spans は残したまま）が
+    // 直す前（f9bf3b3）の全出力と一致する
     const strippedRequests = withoutDiagnostics(requests);
     const strippedRequestsDigest = await sha256Hex(JSON.stringify(strippedRequests));
-    const stripped = await sha256Hex(JSON.stringify({ files, requests: strippedRequests, code, line }).replaceAll(directory, "<tmp>"));
+    const stripped = await sha256Hex(JSON.stringify({ files: rawFiles, requests: strippedRequests, code, line }).replaceAll(directory, "<tmp>"));
     // 費用（budget_*）の値だけを印に替えた全出力の指紋（入力長で正当に変わる費用を除き、ほかの欄を旧値と照らす）
     const budgetFiles = await budgetNormalizedFiles(budgetSources);
     const budgetLine = line.includes('"budget_') ? withBudgetMarkersInText(line, budgetFiles.keys) : line;
@@ -5266,10 +5272,10 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       searched[entry.name] = hasSearch;
     }
     expect(digests).toEqual(BEFORE_746);
-    // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと、直す前（f9bf3b3）の全出力とバイト列で同じ
+    // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと（search_repair・requests・stage_spans を残したまま）、直す前（f9bf3b3）の生出力とバイト列で同じ
     for (const entry of INVARIANT_RUNS) {
       if (WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_746[entry.name]);
+      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_RAW[entry.name]);
     }
     // 費用が入力長で変わる 4 経路を含む全部の要求の列は、旧値（f9bf3b3）と一致する
     expect(strippedRequestDigests).toEqual(BEFORE_761_REQUESTS);
@@ -5324,32 +5330,6 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
-  /**
-   * #761 の前（f9bf3b3）の全出力のダイジェスト（**期待**。注ではない）。BEFORE_748_BASE との差は、修復を呼ぶ ids on の
-   * 12 経路だけ。現在の出力から診断の塊 1 つと規則 R-fr-08 1 つを位置で外した指紋が、この値と一致することを照らす。
-   */
-  const BEFORE_761_748: Readonly<Record<string, string>> = {
-    "stage-stagnation": "0ef2fe8bc20c81f4a8dba870cdb2103f14ba42b0c064cccd68f01c3c163008f8",
-    "stage-adopting": "d40f0f31882cd2b83f5d93b308283cf18ba0b63b9a1cd72f31d332fd31fcf8d1",
-    "stage-sets": "a3969eaa6be4fe49cbffbebc81010fbb5df3312b0d325cbf3b873ad9c92cbf05",
-    "stage-mixed": "1f029859b4af94df617d1a67f23ddfc7113dae32bc5079615943b28e24b467c6",
-    "stage-returned": "a2f5dad9b7cefe9e2e530c3517774be719f2cefb24d4db19864174b2cde09429",
-    "stage-recounts": "adbcd1aa9c7f452cb352d11cd873eab96966a1be4f155479a67b3444f844d004",
-    "stage-stop-repair": "1bd073e2d94a519d53762e8e0b6fecb78f9731ff306e4422377288a9eee681bb",
-    "stage-stop-first-eval": "df320daf50a2c3e343c582894f57af6874bee3bd02d881ad445e36734f8d490f",
-    "stage-stop-commit": "1bbfcba658904ff0c2aa4fbe935e00cbcb427a466928b678b81c2017695a3373",
-    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
-    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
-    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
-    "whole-mixed": "175e38f8f70ca325904c33cad04d27aede2d8cd1005ebef141c9825ab4acf572",
-    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
-    "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
-    "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
-    "stage-search-repair-off": "5dc5994e2dffc41aab246647e4b9b5d61d281194cf7cfff32d01525c95c311cd",
-    "whole-search-repair-off": "b54b883dcc61c988952fbce4d66ff2bc6cdd8174f24d797824d4bde1371875bb",
-    "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
-    "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
-  };
   it("不変（4a80f4b の全出力・search_repair を含む）：ids on の段の記録だけ requests・stage_spans を除き、ほかの欄は 1 つも落とさずに比較元と同じ（修復を呼ぶ ids on の経路だけ #761 の診断の塊の分を取り直した）。診断の塊と R-fr-08 を位置で外した指紋は #761 の前（f9bf3b3）の値と一致し、この照合は完了条件 (7)（往復の数・採否の並び・要求の数が直す前と等値）も覆う", async (ctx) => {
     const digests: Record<string, string> = {};
     const strippedDigests: Record<string, string> = {};
@@ -5382,10 +5362,10 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       searched[entry.name] = hasSearch;
     }
     expect(digests).toEqual(BEFORE_748_BASE);
-    // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと、直す前（f9bf3b3）の全出力とバイト列で同じ
+    // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと（search_repair・requests・stage_spans を残したまま）、直す前（f9bf3b3）の生出力とバイト列で同じ
     for (const entry of INVARIANT_RUNS) {
       if (WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_748[entry.name]);
+      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_RAW[entry.name]);
     }
     // 費用が入力長で変わる 4 経路を含む全部の要求の列は、旧値（f9bf3b3）と一致する
     expect(strippedRequestDigests).toEqual(BEFORE_761_REQUESTS);
