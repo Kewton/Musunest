@@ -7645,6 +7645,36 @@ describe("最後の答えの枠を取っておく（旗 v12.ids の探索 on の
   /** 全文の直しの要求に印（道具を選ばせない指定）が載っているか */
   const markedOf = (sent: WireSent): boolean => sent.body["tool_choice"] === "none";
   const six = (): RecordedCall[] => Array.from({ length: 6 }, (_, round) => bundle(round));
+  /** 印の 1 キーだけを外した body（7b47038 との比較用。ほかのキーは除かない） */
+  const withoutToolChoice = (body: Record<string, unknown>): Record<string, unknown> => {
+    const { tool_choice: _choice, ...rest } = body;
+    return rest;
+  };
+  /**
+   * 直す前（7b47038）の、(1) と同じ台本の 1〜7 回目の道具付きの要求の body の SHA-256（**期待**）。
+   * 偽物の fetch が実際に受けた body を**加工しない**で `sha256(JSON.stringify(body))` にした値。
+   *
+   * 取り方：`git worktree add --detach <リポジトリの外の一時ディレクトリ> 7b47038` で作った一時の worktree に、
+   * 下の (1) と同じ台本（同じ入力・同じ最良版・同じ応答・同じ adapter の設定＝実行口から実 adapter と
+   * 偽物の fetch まで。`idsHead({ yaml: NO_CLOSE })`・道具の束 6 回・7 回目の done）を、一気通貫
+   * （`runGenerationV11a`）と段の走り（`runStageRangeV11a`・`name-table`→`judge`）の両方の実行口から流し、
+   * 受けた 7 本の body の SHA を記録した。**両方の実行口で 7 本とも同じ値**で、7 回目の body に
+   * `tool_choice` のキーが無いことも確かめた（`Object.hasOwn(body, "tool_choice")` が全 7 本で偽）。
+   * 測った後に一時の試験を戻し、`git status --porcelain` が空を確かめて `git worktree remove`（force なし）で
+   * 消した。branch は作らず、push もしていない。
+   *
+   * 今の head では 1〜6 回目の body がこの値とそのまま一致し、7 回目は `tool_choice` の 1 キーだけを除いた
+   * JSON の SHA が 7 番目の値と一致する（足されたのは道具を選ばせない指定だけ）。
+   */
+  const BEFORE_768_BODY_SHA = [
+    "9fbb8ee3925cc507086726de650528f4ad2a9e2808267eecb77191c835a8e5f4",
+    "8ec81b99f165db65ff99a68faf4f6b0935aaab6042f2bd2755feed6e28c7d204",
+    "2ca54844448e22349158a578990a0a16a3527a294f87d62e5740d3979b20ddb9",
+    "77609928f0c144ed23be4a0d3e511db17f624e4fb8527049d748506863e7d8ed",
+    "d8a749023ba59acbf609f3fca39ac44ed6552d13ae2cf0b452c3f7e76215bfdc",
+    "abb575b5ad9d3bd70187b674f57cce5f8395af2d07f4d708421e71e7af6a4a09",
+    "9f1d1d6217256db704c9f621bd17989d7e8e09633e5ee405d70f373472816f5d",
+  ] as const;
 
   /** 直す段の記録の 1 行（一気通貫は要約の v12_calls、段の走りは結果の v12Calls） */
   type Steps = readonly Record<string, unknown>[];
@@ -7714,6 +7744,14 @@ describe("最後の答えの枠を取っておく（旗 v12.ids の探索 on の
     // 6 回目までは今の body（道具を選ばせない指定が無い）、7 回目だけに載る
     expect(tools.map(markedOf)).toEqual([false, false, false, false, false, false, true]);
     expect(JSON.stringify(tools[0]?.body)).not.toContain("tool_choice");
+    const seventh = tools[6];
+    if (seventh === undefined) throw new Error("前提が壊れた：7 回目の要求が無い");
+    // 1〜6 回目の body は 7b47038 の実測とそのまま一致する（何も除かない）
+    const rawShas = await Promise.all(tools.map((sent) => sha256Hex(JSON.stringify(sent.body))));
+    expect(rawShas.slice(0, 6)).toEqual(BEFORE_768_BODY_SHA.slice(0, 6));
+    // 7 回目に足されたのは道具を選ばせない指定だけ（その 1 キーを除いた JSON が 7b47038 の 7 回目と一致）
+    expect(seventh.body["tool_choice"]).toBe("none");
+    expect(await sha256Hex(JSON.stringify(withoutToolChoice(seventh.body)))).toBe(BEFORE_768_BODY_SHA[6]);
     expect(run.stopped).toBeNull();
     expect(run.verdict).toBe("full");
     if (run.outcome !== undefined) expect(run.outcome).toEqual({ result: "pass", verdict: "full" });
