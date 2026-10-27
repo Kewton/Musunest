@@ -602,8 +602,8 @@ export interface RepairDiagnosticInput {
 const tableName = (table: NameTable, id: string): string | undefined => table.rows.find((row) => row.id === id)?.name;
 
 /**
- * 試験の対象の行 ID から、診断の表の行を組む（B1 の射影と同じ欄・実名）。行が無い・所属や参照先や見出しの元の ID が表に無いときは
- * 行を省き、固定の印を返す（型や所属を推測しない）。
+ * 試験の対象の行 ID から、診断の表の行を組む（B1 の射影と同じ欄・実名）。行が無い・所属や参照先や見出しの元の ID、型の中の
+ * 集計元（`type.aggregate.entity`）が表に無いときは行を省き、固定の印を返す（型や所属を推測しない）。
  */
 function diagnosticRowOf(
   table: NameTable,
@@ -615,6 +615,14 @@ function diagnosticRowOf(
   const entity = row.entity === null ? null : tableName(table, row.entity);
   const refEntity = row.refEntity === null ? null : tableName(table, row.refEntity);
   const groupByName = row.groupBy === null ? null : tableName(table, row.groupBy.field);
+  // 型の中の集計元（項目・参照先・見出しの元と同じく表の ID）も実名へ引く。表に無ければ行を省く
+  const aggregate = isRecord(row.type) ? row.type["aggregate"] : undefined;
+  let type = row.type;
+  if (isRecord(aggregate) && typeof aggregate["entity"] === "string") {
+    const aggregateEntity = tableName(table, aggregate["entity"]);
+    if (aggregateEntity === undefined) return { row: null, omitted: REPAIR_DIAGNOSTIC_OMITTED };
+    type = { ...(row.type as unknown as Record<string, unknown>), aggregate: { ...aggregate, entity: aggregateEntity } } as NameTableRowType;
+  }
   if (
     (row.entity !== null && entity === undefined) ||
     (row.refEntity !== null && refEntity === undefined) ||
@@ -628,7 +636,7 @@ function diagnosticRowOf(
       kind: row.kind,
       entity: entity ?? null,
       name: row.name,
-      type: row.type,
+      type,
       options: row.options,
       groupBy: row.groupBy === null ? null : { kind: row.groupBy.kind, field: groupByName as string },
       refEntity: refEntity ?? null,

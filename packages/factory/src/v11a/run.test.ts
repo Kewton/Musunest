@@ -6961,6 +6961,86 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
   /** R4 の 3 本（応答の 7〜9 番目） */
   const R4_CASES = [6, 7, 8].map(CASE);
 
+  // ── R4: 候補を採る → まだ失敗が残る → 次の修復の要求（details が変わる）────────────────────────
+  /** 金額の検査の本文を直す欄だけの直しの置き換え */
+  const amountValidation = (expression: string): { readonly location: string; readonly element: string } => ({
+    location: "validation:item.amount",
+    element: ["- name: amount", "  entity: item", `  expression: ${expression}`].join("\n"),
+  });
+  /** 率 base*3・検査 amount<0（不一致 6） */
+  const R4_FIELD_BAD = replaced(
+    replaced(RUN_YAML, "    expression: base * 2", "    expression: base * 3"),
+    "    expression: amount > 0",
+    "    expression: amount < 0",
+  );
+  /** 率 base*4・検査 amount>0（rate の 3 本だけが残る。details は実際 9 → 12 に変わる） */
+  const R4_FIELD_CANDIDATE = replaced(RUN_YAML, "    expression: base * 2", "    expression: base * 4");
+
+  // ── R3: 同じ操作（validate）で observes が違う 2 つの試験（validation と default-value）────────────────
+  const G_LIST_BASE: RequirementList = {
+    ...BASE_LIST,
+    requirements: [
+      ...BASE_LIST.requirements,
+      { id: "R6", text: DEFAULT_VALUE_REQUIREMENT_TEXT, quote: DEFAULT_VALUE_REQUIREMENT_TEXT, position: { start: 0, end: DEFAULT_VALUE_REQUIREMENT_TEXT.length } },
+    ],
+  };
+  const G_PLAN = planOf(G_LIST_BASE);
+  const G_LIST = requirementsFromPlan(G_PLAN);
+  const G_SOURCE = G_LIST_BASE.requirements.map((requirement) => requirement.text).join("");
+  const G_IDS = [...IDS, "R6"] as const;
+  /** R5・R7 を持たない表（C2・C3 が 1 束に収まる 5 要件の走り） */
+  const G_TABLE_ON: NameTable = (() => {
+    const table = fixtureGeneratedTable();
+    const keep = (entry: { readonly requirementId: string }): boolean => entry.requirementId !== "R5" && entry.requirementId !== "R7";
+    return { rows: table.rows, ownership: table.ownership.filter(keep), verification: table.verification.filter(keep), classification: table.classification.filter(keep) };
+  })();
+  const G_RENAME = codeIdRenameOf(G_TABLE_ON);
+  const G_MAPPED: NameTable = withCheckTargets(withCodeIds(G_TABLE_ON));
+  /** 区分の項目に default（alpha）を足した宣言 */
+  const G_YAML = replaced(RUN_YAML, "          beta: ベータ\n", "          beta: ベータ\n        default: alpha\n");
+  /** 検査 kind を足した宣言（既定値の試験の場所を validation:item.kind に写す） */
+  const KIND_VALIDATION = `  - name: kind\n    entity: item\n    expression: kind == "alpha"\n`;
+  /** 既定値が beta（不一致）・金額の検査が amount < 0（不一致）の宣言 */
+  const R3_BAD_YAML = replaced(
+    replaced(G_YAML, "        default: alpha\n", "        default: beta\n"),
+    "    expression: amount > 0\n",
+    `    expression: amount < 0\n${KIND_VALIDATION}`,
+  );
+  /** 直した宣言（既定値 alpha・金額の検査 amount > 0・検査 kind は残す） */
+  const R3_GOOD_YAML = replaced(G_YAML, "    expression: amount > 0\n", `    expression: amount > 0\n${KIND_VALIDATION}`);
+  const gHead = (yaml: string): RecordedCall[] => [
+    ...idsResponseList(idsResponsesOf(G_LIST, G_MAPPED, PROPERTY_LEDGER_VIEW)).map((output) => structured(output)),
+    structured(acceptAll(G_IDS)),
+    structured(renameIds(idsT2Response(), G_RENAME)),
+    structured({ declaration: yaml }),
+  ];
+  /** R3 の走り（欄だけの直し・全文の直しのそれぞれについて、一気通貫と段の走りの実行口で流す） */
+  const runR3 = async (hand: "field" | "full", execution: "generation" | "stage"): Promise<readonly WireSent[]> => {
+    const calls: RecordedCall[] =
+      hand === "field"
+        ? [...gHead(R3_BAD_YAML), structured(acceptAll(G_IDS))]
+        : [...gHead(R3_BAD_YAML), structured(judgments(G_IDS, REJECT_R3)), repairDone(R3_GOOD_YAML)];
+    const wire = wireClientOf(calls, "v1.2-ids");
+    const input = inputOf(wire.client, { flags: FLAGS, plan: G_PLAN, source: G_SOURCE });
+    if (execution === "generation") await runGenerationV11a(input);
+    else await runStageRangeV11a({ ...input, range: { start: "name-table", end: "judge" } });
+    return wire.sent;
+  };
+  /** R3 の診断の (試験 ID, observes) の並び（検査の試験と既定値の試験がともにあること） */
+  const r3ObservesOf = (hand: "field" | "full", sent: readonly WireSent[]): readonly (readonly [string, string | null])[] => {
+    const request = sent.find((candidate) => (hand === "field" ? candidate.schemaName === FIELD_REPAIR_SCHEMA_NAME : candidate.kind === "tools"));
+    if (request === undefined) throw new Error("前提が壊れた：修復の要求が無い");
+    const diagnostic = diagnosticOf(request);
+    const pairs = diagnostic.tests.map((entry) => [entry.testId, entry.observes] as const);
+    const validationIds = pairs.filter(([, observes]) => observes === "validation").map(([testId]) => testId);
+    const defaultIds = pairs.filter(([, observes]) => observes === "default-value").map(([testId]) => testId);
+    expect(validationIds.length).toBeGreaterThan(0);
+    expect(validationIds.every((testId) => testId.startsWith("case:"))).toBe(true);
+    expect(defaultIds).toHaveLength(1);
+    expect(defaultIds[0]?.startsWith(GENERATED_TEST_ID_PREFIX)).toBe(true);
+    return pairs;
+  };
+
   /** 送った body の入力（`input` の `input_text` を順につなぐ） */
   const wireInputOf = (sent: WireSent): string => {
     const messages = sent.body["input"] as readonly { readonly content?: readonly { readonly type: string; readonly text?: string }[] }[] | undefined;
@@ -6971,9 +7051,9 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
       .join("\n");
   };
   /** 診断の塊の中身（body の入力から） */
-  const diagnosticOf = (sent: WireSent): { readonly tests: readonly { readonly testId: string; readonly observes: string | null; readonly table: Record<string, unknown> | null }[] } =>
+  const diagnosticOf = (sent: WireSent): { readonly tests: readonly { readonly testId: string; readonly observes: string | null; readonly table: Record<string, unknown> | null; readonly details: readonly string[] }[] } =>
     dataBlockOf(wireInputOf(sent), repairStage.REPAIR_DIAGNOSTIC_DATA_NAME) as {
-      readonly tests: readonly { readonly testId: string; readonly observes: string | null; readonly table: Record<string, unknown> | null }[];
+      readonly tests: readonly { readonly testId: string; readonly observes: string | null; readonly table: Record<string, unknown> | null; readonly details: readonly string[] }[];
     };
   const hasDiagnostic = (sent: WireSent): boolean => wireInputOf(sent).includes(`<data name="${FIELD_REPAIR_DIAGNOSTIC_DATA_NAME}">`);
 
@@ -7209,5 +7289,74 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
     expect(plainTools).toHaveLength(1);
     for (const candidate of plainTools) expect(hasDiagnostic(candidate)).toBe(false);
     expect(hasDiagnostic(sent)).toBe(true);
+  });
+
+  it("(R4) 候補を採ったあとも失敗が残る例で、次の修復の要求は新しい一番良い版の診断になり、同じ版から始めた最初の要求と body が完全に等しい（同じ試験 ID の details が変わる）", async () => {
+    const sentOf = async (calls: readonly RecordedCall[]): Promise<readonly WireSent[]> => {
+      const wire = wireClientOf(calls, "v1.2-ids");
+      await runGenerationV11a(inputOf(wire.client, { flags: FLAGS }));
+      return wire.sent;
+    };
+    const rateDetails = (sent: WireSent): readonly string[] =>
+      (() => {
+        const request = sent.schemaName === FIELD_REPAIR_SCHEMA_NAME || sent.kind === "tools" ? sent : undefined;
+        if (request === undefined) throw new Error("前提が壊れた：修復の要求が無い");
+        return diagnosticOf(request)
+          .tests.filter((entry) => R4_CASES.includes(entry.testId))
+          .flatMap((entry) => entry.details);
+      })();
+
+    // 欄だけの直し：率 base*3・検査 amount<0（6）→ 率 base*4・検査 amount>0（3）を採る → 次の要求は新しい一番良い版
+    const fieldAdopted = await sentOf([
+      ...idsHead({ yaml: R4_FIELD_BAD }),
+      structured(acceptAll()),
+      fieldRepairWith([amountValidation("amount > 0"), { location: "computation:rate", element: rateBody("base * 4") }]),
+      structured(acceptAll()),
+    ]);
+    const fieldFromBest = await sentOf([...idsHead({ yaml: R4_FIELD_CANDIDATE }), structured(acceptAll())]);
+    const fieldA = fieldAdopted.filter((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME);
+    const fieldB = fieldFromBest.filter((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME);
+    expect(fieldA).toHaveLength(2);
+    expect(fieldB).toHaveLength(1);
+    // 採用後の次の要求の body は、同じ一番良い版から始めた最初の要求と完全に等しい
+    expect(wireInputOf(fieldA[1] as WireSent)).toBe(wireInputOf(fieldB[0] as WireSent));
+    // 同じ試験 ID（rate）の details が、実際 9 から実際 12 に変わる
+    expect(rateDetails(fieldA[0] as WireSent).some((detail) => detail.includes("実際 9"))).toBe(true);
+    expect(rateDetails(fieldA[1] as WireSent).some((detail) => detail.includes("実際 12"))).toBe(true);
+    expect(rateDetails(fieldA[0] as WireSent)).not.toEqual(rateDetails(fieldA[1] as WireSent));
+
+    // 全文の直し：場所なし（closeItem を外す）と率 base*3・検査 amount<0（8）→ 率 base*4・検査 amount>0（場所なし 3 + rate 3）を採る
+    const rejected = (): RecordedCall => structured(judgments(IDS, REJECT_R3));
+    const fullAdopted = await sentOf([...idsHead({ yaml: R4_FIELD_BAD }), rejected(), repairDone(R4_FIELD_CANDIDATE), rejected()]);
+    const fullFromBest = await sentOf([...idsHead({ yaml: R4_FIELD_CANDIDATE }), rejected(), repairDone(RUN_YAML)]);
+    const fullA = fullAdopted.filter((sent) => sent.kind === "tools");
+    const fullB = fullFromBest.filter((sent) => sent.kind === "tools");
+    expect(fullA).toHaveLength(2);
+    expect(fullB).toHaveLength(1);
+    expect(wireInputOf(fullA[1] as WireSent)).toBe(wireInputOf(fullB[0] as WireSent));
+    expect(rateDetails(fullA[0] as WireSent).some((detail) => detail.includes("実際 9"))).toBe(true);
+    expect(rateDetails(fullA[1] as WireSent).some((detail) => detail.includes("実際 12"))).toBe(true);
+    expect(rateDetails(fullA[0] as WireSent)).not.toEqual(rateDetails(fullA[1] as WireSent));
+  });
+
+  it("(R3) 同じ操作（validate）で observes が違う検査と既定値の 2 つの試験を、欄だけの直しと全文の直しの両方の入口・一気通貫と段の走りの両方の実行口で、試験 ID ごとに照合する", async () => {
+    const runs = [
+      await runR3("field", "generation"),
+      await runR3("field", "stage"),
+      await runR3("full", "generation"),
+      await runR3("full", "stage"),
+    ];
+    const pairs = runs.map((sent, index) => r3ObservesOf(index < 2 ? "field" : "full", sent));
+    // 4 つの走りで、同じ試験 ID に同じ observes が載る（body の完全な等値）
+    for (const candidate of pairs.slice(1)) expect(candidate).toEqual(pairs[0]);
+    // 検査（validation）と既定値（default-value）が同じ操作（validate）のまま別々に載る
+    const observed = pairs[0] ?? [];
+    expect(new Set(observed.map(([, observes]) => observes))).toEqual(new Set(["validation", "default-value"]));
+    const defaultPair = observed.find(([, observes]) => observes === "default-value");
+    if (defaultPair === undefined) throw new Error("前提が壊れた：既定値の試験が無い");
+    expect(defaultPair[0].startsWith(GENERATED_TEST_ID_PREFIX)).toBe(true);
+    for (const [testId] of observed.filter(([, value]) => value === "validation")) {
+      expect(testId, "検査の試験は T2 の場合（同じ操作 validate）").toMatch(/^case:\d+$/u);
+    }
   });
 });

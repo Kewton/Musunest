@@ -754,6 +754,42 @@ describe("修復へ渡す診断（純粋。Issue #761）：C7・B3・B3' を、�
     expect(diagnostic.tests.map((entry) => entry.roleId)).toEqual(["f.item.none", "f.item.title", null]);
   });
 
+  it("(R1) 型の中の集計元（type.aggregate.entity）も表の実名へ引く。表に無い集計元は行を省き固定の印を置く", () => {
+    const withAggregate = (entity: string): typeof TABLE => ({
+      ...TABLE,
+      rows: TABLE.rows.map((row) =>
+        row.id === "c.byKind"
+          ? ({
+              ...row,
+              type: { ...(row.type as unknown as Record<string, unknown>), aggregate: { kind: "count" as const, entity } },
+            } as (typeof TABLE.rows)[number])
+          : row,
+      ),
+    });
+    const suite: TestSuite = { tests: [test("g-aggregate", "R4", "computation", "c.byKind", "compute")] };
+    const diagnosticOf = (entity: string) =>
+      buildRepairDiagnostic(
+        diagnosticInput({
+          table: withAggregate(entity),
+          suite,
+          observes: new Map<string, TestObserves>([["g-aggregate", "value"]]),
+          mismatches: [{ testId: "g-aggregate", detail: "集計の値が違う" }],
+        }),
+      );
+    const resolved = diagnosticOf("e.item");
+    expect(resolved.tests[0]?.table?.type).toEqual({
+      valueType: "groups",
+      scope: "groups",
+      form: "aggregate",
+      aggregate: { kind: "count", entity: "item" },
+    });
+    expect(JSON.stringify(resolved.tests)).not.toContain('"e.item"');
+    // 表に無い集計元は、型や所属を推測せずに行を省いて固定の印を置く
+    const missing = diagnosticOf("e.none");
+    expect(missing.tests[0]?.table).toBeNull();
+    expect(missing.tests[0]?.omitted).toBe(REPAIR_DIAGNOSTIC_OMITTED);
+  });
+
   it("同じ入力から 2 回同じ結果（決定的）。C7 は試験 ID ごとに 1 件にし、順は不一致・未解決の順", () => {
     const inputValue = diagnosticInput({
       mismatches: [
