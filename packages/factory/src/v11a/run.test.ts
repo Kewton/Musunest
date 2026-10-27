@@ -6794,6 +6794,21 @@ describe("⑥ 直すの段の effort の口（repair。Issue #751）：実行口
     for (const sent of fields) expect(wireEffortOf(sent)).toBe("medium");
   });
 
+  it("(3) 探索 on の全文の直し（ids on）：場所なしの失敗がある往復は道具付きの直す段になり、その wire は全部 medium", async () => {
+    // 検査の節を読めない形（validations: [amount]）にすると静的チェックに落ち、場所を作らずに全文の直し（道具付き）へ流れる
+    const NOVAL = replaced(RUN_YAML, "validations:\n  - name: amount\n    entity: item\n    expression: amount > 0\n", "validations: []\n");
+    const FLOW = replaced(NOVAL, "validations: []\n", "validations: [amount]\n");
+    const calls = [...idsHead({ yaml: FLOW }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())];
+    const tuned = await runWire(calls, "v1.2-ids", { flags: { ledger: true, ids: true, searchRepair: true }, stageEfforts: EFFORTS });
+    const tools = tuned.sent.filter((sent) => sent.kind === "tools");
+    expect(tools.length).toBeGreaterThan(0);
+    for (const sent of tools) {
+      expect(wireEffortOf(sent)).toBe("medium");
+      expect(sent.body["max_output_tokens"]).toBe(maxOutputTokensForEffort("medium", "repair"));
+    }
+    expect(tuned.sent.some((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME)).toBe(false);
+  });
+
   it("(1) 段の走りの実行口（runStageRangeV11a）でも、全文の直しの道具付きの往復の全部のターンの wire は medium", async () => {
     const calls = [...head({ yaml: BAD_YAML }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())];
     const wire = wireClientOf(calls, "v1.1a");
