@@ -4845,22 +4845,32 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
   /**
    * 不変の比較元（直す前＝99b6478 の工場で同じ試験の台本を流した出力のダイジェスト）。段の走りの記録は search_repair を除いて照らし
    * （直す前の記録は欄を持たない）、ほかのファイル・要求の列・終了コード・1 行の要約はそのまま照らす。一時の場所の名前は目印に置き換える
+   *
+   * **Issue #761 の取り直し（旧値と理由）**：ids on・search-repair on の修復の 2 つの入口に、診断の塊 1 つと規則 1 つ（欄だけの直し）を
+   * 足したので、修復を呼ぶ ids on の経路の要求の列が変わった。Issue #761 が認める取り直しは ids on の修復の要求を含むものだけなので、
+   * 次の 12 経路だけ値を取り直した（段の走りは `write` から `judge` までで修復を呼ぶ。`stage-stop-first-eval` は修復の前に止まるので
+   * 旧値のまま。ids off・search-repair off・v1.1a も旧値のまま）：
+   *   stage-stagnation 055ebe51…→49a368e9…／stage-adopting 584eaf3e…→23434cca…／stage-sets 25a22183…→8f758fc3…／
+   *   stage-mixed c49884f9…→2ea0ad78…／stage-returned 7669c971…→e23b3086…／stage-recounts de005c95…→0843efec…／
+   *   stage-stop-repair 4e17820e…→c6d4b2e4…／stage-stop-commit ab11a902…→288415f3…／
+   *   whole-stagnation 248017e1…→883aa1dd…／whole-adopting ca3074eb…→092a3533…／whole-sets acd0d9b6…→e13e5689…／
+   *   whole-mixed 175e38f8…→25b33209…／whole-recounts 0a657756…→ad7ebe0d…
    */
   const BEFORE_746: Readonly<Record<string, string>> = {
-    "stage-stagnation": "055ebe51378e8035e4ea152c509710fc84473c6d954be3d1168cb17b4ced9a1f",
-    "stage-adopting": "584eaf3e017350fb46a395f74ac640038a782c7b306b572e7ccbe6890fecd313",
-    "stage-sets": "25a22183c57cdbb64fe6b74e699063c6356201a037265d561f2731a1ac437146",
-    "stage-mixed": "c49884f9b7a556c4e0c9afd90d1a22f37b5828e44fee9d58399437dbaf5798d4",
-    "stage-returned": "7669c971267262ebc921bd61046f1d9e3540a12d3892a48d9508e281b544af78",
-    "stage-recounts": "de005c953d91b30fc27a7a24c2d41292be6cabf35242a0525a03804d1bd33252",
-    "stage-stop-repair": "4e17820e9cd8415b24850f555bed05d332ce45a3c79eb1d6eedb93ee1a892dac",
+    "stage-stagnation": "49a368e910f1c137523f519524aaf90ab3be8d3773126aee8c2e4d3baac37dbe",
+    "stage-adopting": "23434cca3fd45c90b17cb9ed5df60324a0c48827dfa3c9973659038d3fdcc586",
+    "stage-sets": "8f758fc3e2e066f9c959c066aca50af60e9751134e40fe7a28b29e77b2172ad3",
+    "stage-mixed": "2ea0ad787b19d02ca88a4838c200f169937b7bfbe354f7477ee665eccae04fb2",
+    "stage-returned": "e23b3086a05be0c58a38ab77d0de9c80959aa4609079ce67f6e960d5e7e2551f",
+    "stage-recounts": "0843efecb4f30c3d8ac596e1b79337559b500121e0468da5f1a30f4eb523533c",
+    "stage-stop-repair": "c6d4b2e4ed477044da1b31dd064284bebe29f95e0047570b8860d372cd792ac3",
     "stage-stop-first-eval": "fd323bfcc9d82f0f102dbf43d9ce14db17bc05cc9b8c0ff84c91939270710948",
-    "stage-stop-commit": "ab11a902ec436a60193e2b2b4c5ab3bf4afd6ae88b338dbb74bc042944100909",
-    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
-    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
-    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
-    "whole-mixed": "175e38f8f70ca325904c33cad04d27aede2d8cd1005ebef141c9825ab4acf572",
-    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
+    "stage-stop-commit": "288415f342218479b9bf6d38c392db03d5327d0f26418c227d58882c24ee9a47",
+    "whole-stagnation": "883aa1dd31903213a189e2e66764dd75309b1dd37bf9b332db04e71cc8270615",
+    "whole-adopting": "092a35339921904319692086e813dc2b6f1f1ca904e3d2401f031400d5bd9f31",
+    "whole-sets": "e13e5689216675a6f2902473c0c077c9ccbfb4e54e5d76b87d2c6fb10688cd63",
+    "whole-mixed": "25b33209e5ab933891fde2ad38ef607734add0c3ab1a924892831b7ba502115c",
+    "whole-recounts": "ad7ebe0d0d88b7460b4fb079f57e9d20f9c52fb30a8da1a3614aaab22d538d9a",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
     "stage-search-repair-off": "5dc5994e2dffc41aab246647e4b9b5d61d281194cf7cfff32d01525c95c311cd",
@@ -4988,7 +4998,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     return { digest, hasSearch };
   }
 
-  it("不変：v1・v1.1a・ids off の v1.2・search-repair off の走りと、ids on・search-repair on の一気通貫・段の走り（search_repair を除く）の全出力が直す前（99b6478）とバイト列で同じ。欄を持つのは ids on・search-repair on の段の走りで探索に入ったものだけ", async () => {
+  it("不変：v1・v1.1a・ids off の v1.2・search-repair off の走りと、ids on・search-repair on の一気通貫・段の走り（search_repair を除く）の全出力が比較元とバイト列で同じ（修復を呼ぶ ids on の経路だけ #761 の診断の塊の分を取り直した）。欄を持つのは ids on・search-repair on の段の走りで探索に入ったものだけ", async () => {
     const digests: Record<string, string> = {};
     const searched: Record<string, boolean> = {};
     for (const entry of INVARIANT_RUNS) {
@@ -5010,22 +5020,28 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    * この試験の各経路を流して出た値をそのまま固定した。その後 `git checkout HEAD -- <同じ 4 本>` で戻し、
    * 製品のファイルに差が無いことを確かめている。ids on の段の記録は新しい 2 欄（requests・stage_spans）を
    * 除いて比べ、search_repair を含むほかの欄は比較に残す。
+   *
+   * **Issue #761 の取り直し（旧値と理由）**：修復を呼ぶ ids on の経路の要求の列に診断の塊 1 つ（と欄だけの直しの規則 1 つ）が増えたため、
+   * 上の BEFORE_746 と同じ 12 経路だけ取り直した（旧値：stage-stagnation 0ef2fe8b…／stage-adopting d40f0f31…／stage-sets a3969eaa…／
+   * stage-mixed 1f029859…／stage-returned a2f5dad9…／stage-recounts adbcd1aa…／stage-stop-repair 1bd073e2…／stage-stop-commit
+   * 1bbfcba6…／whole-stagnation 248017e1…／whole-adopting ca3074eb…／whole-sets acd0d9b6…／whole-mixed 175e38f8…／whole-recounts
+   * 0a657756…）。`stage-stop-first-eval`・ids off・search-repair off・v1.1a は旧値のまま
    */
   const BEFORE_748_BASE: Readonly<Record<string, string>> = {
-    "stage-stagnation": "0ef2fe8bc20c81f4a8dba870cdb2103f14ba42b0c064cccd68f01c3c163008f8",
-    "stage-adopting": "d40f0f31882cd2b83f5d93b308283cf18ba0b63b9a1cd72f31d332fd31fcf8d1",
-    "stage-sets": "a3969eaa6be4fe49cbffbebc81010fbb5df3312b0d325cbf3b873ad9c92cbf05",
-    "stage-mixed": "1f029859b4af94df617d1a67f23ddfc7113dae32bc5079615943b28e24b467c6",
-    "stage-returned": "a2f5dad9b7cefe9e2e530c3517774be719f2cefb24d4db19864174b2cde09429",
-    "stage-recounts": "adbcd1aa9c7f452cb352d11cd873eab96966a1be4f155479a67b3444f844d004",
-    "stage-stop-repair": "1bd073e2d94a519d53762e8e0b6fecb78f9731ff306e4422377288a9eee681bb",
+    "stage-stagnation": "af4dfa22006e2ba2a8af5897c538c26973f074c72a52a3e5197815186dc67059",
+    "stage-adopting": "6da4f975f4ac5e06b2fc2030eb77c1cccc89bf2d5503dbeba2baa027992433d8",
+    "stage-sets": "6e1c5ff55655e17893ddff553c984b2a75737e7bf53d8a82bd01a18dfb212a6c",
+    "stage-mixed": "8f3915c5eb65e9dce28addb2ec97e5942606b8f508d2ba70eb13c22266c85df1",
+    "stage-returned": "4a3d8c40987efe842f5f3c2f46a3648b4282f7a80f9f3581883b7210eb467fb0",
+    "stage-recounts": "4db16a8cdf2f0cbd74824e54fab7b46a1cd2ffdfc911561cc0670cc78e6cd2df",
+    "stage-stop-repair": "1c991819116126c6239050829f1aac18d8d449ed1c42442c4b81bbf13310ef17",
     "stage-stop-first-eval": "df320daf50a2c3e343c582894f57af6874bee3bd02d881ad445e36734f8d490f",
-    "stage-stop-commit": "1bbfcba658904ff0c2aa4fbe935e00cbcb427a466928b678b81c2017695a3373",
-    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
-    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
-    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
-    "whole-mixed": "175e38f8f70ca325904c33cad04d27aede2d8cd1005ebef141c9825ab4acf572",
-    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
+    "stage-stop-commit": "ca7e70ecdde9ef030c38b7d84525b24ebcd415fdb9d744f4b955769133c75f63",
+    "whole-stagnation": "883aa1dd31903213a189e2e66764dd75309b1dd37bf9b332db04e71cc8270615",
+    "whole-adopting": "092a35339921904319692086e813dc2b6f1f1ca904e3d2401f031400d5bd9f31",
+    "whole-sets": "e13e5689216675a6f2902473c0c077c9ccbfb4e54e5d76b87d2c6fb10688cd63",
+    "whole-mixed": "25b33209e5ab933891fde2ad38ef607734add0c3ab1a924892831b7ba502115c",
+    "whole-recounts": "ad7ebe0d0d88b7460b4fb079f57e9d20f9c52fb30a8da1a3614aaab22d538d9a",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
     "stage-search-repair-off": "5dc5994e2dffc41aab246647e4b9b5d61d281194cf7cfff32d01525c95c311cd",
@@ -5033,7 +5049,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
-  it("不変（4a80f4b の全出力・search_repair を含む）：ids on の段の記録だけ requests・stage_spans を除き、ほかの欄は 1 つも落とさずに比較元と同じ", async (ctx) => {
+  it("不変（4a80f4b の全出力・search_repair を含む）：ids on の段の記録だけ requests・stage_spans を除き、ほかの欄は 1 つも落とさずに比較元と同じ（修復を呼ぶ ids on の経路だけ #761 の診断の塊の分を取り直した）", async (ctx) => {
     const digests: Record<string, string> = {};
     const searched: Record<string, boolean> = {};
     let current = "開始前";

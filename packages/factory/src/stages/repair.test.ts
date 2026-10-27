@@ -40,6 +40,7 @@ import type { TestRunReport } from "./run-tests.js";
 import type { DeclarationEvaluator, EvaluationContext } from "./tools.js";
 import {
   DECLARATION_REJECTIONS_DATA_NAME,
+  REPAIR_DIAGNOSTIC_DATA_NAME,
   REPAIR_REQUIRED_VALIDATIONS_DATA_NAME,
   REPAIR_STEP_LIMITS_DATA_NAME,
   checkDeclarationVersion,
@@ -56,6 +57,7 @@ import {
   type VersionReport,
 } from "./repair.js";
 import * as repairTools from "./tools.js";
+import type { RepairDiagnostic } from "../v12/locate.js";
 
 const done = (declaration: string, disputes: readonly { testId: string; quote: string }[] = []) => ({
   kind: "tools" as const,
@@ -1755,5 +1757,81 @@ describe("直す段のデータの末尾に要る検査の骨組みを足す（�
     expect(input.indexOf(REPAIR_REQUIRED_VALIDATIONS_DATA_NAME)).toBeGreaterThan(input.indexOf(REPAIR_STEP_LIMITS_DATA_NAME));
     expect(input.endsWith(block)).toBe(true);
     expect(blockOf(input).value).toEqual(limitsBlock(0));
+  });
+});
+
+// ── 診断（旗 v12.ids と探索がともに on・Issue #761）──────────────────────────────────
+
+describe("直す段のデータの末尾に診断を足す（旗 v12.ids と探索がともに on。Issue #761）", () => {
+  const DIAGNOSTIC: RepairDiagnostic = {
+    tests: [
+      {
+        testId: "t1",
+        requirementId: "R-1",
+        roleId: "c.total",
+        observes: "value",
+        table: null,
+        omitted: null,
+        detail: "計算 total が期待と違う（期待 42、実際 21）",
+        routes: [{ testId: "t1", route: "missing-element", detail: "計算 total が期待と違う（期待 42、実際 21）" }],
+        structural: [],
+      },
+    ],
+    correspondence: [{ requirementId: "R-1", misses: [{ requirementId: "R-1", location: null, detail: "対応そのものが無い" }] }],
+    rejections: [{ requirementId: "R-2", rejections: [{ requirementId: "R-2", kind: "weak-verification", quote: "補助の値を出す" }] }],
+  };
+  const SKELETON = [{ entity: "record", name: "amount", rowId: "f.record.amount", rowKind: "field", testIds: ["t1"], conflict: false }] as const;
+  const stepRequests = async (extra: Partial<RepairStepInput>) => {
+    const initial = await version(V1);
+    const recording = createRecordingClient([toolCalls([staticCheckCall("c1", V1)]), done(V2)]);
+    const outcome = await runRepairStep({
+      source: SOURCE,
+      list: LIST,
+      suite: SUITE,
+      current: initial,
+      correspondences: CORRESPONDENCES,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      ...extra,
+    });
+    return { outcome, requests: recording.tools };
+  };
+  const block = `<data name="${REPAIR_DIAGNOSTIC_DATA_NAME}">\n${JSON.stringify(DIAGNOSTIC, null, 2)}\n</data>`;
+
+  it("省けば要求はバイト列で同じ。渡すと入力の末尾に 1 つだけ増え、規則・道具・schema・往復は同じ。結果も同じ", async () => {
+    const plain = await stepRequests({});
+    const withDiagnostic = await stepRequests({ diagnostic: DIAGNOSTIC });
+    for (const request of plain.requests) expect(request.input).not.toContain(REPAIR_DIAGNOSTIC_DATA_NAME);
+    expect(withDiagnostic.outcome).toEqual(plain.outcome);
+    expect(withDiagnostic.requests).toHaveLength(plain.requests.length);
+    for (const [index, request] of withDiagnostic.requests.entries()) {
+      const base = plain.requests[index];
+      if (base === undefined) throw new Error("要求が無い");
+      expect(request.input).toBe(`${base.input}\n${block}`);
+      expect(request.instructions).toBe(base.instructions);
+      expect(request.rules).toEqual(base.rules);
+      expect(request.documents).toEqual(base.documents);
+      expect(request.tools).toEqual(base.tools);
+      expect(request.schemaName).toBe(base.schemaName);
+      expect(request.schema).toEqual(base.schema);
+      expect(request.turns).toEqual(base.turns);
+    }
+    // 全文の直しの共通の規則は変えない（診断はデータだけ）
+    expect(REPAIR_RULES.join("\n")).not.toContain(REPAIR_DIAGNOSTIC_DATA_NAME);
+    expectNoAcceptanceMaterial([withDiagnostic.requests.map((request) => request.input).join("\n")]);
+  });
+
+  it("拒否・上限・骨組みの塊と併せたときは、診断が末尾（すべてのあと）に来る", async () => {
+    const { requests } = await stepRequests({
+      declRejections: [{ requirementId: "R-1", kind: "expression", quote: "件数を合計する" }],
+      stepLimitsData: true,
+      requiredValidations: SKELETON,
+      diagnostic: DIAGNOSTIC,
+    });
+    const input = requests[0]?.input ?? "";
+    expect(input.indexOf(REPAIR_STEP_LIMITS_DATA_NAME)).toBeGreaterThan(input.indexOf(DECLARATION_REJECTIONS_DATA_NAME));
+    expect(input.indexOf(REPAIR_REQUIRED_VALIDATIONS_DATA_NAME)).toBeGreaterThan(input.indexOf(REPAIR_STEP_LIMITS_DATA_NAME));
+    expect(input.indexOf(REPAIR_DIAGNOSTIC_DATA_NAME)).toBeGreaterThan(input.indexOf(REPAIR_REQUIRED_VALIDATIONS_DATA_NAME));
+    expect(input.endsWith(block)).toBe(true);
   });
 });

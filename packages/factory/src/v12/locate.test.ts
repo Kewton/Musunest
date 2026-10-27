@@ -3,6 +3,8 @@
 // 純粋な関数だけを照らす。LLM・判定・時計を使わない。題材は v1.1α の共通の題材（`v11a/__tests__/fixtures.ts`）。
 import { describe, expect, it } from "vitest";
 import type { FixedTest, TestSuite } from "../fixed-test.js";
+import type { StructuralCheckOutcome } from "../pipeline.js";
+import type { RoutedFailure } from "../stages/run-tests.js";
 import { expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
 import { FIXTURE_YAML, fixtureList, fixtureTable, fixtureYaml, normalizedFixture } from "../v11a/__tests__/fixtures.js";
 import { bindTestsById, correspondenceFromTable, requiredValidationsOf } from "../v11a/bind-by-id.js";
@@ -10,9 +12,11 @@ import { toV1 } from "../v11a/convert.js";
 import { createV11aEvaluator } from "../v11a/evaluate.js";
 import type { TestObserves } from "../v11a/stages/test-spec.js";
 import {
+  buildRepairDiagnostic,
   canRepairFields,
   declarationSpans,
   locateFailures,
+  REPAIR_DIAGNOSTIC_OMITTED,
   spanOf,
   UNLOCATED_REASONS,
   type LocateInput,
@@ -533,6 +537,245 @@ describe("旗 v12.ids の場所（純粋）：validate の試験は結び付け�
   });
 });
 
+// ── 修復へ渡す診断（旗 v12.ids と探索がともに on。Issue #761）──────────────────────────
+
+/** 観測する性質の写像（題材の試験の分） */
+const OBSERVES = new Map<string, TestObserves>([
+  ["r1-validate", "validation"],
+  ["r3-when", "when"],
+  ["r4-rate", "value"],
+]);
+
+/** 診断の材料（失敗は上書きする） */
+const diagnosticInput = (overrides: Partial<Parameters<typeof buildRepairDiagnostic>[0]> = {}): Parameters<typeof buildRepairDiagnostic>[0] => ({
+  table: TABLE,
+  suite: SUITE,
+  observes: OBSERVES,
+  mismatches: [],
+  unresolved: [],
+  correspondenceMisses: [],
+  rejections: [],
+  routes: [],
+  ...overrides,
+});
+
+describe("修復へ渡す診断（純粋。Issue #761）：C7・B3・B3' を、表の実名と観測する性質に結び付ける", () => {
+  it("(1) 表の ID と宣言の名前が違う試験でも、表の行は B1 と同じ欄で ID を実名へ引く（所属・参照先・見出しの元）", () => {
+    const suite: TestSuite = {
+      tests: [
+        test("o-owner", "R1", "field", "f.item.owner", "validate"),
+        test("g-kind", "R4", "computation", "c.byKind", "compute"),
+      ],
+    };
+    const diagnostic = buildRepairDiagnostic(
+      diagnosticInput({
+        suite,
+        observes: new Map<string, TestObserves>([
+          ["o-owner", "existence"],
+          ["g-kind", "value"],
+        ]),
+        mismatches: [
+          { testId: "o-owner", detail: "参照の先が違う" },
+          { testId: "g-kind", detail: "集計の分け方が違う" },
+        ],
+      }),
+    );
+    // 表の ID（f.item.owner・c.byKind）は行の id のまま。宣言の名前と所属・参照先・見出しの元は実名
+    expect(diagnostic.tests.map((entry) => [entry.testId, entry.table])).toEqual([
+      [
+        "o-owner",
+        {
+          id: "f.item.owner",
+          kind: "field",
+          entity: "item",
+          name: "owner",
+          type: "ref",
+          options: null,
+          groupBy: null,
+          refEntity: "member",
+          role: TABLE.rows.find((row) => row.id === "f.item.owner")?.role,
+        },
+      ],
+      [
+        "g-kind",
+        {
+          id: "c.byKind",
+          kind: "computation",
+          entity: null,
+          name: "byKind",
+          type: { valueType: "groups", scope: "groups", form: "aggregate" },
+          options: null,
+          groupBy: { kind: "enum", field: "kind" },
+          refEntity: null,
+          role: TABLE.rows.find((row) => row.id === "c.byKind")?.role,
+        },
+      ],
+    ]);
+    expect(diagnostic.tests.map((entry) => entry.observes)).toEqual(["existence", "value"]);
+    expect(diagnostic.tests.map((entry) => entry.omitted)).toEqual([null, null]);
+    // 表の ID を実名の欄へ混ぜない（entity に e.item・refEntity に e.member・groupBy.field に f.item.kind を残さない）
+    expect(JSON.stringify(diagnostic)).not.toContain('"e.item"');
+    expect(JSON.stringify(diagnostic)).not.toContain('"e.member"');
+    expect(JSON.stringify(diagnostic)).not.toContain('"f.item.kind"');
+  });
+
+  it("(1) 同じ操作（validate）の 2 つの試験でも、観測する性質が違えば 2 件ともそのまま届く", () => {
+    const suite: TestSuite = {
+      tests: [test("v-normal", "R1", "field", "f.item.amount", "validate"), test("v-default", "R1", "field", "f.item.amount", "validate")],
+    };
+    const diagnostic = buildRepairDiagnostic(
+      diagnosticInput({
+        suite,
+        observes: new Map<string, TestObserves>([
+          ["v-normal", "validation"],
+          ["v-default", "default-value"],
+        ]),
+        mismatches: [
+          { testId: "v-normal", detail: "検査が落ちない" },
+          { testId: "v-default", detail: "既定値が違う" },
+        ],
+      }),
+    );
+    expect(diagnostic.tests.map((entry) => [entry.testId, entry.observes, entry.table?.name])).toEqual([
+      ["v-normal", "validation", "amount"],
+      ["v-default", "default-value", "amount"],
+    ]);
+  });
+
+  it("(2) C7：値を文中に含む detail をそのまま写し、actual の欄を作らない。経路と構造の違いは同じ試験 ID に結び付く", () => {
+    const detail = "項目 amount の種類が number（期待 string、実際 number）";
+    const routes: readonly RoutedFailure[] = [
+      { testId: "r1-validate", route: "missing-element", detail },
+      { testId: "r3-when", route: "missing-element", detail: "別の試験の経路" },
+    ];
+    const structural: readonly StructuralCheckOutcome[] = [
+      { testId: "r1-validate", requirementId: "R1", check: "field-type", result: "mismatch", detail },
+      { testId: "r1-validate", requirementId: "R1", check: "action-kind", result: "pass", detail: "成り立った" },
+      { testId: "r3-when", requirementId: "R3", check: "action-kind", result: "pass", detail: "成り立った" },
+    ];
+    const diagnostic = buildRepairDiagnostic(
+      diagnosticInput({ mismatches: [{ testId: "r1-validate", detail }], routes, structural }),
+    );
+    expect(diagnostic.tests).toHaveLength(1);
+    const entry = diagnostic.tests[0];
+    if (entry === undefined) throw new Error("前提が壊れた");
+    // detail は評価の返り値と完全に一致（解析・再評価・expected からの補完をしない）
+    expect(entry.detail).toBe(detail);
+    expect(entry.requirementId).toBe("R1");
+    expect(entry.roleId).toBe("f.item.amount");
+    // 構造化した actual の欄は作らない
+    expect(Object.keys(entry)).not.toContain("actual");
+    expect(JSON.stringify(diagnostic)).not.toContain('"actual"');
+    // 経路と構造の違い（成り立たなかったもの）は、同じ試験 ID のものだけが同じ件に結び付く
+    expect(entry.routes).toEqual([routes[0]]);
+    expect(entry.structural).toEqual([structural[0]]);
+    expect(JSON.stringify(diagnostic)).not.toContain("成り立った");
+  });
+
+  it("(3) B3：同じ要件の異なる 2 か所の落ち（location の無い落ちを含む）を、要件 ID ごとに全件の配列で届ける", () => {
+    const diagnostic = buildRepairDiagnostic(
+      diagnosticInput({
+        correspondenceMisses: [
+          { requirementId: "R4", location: { kind: "computation", entity: null, name: "byKind" }, detail: "分け方の項目が無い" },
+          { requirementId: "R4", detail: "対応そのものが無い" },
+          { requirementId: "R3", location: { kind: "action", entity: "item", name: "closeItem" }, detail: "操作が無い" },
+        ],
+      }),
+    );
+    expect(diagnostic.correspondence).toEqual([
+      {
+        requirementId: "R4",
+        misses: [
+          { requirementId: "R4", location: { kind: "computation", entity: null, name: "byKind" }, detail: "分け方の項目が無い" },
+          { requirementId: "R4", location: null, detail: "対応そのものが無い" },
+        ],
+      },
+      {
+        requirementId: "R3",
+        misses: [{ requirementId: "R3", location: { kind: "action", entity: "item", name: "closeItem" }, detail: "操作が無い" }],
+      },
+    ]);
+  });
+
+  it("(3) B3'：試験を持たない要件の拒否も、種類と引用のまま要件 ID で届く。拒否の無い要件・unmarked からは作らない", () => {
+    const diagnostic = buildRepairDiagnostic(
+      diagnosticInput({
+        mismatches: [{ testId: "r1-validate", detail: "不一致" }],
+        rejections: [
+          { requirementId: "R3", kind: "mismatch", quote: "締められる" },
+          { requirementId: "R5", kind: "weak-verification", quote: "書けない" },
+        ],
+      }),
+    );
+    // R5 は固定した試験を持たないが、拒否は要件 ID で届く（試験 ID を作らない）
+    expect(diagnostic.rejections).toEqual([
+      {
+        requirementId: "R3",
+        rejections: [{ requirementId: "R3", kind: "mismatch", quote: "締められる" }],
+      },
+      {
+        requirementId: "R5",
+        rejections: [{ requirementId: "R5", kind: "weak-verification", quote: "書けない" }],
+      },
+    ]);
+    // 拒否を渡していない要件（R2・R4）の拒否を作らない
+    expect(diagnostic.rejections.map((entry) => entry.requirementId)).toEqual(["R3", "R5"]);
+    expect(JSON.stringify(diagnostic.rejections)).not.toContain("r1-validate");
+  });
+
+  it("(3) 試験の無い要件・表に無い ID・参照の欠けで、ID や結果を作らない（省いた印だけを置く）", () => {
+    const brokenTable = {
+      ...TABLE,
+      rows: TABLE.rows.map((row) => (row.id === "f.item.title" ? { ...row, entity: "e.none" } : row)),
+    };
+    const suite: TestSuite = {
+      tests: [test("unknown", "R1", "field", "f.item.none", "validate"), test("r2-title", "R2", "field", "f.item.title", "validate")],
+    };
+    const diagnostic = buildRepairDiagnostic(
+      diagnosticInput({
+        table: brokenTable,
+        suite,
+        observes: new Map<string, TestObserves>(),
+        mismatches: [
+          { testId: "unknown", detail: "行が無い" },
+          { testId: "r2-title", detail: "所属が引けない" },
+          { testId: "not-in-suite", detail: "試験が無い" },
+        ],
+      }),
+    );
+    // 表に無い行 ID・所属の ID が表に無い行は、行を省いて固定の印を置く（型や所属を推測しない）
+    expect(diagnostic.tests.map((entry) => [entry.testId, entry.table, entry.omitted, entry.observes])).toEqual([
+      ["unknown", null, REPAIR_DIAGNOSTIC_OMITTED, null],
+      ["r2-title", null, REPAIR_DIAGNOSTIC_OMITTED, null],
+      // 試験が無ければ要件 ID・行 ID を作らない（試験 ID は評価の返り値のまま）
+      ["not-in-suite", null, null, null],
+    ]);
+    expect(diagnostic.tests.map((entry) => entry.requirementId)).toEqual(["R1", "R2", null]);
+    expect(diagnostic.tests.map((entry) => entry.roleId)).toEqual(["f.item.none", "f.item.title", null]);
+  });
+
+  it("同じ入力から 2 回同じ結果（決定的）。C7 は不一致・未解決で同じ試験 ID を 1 件にし、順は評価の返り値の順", () => {
+    const inputValue = diagnosticInput({
+      mismatches: [
+        { testId: "r3-when", detail: "不一致 1" },
+        { testId: "r3-when", detail: "不一致 1" },
+        { testId: "r1-validate", detail: "不一致 2" },
+      ],
+      unresolved: [
+        { testId: "r4-rate", detail: "未解決" },
+        { testId: "r1-validate", detail: "未解決（不一致と同じ ID）" },
+      ],
+    });
+    const first = buildRepairDiagnostic(inputValue);
+    expect(JSON.stringify(buildRepairDiagnostic(inputValue))).toBe(JSON.stringify(first));
+    expect(first.tests.map((entry) => [entry.testId, entry.detail])).toEqual([
+      ["r3-when", "不一致 1"],
+      ["r1-validate", "不一致 2"],
+      ["r4-rate", "未解決"],
+    ]);
+  });
+});
+
 describe("題材の言葉の走査（Issue #553・#667 で足した・直したファイル）", () => {
   it("場所・欄だけの直し・探索の部品とその試験のソースに受入の題材の言葉が無い", () => {
     const files = [
@@ -545,6 +788,8 @@ describe("題材の言葉の走査（Issue #553・#667 で足した・直した�
       "./stages/field-repair.ts",
       "./stages/field-repair.test.ts",
       "./stages/field-repair-wire.test.ts",
+      "../stages/repair.ts",
+      "../stages/repair.test.ts",
       "../v11a/run.ts",
       "../v11a/run.test.ts",
       "../v11a/__tests__/fixtures.ts",
