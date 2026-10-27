@@ -1986,7 +1986,7 @@ async function runV11a(
             correspondences: current.report.correspondence?.entries ?? [],
             ...(context.ownership === undefined ? {} : { ownership: context.ownership }),
             documents: input.documents,
-            gateway,
+            gateway: gateway.forStage("repair"),
             // 道具と版の再検査は、評価口から v1.1α の結び付けと B3 を使う（その時点の文脈で。D11）
             evaluate: evaluator.evaluate,
             ...(current.rejections.length === 0 ? {} : { declRejections: current.rejections }),
@@ -2389,7 +2389,7 @@ async function runV11a(
               declaration: best.report.declaration.source,
               failures: located,
               documents: input.documents,
-              gateway,
+              gateway: gateway.forStage("repair"),
             }),
           );
           const fieldRow = requestReturned();
@@ -2435,7 +2435,7 @@ async function runV11a(
             correspondences: best.report.correspondence?.entries ?? [],
             ...(context.ownership === undefined ? {} : { ownership: context.ownership }),
             documents: input.documents,
-            gateway,
+            gateway: gateway.forStage("repair"),
             evaluate: evaluator.evaluate,
             ...(best.rejections.length === 0 ? {} : { declRejections: best.rejections }),
             ...repairStepIds(),

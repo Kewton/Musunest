@@ -25,8 +25,10 @@ import {
 import type { Judge, JudgeAnswer } from "../judge.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { RecordedCall } from "../llm-fake.js";
-import type { LlmStructuredRequest, LlmToolRequest, LlmUsage } from "../llm.js";
+import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "../llm.js";
 import { AGENT_LIMITS, STAGE_EFFORT_STAGES, maxOutputTokensForEffort } from "../limits.js";
+import { createOpenAiLlmClient, type FetchLike } from "../openai.js";
+import { resolveStageEnvelope, type EnvelopeId } from "../schema-envelope.js";
 import { requirementsFromPlan, type RequirementList, type TestSuite } from "../pipeline.js";
 import * as bindModule from "../stages/bind.js";
 import * as correspondenceStage from "../stages/correspondence.js";
@@ -700,6 +702,8 @@ describe("(b) T1' に 2 回落ちる", () => {
 
 /** 要求から段ごとの effort と打ち切りの合図を除く（口なしの走りの要求と比べる。Issue #664） */
 const withoutEffort664 = ({ effort: _effort, signal: _signal, ...rest }: LlmStructuredRequest) => rest;
+/** 道具付きの要求から段ごとの effort と打ち切りの合図を除く（Issue #751） */
+const withoutToolEffort664 = ({ effort: _effort, signal: _signal, ...rest }: LlmToolRequest) => rest;
 
 describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3（Issue #593）", () => {
   const IDS_FLAGS = { ledger: true, searchRepair: true, ids: true };
@@ -742,17 +746,20 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     }
   });
 
-  it("段ごとの effort（Issue #664）(6)：C1・C2・C3・T2 の束・B1・B3' に違う effort を指定した走りで、各要求の effort と上限がその段の指定から出る。effort の欄を除いた要求・段の記録・要約・納品物・診断は口なしの走りと深く等しい", async () => {
-    const efforts = { vocabulary: "low", mapping: "medium", "semantic-check": "low", "test-spec": "medium", write: "low", "decl-check": "medium" } as const;
+  it("段ごとの effort（Issue #664・#751）(6)：C1・C2・C3・T2 の束・B1・B3'・⑥ 直すに違う effort を指定した走りで、各要求（道具付きを含む）の effort と上限がその段の指定から出る。effort の欄を除いた要求・段の記録・要約・納品物・診断は口なしの走りと深く等しい", async () => {
+    const efforts = { vocabulary: "low", mapping: "medium", "semantic-check": "low", "test-spec": "medium", write: "low", "decl-check": "medium", repair: "low" } as const;
     // 要求の schema の名前 → 段（C1 は束ごとの名前、B1 は v1.1α の宣言の名前）と、その段が引く出力の上限の段
     const stageOf = (schemaName: string): keyof typeof efforts | undefined =>
       schemaName.startsWith("vocabulary-")
         ? "vocabulary"
-        : (({ [MAPPING_SCHEMA_NAME]: "mapping", [SEMANTIC_CHECK_SCHEMA_NAME]: "semantic-check", [TEST_SPEC_SCHEMA_NAME]: "test-spec", "declaration-v11a": "write", [DECL_CHECK_SCHEMA_NAME]: "decl-check" }) as Record<string, keyof typeof efforts>)[schemaName];
-    const outputStageOf = { vocabulary: "name-table", mapping: "name-table", "semantic-check": "semantic-check", "test-spec": "test-spec", write: "write", "decl-check": "decl-check" } as const;
-    const calls = [...idsHead(), structured(acceptAll())];
-    const plain = await runScenario(calls, { flags: IDS_FLAGS });
-    const tuned = await runScenario(calls, { flags: IDS_FLAGS, stageEfforts: efforts });
+        : (({ [MAPPING_SCHEMA_NAME]: "mapping", [SEMANTIC_CHECK_SCHEMA_NAME]: "semantic-check", [TEST_SPEC_SCHEMA_NAME]: "test-spec", "declaration-v11a": "write", [DECL_CHECK_SCHEMA_NAME]: "decl-check", [FIELD_REPAIR_SCHEMA_NAME]: "repair" }) as Record<string, keyof typeof efforts>)[schemaName];
+    const outputStageOf = { vocabulary: "name-table", mapping: "name-table", "semantic-check": "semantic-check", "test-spec": "test-spec", write: "write", "decl-check": "decl-check", repair: "repair" } as const;
+    // 初版が不一致になり、⑥ 直す（道具付き）を 1 往復だけ実際に呼ぶ台本（旗 search-repair は外す）
+    const broken = replaced(RUN_YAML, "    when: amount > 0", "    when: amount > 5");
+    const flags = { ledger: true, ids: true } as const;
+    const calls = [...idsHead({ yaml: broken }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())];
+    const plain = await runScenario(calls, { flags });
+    const tuned = await runScenario(calls, { flags, stageEfforts: efforts });
     expect(tuned.result.outcome).toEqual({ result: "pass", verdict: "full" });
     const seen = new Set<string>();
     for (const request of tuned.recording.structured) {
@@ -765,14 +772,23 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       expect(request.effort, request.schemaName).toBe(efforts[stage]);
       expect(request.maxOutputTokens, request.schemaName).toBe(maxOutputTokensForEffort(efforts[stage], outputStageOf[stage]));
     }
+    // ⑥ 直すは道具付きの要求で呼ぶ（往復の全部のターンに同じ effort）。段の集合に repair を足して 7 段を見る
+    expect(tuned.recording.tools.length).toBeGreaterThan(0);
+    seen.add("repair");
+    for (const request of tuned.recording.tools) {
+      expect(request.effort).toBe(efforts.repair);
+      expect(request.maxOutputTokens).toBe(maxOutputTokensForEffort(efforts.repair, "repair"));
+    }
     expect(seen).toEqual(new Set(STAGE_EFFORT_STAGES));
+    expect(countStage(tuned.result, "repair")).toBeGreaterThan(0);
     // T2 は束の口で呼ぶ（旗 ids の T2 は束ごとに 1 記録）。束の口の要求も T2 の段の effort を持つ
     expect(countStage(tuned.result, "test-spec")).toBeGreaterThan(0);
     expect(tuned.recording.structured.filter((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME).every((request) => request.effort === "medium")).toBe(true);
     // 口なしの走りの要求に effort の欄は無い。effort の欄を除けば、口を付けた走りの要求と同じ
     expect(plain.recording.structured.some((request) => "effort" in request)).toBe(false);
+    expect(plain.recording.tools.some((request) => "effort" in request)).toBe(false);
     expect(tuned.recording.structured.map(withoutEffort664)).toEqual(plain.recording.structured.map(withoutEffort664));
-    expect(tuned.recording.tools).toEqual(plain.recording.tools);
+    expect(tuned.recording.tools.map(withoutToolEffort664)).toEqual(plain.recording.tools.map(withoutToolEffort664));
     // effort は記録の値を変えない（段の記録・要約・納品物・診断・終了コード）
     expect(tuned.result).toEqual(plain.result);
     expectNoAcceptanceMaterial(tuned.recording.structured.map((request) => JSON.stringify(request)));
@@ -6586,5 +6602,250 @@ describe("旗 v12.ids の C2 の初回の束（Issue #736）：C3 の拒否の�
     const files = result.bundle === null ? [] : bundleFiles(result.bundle);
     expect(files.length).toBeGreaterThan(0);
     expect(files.some((file) => file.text.includes("E1.F99"))).toBe(false);
+  });
+});
+
+// ── ⑥ 直すの段の effort の口（`repair`。Issue #751）────────────────────────────────
+//
+// 実行口（`runGenerationV11a`）から**実 adapter**（`createOpenAiLlmClient`）に偽物の `fetch` を当て、送った body の
+// `reasoning.effort` を見る。段の関数を直接呼ばず、段の口も試験側で渡さない——`runGenerationV11a` が組む口を通す。
+// 修復は 3 つの入口（探索 off の全文の直し・探索 on の欄だけの直し・探索 on の全文の直し）を実際に呼ぶ。
+
+/** 送った 1 本の body（どの要求から出たか） */
+interface WireSent {
+  readonly kind: "structured" | "tools";
+  readonly schemaName: string | undefined;
+  readonly body: Record<string, unknown>;
+}
+
+/** 完了した応答（本文を載せる） */
+function wireCompleted(output: readonly unknown[]): Response {
+  return new Response(JSON.stringify({ id: "resp-wire", status: "completed", output }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * 記録した応答を順に返す偽物の `fetch` を当てた、実 adapter の client（外部の API は呼ばない）。
+ * 構造化の応答は、adapter が選ぶ封筒と同じ枝（`resolveStageEnvelope`）で包む。`failToolOnce` は最初の道具付きの
+ * 要求を 1 度だけ HTTP の 5xx で失敗させ、共通の口の通信の再送を通す（記録は消費しない）。
+ */
+function wireClientOf(calls: readonly RecordedCall[], envelope: EnvelopeId, options: { readonly failToolOnce?: boolean } = {}) {
+  const sent: WireSent[] = [];
+  let index = 0;
+  let toolFailures = options.failToolOnce === true ? 1 : 0;
+  let current: { readonly schemaName: string; readonly schema: unknown } | undefined;
+  const fetch: FetchLike = async (_url, init) => {
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    const tools = body["tools"] !== undefined;
+    sent.push({ kind: tools ? "tools" : "structured", schemaName: tools ? undefined : current?.schemaName, body });
+    if (tools && toolFailures > 0) {
+      toolFailures -= 1;
+      return new Response(JSON.stringify({ error: { type: "server_error" } }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    const call = calls[index];
+    index += 1;
+    if (call === undefined) throw new Error(`記録した応答が尽きました（${String(index)} 件目）`);
+    if (tools) {
+      if (call.kind !== "tools") throw new Error("記録した応答の種別が違います（道具付き）");
+      const output =
+        call.response.kind === "toolCalls"
+          ? call.response.toolCalls.map((tool) => ({ type: "function_call", call_id: tool.id, name: tool.name, arguments: JSON.stringify(tool.arguments ?? null) }))
+          : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(call.response.declaration) }] }];
+      return wireCompleted(output);
+    }
+    if (call.kind !== "structured") throw new Error("記録した応答の種別が違います（構造化）");
+    const resolved = current === undefined ? undefined : resolveStageEnvelope(current.schemaName, current.schema, envelope);
+    const output =
+      resolved === undefined || typeof call.output !== "object" || call.output === null || Array.isArray(call.output)
+        ? call.output
+        : { result: { stage: resolved.entry.stage, ...(call.output as Record<string, unknown>) } };
+    return wireCompleted([{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(output) }] }]);
+  };
+  const adapter = createOpenAiLlmClient({ apiKey: "sk-FAKE", effort: "high", envelope, fetch });
+  const client: LlmClient = {
+    callStructured<T>(request: LlmStructuredRequest) {
+      current = { schemaName: request.schemaName, schema: request.schema };
+      return adapter.callStructured<T>(request);
+    },
+    callWithTools(request: LlmToolRequest) {
+      current = undefined;
+      return adapter.callWithTools(request);
+    },
+  };
+  return { client, sent };
+}
+
+/** 送った body の `reasoning.effort`（無ければ undefined） */
+const wireEffortOf = (sent: WireSent): string | undefined =>
+  (sent.body["reasoning"] as { readonly effort?: string } | undefined)?.effort;
+/** 修復の要求か（道具付きの要求と、欄だけの直しの構造化の要求） */
+const isRepairWire = (sent: WireSent): boolean => sent.kind === "tools" || sent.schemaName === FIELD_REPAIR_SCHEMA_NAME;
+
+describe("⑥ 直すの段の effort の口（repair。Issue #751）：実行口から偽物の fetch の body まで", () => {
+  const EFFORTS = { repair: "medium" } as const;
+  /** 静的チェックに落ちる宣言（R4 の計算の式が違う） */
+  const BAD_YAML = replaced(RUN_YAML, "    expression: base * 2", "    expression: base * 3");
+
+  /** 一気通貫の実行口（runGenerationV11a）で流す */
+  async function runWire(calls: readonly RecordedCall[], envelope: EnvelopeId, overrides: Partial<GenerationInputV11a> = {}, options: { readonly failToolOnce?: boolean } = {}) {
+    const wire = wireClientOf(calls, envelope, options);
+    const result = await runGenerationV11a(inputOf(wire.client, overrides));
+    return { result, sent: wire.sent };
+  }
+
+  it("(1)(3) 探索 off の全文の直し（ids off）：道具の往復の全部のターン（道具の呼び出し → 結果 → 最後の応答）と、形の再要求・通信の再送の wire の reasoning.effort が medium。ほかの段の body は口なしの走りと同じ", async () => {
+    const calls = [
+      ...head({ yaml: BAD_YAML }),
+      structured(acceptAll()),
+      repairToolCall("call-1", "static-check", RUN_YAML),
+      repairDone(""),
+      repairDone(RUN_YAML),
+      structured(acceptAll()),
+    ];
+    const plain = await runWire(calls, "v1.1a", { deadline: 600_000 });
+    const tuned = await runWire(calls, "v1.1a", { stageEfforts: EFFORTS, deadline: 600_000 }, { failToolOnce: true });
+    expect(tuned.result.stopped).toBeNull();
+    expect(tuned.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(plain.result.outcome).toEqual(tuned.result.outcome);
+    // 全文の直し（道具付き）が実際に呼ばれ、通信の再送と形の再要求の数が記録に残る
+    expect(tuned.result.record.stages.filter((stage) => stage.stage === "repair")).toHaveLength(1);
+    const repairStageRecord = tuned.result.record.stages.find((stage) => stage.stage === "repair");
+    expect(repairStageRecord?.retries.shape).toBe(1);
+    expect(repairStageRecord?.retries.communication).toBe(1);
+    const tools = tuned.sent.filter((sent) => sent.kind === "tools");
+    // 道具の呼び出し・（HTTP の誤りで始めなかった応答の）再送・形の再要求・最後の応答
+    expect(tools.length).toBe(4);
+    for (const sent of tools) {
+      expect(wireEffortOf(sent), "道具付きの往復の全部のターン").toBe("medium");
+      expect(sent.body["max_output_tokens"]).toBe(maxOutputTokensForEffort("medium", "repair"));
+    }
+    // 通信の再送は同じ body を送り直す（effort も同じ）
+    expect(JSON.stringify(tools[0]?.body)).toBe(JSON.stringify(tools[1]?.body));
+    // ほかの段（B1・B3'・B4 の判断など）の body は、repair を指定しない走りと同じ
+    const others = (s: readonly WireSent[]) => s.filter((sent) => !isRepairWire(sent)).map((sent) => JSON.stringify(sent.body));
+    expect(others(tuned.sent)).toEqual(others(plain.sent));
+    // 口なしの走りの修復の要求は adapter の設定の effort（high）のまま
+    for (const sent of plain.sent.filter((candidate) => candidate.kind === "tools")) expect(wireEffortOf(sent)).toBe("high");
+  });
+
+  it("(2)(3) 探索 on の欄だけの直し（ids off）：構造化の要求の wire の reasoning.effort が medium。道具付きの直す段は呼ばない", async () => {
+    const calls = [
+      ...head({ yaml: W2 }),
+      structured(acceptAll()),
+      fieldRepair("amount > 1"),
+      structured(acceptAll()),
+      fieldRepair("amount > 0"),
+      structured(acceptAll()),
+    ];
+    const plain = await runWire(calls, "v1.1a", { flags: { searchRepair: true } });
+    const tuned = await runWire(calls, "v1.1a", { flags: { searchRepair: true }, stageEfforts: EFFORTS });
+    expect(tuned.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(tuned.result.outcome).toEqual(plain.result.outcome);
+    expect(tuned.sent.filter((sent) => sent.kind === "tools")).toEqual([]);
+    const fields = tuned.sent.filter((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME);
+    expect(fields.length).toBe(2);
+    for (const sent of fields) {
+      expect(wireEffortOf(sent)).toBe("medium");
+      expect(sent.body["max_output_tokens"]).toBe(maxOutputTokensForEffort("medium", "repair"));
+      // adapter の body の形（封筒の外の段なので、要求の schema をそのまま送る）
+      expect((sent.body["text"] as { readonly format: { readonly name: string } }).format.name).toBe(FIELD_REPAIR_SCHEMA_NAME);
+    }
+    const others = (s: readonly WireSent[]) => s.filter((sent) => !isRepairWire(sent)).map((sent) => JSON.stringify(sent.body));
+    expect(others(tuned.sent)).toEqual(others(plain.sent));
+    for (const sent of plain.sent.filter((candidate) => candidate.schemaName === FIELD_REPAIR_SCHEMA_NAME)) expect(wireEffortOf(sent)).toBe("high");
+  });
+
+  it("(3) 探索 on の全文の直し（ids off）：場所なしの失敗がある往復は道具付きの直す段になり、その wire は全部 medium", async () => {
+    const calls = [...head({ yaml: W1, table: TABLE_R4_ENTITY }), structured(judgments(IDS, REJECT_R4)), repairDone(RUN_YAML), structured(acceptAll())];
+    const tuned = await runWire(calls, "v1.1a", { flags: { searchRepair: true }, stageEfforts: EFFORTS });
+    expect(tuned.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const tools = tuned.sent.filter((sent) => sent.kind === "tools");
+    expect(tools.length).toBeGreaterThan(0);
+    for (const sent of tools) expect(wireEffortOf(sent)).toBe("medium");
+    expect(tuned.sent.some((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME)).toBe(false);
+  });
+
+  it("(3) ids on：探索 off の全文の直しと、探索 on の欄だけの直しの wire も medium", async () => {
+    // 探索 off（全文の直し。道具付き）
+    const fullCalls = [...idsHead({ yaml: BAD_YAML }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())];
+    const full = await runWire(fullCalls, "v1.2-ids", { flags: { ledger: true, ids: true }, stageEfforts: EFFORTS });
+    expect(full.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const fullTools = full.sent.filter((sent) => sent.kind === "tools");
+    expect(fullTools.length).toBeGreaterThan(0);
+    for (const sent of fullTools) expect(wireEffortOf(sent)).toBe("medium");
+    // 探索 on（欄だけの直し。構造化）
+    const fieldCalls = [
+      ...idsHead({ yaml: W2 }),
+      structured(acceptAll()),
+      fieldRepair("amount > 1"),
+      structured(acceptAll()),
+      fieldRepair("amount > 0"),
+      structured(acceptAll()),
+    ];
+    const field = await runWire(fieldCalls, "v1.2-ids", { flags: { ledger: true, ids: true, searchRepair: true }, stageEfforts: EFFORTS });
+    expect(field.sent.filter((sent) => sent.kind === "tools")).toEqual([]);
+    const fields = field.sent.filter((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME);
+    expect(fields.length).toBeGreaterThan(0);
+    for (const sent of fields) expect(wireEffortOf(sent)).toBe("medium");
+  });
+
+  it("(3) 探索 on の全文の直し（ids on）：場所なしの失敗がある往復は道具付きの直す段になり、その wire は全部 medium", async () => {
+    // 検査の節を読めない形（validations: [amount]）にすると静的チェックに落ち、場所を作らずに全文の直し（道具付き）へ流れる
+    const NOVAL = replaced(RUN_YAML, "validations:\n  - name: amount\n    entity: item\n    expression: amount > 0\n", "validations: []\n");
+    const FLOW = replaced(NOVAL, "validations: []\n", "validations: [amount]\n");
+    const calls = [...idsHead({ yaml: FLOW }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())];
+    const tuned = await runWire(calls, "v1.2-ids", { flags: { ledger: true, ids: true, searchRepair: true }, stageEfforts: EFFORTS });
+    const tools = tuned.sent.filter((sent) => sent.kind === "tools");
+    expect(tools.length).toBeGreaterThan(0);
+    for (const sent of tools) {
+      expect(wireEffortOf(sent)).toBe("medium");
+      expect(sent.body["max_output_tokens"]).toBe(maxOutputTokensForEffort("medium", "repair"));
+    }
+    expect(tuned.sent.some((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME)).toBe(false);
+  });
+
+  it("(1) 段の走りの実行口（runStageRangeV11a）でも、全文の直しの道具付きの往復の全部のターンの wire は medium", async () => {
+    const calls = [...head({ yaml: BAD_YAML }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())];
+    const wire = wireClientOf(calls, "v1.1a");
+    const outcome = await runStageRangeV11a({ ...inputOf(wire.client, { stageEfforts: EFFORTS }), range: { start: "name-table", end: "judge" } });
+    expect(outcome.stopped).toBeNull();
+    const tools = wire.sent.filter((sent) => sent.kind === "tools");
+    expect(tools.length).toBeGreaterThan(0);
+    for (const sent of tools) expect(wireEffortOf(sent)).toBe("medium");
+  });
+
+  it("(4) ほかの段の effort は変わらない：repair を指定しても B1 の作り直しは write の指定に従い、B3' は adapter の設定のまま", async () => {
+    // 検査の名前だけ別の初版 → 欄だけの直しが 2 回空振りして停滞 → B1 の作り直し（declare 全文）→ 通る
+    const RENAMED = replaced(RUN_YAML, "  - name: amount\n    entity: item", "  - name: positive\n    entity: item");
+    const calls = [
+      ...idsHead({ yaml: RENAMED }),
+      structured(acceptAll()),
+      structured({ replacements: [], disputes: [] }),
+      structured(acceptAll()),
+      structured({ replacements: [], disputes: [] }),
+      structured(acceptAll()),
+      structured({ declaration: RUN_YAML }),
+      structured(acceptAll()),
+    ];
+    const tuned = await runWire(calls, "v1.2-ids", {
+      flags: { ledger: true, ids: true, searchRepair: true },
+      stageEfforts: { repair: "medium", write: "low" },
+    });
+    const writes = tuned.sent.filter((sent) => sent.schemaName === WRITE_V11A_SCHEMA_NAME);
+    expect(writes).toHaveLength(2);
+    expect(wireEffortOf(writes[0] as WireSent)).toBe("low");
+    expect(wireEffortOf(writes[1] as WireSent), "B1 の作り直しは write の指定").toBe("low");
+    const repairs = tuned.sent.filter((sent) => isRepairWire(sent));
+    expect(repairs.length).toBeGreaterThan(0);
+    for (const sent of repairs) expect(wireEffortOf(sent)).toBe("medium");
+    // B3'（decl-check）は段の指定が無いので adapter の設定（high）のまま
+    const declChecks = tuned.sent.filter((sent) => sent.schemaName === DECL_CHECK_SCHEMA_NAME);
+    expect(declChecks.length).toBeGreaterThan(0);
+    for (const sent of declChecks) expect(wireEffortOf(sent)).toBe("high");
   });
 });

@@ -20,7 +20,8 @@
 //
 // 段ごとの effort（`stageEfforts`。Issue #664）を受けた口は、`forStage(段)` で**その段の effort を持つ薄い見方**を返す。
 // 出力の上限・呼び出しごとの timeout の基準・要求の effort の 3 つを**同じ段の同じ effort**から引く（3 か所を別々に引くと、
-// 「検査は通るのに店頭で切れる」ずれになる）。指定の無い段は元の口そのもので、要求のバイト列は今と同じ。
+// 「検査は通るのに店頭で切れる」ずれになる）。要求の effort は構造化と道具付きの両方に載せる（Issue #751）。
+// 指定の無い段は元の口そのもので、要求のバイト列は今と同じ。
 //
 // 費用の予約そのものは budget.ts（`JobBudget`）が持つ。ここは「呼ぶ前に予約し、呼んだ後で精算する」
 // 順番と、回数の集計と、締切と timeout を引き受ける。単価はコードに埋め込まない（引数で受け取る）。
@@ -595,7 +596,7 @@ export class CallGateway {
   readonly #observer: CallAttemptObserver | undefined;
   /** 段の名前で引いた口の元の口（元の口では自分自身。Issue #664） */
   #root: CallGateway = this;
-  /** 要求に載せる effort（段の名前で引いた口だけが持つ。無ければ載せない＝今の要求。Issue #664） */
+  /** 要求に載せる effort（段の名前で引いた口だけが持つ。無ければ載せない＝今の要求。構造化と道具付きの両方。Issue #664・#751） */
   #requestEffort: ReasoningEffort | undefined;
   /** 口の計（段の名前で引いた口は、元の口と同じ計を共有する。Issue #664） */
   #counts: GatewayCounters = newGatewayCounters();
@@ -636,7 +637,8 @@ export class CallGateway {
 
   /**
    * 段の名前で引いた口（Issue #664）。その段に effort の指定があれば、**その段の effort を持つ薄い見方**を返す——
-   * 出力の上限（`maxOutputTokens`）と呼び出しごとの timeout の基準をその effort から引き、構造化の要求に effort を載せる。
+   * 出力の上限（`maxOutputTokens`）と呼び出しごとの timeout の基準をその effort から引き、構造化と道具付きの
+   * 両方の要求に effort を載せる（Issue #751）。
    * 予算・門・締切・時計・単価・上限・試行の回数と**口の計は元の口と共有する**（段の前後の差の取り方は変わらない）。
    * 呼ぶ側が timeout の基準を指定した口では、その指定を引き継ぐ（呼ぶ側の指定が effort の基準に勝つのは今と同じ）。
    * 指定の無い段は**元の口そのもの**を返す（上限・timeout・要求は今と同じ）。
@@ -741,8 +743,10 @@ export class CallGateway {
 
   /** 道具付き（⑥ 直す）を共通の口を通して呼ぶ。道具の呼び出しの回数も数える */
   async callWithTools(request: LlmToolRequest): Promise<CallResult<LlmToolResponse>> {
-    return this.#run(toolInputParts(request), request.maxOutputTokens, async (signal) => {
-      const response = await this.#client.callWithTools({ ...request, signal });
+    // 段の名前で引いた口だけ、要求に段の effort を載せる（指定の無い口の要求は今と同じ。Issue #664・#751）
+    const sent: LlmToolRequest = this.#requestEffort === undefined ? request : { ...request, effort: this.#requestEffort };
+    return this.#run(toolInputParts(sent), sent.maxOutputTokens, async (signal) => {
+      const response = await this.#client.callWithTools({ ...sent, signal });
       if (response.kind === "toolCalls") this.#counts.toolCalls += response.toolCalls.length;
       return { value: response, usage: response.usage };
     });
