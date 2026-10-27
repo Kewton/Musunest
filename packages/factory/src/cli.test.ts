@@ -4856,22 +4856,29 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    *   stage-stop-repair 4e17820e…→c6d4b2e4…／stage-stop-commit ab11a902…→288415f3…／
    *   whole-stagnation 248017e1…→883aa1dd…／whole-adopting ca3074eb…→092a3533…／whole-sets acd0d9b6…→e13e5689…／
    *   whole-mixed 175e38f8…→25b33209…／whole-recounts 0a657756…→ad7ebe0d…
+   *
+   * **Issue #764 の取り直し（旧値と理由）**：ids on・search-repair on の**探索 on の全文の直し**から診断の塊を外し、#761 の前（f9bf3b3）の
+   * 要求に戻したので、全文の直しだけを呼ぶ次の 11 経路は #761 の取り直しの前の値に戻った（旧値＝上の #761 の取り直しの値：
+   *   stage-stagnation d311973b…／stage-adopting 23434cca…／stage-sets 8f758fc3…／stage-returned e23b3086…／
+   *   stage-recounts d78e5d53…／stage-stop-repair c6d4b2e4…／stage-stop-commit f95fbfa3…／whole-stagnation 78f47029…／
+   *   whole-adopting 092a3533…／whole-sets e13e5689…／whole-recounts 2940a375…）。欄だけの直しを含む `stage-mixed`・`whole-mixed` は
+   * 診断が残るので #761 の取り直しの値のまま
    */
   const BEFORE_746: Readonly<Record<string, string>> = {
-    "stage-stagnation": "d311973baccf259a8a3df81c79a6d392f0d2888e6fd5f609d8aa768e7cec71c6",
-    "stage-adopting": "23434cca3fd45c90b17cb9ed5df60324a0c48827dfa3c9973659038d3fdcc586",
-    "stage-sets": "8f758fc3e2e066f9c959c066aca50af60e9751134e40fe7a28b29e77b2172ad3",
+    "stage-stagnation": "055ebe51378e8035e4ea152c509710fc84473c6d954be3d1168cb17b4ced9a1f",
+    "stage-adopting": "584eaf3e017350fb46a395f74ac640038a782c7b306b572e7ccbe6890fecd313",
+    "stage-sets": "25a22183c57cdbb64fe6b74e699063c6356201a037265d561f2731a1ac437146",
     "stage-mixed": "fe2b1148ed2168a0c7aaeb2e94bccdcc01e7e4f63713b6f5116026c8fbdc0a29",
-    "stage-returned": "e23b3086a05be0c58a38ab77d0de9c80959aa4609079ce67f6e960d5e7e2551f",
-    "stage-recounts": "d78e5d5376c9b8e58e12efa937fd2d27e9aaed4425d4afa6efe858ab668bc6ac",
-    "stage-stop-repair": "c6d4b2e4ed477044da1b31dd064284bebe29f95e0047570b8860d372cd792ac3",
+    "stage-returned": "7669c971267262ebc921bd61046f1d9e3540a12d3892a48d9508e281b544af78",
+    "stage-recounts": "de005c953d91b30fc27a7a24c2d41292be6cabf35242a0525a03804d1bd33252",
+    "stage-stop-repair": "4e17820e9cd8415b24850f555bed05d332ce45a3c79eb1d6eedb93ee1a892dac",
     "stage-stop-first-eval": "fd323bfcc9d82f0f102dbf43d9ce14db17bc05cc9b8c0ff84c91939270710948",
-    "stage-stop-commit": "f95fbfa3302cfdceb1e03c07d069e0d68b7c6450a9a23bf8aa2887cfcc08e7ca",
-    "whole-stagnation": "78f4702902060f6fe1e825a0582fbfc20da3c887064b73fda8bf7376383f27a3",
-    "whole-adopting": "092a35339921904319692086e813dc2b6f1f1ca904e3d2401f031400d5bd9f31",
-    "whole-sets": "e13e5689216675a6f2902473c0c077c9ccbfb4e54e5d76b87d2c6fb10688cd63",
+    "stage-stop-commit": "ab11a902ec436a60193e2b2b4c5ab3bf4afd6ae88b338dbb74bc042944100909",
+    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
+    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
+    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
     "whole-mixed": "2fb98ee37e8a4e2b3cab5b8a1dbdd723ffb5e87011b45f9019ad51c79feb062b",
-    "whole-recounts": "2940a375fa162cd104a88e5c8d97971dee87ba6f233e56e82d84eb55ce8cb586",
+    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
     "stage-search-repair-off": "5dc5994e2dffc41aab246647e4b9b5d61d281194cf7cfff32d01525c95c311cd",
@@ -5307,22 +5314,28 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    * stage-mixed 1f029859…／stage-returned a2f5dad9…／stage-recounts adbcd1aa…／stage-stop-repair 1bd073e2…／stage-stop-commit
    * 1bbfcba6…／whole-stagnation 248017e1…／whole-adopting ca3074eb…／whole-sets acd0d9b6…／whole-mixed 175e38f8…／whole-recounts
    * 0a657756…）。`stage-stop-first-eval`・ids off・search-repair off・v1.1a は旧値のまま
+   *
+   * **Issue #764 の取り直し（旧値と理由）**：探索 on の全文の直しから診断の塊を外したので、全文の直しだけを呼ぶ 11 経路は
+   * #761 の取り直しの前の値に戻った（旧値：stage-stagnation 8aae7d48…／stage-adopting 6da4f975…／stage-sets 6e1c5ff5…／
+   * stage-returned 4a3d8c40…／stage-recounts 25d652b0…／stage-stop-repair 1c991819…／stage-stop-commit 241ad6a1…／
+   * whole-stagnation 78f47029…／whole-adopting 092a3533…／whole-sets e13e5689…／whole-recounts 2940a375…）。
+   * `stage-mixed`・`whole-mixed` は欄だけの直しを含むので #761 の取り直しの値のまま
    */
   const BEFORE_748_BASE: Readonly<Record<string, string>> = {
-    "stage-stagnation": "8aae7d48a9c4b5d5036b95270d7d0f3ffdc8130e48fd7bb472055163711c4349",
-    "stage-adopting": "6da4f975f4ac5e06b2fc2030eb77c1cccc89bf2d5503dbeba2baa027992433d8",
-    "stage-sets": "6e1c5ff55655e17893ddff553c984b2a75737e7bf53d8a82bd01a18dfb212a6c",
+    "stage-stagnation": "0ef2fe8bc20c81f4a8dba870cdb2103f14ba42b0c064cccd68f01c3c163008f8",
+    "stage-adopting": "d40f0f31882cd2b83f5d93b308283cf18ba0b63b9a1cd72f31d332fd31fcf8d1",
+    "stage-sets": "a3969eaa6be4fe49cbffbebc81010fbb5df3312b0d325cbf3b873ad9c92cbf05",
     "stage-mixed": "192d1807e23342fc26db90a68bfd1c52bd53d7597d42c67c6e7d3ec791da36fc",
-    "stage-returned": "4a3d8c40987efe842f5f3c2f46a3648b4282f7a80f9f3581883b7210eb467fb0",
-    "stage-recounts": "25d652b0aedcdf61d2acdc80bcf7a1c6c0fb6cfd26c4b68ced564c4cad0e718b",
-    "stage-stop-repair": "1c991819116126c6239050829f1aac18d8d449ed1c42442c4b81bbf13310ef17",
+    "stage-returned": "a2f5dad9b7cefe9e2e530c3517774be719f2cefb24d4db19864174b2cde09429",
+    "stage-recounts": "adbcd1aa9c7f452cb352d11cd873eab96966a1be4f155479a67b3444f844d004",
+    "stage-stop-repair": "1bd073e2d94a519d53762e8e0b6fecb78f9731ff306e4422377288a9eee681bb",
     "stage-stop-first-eval": "df320daf50a2c3e343c582894f57af6874bee3bd02d881ad445e36734f8d490f",
-    "stage-stop-commit": "241ad6a12004d3cdb8cc267fae8c39c0cc71de76a1c9a153941e3a3d90fb4e39",
-    "whole-stagnation": "78f4702902060f6fe1e825a0582fbfc20da3c887064b73fda8bf7376383f27a3",
-    "whole-adopting": "092a35339921904319692086e813dc2b6f1f1ca904e3d2401f031400d5bd9f31",
-    "whole-sets": "e13e5689216675a6f2902473c0c077c9ccbfb4e54e5d76b87d2c6fb10688cd63",
+    "stage-stop-commit": "1bbfcba658904ff0c2aa4fbe935e00cbcb427a466928b678b81c2017695a3373",
+    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
+    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
+    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
     "whole-mixed": "2fb98ee37e8a4e2b3cab5b8a1dbdd723ffb5e87011b45f9019ad51c79feb062b",
-    "whole-recounts": "2940a375fa162cd104a88e5c8d97971dee87ba6f233e56e82d84eb55ce8cb586",
+    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
     "stage-search-repair-off": "5dc5994e2dffc41aab246647e4b9b5d61d281194cf7cfff32d01525c95c311cd",

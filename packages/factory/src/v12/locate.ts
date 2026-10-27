@@ -496,9 +496,10 @@ export function canRepairFields(locations: FailureLocations): boolean {
   return locations.located.length > 0 && locations.unlocated.length === 0 && locations.locations.length > 0;
 }
 
-// ── 修復へ渡す診断（旗 `v12.ids` と探索がともに on の走りだけ。Issue #761）────────────────────
+// ── 修復へ渡す診断（旗 `v12.ids` と探索がともに on の走りの、欄だけの直しだけ。Issue #761・#764）────────────────────
 //
-// 失敗を検出する側（C7 の試験・B3 の対応・B3' の点検）が持つ情報を、欄だけの直しと探索 on の全文の直しへ渡す。**純粋な関数**で、
+// 失敗を検出する側（C7 の試験・B3 の対応・B3' の点検）が持つ情報を、欄だけの直しへ渡す（探索 on の全文の直しへは渡さない。
+// この Issue）。**純粋な関数**で、
 // 材料は一番良い版の状態と評価の入力・結果だけ（新しい評価をしない）。**構造化した actual は作らない**——`detail` は評価の返り値
 // のまま写し、文を解析しない・expected から補わない。試験の無い要件・未実施・参照の欠けで、ID や結果を作らない。
 
