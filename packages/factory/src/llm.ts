@@ -125,6 +125,11 @@ export interface LlmToolRequest {
   readonly turns: readonly LlmTurn[];
   /** 出力トークンの上限。推論のトークンも含めて上限に入れる（§1.5） */
   readonly maxOutputTokens: number;
+  /**
+   * 推論の effort（段の名前で引いた口が載せる。Issue #751）。adapter は、あればこれを、無ければ adapter の設定の値を送る。
+   * 段ごとに指定しない走りの要求には載らない（要求のバイト列は今と同じ）。構造化の要求と同じ規則である。
+   */
+  readonly effort?: ReasoningEffort;
   /** 締切までの残り時間で実呼び出しを打ち切るための合図（共通の口が付ける。§1.5） */
   readonly signal?: AbortSignal;
 }

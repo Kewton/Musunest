@@ -4141,12 +4141,20 @@ describe("段ごとの effort の口（`--pipeline v1.2` の `--stage-effort`。
     expect("error" in staged ? staged.error : [staged.stageRange, staged.stageEfforts]).toEqual([{ start: "name-table", end: "semantic-check" }, { "semantic-check": "low" }]);
     expect(parseCliArguments(base)).not.toHaveProperty("stageEfforts");
     expect(parseStageEfforts([])).toEqual({ stageEfforts: {} });
+    // 直す前（#751 の前）の入口は repair を配線していない段として断っていた。その挙動は、当時の段の集合を
+    // 記録として残して照らす（今は 7 番目の段として受け、知らない段・知らない値・重複は今までどおり断る）
+    const stagesBefore751 = ["vocabulary", "mapping", "semantic-check", "test-spec", "write", "decl-check"] as const;
+    expect(stagesBefore751).not.toContain("repair");
+    expect(parseStageEfforts(["repair=medium"])).toEqual({ stageEfforts: { repair: "medium" } });
+    for (const effort of ["low", "medium", "high"] as const) expect(parseStageEfforts([`repair=${effort}`])).toEqual({ stageEfforts: { repair: effort } });
+    expect(parseStageEfforts(["repair=extreme"])).toEqual({ code: "stage-effort:value" });
+    expect(parseStageEfforts(["repair=low", "repair=high"])).toEqual({ code: "stage-effort:duplicate" });
+    expect(STAGE_EFFORT_USAGE).toContain("repair");
   });
 
   const usageCases: readonly { readonly name: string; readonly argv: readonly string[]; readonly code: string }[] = [
     { name: "知らない段", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "unknown-stage=low"], code: "stage-effort:stage" },
     { name: "配線していない段（name-table）", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "name-table=low"], code: "stage-effort:stage" },
-    { name: "配線していない段（repair）", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "repair=low"], code: "stage-effort:stage" },
     { name: "知らない値", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "semantic-check=extreme"], code: "stage-effort:value" },
     { name: "空の値", argv: ["--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-effort", "semantic-check="], code: "stage-effort:value" },
     {
