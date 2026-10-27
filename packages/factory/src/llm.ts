@@ -130,6 +130,13 @@ export interface LlmToolRequest {
    * 段ごとに指定しない走りの要求には載らない（要求のバイト列は今と同じ）。構造化の要求と同じ規則である。
    */
   readonly effort?: ReasoningEffort;
+  /**
+   * **最後の答えだけを求める印**（旗 `v12.ids` の探索 on の全文の直し。Issue #768）。道具の定義と履歴は
+   * 送るが、モデルに道具を選ばせない。adapter は、真のときだけ道具を選ばせない指定
+   * （Responses API の `tool_choice: "none"`）を body に足す。**省けば今の要求のまま**（body は
+   * バイト列で同じ）。
+   */
+  readonly finalAnswerOnly?: boolean;
   /** 締切までの残り時間で実呼び出しを打ち切るための合図（共通の口が付ける。§1.5） */
   readonly signal?: AbortSignal;
 }

@@ -387,6 +387,9 @@ function buildToolBody(config: WireConfig, request: LlmToolRequest): Record<stri
   ];
   const body = baseBody(config, request.instructions, input, request.maxOutputTokens, request.effort);
   body.tools = request.tools.map(toFunctionTool);
+  // 最後の答えだけを求める印があるときだけ、道具を選ばせない（旗 `v12.ids` の探索 on の全文の直し。Issue #768）。
+  // 印が無ければ body はバイト列で今と同じ（道具の定義と履歴は印があっても送る）。
+  if (request.finalAnswerOnly === true) body.tool_choice = "none";
   if (request.schema !== undefined) {
     body.text = {
       format: {

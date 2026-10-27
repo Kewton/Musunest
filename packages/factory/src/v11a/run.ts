@@ -323,6 +323,10 @@ export interface RepairStepSummary {
   readonly shape_retries: number;
   readonly limit: { readonly name: string; readonly max: number; readonly actual: number } | null;
   readonly end: "done" | FailureKind;
+  /** 印付きの要求に対し、共通の口から成功して受け取った応答の数（Issue #768。受け取らなければ省く） */
+  readonly finalize_responses?: number;
+  /** 印付きの要求に返った道具の束のうち、実行しなかったもの（Issue #768） */
+  readonly finalize_refused_bundles?: number;
 }
 
 /** 旗 `v12.ids` の直す段の要約（`v12_calls.repair`。直す段を呼んだ走りだけ。欄だけの直しは含めない。Issue #665） */
@@ -342,6 +346,10 @@ function toRepairStepSummary(counts: RepairStepCounts): RepairStepSummary {
     shape_retries: counts.shapeRetries,
     limit: counts.limit === null ? null : { name: counts.limit.name, max: counts.limit.max, actual: counts.limit.actual },
     end: counts.end === "done" ? "done" : stageFailureToKind({ kind: counts.end }),
+    // 印付きの要求の応答を受け取った段だけが持つ（Issue #768。受け取らなければ 0 を出さずに省く）
+    ...(counts.finalizeResponses === undefined
+      ? {}
+      : { finalize_responses: counts.finalizeResponses, finalize_refused_bundles: counts.finalizeRefusedBundles ?? 0 }),
   };
 }
 
@@ -2461,6 +2469,9 @@ async function runV11a(
             evaluate: evaluator.evaluate,
             ...(best.rejections.length === 0 ? {} : { declRejections: best.rejections }),
             ...repairStepIds(),
+            // 旗 v12.ids の探索 on の全文の直しだけ、最後の答えの枠を取っておく（Issue #768）。欄だけの直し・
+            // 探索 off の全文の直し・ids off の走りは今のまま
+            ...(flags.ids ? { reserveFinalAnswer: true } : {}),
             ...requiredValidationsFor(context.suite),
           }),
         );
