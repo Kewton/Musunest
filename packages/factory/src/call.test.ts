@@ -1607,8 +1607,8 @@ describe("⑥ 直すの段の口（repair。Issue #751）：道具付きの要�
   });
 
   it("(6) repair の口と元の口を交互に使っても、道具の呼び出しの累計・共有の門・予算の境界は 1 つの数で掛かる。8 応答と道具の累計の上限の値は変えない", async () => {
-    /** 道具の呼び出しを `count` 個返す偽物 */
-    const toolClient = (count: number): { readonly client: LlmClient; readonly calls: () => number } => {
+    /** 道具の呼び出しを `count` 個返す偽物（`usage: undefined` を明示すると予約を残し、費用を実際に消費する） */
+    const toolClient = (count: number, options: { readonly usage?: LlmUsage | undefined } = { usage: USAGE }): { readonly client: LlmClient; readonly calls: () => number } => {
       let calls = 0;
       return {
         calls: () => calls,
@@ -1619,13 +1619,13 @@ describe("⑥ 直すの段の口（repair。Issue #751）：道具付きの要�
             return Promise.resolve({
               kind: "toolCalls",
               toolCalls: Array.from({ length: count }, (_, index) => ({ id: `c${String(index)}`, name: "static-check", arguments: {} })),
-              usage: USAGE,
+              usage: options.usage,
             });
           },
         },
       };
     };
-    // 道具の呼び出しの累計は、段の口から見ても元の口から見ても 1 つの数（門の無い口でも共有する）
+    // 道具の呼び出しの累計は、repair・write の段の口から見ても元の口から見ても 1 つの数（門の無い口でも共有する）
     const counted = toolClient(2);
     const counting = new CallGateway({
       client: counted.client,
@@ -1634,13 +1634,59 @@ describe("⑥ 直すの段の口（repair。Issue #751）：道具付きの要�
       now: () => 0,
       deadline: 600_000,
       effort: "high",
-      stageEfforts: { repair: "medium" },
+      stageEfforts: { repair: "medium", write: "low" },
     });
     await counting.forStage("repair").callWithTools(TOOL_REQUEST);
+    await counting.forStage("write").callWithTools(TOOL_REQUEST);
     await counting.callWithTools(TOOL_REQUEST);
-    expect(counted.calls()).toBe(2);
-    expect(counting.toolCalls).toBe(4);
-    expect(counting.forStage("repair").toolCalls).toBe(4);
+    expect(counted.calls()).toBe(3);
+    expect(counting.toolCalls).toBe(6);
+    expect(counting.forStage("repair").toolCalls).toBe(6);
+    expect(counting.forStage("write").toolCalls).toBe(6);
+
+    // 正の予算：repair の口・write の口・元の口で交互に消費し、次の 1 回を断る（予約は usage が返らない前提で残す）
+    const perCall = maxCostOf(toolInputParts(TOOL_REQUEST), TOOL_REQUEST.maxOutputTokens);
+    const sharedBudget = new JobBudget(perCall * 3.5);
+    const spendingClient = toolClient(1, { usage: undefined });
+    const spending = new CallGateway({
+      client: spendingClient.client,
+      budget: sharedBudget,
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "high",
+      stageEfforts: { repair: "medium", write: "low" },
+    });
+    const kinds = [
+      (await spending.forStage("repair").callWithTools(TOOL_REQUEST)).kind,
+      (await spending.forStage("write").callWithTools(TOOL_REQUEST)).kind,
+      (await spending.callWithTools(TOOL_REQUEST)).kind,
+      (await spending.forStage("repair").callWithTools(TOOL_REQUEST)).kind,
+    ];
+    expect(kinds).toEqual(["ok", "ok", "ok", "budgetExceeded"]);
+    expect(sharedBudget.reservedUsd).toBeCloseTo(perCall * 3, 12);
+    expect(sharedBudget.remainingUsd).toBeCloseTo(perCall * 0.5, 12);
+    expect(spending.attempts.not_started.budget).toBe(1);
+    // 4 回目は始めていないので、道具の累計はどの口から見ても 3
+    expect(spending.toolCalls).toBe(3);
+    expect(spending.forStage("repair").toolCalls).toBe(3);
+    expect(spending.forStage("write").toolCalls).toBe(3);
+    // 元の口だけを使った走りでも、同じ判定・同じ累計になる
+    const plainBudget = new JobBudget(perCall * 3.5);
+    const plainClient = toolClient(1, { usage: undefined });
+    const plain = new CallGateway({
+      client: plainClient.client,
+      budget: plainBudget,
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "high",
+    });
+    const plainKinds: string[] = [];
+    for (let index = 0; index < 4; index += 1) plainKinds.push((await plain.callWithTools(TOOL_REQUEST)).kind);
+    expect(plainKinds).toEqual(kinds);
+    expect(plain.toolCalls).toBe(3);
+    expect(plainBudget.remainingUsd).toBeCloseTo(sharedBudget.remainingUsd, 12);
     // 共有の門：段の口が 1 つ使えば、元の口の次の試行は上限で未着手になる
     const gate = createCallGate({ now: () => 0, deadline: 600_000, limit: 1 });
     const gatedClient = toolClient(1);
