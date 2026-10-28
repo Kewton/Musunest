@@ -170,11 +170,12 @@ async function loadOllama(ctx) {
   if (typeof mod.DEFAULT_OLLAMA_MODEL !== "string" || mod.DEFAULT_OLLAMA_MODEL === "" || typeof keyEnv !== "string" || keyEnv === "") return null;
   return { model: mod.DEFAULT_OLLAMA_MODEL, keyEnv };
 }
-const ollamaMain = provider === "ollama" ? await loadOllama(main) : null;
-if (provider === "ollama" && ollamaMain === null) refuseCode("provider:ollama-unavailable");
-const model = opt("--model", provider === "ollama" ? ollamaMain.model : openai.DEFAULT_OPENAI_MODEL);
-/** #771：条件の記録に残す鍵の環境変数の名前（値は読まない・残さない） */
-const apiKeyEnvName = provider === "ollama" ? ollamaMain.keyEnv : factory.API_KEY_ENV;
+// #771：Ollama の公開値（既定のモデル・鍵の環境変数の名前）は checkout ごとに持つ（比較元は比較元の dist の値。候補の値を写さない）
+main.ollama = provider === "ollama" ? await loadOllama(main) : null;
+if (provider === "ollama" && main.ollama === null) refuseCode("provider:ollama-unavailable");
+const model = opt("--model", provider === "ollama" ? main.ollama.model : openai.DEFAULT_OPENAI_MODEL);
+/** #771：条件の記録に残す、その checkout の鍵の環境変数の名前（値は読まない・残さない） */
+const apiKeyEnvOf = (ctx) => (provider === "ollama" ? ctx.ollama.keyEnv : ctx.factory.API_KEY_ENV);
 const perRunBudget = Number(opt("--factory-budget-usd", String(factory.DEFAULT_BUDGET_USD)));
 const deadlineMin = Number(opt("--deadline-min", String(factory.DEFAULT_DEADLINE_MS / 60000)));
 
@@ -292,7 +293,8 @@ let baseline = null;
 if (compare) {
   try { baseline = await loadCheckout(resolve(baselineArg)); } catch { refuseCode("compare:baseline-unreadable"); }
   // #771：比較では両群に同じ provider とモデルを渡す。比較元の dist も Ollama に対応していることを子を起こす前に確かめる
-  if (provider === "ollama" && (await loadOllama(baseline)) === null) refuseCode("provider:ollama-unavailable");
+  baseline.ollama = provider === "ollama" ? await loadOllama(baseline) : null;
+  if (provider === "ollama" && baseline.ollama === null) refuseCode("provider:ollama-unavailable");
 }
 // 段だけの対の比較 × v1.2（#638）：両群とも v1.2 の経路なので、比較元の dist の旗の組も読み、候補の組と名前 → 真偽の集合として同じことを確かめる（子を起こす前）
 let baselineEntry = null;
@@ -607,7 +609,7 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId, e
       // #513：経路（v1 か v1.1a。省略は v1）と v1.1α の 4 段の上限（dist に無ければ null）
       pipeline: pl, stage_output_limits_v11a: outputLimits.v11a,
       // #771：--provider を指定したときだけ。LLM の adapter と、鍵を読む環境変数の名前（値は残さない。署名に入る）
-      ...(providerArg === null ? {} : { provider, provider_api_key_env: apiKeyEnvName }),
+      ...(providerArg === null ? {} : { provider, provider_api_key_env: apiKeyEnvOf(ctx) }),
       // #557：経路 v1.2 のときだけ。工場の dist の V12_PIPELINE_FLAGS の写し（署名に入る。旗の組が変われば再開を断る）
       ...(pl === V12_PIPELINE ? { v12_flags: v12Flags } : {}),
       // #618：経路 v1.2 の単独の計測だけ（署名に入る。上限が変われば再開を断る）。比較の群には足さない（採点側の比較が params の同一を見るため）
@@ -861,9 +863,9 @@ async function runCompare() {
   const defaultsOf = (ctx) => ({
     effort: ctx.factory.DEFAULT_EFFORT, budget_usd: ctx.factory.DEFAULT_BUDGET_USD, deadline_ms: ctx.factory.DEFAULT_DEADLINE_MS, model: ctx.openai.DEFAULT_OPENAI_MODEL,
     reasoning_effort: ctx.limits.DEFAULT_REASONING_EFFORT, vocabulary_version: ctx.factory.VOCABULARY_VERSION,
-    // #771：--provider ollama のときは、既定のモデルと鍵の環境変数も provider のもの（指定が無ければ今のまま）
-    ...(provider === "ollama" ? { model_ollama: ollamaMain.model } : {}),
-    api_key_env: provider === "ollama" ? apiKeyEnvName : ctx.factory.API_KEY_ENV, jev_key_env: ctx.factory.JEV_API_KEY_ENV,
+    // #771：--provider ollama のときは、既定のモデルと鍵の環境変数もその checkout の provider の値（指定が無ければ今のまま）
+    ...(provider === "ollama" ? { model_ollama: ctx.ollama.model } : {}),
+    api_key_env: apiKeyEnvOf(ctx), jev_key_env: ctx.factory.JEV_API_KEY_ENV,
     ...(providerArg === null ? {} : { provider }),
   });
   if (JSON.stringify(defaultsOf(baseline)) !== JSON.stringify(defaultsOf(main))) refuseCode("compare:defaults-differ");
@@ -934,7 +936,7 @@ async function runCompare() {
     shared: {
       set: { sha256: m1.set.sha256, id: m1.set.id, version: m1.set.version }, scoring: m1.scoring.fingerprint, scripts: m1.scripts.fingerprint, judge: m1.judge.configuration,
       frozen: { sha256: frozen.sha256, id: frozen.id, version: frozen.version, adopted: frozen.adopted.length }, document: m1.document.sha256,
-      params: { effort: m1.params.effort, model: m1.params.model, factory_budget_usd: m1.params.factory_budget_usd, factory_deadline_min: m1.params.factory_deadline_min, mode: m1.params.mode, ...(providerArg === null ? {} : { provider, provider_api_key_env: apiKeyEnvName }) },
+      params: { effort: m1.params.effort, model: m1.params.model, factory_budget_usd: m1.params.factory_budget_usd, factory_deadline_min: m1.params.factory_deadline_min, mode: m1.params.mode, ...(providerArg === null ? {} : { provider, provider_api_key_env: m1.params.provider_api_key_env }) },
     },
     profile, profile_mismatches: mismatches,
     concurrency: CONC, budget_usd: budget, reserve_per_run_usd: perRunBudget, scoring_cost_usd: SCORING_COST_USD,

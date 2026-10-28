@@ -252,6 +252,92 @@ describe("body は OpenAI と同じで、段の指示の最後に schema の塊�
   });
 });
 
+// ── 2'. schema の塊をちょうど 1 つ除けば、body 全体が OpenAI と同じ（Issue #771 レビュー R3）──
+
+/**
+ * Ollama の body から schema の塊を除いた body を返す。塊は input 全体で**ちょうど 1 つ**、developer の
+ * **最後の内容の塊**にあり、本文は固定の文と期待の schema に等しいことを確かめる。塊だけの developer は
+ * 項目ごと除く（規則も封筒の指示も無い要求）。ほかの欄・項目には触れない
+ */
+function withoutSchemaBlock(body: Record<string, unknown>, schema: unknown): Record<string, unknown> {
+  const copy = JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
+  const input = copy["input"] as { role?: string; content?: { type: string; text?: string }[] }[];
+  const found: { readonly item: number; readonly block: number }[] = [];
+  input.forEach((item, i) => {
+    (item.content ?? []).forEach((block, j) => {
+      if (typeof block.text === "string" && block.text.startsWith(SCHEMA_INSTRUCTION_PREFIX)) found.push({ item: i, block: j });
+    });
+  });
+  expect(found, "schema の塊がちょうど 1 つではない").toHaveLength(1);
+  const { item, block } = found[0]!;
+  const developer = input[item]!;
+  expect(developer.role).toBe("developer");
+  expect(block, "schema の塊が developer の最後の内容の塊ではない").toBe(developer.content!.length - 1);
+  expect(developer.content![block]).toEqual({ type: "input_text", text: `${SCHEMA_INSTRUCTION_PREFIX}\n${JSON.stringify(schema)}` });
+  developer.content!.splice(block, 1);
+  if (developer.content!.length === 0) input.splice(item, 1);
+  return copy;
+}
+
+/** 文書 2 つ（最後だけ breakpoint）・規則・データ・履歴を持つ道具の要求（最後の答えの schema 付き） */
+const TOOL_WITH_HISTORY: LlmToolRequest = {
+  instructions: "規則",
+  documents: ["文書 1", "文書 2"],
+  rules: ["道具の段の規則 1", "道具の段の規則 2"],
+  input: "宣言のデータ",
+  tools: [{ name: "staticCheck", description: "静的チェックを流す", parameters: { type: "object" } }],
+  turns: [
+    { role: "assistant", toolCalls: [{ id: "call_1", name: "staticCheck", arguments: { target: "a" } }] },
+    { role: "tool", results: [{ toolCallId: "call_1", name: "staticCheck", output: { ok: false, errors: ["e1"] } }] },
+  ],
+  schemaName: "answer",
+  schema: SCHEMA,
+  maxOutputTokens: 256,
+  effort: "medium",
+};
+
+describe("schema の塊をちょうど 1 つ除いた body 全体が OpenAI の body と同じ（文書・規則・データ・履歴・breakpoint を保つ。Issue #771 レビュー R3）", () => {
+  it("構造化（規則も封筒も無い）：塊だけの developer を除けば、文書と breakpoint・データを含む body 全体が同じ", async () => {
+    const request: LlmStructuredRequest = { ...STRUCTURED_REQUEST, documents: ["文書 1", "文書 2"], input: "依頼のデータ" };
+    const { ollama, openai } = await bodiesOf((client) => client.callStructured(request));
+    expect(withoutSchemaBlock(ollama, SCHEMA)).toEqual(openai);
+    expect(JSON.stringify(openai["input"])).toContain("依頼のデータ");
+  });
+
+  it("構造化（段の規則・封筒の段）：載せる schema はその段だけの封筒全体で、塊を除けば規則・封筒の指示・データを含む body 全体が同じ", async () => {
+    const request: LlmStructuredRequest = {
+      ...STRUCTURED_REQUEST,
+      documents: ["文書 1", "文書 2"],
+      rules: ["段の規則 1", "段の規則 2"],
+      input: "依頼のデータ",
+      schemaName: REVERSE_CHECK_SCHEMA_NAME,
+      schema: REVERSE_CHECK_SCHEMA,
+      effort: "low",
+    };
+    const entry = envelopeStageFor(REVERSE_CHECK_SCHEMA_NAME);
+    expect(entry).toBeDefined();
+    const envelopeOfStage = {
+      type: "object",
+      additionalProperties: false,
+      required: ["result"],
+      properties: { result: buildStageBranch(entry!) },
+    };
+    const { ollama, openai } = await bodiesOf((client) => client.callStructured(request));
+    expect(withoutSchemaBlock(ollama, envelopeOfStage)).toEqual(openai);
+  });
+
+  for (const finalAnswerOnly of [undefined, true] as const) {
+    it(`schema 付きの道具（${finalAnswerOnly === true ? "finalAnswerOnly" : "通常の往復"}）：塊を除けば、道具の定義・履歴・tool_choice を含む body 全体が同じ`, async () => {
+      const request: LlmToolRequest = finalAnswerOnly === true ? { ...TOOL_WITH_HISTORY, finalAnswerOnly } : TOOL_WITH_HISTORY;
+      const { ollama, openai } = await bodiesOf((client) => client.callWithTools(request));
+      expect(withoutSchemaBlock(ollama, SCHEMA)).toEqual(openai);
+      expect(openai["tool_choice"]).toBe(finalAnswerOnly === true ? "none" : undefined);
+      // 履歴（道具の呼び出しと結果）が OpenAI の body に載っている＝比べた範囲に入っている
+      expect((openai["input"] as readonly unknown[]).length).toBe(2 + 1 + 1 + 2);
+    });
+  }
+});
+
 // ── 3. 応答の解釈（OpenAI と同じ） ──────────────────────────────────
 
 describe("応答の解釈は OpenAI と同じ（Issue #771）", () => {
