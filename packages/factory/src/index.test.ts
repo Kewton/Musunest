@@ -45,7 +45,10 @@ import {
   createFallbackJudge,
   createJevJudge,
   createLlmJudge,
+  createOllamaLlmClient,
   createOpenAiLlmClient,
+  DEFAULT_OLLAMA_MODEL,
+  DEFAULT_OPENAI_MODEL,
   decideOutcome,
   estimateMaxCostUsd,
   nextPlanStep,
@@ -104,6 +107,13 @@ describe("公開する面", () => {
     ]) {
       expect(entry).toBeTypeOf("function");
     }
+  });
+
+  it("Ollama の adapter と既定のモデルが、根から読める（Issue #771）", () => {
+    expect(createOllamaLlmClient).toBeTypeOf("function");
+    expect(DEFAULT_OLLAMA_MODEL).toBe("deepseek-v4.1-flash:cloud");
+    // OpenAI の既定は今のまま（provider を省いた走りを変えない）
+    expect(DEFAULT_OPENAI_MODEL).toBe("gpt-6-luna");
   });
 
   it("判定の口の型と 3 つの adapter が、根から読める（Issue #330）", () => {

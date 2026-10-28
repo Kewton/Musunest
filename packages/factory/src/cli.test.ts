@@ -19,6 +19,8 @@ import {
   EXIT_STAGE_INPUT,
   EXIT_USAGE,
   JEV_API_KEY_ENV,
+  OLLAMA_API_KEY_ENV,
+  OLLAMA_RATES,
   CONTRACT_VERSION,
   PROMPT_VERSION_V11A,
   PROMPT_VERSION_V12,
@@ -31,6 +33,7 @@ import {
   runCli,
 } from "./cli.js";
 import { AGENT_LIMITS, maxOutputTokensForEffort } from "./limits.js";
+import { DEFAULT_OLLAMA_MODEL } from "./ollama.js";
 import { BUILD_CLI_RECORD_FILE, PLAN_ONLY_RESULT_SCHEMA } from "./cli-plan.js";
 import * as factory from "./index.js";
 import { createFakeJudge } from "./judge-fake.js";
@@ -201,6 +204,63 @@ describe("引数の読み取り（02 §3.2）", () => {
   });
 });
 
+// ── --provider の読み取り（Issue #771）──────────────────────────
+
+describe("--provider の読み取り（Issue #771）", () => {
+  it("--provider ollama は既定のモデルを Ollama のものにする", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--provider", "ollama"])).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: DEFAULT_OLLAMA_MODEL,
+      effort: "high",
+      provider: "ollama",
+    });
+  });
+
+  it("--model は --provider の前でも後でも勝つ", () => {
+    const expected = {
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "deepseek-v4.1-flash",
+      effort: "high",
+      provider: "ollama",
+    };
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--model", "deepseek-v4.1-flash", "--provider", "ollama"]),
+    ).toEqual(expected);
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--provider", "ollama", "--model", "deepseek-v4.1-flash"]),
+    ).toEqual(expected);
+  });
+
+  it("--provider openai を明示すると、既定のモデルは今のまま", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--provider", "openai"])).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "gpt-6-luna",
+      effort: "high",
+      provider: "openai",
+    });
+  });
+
+  it("--provider の値の誤りは使い方の誤り", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--provider", "nope"])).toEqual({
+      error: "--provider には openai か ollama を指定してください",
+    });
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--provider"])).toEqual({
+      error: "--provider には openai か ollama を指定してください",
+    });
+  });
+
+  it("--provider を省いた出力に provider の欄は無い（ccdfcd7 と同じ）", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out"])).not.toHaveProperty("provider");
+  });
+
+  it("使い方の文に --provider openai|ollama がある", () => {
+    expect(USAGE).toContain("[--provider openai|ollama]");
+  });
+});
+
 // ── --plan-only・--plan-file の読み取り（Issue #495）──────────────
 
 describe("--plan-only・--plan-file の読み取り（Issue #495）", () => {
@@ -358,6 +418,27 @@ describe("鍵が無いときは、API を呼ばずに使い方の誤りで終わ
     expect(log.mock.calls.some(([line]) => String(line).includes(API_KEY_ENV))).toBe(true);
   });
 
+  it("--provider ollama で OLLAMA_API_KEY が無ければ、makeClient を呼ばずに 2 を返し、何も書かない（Issue #771）", async () => {
+    const makeClient = vi.fn();
+    const log = vi.fn();
+    const writeFile = vi.fn(async () => {});
+    const code = await runCli({
+      // OpenAI の鍵だけがあっても、選んだ provider の鍵が無ければ使い方の誤り
+      argv: ["--", "request.txt", "--out", "out", "--provider", "ollama"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async () => SOURCE_TEXT,
+      writeFile,
+      makeDirectory: async () => {},
+      loadDocuments: async () => [],
+      makeClient,
+      log,
+    });
+    expect(code).toBe(EXIT_USAGE);
+    expect(makeClient).not.toHaveBeenCalled();
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(log.mock.calls.some(([line]) => String(line).includes(OLLAMA_API_KEY_ENV))).toBe(true);
+  });
+
   it("引数が足りないときも 2 を返す", async () => {
     const makeClient = vi.fn();
     const code = await runCli({
@@ -435,6 +516,37 @@ describe("偽物を差し込んで 1 回の生成を流し、ディレクトリ�
     }
     // 依頼文の目印の文字列は出ない
     expect(last).not.toContain("タスクを記録する");
+  });
+
+  it("--provider ollama は Ollama の鍵・モデル・単価 0 で client を作り、費用 0 で流す（Issue #771）", async () => {
+    const recording = createRecordingClient(recordedRun());
+    const makeClient = vi.fn(() => recording.client);
+    const lines: string[] = [];
+    const dir = `${directory}-ollama`;
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--provider", "ollama"],
+      // OpenAI の鍵は渡さない（選んだ provider の鍵だけを読む）
+      env: { [OLLAMA_API_KEY_ENV]: "ol-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient,
+      log: (line) => lines.push(line),
+    });
+
+    expect(code).toBe(EXIT_OK);
+    // 鍵の名前・モデル・provider が makeClient に届く
+    expect(makeClient.mock.calls[0]).toEqual([
+      { apiKey: "ol-FAKE", model: DEFAULT_OLLAMA_MODEL, effort: "high", provider: "ollama" },
+    ]);
+    expect(OLLAMA_RATES).toEqual({
+      inputPerToken: 0,
+      cachedInputPerToken: 0,
+      cacheWritePerToken: 0,
+      outputPerToken: 0,
+    });
+    // 定額の購読なので LLM の費用は 0（usage があっても単価 0）
+    const summary = JSON.parse(lines.at(-1) ?? "{}") as { provider_cost_usd?: number };
+    expect(summary.provider_cost_usd).toBe(0);
   });
 });
 

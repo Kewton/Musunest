@@ -6,6 +6,13 @@
 // （日付付きの既定値）。**判定の口（05 §4）もここで組み立てて生成に渡す**——`JEV_API_KEY` があれば Jev を
 // 主・LLM を落とし先にした組み合わせ、無ければ LLM だけを使う（標準エラーに 1 行出す）。
 //
+// `--provider openai|ollama`（既定 openai。Issue #771）で LLM の adapter を選ぶ。**省けば今までと同じ**——
+// 鍵の環境変数 `OPENAI_API_KEY`・既定のモデル `gpt-6-luna`・単価 `DEFAULT_RATES`・`makeClient` の引数・出力は
+// 変えない。`ollama` のときは鍵 `OLLAMA_API_KEY`（`OLLAMA_API_KEY_ENV`）、既定のモデル
+// `deepseek-v4.1-flash:cloud`（`DEFAULT_OLLAMA_MODEL`。`--model` が先でも後でも明示の値が勝つ）、単価 0
+// （`OLLAMA_RATES`。定額の購読である）を使い、全部の実行口と判定の LLM が同じ provider の client を使う。
+// 値の誤り・選んだ provider の鍵が無いときは使い方の誤り（exit 2・何も書かない・API を呼ばない）。
+//
 // **ライブラリ（run.ts・bundle.ts・record.ts・段）は、環境変数もファイルも Node 固有の API も持たない。**
 // ここが外側との境目である。鍵が無ければ、API を呼ばずに使い方の誤りで終わる。
 //
@@ -87,6 +94,7 @@ import {
   type StageEffortStage,
 } from "./limits.js";
 import type { LlmClient } from "./llm.js";
+import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL } from "./ollama.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL } from "./openai.js";
 import type { EnvelopeId } from "./schema-envelope.js";
 import { runPlan, type PlanResponder, type PlanResult } from "./plan/run-plan.js";
@@ -146,6 +154,10 @@ export const PROMPT_VERSION_V12 = "v1.2" as const;
 export const PIPELINES = ["v1", "v1.1a", "v1.2"] as const;
 /** 経路の型 */
 export type Pipeline = (typeof PIPELINES)[number];
+/** `--provider` で選べる LLM の adapter（既定 openai。Issue #771） */
+export const PROVIDERS = ["openai", "ollama"] as const;
+/** LLM の adapter の型 */
+export type Provider = (typeof PROVIDERS)[number];
 /** 契約の版（`03-evaluation.md` §1 が v0.2 に固定する） */
 export const CONTRACT_VERSION = "v0.2" as const;
 /** P3 が照らす語彙の版（確定した仕様の `vocabulary_version`。04 §4・Issue #336） */
@@ -163,6 +175,11 @@ export const DEFAULT_BUDGET_USD = 0.3 as const;
 export const DEFAULT_DEADLINE_MS = 10 * 60 * 1000;
 /** 鍵を読む環境変数の名前 */
 export const API_KEY_ENV = "OPENAI_API_KEY" as const;
+/**
+ * Ollama の鍵を読む環境変数の名前（`--provider ollama` のとき。Issue #771）。
+ * **鍵を読むのは手元の入口だけ**（adapter は環境変数を読まない）。
+ */
+export const OLLAMA_API_KEY_ENV = "OLLAMA_API_KEY" as const;
 /** Jev の鍵を読む環境変数の名前。**鍵を読むのは手元の入口だけ**（adapter は環境変数を読まない。§4） */
 export const JEV_API_KEY_ENV = "JEV_API_KEY" as const;
 
@@ -176,6 +193,27 @@ export const DEFAULT_RATES: TokenRates = {
   cacheWritePerToken: 0.125 / 1_000_000,
   outputPerToken: 0.5 / 1_000_000,
 };
+
+/**
+ * Ollama の単価（USD / 1 トークン。Issue #771）。**定額の購読なので、LLM の費用は 0 と記録する**
+ * （2026-10-29 に所有者が承認）。予算の上限は LLM の分では効かず、実試行の門・並列の上限・締切で効く。
+ */
+export const OLLAMA_RATES: TokenRates = {
+  inputPerToken: 0,
+  cachedInputPerToken: 0,
+  cacheWritePerToken: 0,
+  outputPerToken: 0,
+};
+
+/** LLM の adapter が読む鍵の環境変数の名前（`--provider` の既定は openai） */
+export function apiKeyEnvOf(provider: Provider): string {
+  return provider === "ollama" ? OLLAMA_API_KEY_ENV : API_KEY_ENV;
+}
+
+/** その provider の既定の単価（試験用の `deps.rates` が優先する） */
+export function ratesOf(provider: Provider): TokenRates {
+  return provider === "ollama" ? OLLAMA_RATES : DEFAULT_RATES;
+}
 
 /** 終了コード：成功（納品物を書いた） */
 export const EXIT_OK = 0;
@@ -196,7 +234,7 @@ export const EXIT_STAGE_INPUT = 4;
 
 /** 使い方の文（誤りを人に見せる） */
 export const USAGE =
-  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル> [--pipeline v1|v1.1a|v1.2]]";
+  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--provider openai|ollama] [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル> [--pipeline v1|v1.1a|v1.2]]";
 
 /** 段単位の実行口の使い方（段の旗の誤りのときだけ、`USAGE` のあとに出す。Issue #544） */
 export const STAGE_USAGE =
@@ -211,6 +249,11 @@ export interface CliArguments {
   readonly outDir: string;
   readonly model: string;
   readonly effort: string;
+  /**
+   * `--provider <openai|ollama>`（指定したときだけ持つ。Issue #771）。省けば openai で、
+   * 鍵の環境変数・既定のモデル・単価・`makeClient` の引数は今までと同じである。
+   */
+  readonly provider?: Provider;
   /** 費用の上限（USD）。指定しなければ既定（`DEFAULT_BUDGET_USD`）を使う */
   readonly budgetUsd?: number;
   /** 締切（ミリ秒）。指定しなければ既定（`DEFAULT_DEADLINE_MS`）を使う */
@@ -297,6 +340,10 @@ function isPipeline(value: string): value is Pipeline {
   return (PIPELINES as readonly string[]).includes(value);
 }
 
+function isProvider(value: string): value is Provider {
+  return (PROVIDERS as readonly string[]).includes(value);
+}
+
 /** v1.1α の経路で流す経路か（`v1.1a` と `v1.2`。確定した仕様と組んでだけ流れる） */
 function isV11aPath(pipeline: Pipeline | undefined): pipeline is "v1.1a" | "v1.2" {
   return pipeline === "v1.1a" || pipeline === "v1.2";
@@ -336,7 +383,9 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   const args = argv[0] === "--" ? argv.slice(1) : argv;
   let requestFile: string | undefined;
   let outDir: string | undefined;
-  let model: string = DEFAULT_OPENAI_MODEL;
+  // `--model` の明示の値（省けば provider の既定。`--model` は `--provider` の前後どちらでも勝つ。Issue #771）
+  let explicitModel: string | undefined;
+  let provider: Provider | undefined;
   let effort: string = DEFAULT_EFFORT;
   let budgetUsd: number | undefined;
   let deadlineMs: number | undefined;
@@ -417,8 +466,17 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
       index += 1;
       continue;
     }
+    if (arg === "--provider") {
+      const raw = args[index + 1];
+      index += 1;
+      if (raw === undefined || !isProvider(raw)) {
+        return { error: `--provider には ${PROVIDERS.join(" か ")} を指定してください` };
+      }
+      provider = raw;
+      continue;
+    }
     if (arg === "--model") {
-      model = args[index + 1] ?? model;
+      explicitModel = args[index + 1] ?? explicitModel;
       index += 1;
       continue;
     }
@@ -527,8 +585,9 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   return {
     requestFile,
     outDir,
-    model,
+    model: explicitModel ?? (provider === "ollama" ? DEFAULT_OLLAMA_MODEL : DEFAULT_OPENAI_MODEL),
     effort,
+    ...(provider === undefined ? {} : { provider }),
     ...(budgetUsd === undefined ? {} : { budgetUsd }),
     ...(deadlineMs === undefined ? {} : { deadlineMs }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
@@ -565,8 +624,15 @@ export interface CliDeps {
   /**
    * LLM の adapter を作る。`envelope` は v1.1α の走り（段の走りを含む）で `"v1.1a"`、v1.2 の走りで `"v1.2"` が渡る
    * （Issue #511・#588）——v1 の走りでは欄を置かない（v1 の要求のバイト列を変えない）。
+   * `provider` は `--provider ollama` のときだけ渡る（省けば今までの openai の adapter。Issue #771）。
    */
-  readonly makeClient: (options: { apiKey: string; model: string; effort: string; envelope?: EnvelopeId }) => LlmClient;
+  readonly makeClient: (options: {
+    apiKey: string;
+    model: string;
+    effort: string;
+    envelope?: EnvelopeId;
+    provider?: Provider;
+  }) => LlmClient;
   /**
    * Jev の判定の adapter を作る（05 §4）。**鍵を読むのは手元の入口だけ**——`JEV_API_KEY` を環境変数
    * から読んで渡す（adapter は環境変数を読まない）。試験は偽物を差し込む（実 API を呼ばない）。
@@ -644,6 +710,8 @@ interface BuildJob {
   readonly outDir: string;
   readonly model: string;
   readonly effort: string;
+  /** その走りの単価（provider の既定。試験用の `deps.rates` が優先する。Issue #771） */
+  readonly rates: TokenRates;
   readonly budgetUsd: number;
   readonly deadline: number;
   readonly now: () => number;
@@ -698,7 +766,7 @@ function generationInputOf(deps: CliDeps, job: BuildJob, promptVersion: string) 
     documents: job.documents,
     client: job.client,
     budgetUsd: job.budgetUsd,
-    rates: deps.rates ?? DEFAULT_RATES,
+    rates: job.rates,
     now: job.now,
     deadline: job.deadline,
     ...(deps.limits === undefined ? {} : { limits: deps.limits }),
@@ -854,7 +922,7 @@ async function runPlanOnce(
     recheckJudge: job.recheckJudge,
     responder: setup.responder,
     budgetUsd: job.budgetUsd,
-    rates: deps.rates ?? DEFAULT_RATES,
+    rates: job.rates,
     now: job.now,
     deadline: job.deadline,
     effort: job.effort,
@@ -985,9 +1053,11 @@ async function runBuildFromPlanFile(
     return runStageFromPlanFile(deps, parsed, parsed.stageRange, { ...ctx, source, validation }, log, logError);
   }
 
-  const apiKey = deps.env[API_KEY_ENV];
+  const provider = parsed.provider ?? "openai";
+  const apiKeyEnv = apiKeyEnvOf(provider);
+  const apiKey = deps.env[apiKeyEnv];
   if (apiKey === undefined || apiKey === "") {
-    log(`使い方の誤り: 環境変数 ${API_KEY_ENV} がありません`);
+    log(`使い方の誤り: 環境変数 ${apiKeyEnv} がありません`);
     log(USAGE);
     return EXIT_USAGE;
   }
@@ -999,6 +1069,7 @@ async function runBuildFromPlanFile(
     model: parsed.model,
     effort: parsed.effort,
     ...(envelope === undefined ? {} : { envelope }),
+    ...(parsed.provider === undefined ? {} : { provider: parsed.provider }),
   });
   const { judge, recheckJudge } = assembleJudge({
     env: deps.env,
@@ -1017,6 +1088,7 @@ async function runBuildFromPlanFile(
     outDir: parsed.outDir,
     model: parsed.model,
     effort: parsed.effort,
+    rates: deps.rates ?? ratesOf(provider),
     budgetUsd: ctx.budgetUsd,
     deadline: ctx.now() + ctx.deadlineMs,
     now: ctx.now,
@@ -1193,14 +1265,22 @@ async function runStageFromPlanFile(
     inputRecord = verified.input;
   }
 
-  const apiKey = deps.env[API_KEY_ENV];
+  const provider = parsed.provider ?? "openai";
+  const apiKeyEnv = apiKeyEnvOf(provider);
+  const apiKey = deps.env[apiKeyEnv];
   if (apiKey === undefined || apiKey === "") {
-    log(`使い方の誤り: 環境変数 ${API_KEY_ENV} がありません`);
+    log(`使い方の誤り: 環境変数 ${apiKeyEnv} がありません`);
     log(USAGE);
     return EXIT_USAGE;
   }
   const documents = await deps.loadDocuments();
-  const client = deps.makeClient({ apiKey, model: parsed.model, effort: parsed.effort, envelope: envelopeIdOf(pipeline) ?? "v1.1a" });
+  const client = deps.makeClient({
+    apiKey,
+    model: parsed.model,
+    effort: parsed.effort,
+    envelope: envelopeIdOf(pipeline) ?? "v1.1a",
+    ...(parsed.provider === undefined ? {} : { provider: parsed.provider }),
+  });
   const { judge, recheckJudge } = assembleJudge({
     env: deps.env,
     model: parsed.model,
@@ -1218,6 +1298,7 @@ async function runStageFromPlanFile(
     outDir: parsed.outDir,
     model: parsed.model,
     effort: parsed.effort,
+    rates: deps.rates ?? ratesOf(provider),
     budgetUsd: ctx.budgetUsd,
     deadline: ctx.now() + ctx.deadlineMs,
     now: ctx.now,
@@ -1377,16 +1458,23 @@ export async function runCli(deps: CliDeps): Promise<number> {
     );
   }
 
-  const apiKey = deps.env[API_KEY_ENV];
+  const provider = parsed.provider ?? "openai";
+  const apiKeyEnv = apiKeyEnvOf(provider);
+  const apiKey = deps.env[apiKeyEnv];
   if (apiKey === undefined || apiKey === "") {
-    log(`使い方の誤り: 環境変数 ${API_KEY_ENV} がありません`);
+    log(`使い方の誤り: 環境変数 ${apiKeyEnv} がありません`);
     log(USAGE);
     return EXIT_USAGE;
   }
 
   const source = await deps.readFile(parsed.requestFile);
   const documents = await deps.loadDocuments();
-  const client = deps.makeClient({ apiKey, model: parsed.model, effort: parsed.effort });
+  const client = deps.makeClient({
+    apiKey,
+    model: parsed.model,
+    effort: parsed.effort,
+    ...(parsed.provider === undefined ? {} : { provider: parsed.provider }),
+  });
   const { judge, recheckJudge } = assembleJudge({
     env: deps.env,
     model: parsed.model,
@@ -1406,6 +1494,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
     outDir: parsed.outDir,
     model: parsed.model,
     effort: parsed.effort,
+    rates: deps.rates ?? ratesOf(provider),
     budgetUsd,
     deadline,
     now,
@@ -1515,8 +1604,10 @@ export async function main(): Promise<void> {
       await fs.mkdir(path, { recursive: true });
     },
     loadDocuments: loadDocumentsFromFiles,
-    makeClient: ({ apiKey, model, effort, envelope }) =>
-      createOpenAiLlmClient({ apiKey, model, effort, ...(envelope === undefined ? {} : { envelope }) }),
+    makeClient: ({ apiKey, model, effort, envelope, provider }) =>
+      provider === "ollama"
+        ? createOllamaLlmClient({ apiKey, model, effort, ...(envelope === undefined ? {} : { envelope }) })
+        : createOpenAiLlmClient({ apiKey, model, effort, ...(envelope === undefined ? {} : { envelope }) }),
     terminal: createNodeTerminal(proc),
     log: (line) => proc.stdout.write(`${line}\n`),
     logError: (line) => proc.stderr.write(`${line}\n`),
