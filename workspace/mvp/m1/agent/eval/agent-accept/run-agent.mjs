@@ -70,6 +70,7 @@
 //          群の条件の照合は stage_efforts を外し（同じ値を求めない）、比較の記録の群に両群の値を並べる（持たない群は null）。--make-pairs の対のファイルは変えない
 // #771（LLM の adapter の選択。README §5.1）：
 //   --provider openai|ollama（既定 openai）：省けば子の argv・条件の記録・署名は今までと同じ（provider の欄を足さない。欄の無い旧の記録は openai と扱う）。
+//          --provider openai の明示も省略と同じ形にする（子の argv・条件の params・比較の既定・shared.params に provider の欄を足さない。ccdfcd7 と同じ条件と署名）。
 //          ollama のときだけ、子を起こす前に、対象の checkout（比較なら両方）の dist が対応している（ollama.js と DEFAULT_OLLAMA_MODEL・
 //          OLLAMA_API_KEY_ENV を公開している）ことを確かめ、無ければ provider:ollama-unavailable で断る（子 0 本）。対応していれば子の argv に
 //          --provider ollama と dist の既定モデルを渡し、条件の params.provider・params.provider_api_key_env に provider と鍵の環境変数の名前
@@ -132,6 +133,8 @@ const pipelineArg = valueOf("--pipeline"), pipeline = pipelineArg ?? "v1";
 // #771：LLM の adapter（--provider openai|ollama）。省けば今までどおり openai で、子の argv も条件の記録も署名も変えない
 const providerArg = valueOf("--provider"), provider = providerArg ?? "openai";
 if (providerArg === "" || (providerArg !== null && provider !== "openai" && provider !== "ollama")) refuseCode("provider:unknown");
+// #771 再レビュー：provider の欄を足すのは既定（openai）でないときだけ。--provider openai の明示は省略と同じ argv・条件・署名にする
+const providerExplicit = provider !== "openai";
 const compare = args.includes("--compare"), makePairsOut = valueOf("--make-pairs"), baselineArg = valueOf("--baseline"), pairsArg = valueOf("--pairs");
 // #545：段単位の走り。段の旗のどれかがあれば段単位で、v1.1α の経路の旗と凍結した組の旗が要る（比較・対のファイルでも同じ）
 const stageStartArg = valueOf("--stage-start"), stageEndArg = valueOf("--stage-end"), stageFromArg = valueOf("--stage-from");
@@ -534,8 +537,8 @@ if (script) {
 // 子プロセスへ渡す引数を 1 か所で組み立て、条件のファイルもここから作る（既定値を別に手書きしない）。v1.1a・v1.2 の経路だけ末尾に --pipeline <経路> を足す（#513・#557）
 const argvFor = (cli, dir, pl, withEfforts = false) => {
   const argv = [cli, join(dir, "request.md"), "--out", join(dir, "bundle"), "--effort", effort, "--model", model, "--budget", String(perRunBudget), "--deadline", String(deadlineMin)];
-  // #771：--provider を指定したときだけ、子にも同じ provider を渡す（省けば今までどおり何も足さない。モデルは上の --model）
-  if (providerArg !== null) argv.push("--provider", provider);
+  // #771：既定でない --provider を指定したときだけ、子にも同じ provider を渡す（省略と openai の明示は今までどおり何も足さない。モデルは上の --model）
+  if (providerExplicit) argv.push("--provider", provider);
   if (plan || planOnly) argv.push(plan ? "--plan" : "--plan-only", ...(script ? ["--script", join(dir, "script.json")] : ["--answers", join(dir, "answers.json")]));
   if (buildFrom !== null) argv.push("--plan-file", join(dir, "plan-file.json"));
   if (pl === "v1.1a" || pl === V12_PIPELINE) argv.push("--pipeline", pl);
@@ -608,8 +611,8 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId, e
       stage_output_limits: outputLimits.v1,
       // #513：経路（v1 か v1.1a。省略は v1）と v1.1α の 4 段の上限（dist に無ければ null）
       pipeline: pl, stage_output_limits_v11a: outputLimits.v11a,
-      // #771：--provider を指定したときだけ。LLM の adapter と、鍵を読む環境変数の名前（値は残さない。署名に入る）
-      ...(providerArg === null ? {} : { provider, provider_api_key_env: apiKeyEnvOf(ctx) }),
+      // #771：既定でない --provider を指定したときだけ。LLM の adapter と、鍵を読む環境変数の名前（値は残さない。署名に入る）
+      ...(!providerExplicit ? {} : { provider, provider_api_key_env: apiKeyEnvOf(ctx) }),
       // #557：経路 v1.2 のときだけ。工場の dist の V12_PIPELINE_FLAGS の写し（署名に入る。旗の組が変われば再開を断る）
       ...(pl === V12_PIPELINE ? { v12_flags: v12Flags } : {}),
       // #618：経路 v1.2 の単独の計測だけ（署名に入る。上限が変われば再開を断る）。比較の群には足さない（採点側の比較が params の同一を見るため）
@@ -866,7 +869,7 @@ async function runCompare() {
     // #771：--provider ollama のときは、既定のモデルと鍵の環境変数もその checkout の provider の値（指定が無ければ今のまま）
     ...(provider === "ollama" ? { model_ollama: ctx.ollama.model } : {}),
     api_key_env: apiKeyEnvOf(ctx), jev_key_env: ctx.factory.JEV_API_KEY_ENV,
-    ...(providerArg === null ? {} : { provider }),
+    ...(!providerExplicit ? {} : { provider }),
   });
   if (JSON.stringify(defaultsOf(baseline)) !== JSON.stringify(defaultsOf(main))) refuseCode("compare:defaults-differ");
   // 正式な比較の条件（断らない。違った項目の名前だけ残す）。採点 v5 は採点の定義に rubric-v5.mjs があるとき
@@ -936,7 +939,7 @@ async function runCompare() {
     shared: {
       set: { sha256: m1.set.sha256, id: m1.set.id, version: m1.set.version }, scoring: m1.scoring.fingerprint, scripts: m1.scripts.fingerprint, judge: m1.judge.configuration,
       frozen: { sha256: frozen.sha256, id: frozen.id, version: frozen.version, adopted: frozen.adopted.length }, document: m1.document.sha256,
-      params: { effort: m1.params.effort, model: m1.params.model, factory_budget_usd: m1.params.factory_budget_usd, factory_deadline_min: m1.params.factory_deadline_min, mode: m1.params.mode, ...(providerArg === null ? {} : { provider, provider_api_key_env: m1.params.provider_api_key_env }) },
+      params: { effort: m1.params.effort, model: m1.params.model, factory_budget_usd: m1.params.factory_budget_usd, factory_deadline_min: m1.params.factory_deadline_min, mode: m1.params.mode, ...(!providerExplicit ? {} : { provider, provider_api_key_env: m1.params.provider_api_key_env }) },
     },
     profile, profile_mismatches: mismatches,
     concurrency: CONC, budget_usd: budget, reserve_per_run_usd: perRunBudget, scoring_cost_usd: SCORING_COST_USD,
