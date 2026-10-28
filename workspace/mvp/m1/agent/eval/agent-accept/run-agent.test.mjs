@@ -1357,6 +1357,61 @@ function assertCompareRefused(r, code, log, out, label = code) {
   assertNothingWritten(out, label);
 }
 
+/** #771（レビュー R1）：比較の両 checkout を Ollama に対応させる。比較元の公開値（鍵の環境変数の名前・既定のモデル）は別に与えられる。baselineOllama を偽にすると比較元は未対応 */
+function makeOllamaCompare(base, { baselineOllama = true, baselineKeyEnv = "OLLAMA_API_KEY", baselineModel = "fake-ollama-model" } = {}) {
+  const c = makeCompare(base);
+  const keyEnvExport = (name) => `export const OLLAMA_API_KEY_ENV = ${JSON.stringify(name)};\n`;
+  writeFileSync(join(c.repo, "packages/factory/dist/cli.js"), fakeCompareCli() + keyEnvExport("OLLAMA_API_KEY"));
+  writeFileSync(join(c.repo, "packages/factory/dist/ollama.js"), fakeOllama);
+  if (baselineOllama) {
+    writeFileSync(join(c.baseline, "packages/factory/dist/cli.js"), fakeCompareCli() + keyEnvExport(baselineKeyEnv));
+    writeFileSync(join(c.baseline, "packages/factory/dist/ollama.js"), `export const DEFAULT_OLLAMA_MODEL = ${JSON.stringify(baselineModel)};\n`);
+  }
+  return c;
+}
+
+test("#771 R1 比較 × --provider ollama：比較元の鍵の環境変数の名前・既定のモデルが候補と違えば、比較元の値で照らして compare:defaults-differ で断る（子 0 本・何も書かない）", async () => {
+  await withRepo(async (base) => {
+    for (const [label, opts] of [["key", { baselineKeyEnv: "BASE_OLLAMA_API_KEY" }], ["model", { baselineModel: "base-ollama-model" }]]) {
+      const c = makeOllamaCompare(join(base, `r1-${label}`), opts);
+      const pairs = makePairsFile(c.repo, c, join(base, `pairs-r1-${label}.json`), 1);
+      const log = join(base, `spawn-r1-${label}.log`), out = join(base, `out-r1-${label}`);
+      assertCompareRefused(runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5", "--provider", "ollama"]), { FAKE_SPAWN_LOG: log }), "compare:defaults-differ", log, out, label);
+    }
+  });
+});
+
+test("#771 R1 比較 × --provider ollama：比較元だけ Ollama に対応していなければ provider:ollama-unavailable で断る（exit 3・子 0 本・何も書かない）", async () => {
+  await withRepo(async (base) => {
+    const c = makeOllamaCompare(join(base, "r1-old"), { baselineOllama: false });
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-r1-old.json"), 1);
+    const log = join(base, "spawn-r1-old.log"), out = join(base, "out-r1-old");
+    assertCompareRefused(runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5", "--provider", "ollama"]), { FAKE_SPAWN_LOG: log }), "provider:ollama-unavailable", log, out);
+  });
+});
+
+test("#771 R1 比較 × --provider ollama：両方が対応し公開値が同じなら、両群の子に provider と dist の既定モデルが渡り、各群の条件・既定・shared.params の provider と鍵の名前が一致する", async () => {
+  await withRepo(async (base) => {
+    const c = makeOllamaCompare(join(base, "r1-ok"));
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-r1-ok.json"), 1);
+    const log = join(base, "spawn-r1-ok.log"), out = join(base, "out-r1-ok");
+    const r = runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5", "--provider", "ollama"]), { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(compareLog(log).length, 4);
+    for (const g of ["v1", "v1.1a"]) {
+      const argv = readJson(join(out, g, "P1-r1", "received-argv.json"));
+      assert.equal(argv[argv.indexOf("--provider") + 1], "ollama", g);
+      assert.equal(argv[argv.indexOf("--model") + 1], "fake-ollama-model", g);
+      const cond = readJson(join(out, g, "conditions.json"));
+      assert.deepEqual([cond.params.provider, cond.params.provider_api_key_env, cond.params.model], ["ollama", "OLLAMA_API_KEY", "fake-ollama-model"], g);
+      assert.equal(conditionsSignature(cond), cond.signature, g);
+    }
+    const rec = readJson(join(out, "comparison.json"));
+    for (const g of ["v1", "v1.1a"]) assert.deepEqual([rec.groups[g].defaults.provider, rec.groups[g].defaults.api_key_env, rec.groups[g].defaults.model_ollama], ["ollama", "OLLAMA_API_KEY", "fake-ollama-model"], g);
+    assert.deepEqual([rec.shared.params.provider, rec.shared.params.provider_api_key_env, rec.shared.params.model], ["ollama", "OLLAMA_API_KEY", "fake-ollama-model"]);
+  });
+});
+
 test("#513 (a) --pipeline：--build-from と v1.1a で子の引数の末尾が --pipeline v1.1a・schema v5・署名が省略時と異なる。省略と v1 は子の引数が今までと同じで署名も同じ。知らない値・組めない組は flags:conflict で子を起こさない", async () => {
   await withRepo(async (base, repo) => {
     const log = join(base, "spawn-p.log");
