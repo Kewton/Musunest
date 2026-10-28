@@ -13,12 +13,15 @@ import {
   API_KEY_ENV,
   DEFAULT_BUDGET_USD,
   DEFAULT_DEADLINE_MS,
+  DEFAULT_RATES,
   EXIT_OK,
   EXIT_RETURN_TO_PLAN,
   EXIT_RUN_FAILED,
   EXIT_STAGE_INPUT,
   EXIT_USAGE,
   JEV_API_KEY_ENV,
+  OLLAMA_API_KEY_ENV,
+  OLLAMA_RATES,
   CONTRACT_VERSION,
   PROMPT_VERSION_V11A,
   PROMPT_VERSION_V12,
@@ -29,14 +32,18 @@ import {
   parseCliArguments,
   parseStageEfforts,
   runCli,
+  main,
 } from "./cli.js";
 import { AGENT_LIMITS, maxOutputTokensForEffort } from "./limits.js";
+import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL } from "./ollama.js";
+import * as planRunModule from "./plan/run-plan.js";
+import type { PlanResult } from "./plan/run-plan.js";
 import { BUILD_CLI_RECORD_FILE, PLAN_ONLY_RESULT_SCHEMA } from "./cli-plan.js";
 import * as factory from "./index.js";
 import { createFakeJudge } from "./judge-fake.js";
 import type { JudgeAnswer } from "./judge.js";
 import { FakeLlmSchemaMismatchError, uncheckedBecause, type RecordedCall } from "./llm-fake.js";
-import { createOpenAiLlmClient, OpenAiIncompleteError } from "./openai.js";
+import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL, OpenAiIncompleteError } from "./openai.js";
 import { FIELD_REPAIR_IDS_DIAGNOSTIC_RULE_DEFINITIONS, FIELD_REPAIR_IDS_R08_DEFINITION, FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "./v12/stages/field-repair.js";
 import { REPAIR_DIAGNOSTIC_DATA_NAME } from "./stages/repair.js";
 import {
@@ -139,7 +146,7 @@ import type { Judge, JudgeRequest } from "./judge.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse, LlmUsage } from "./llm.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, ACCEPTANCE_MATERIAL_WORDS } from "./stages/__tests__/prompt.js";
 import { ATTEMPT_KEYS, FAILURE_KINDS, RETRY_KEYS, STAGE_IDS } from "./record.js";
-import { DESIGN_OUTPUT_MAPPED, SOURCE_TEXT, recordedRun, structured, USAGE as RECORDED_USAGE } from "./__tests__/run.js";
+import { CONFIRMED_PLAN, DESIGN_OUTPUT_MAPPED, SOURCE_TEXT, recordedRun, structured, USAGE as RECORDED_USAGE } from "./__tests__/run.js";
 
 interface NodeFs {
   mkdtemp(prefix: string): Promise<string>;
@@ -198,6 +205,63 @@ describe("引数の読み取り（02 §3.2）", () => {
     expect(parseCliArguments(["request.txt"])).toEqual({
       error: "--out で出力のディレクトリを指定してください",
     });
+  });
+});
+
+// ── --provider の読み取り（Issue #771）──────────────────────────
+
+describe("--provider の読み取り（Issue #771）", () => {
+  it("--provider ollama は既定のモデルを Ollama のものにする", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--provider", "ollama"])).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: DEFAULT_OLLAMA_MODEL,
+      effort: "high",
+      provider: "ollama",
+    });
+  });
+
+  it("--model は --provider の前でも後でも勝つ", () => {
+    const expected = {
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "deepseek-v4.1-flash",
+      effort: "high",
+      provider: "ollama",
+    };
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--model", "deepseek-v4.1-flash", "--provider", "ollama"]),
+    ).toEqual(expected);
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--provider", "ollama", "--model", "deepseek-v4.1-flash"]),
+    ).toEqual(expected);
+  });
+
+  it("--provider openai を明示すると、既定のモデルは今のまま", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--provider", "openai"])).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "gpt-6-luna",
+      effort: "high",
+      provider: "openai",
+    });
+  });
+
+  it("--provider の値の誤りは使い方の誤り", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--provider", "nope"])).toEqual({
+      error: "--provider には openai か ollama を指定してください",
+    });
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--provider"])).toEqual({
+      error: "--provider には openai か ollama を指定してください",
+    });
+  });
+
+  it("--provider を省いた出力に provider の欄は無い（ccdfcd7 と同じ）", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out"])).not.toHaveProperty("provider");
+  });
+
+  it("使い方の文に --provider openai|ollama がある", () => {
+    expect(USAGE).toContain("[--provider openai|ollama]");
   });
 });
 
@@ -358,6 +422,27 @@ describe("鍵が無いときは、API を呼ばずに使い方の誤りで終わ
     expect(log.mock.calls.some(([line]) => String(line).includes(API_KEY_ENV))).toBe(true);
   });
 
+  it("--provider ollama で OLLAMA_API_KEY が無ければ、makeClient を呼ばずに 2 を返し、何も書かない（Issue #771）", async () => {
+    const makeClient = vi.fn();
+    const log = vi.fn();
+    const writeFile = vi.fn(async () => {});
+    const code = await runCli({
+      // OpenAI の鍵だけがあっても、選んだ provider の鍵が無ければ使い方の誤り
+      argv: ["--", "request.txt", "--out", "out", "--provider", "ollama"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async () => SOURCE_TEXT,
+      writeFile,
+      makeDirectory: async () => {},
+      loadDocuments: async () => [],
+      makeClient,
+      log,
+    });
+    expect(code).toBe(EXIT_USAGE);
+    expect(makeClient).not.toHaveBeenCalled();
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(log.mock.calls.some(([line]) => String(line).includes(OLLAMA_API_KEY_ENV))).toBe(true);
+  });
+
   it("引数が足りないときも 2 を返す", async () => {
     const makeClient = vi.fn();
     const code = await runCli({
@@ -435,6 +520,37 @@ describe("偽物を差し込んで 1 回の生成を流し、ディレクトリ�
     }
     // 依頼文の目印の文字列は出ない
     expect(last).not.toContain("タスクを記録する");
+  });
+
+  it("--provider ollama は Ollama の鍵・モデル・単価 0 で client を作り、費用 0 で流す（Issue #771）", async () => {
+    const recording = createRecordingClient(recordedRun());
+    const makeClient = vi.fn(() => recording.client);
+    const lines: string[] = [];
+    const dir = `${directory}-ollama`;
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--provider", "ollama"],
+      // OpenAI の鍵は渡さない（選んだ provider の鍵だけを読む）
+      env: { [OLLAMA_API_KEY_ENV]: "ol-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient,
+      log: (line) => lines.push(line),
+    });
+
+    expect(code).toBe(EXIT_OK);
+    // 鍵の名前・モデル・provider が makeClient に届く
+    expect(makeClient.mock.calls[0]).toEqual([
+      { apiKey: "ol-FAKE", model: DEFAULT_OLLAMA_MODEL, effort: "high", provider: "ollama" },
+    ]);
+    expect(OLLAMA_RATES).toEqual({
+      inputPerToken: 0,
+      cachedInputPerToken: 0,
+      cacheWritePerToken: 0,
+      outputPerToken: 0,
+    });
+    // 定額の購読なので LLM の費用は 0（usage があっても単価 0）
+    const summary = JSON.parse(lines.at(-1) ?? "{}") as { provider_cost_usd?: number };
+    expect(summary.provider_cost_usd).toBe(0);
   });
 });
 
@@ -7015,6 +7131,273 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
         vi.useRealTimers();
         vi.restoreAllMocks();
       }
+    });
+  }
+});
+
+// ── 入口の provider の配線（実 adapter・偽物の fetch。Issue #771 レビュー R2）──────────────
+
+/** provider ごとの期待（宛先・選ぶ鍵・既定のモデル・単価）。env には両方の鍵を置き、選んだ鍵だけが送られることを見る */
+const PROVIDER_WIRING = [
+  {
+    label: "--provider ollama",
+    args: ["--provider", "ollama"],
+    provider: "ollama" as const,
+    url: "https://ollama.com/v1/responses",
+    key: "ol-FAKE-R2",
+    model: DEFAULT_OLLAMA_MODEL,
+    rates: OLLAMA_RATES,
+  },
+  {
+    label: "--provider 省略（openai）",
+    args: [],
+    provider: undefined,
+    url: "https://api.openai.com/v1/responses",
+    key: "sk-FAKE-R2",
+    model: DEFAULT_OPENAI_MODEL,
+    rates: DEFAULT_RATES,
+  },
+] as const;
+type ProviderWiring = (typeof PROVIDER_WIRING)[number];
+const BOTH_KEYS = { [API_KEY_ENV]: "sk-FAKE-R2", [OLLAMA_API_KEY_ENV]: "ol-FAKE-R2" };
+
+/** 偽物の fetch：宛先・鍵・モデルを残して HTTP 400 を返す（外部の API は呼ばない。400 は再送されない） */
+function wireTap() {
+  const hits: { readonly url: string; readonly authorization: string | undefined; readonly model: unknown }[] = [];
+  const fetch = vi.fn(async (url: string, init: RequestInit) => {
+    const headers = init.headers as Record<string, string>;
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    hits.push({ url, authorization: headers["authorization"], model: body["model"] });
+    return new Response(JSON.stringify({ error: { message: "fake", type: "invalid_request_error" } }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  });
+  return { hits, fetch };
+}
+
+/** 偽物の fetch を当てた宛先・鍵・モデルが provider のものであること（1 回以上送り、全部が同じ） */
+function expectWire(tap: ReturnType<typeof wireTap>, c: ProviderWiring): void {
+  expect(tap.hits.length, "LLM を 1 回も呼んでいない").toBeGreaterThan(0);
+  for (const hit of tap.hits) {
+    expect(hit).toEqual({ url: c.url, authorization: `Bearer ${c.key}`, model: c.model });
+  }
+}
+
+/** 入口と同じ形で provider の adapter を組む makeClient（fetch だけ偽物）と、判定の偽物を差して 1 回流す */
+async function runWired(input: {
+  readonly c: ProviderWiring;
+  readonly tap: ReturnType<typeof wireTap>;
+  readonly dir: string;
+  readonly args: readonly string[];
+  readonly readFile: (path: string) => Promise<string>;
+  readonly documents: readonly { readonly name: string; readonly text: string }[];
+}) {
+  const makeClient = vi.fn(
+    (options: { apiKey: string; model: string; effort: string; envelope?: EnvelopeId; provider?: string }): LlmClient => {
+      const adapterOptions = {
+        apiKey: options.apiKey,
+        model: options.model,
+        effort: options.effort,
+        ...(options.envelope === undefined ? {} : { envelope: options.envelope }),
+        fetch: input.tap.fetch,
+      };
+      return options.provider === "ollama" ? createOllamaLlmClient(adapterOptions) : createOpenAiLlmClient(adapterOptions);
+    },
+  );
+  const llmJudges: { readonly client: LlmClient; readonly model: string; readonly judge: Judge }[] = [];
+  const makeLlmJudge = vi.fn((options: { client: LlmClient; model: string }) => {
+    const judge = fakeJudge("llm");
+    llmJudges.push({ ...options, judge });
+    return judge;
+  });
+  const code = await runCli({
+    argv: ["--", "request.txt", "--out", input.dir, ...input.c.args, ...input.args],
+    env: { ...BOTH_KEYS, [JEV_API_KEY_ENV]: "jev-FAKE-R2" },
+    readFile: input.readFile,
+    writeFile: async (path, text) => {
+      await fs.writeFile(path, text, "utf8");
+    },
+    makeDirectory: async (path) => {
+      await fs.mkdir(path, { recursive: true });
+    },
+    loadDocuments: async () => input.documents,
+    makeClient,
+    makeJevJudge: () => fakeJudge("jev"),
+    makeLlmJudge,
+    now: () => 0,
+    log: () => {},
+    logError: () => {},
+  });
+  expect(makeClient).toHaveBeenCalledTimes(1);
+  const options = makeClient.mock.calls[0]![0];
+  // 選んだ provider の鍵・モデルが makeClient に届き、provider は指定したときだけ欄を持つ
+  expect(options.apiKey).toBe(input.c.key);
+  expect(options.model).toBe(input.c.model);
+  expect("provider" in options).toBe(input.c.provider !== undefined);
+  expect(options.provider).toBe(input.c.provider);
+  const client = makeClient.mock.results[0]!.value as LlmClient;
+  // 判定の LLM（Jev の落とし先・再点検）は同じ client とモデル
+  expect(llmJudges).toHaveLength(1);
+  expect(llmJudges[0]!.client).toBe(client);
+  expect(llmJudges[0]!.model).toBe(input.c.model);
+  return { code, client, llmJudge: llmJudges[0]!.judge };
+}
+
+/** 実行部に届いた入力の client・単価・判定（Jev が主・LLM が落とし先） */
+async function expectJob(
+  job: { readonly client: LlmClient; readonly rates: unknown; readonly judge?: Judge | undefined } | undefined,
+  wired: { readonly client: LlmClient },
+  c: ProviderWiring,
+): Promise<void> {
+  expect(job, "実行部に届いていない").toBeDefined();
+  expect(job!.client).toBe(wired.client);
+  expect(job!.rates).toEqual(c.rates);
+  expect(job!.judge, "判定の口が届いていない").toBeDefined();
+  expect((await job!.judge!.judge(JUDGE_REQUEST)).answeredBy).toBe("jev");
+}
+
+describe("入口の全部の実行口が provider の adapter・鍵・モデル・単価・判定を使う（実 adapter・偽物の fetch。Issue #771 レビュー R2）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  for (const c of PROVIDER_WIRING) {
+    it(`Plan だけ（${c.label}）`, async () => {
+      const tap = wireTap();
+      const spy = vi.spyOn(planRunModule, "runPlan");
+      const wired = await runWired({
+        c,
+        tap,
+        dir: `${directory}/r2-plan-only-${c.args.length}`,
+        args: ["--plan-only", "--answers", "answers.json"],
+        readFile: async (path) => (path === "answers.json" ? "{}" : SOURCE_TEXT),
+        documents: [],
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      const plan = spy.mock.calls[0]![0];
+      await expectJob(plan, wired, c);
+      expect(plan.recheckJudge).toBe(wired.llmJudge);
+      expectWire(tap, c);
+    });
+
+    it(`Plan→Build（${c.label}）`, async () => {
+      const tap = wireTap();
+      const realRunPlan = planRunModule.runPlan;
+      let planHits = -1;
+      // Plan は実物を流し（偽物の fetch は 400 なので止まる）、その結果を確定に読み替えて Build へ進ませる
+      const planSpy = vi.spyOn(planRunModule, "runPlan").mockImplementation(async (planInput) => {
+        const result = await realRunPlan(planInput);
+        planHits = tap.hits.length;
+        const { reason: _reason, failure: _failure, ...base } = result as Extract<PlanResult, { kind: "stopped" }>;
+        return { ...base, kind: "confirmed", plan: CONFIRMED_PLAN, remainingUsd: planInput.budgetUsd };
+      });
+      const buildSpy = vi.spyOn(runModule, "runGeneration");
+      const wired = await runWired({
+        c,
+        tap,
+        dir: `${directory}/r2-plan-build-${c.args.length}`,
+        args: ["--plan", "--answers", "answers.json"],
+        readFile: async (path) => (path === "answers.json" ? "{}" : SOURCE_TEXT),
+        documents: [],
+      });
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      await expectJob(planSpy.mock.calls[0]![0], wired, c);
+      expect(planSpy.mock.calls[0]![0].recheckJudge).toBe(wired.llmJudge);
+      expect(buildSpy).toHaveBeenCalledTimes(1);
+      const build = buildSpy.mock.calls[0]![0];
+      expect(build.plan).toBe(CONFIRMED_PLAN);
+      expect(build.model).toBe(c.model);
+      await expectJob(build, wired, c);
+      // Plan と Build の両方が LLM を呼び、どれも provider の宛先・鍵・モデル
+      expect(planHits).toBeGreaterThan(0);
+      expect(tap.hits.length).toBeGreaterThan(planHits);
+      expectWire(tap, c);
+    });
+
+    for (const pipeline of ["v1", "v1.1a"] as const) {
+      it(`--plan-file の Build（--pipeline ${pipeline}・${c.label}）`, async () => {
+        const tap = wireTap();
+        const planPath = `${directory}/r2-plan-file-${pipeline}-${c.args.length}-plan.json`;
+        const planText = JSON.stringify(await v11aEnvelope());
+        const v1Spy = vi.spyOn(runModule, "runGeneration");
+        const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
+        const wired = await runWired({
+          c,
+          tap,
+          dir: `${directory}/r2-plan-file-${pipeline}-${c.args.length}`,
+          args: ["--pipeline", pipeline, "--plan-file", planPath],
+          readFile: async (path) => (path === planPath ? planText : V11A_SOURCE),
+          documents: FIXTURE_DOCUMENTS,
+        });
+        const spy = pipeline === "v1" ? v1Spy : v11aSpy;
+        expect(spy).toHaveBeenCalledTimes(1);
+        const build = spy.mock.calls[0]![0];
+        expect(build.model).toBe(c.model);
+        await expectJob(build, wired, c);
+        expectWire(tap, c);
+      });
+    }
+
+    it(`段の走り（--pipeline v1.1a・name-table..semantic-check・${c.label}）`, async () => {
+      const tap = wireTap();
+      const planPath = `${directory}/r2-stage-${c.args.length}-plan.json`;
+      const planText = JSON.stringify(await v11aEnvelope());
+      const spy = vi.spyOn(v11aRunModule, "runStageRangeV11a");
+      const wired = await runWired({
+        c,
+        tap,
+        dir: `${directory}/r2-stage-${c.args.length}`,
+        args: ["--pipeline", "v1.1a", "--plan-file", planPath, "--stage-start", "name-table", "--stage-end", "semantic-check"],
+        readFile: async (path) => (path === planPath ? planText : V11A_SOURCE),
+        documents: FIXTURE_DOCUMENTS,
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      const stage = spy.mock.calls[0]![0];
+      expect(stage.model).toBe(c.model);
+      await expectJob(stage, wired, c);
+      expectWire(tap, c);
+    });
+  }
+});
+
+describe("main の依存の注入が provider の adapter を組む（本物の makeClient・偽物の fetch。Issue #771 レビュー R2）", () => {
+  interface MainProcess {
+    argv: string[];
+    exitCode?: number | undefined;
+    readonly stdout: { write: (text: string) => boolean };
+    readonly stderr: { write: (text: string) => boolean };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  for (const c of PROVIDER_WIRING) {
+    it(`main（${c.label}）は選んだ provider の宛先・鍵・モデルで送る`, async () => {
+      const tap = wireTap();
+      vi.stubGlobal("fetch", tap.fetch);
+      for (const [name, value] of Object.entries(BOTH_KEYS)) vi.stubEnv(name, value);
+      vi.stubEnv(JEV_API_KEY_ENV, "");
+      const dir = await fs.mkdtemp(`${directory}/r2-main-`);
+      const requestPath = `${dir}/request.txt`;
+      await fs.writeFile(requestPath, SOURCE_TEXT, "utf8");
+      const proc = (globalThis as unknown as { process: MainProcess }).process;
+      const saved = { argv: proc.argv, exitCode: proc.exitCode, stdout: proc.stdout.write, stderr: proc.stderr.write };
+      // main は自分が入口として起動されたときだけ動く（argv[1] が自分の URL で終わる）
+      proc.argv = [saved.argv[0] ?? "node", new URL("./cli.ts", import.meta.url).href, requestPath, "--out", `${dir}/out`, ...c.args];
+      proc.stdout.write = () => true;
+      proc.stderr.write = () => true;
+      try {
+        await main();
+      } finally {
+        proc.argv = saved.argv;
+        proc.exitCode = saved.exitCode;
+        proc.stdout.write = saved.stdout;
+        proc.stderr.write = saved.stderr;
+      }
+      expectWire(tap, c);
     });
   }
 });

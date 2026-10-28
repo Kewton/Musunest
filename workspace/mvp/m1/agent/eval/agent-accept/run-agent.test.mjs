@@ -119,6 +119,9 @@ export async function validatePlanFile({ envelope, source, vocabularyVersion }) 
 `;
 
 const fakeOpenai = 'export const DEFAULT_OPENAI_MODEL = "fake-model";\n';
+// #771：Ollama に対応した工場の dist（ollama.js の既定のモデルと、cli.js の OLLAMA_API_KEY_ENV）
+const fakeOllama = 'export const DEFAULT_OLLAMA_MODEL = "fake-ollama-model";\n';
+const FAKE_OLLAMA_KEY_ENV_EXPORT = 'export const OLLAMA_API_KEY_ENV = "OLLAMA_API_KEY";\n';
 const fakeLimits = 'export const DEFAULT_REASONING_EFFORT = "high";\nexport const STAGE_MAX_OUTPUT_TOKENS = { low: { requirements: 2048 }, medium: { requirements: 16384 }, high: { requirements: 16384 } };\n';
 // 偽物の appspec-schema の files（工場の入口が生成に渡す文書の置き場所を引く口。packages/appspec-schema/src/files.ts と同じ形）
 const fakeSchemaFiles = `export const CONTRACT_DIR = "contract";
@@ -140,17 +143,18 @@ function makeSet(over = {}) {
   return { schema: EVAL_SET_SCHEMA, id: "dev-p1-p10", version: 1, role: "development", title: "t", source: { document: "workspace/mvp/m1/grammar-trial/stage1-patterns.md" }, styles: { S1: "s1", S2: "s2" }, items, ...over };
 }
 
-/** 一時の偽物のリポジトリを作る。dist は src より後に書くので「作り直した」根拠が立つ */
-function makeRepo(base) {
+/** 一時の偽物のリポジトリを作る。dist は src より後に書くので「作り直した」根拠が立つ。ollama を真にすると Ollama に対応した dist になる（#771） */
+function makeRepo(base, { ollama = false } = {}) {
   const repo = join(base, "repo");
   mkdirSync(join(repo, "packages/factory/dist"), { recursive: true });
   mkdirSync(join(repo, "packages/factory/src"), { recursive: true });
   mkdirSync(join(repo, "workspace/mvp/m1/grammar-trial"), { recursive: true });
   writeFileSync(join(repo, "packages/factory/package.json"), JSON.stringify({ type: "module" }));
   writeFileSync(join(repo, "packages/factory/src/index.ts"), "export {};\n");
-  writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeCli);
+  writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeCli + (ollama ? FAKE_OLLAMA_KEY_ENV_EXPORT : ""));
   writeFileSync(join(repo, "packages/factory/dist/cli-plan.js"), fakeCliPlan);
   writeFileSync(join(repo, "packages/factory/dist/openai.js"), fakeOpenai);
+  if (ollama) writeFileSync(join(repo, "packages/factory/dist/ollama.js"), fakeOllama);
   writeFileSync(join(repo, "packages/factory/dist/limits.js"), fakeLimits);
   writeFileSync(join(repo, "workspace/mvp/m1/grammar-trial/stage1-patterns.md"), makeTable());
   // #425：spec-engine の dist・生成に渡す文書・採点の定義と集計のコード（指紋を取るだけ。中身は動かさない）
@@ -202,10 +206,168 @@ function assertFreshRefused(r, code, out, label = code) {
   assert.ok(!existsSync(out) || readdirSync(out).length === 0, `${label}: 出力先に書いた`);
 }
 
-async function withRepo(fn) {
+async function withRepo(fn, options = {}) {
   const base = mkdtempSync(join(tmpdir(), "run-agent-test-"));
-  try { await fn(base, makeRepo(base)); } finally { rmSync(base, { recursive: true, force: true }); }
+  try { await fn(base, makeRepo(base, options)); } finally { rmSync(base, { recursive: true, force: true }); }
 }
+
+test("--provider を省いた計測の条件に provider の欄が無い（#771。ccdfcd7 と同じ）", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-no-provider");
+    assert.equal(runAgent(repo, out, ["--only", "P1", "--runs", "1"]).status, 0);
+    const cond = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    assert.equal("provider" in cond.params, false);
+    assert.equal("provider_api_key_env" in cond.params, false);
+    const received = JSON.parse(readFileSync(join(out, "P1-r1", "received-argv.json"), "utf8"));
+    assert.equal(received.includes("--provider"), false);
+  });
+});
+
+test("旧の checkout（Ollama に対応していない dist）は --provider ollama を子を起こす前に固定の理由で断る（#771）", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-ollama-old");
+    const log = join(base, "spawn-ollama-old.log");
+    const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--provider", "ollama"], { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 3);
+    assert.ok(r.stderr.includes("[provider:ollama-unavailable]"), r.stderr);
+    assert.equal(spawnCount(log), 0);
+    assert.ok(!existsSync(out) || readdirSync(out).length === 0);
+  });
+});
+
+test("--provider の値の誤りは子を起こす前に断る（#771）", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-provider-unknown");
+    const log = join(base, "spawn-provider-unknown.log");
+    const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--provider", "nope"], { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 3);
+    assert.ok(r.stderr.includes("[provider:unknown]"), r.stderr);
+    assert.equal(spawnCount(log), 0);
+  });
+});
+
+test("Ollama に対応した checkout は、argv に provider と dist の既定モデルを渡し、条件に provider と鍵の名前だけを残す（#771）", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-ollama");
+    const keyValue = "ol-SECRET-MARK";
+    const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--provider", "ollama"], { OLLAMA_API_KEY: keyValue });
+    assert.equal(r.status, 0, r.stderr);
+    const received = JSON.parse(readFileSync(join(out, "P1-r1", "received-argv.json"), "utf8"));
+    const at = received.indexOf("--provider");
+    assert.ok(at >= 0, "argv に --provider が無い");
+    assert.equal(received[at + 1], "ollama");
+    assert.equal(received[received.indexOf("--model") + 1], "fake-ollama-model");
+    const cond = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    assert.equal(cond.params.provider, "ollama");
+    assert.equal(cond.params.provider_api_key_env, "OLLAMA_API_KEY");
+    // run-agent と score-agent が同じ署名の式で一致する
+    assert.equal(conditionsSignature(cond), cond.signature);
+    // 鍵の値は記録にも出力にも残らない
+    assert.equal(readFileSync(join(out, "conditions.json"), "utf8").includes(keyValue), false);
+    assert.equal(r.stdout.includes(keyValue), false);
+    assert.equal(r.stderr.includes(keyValue), false);
+  }, { ollama: true });
+});
+
+test("--provider openai を明示しても、鍵の環境変数とモデルは今のままで、provider の欄を足さない（#771 再レビュー。省略と同じ形）", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-provider-openai");
+    assert.equal(runAgent(repo, out, ["--only", "P1", "--runs", "1", "--provider", "openai"]).status, 0);
+    const cond = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    assert.equal("provider" in cond.params, false);
+    assert.equal("provider_api_key_env" in cond.params, false);
+    assert.equal(cond.params.model, "fake-model");
+    const received = JSON.parse(readFileSync(join(out, "P1-r1", "received-argv.json"), "utf8"));
+    assert.equal(received.includes("--provider"), false);
+    assert.equal(received[received.indexOf("--model") + 1], "fake-model");
+  });
+});
+
+/**
+ * #771 再レビュー：出力先の条件・署名・子の argv を集める（同じ出力先で省略と明示 openai を比べる）。
+ * 除くのは時刻（条件と比較の記録の started_at）と、started_at を含む比較の記録の署名だけ。群の条件の署名（conditions_signature）は残す
+ */
+function conditionBytesOf(out) {
+  const got = {};
+  const walk = (d) => { for (const n of readdirSync(d).sort()) { const f = join(d, n); if (statSync(f).isDirectory()) { walk(f); continue; }
+    const rel = relative(out, f);
+    if (n === "received-argv.json") got[rel] = readFileSync(f, "utf8");
+    else if (n === "conditions.json") { const { started_at: _t, ...rest } = readJson(f); got[rel] = JSON.stringify(rest); }
+    else if (n === "comparison.json") { const { started_at: _t, signature: _s, ...rest } = readJson(f); got[rel] = JSON.stringify(rest); } } };
+  walk(out);
+  return got;
+}
+/** 同じ出力先へ、省略と --provider openai の明示を順に流し、集めた条件・署名・argv のバイト列を返す（間で出力先を消す） */
+function omittedAndExplicit(repo, out, args, env = {}) {
+  const r0 = runAgent(repo, out, args, env);
+  assert.equal(r0.status, 0, r0.stderr);
+  const omitted = conditionBytesOf(out);
+  rmSync(out, { recursive: true, force: true });
+  const r1 = runAgent(repo, out, [...args, "--provider", "openai"], env);
+  assert.equal(r1.status, 0, r1.stderr);
+  return { omitted, explicit: conditionBytesOf(out) };
+}
+
+test("#771 再レビュー：--provider openai の明示と省略は、通常・Plan だけ・Plan→Build・plan-file の Build で、条件の JSON・署名・子の argv がバイト列で同じ", async () => {
+  await withRepo(async (base, repo) => {
+    const fz = writeFrozen(join(base, "fz-openai"), repo, { envelopes: { P1: envelopeOf("P1"), P3: envelopeOf("P3") }, missing: ["P2"] });
+    for (const [label, flags] of [["build", ["--only", "P1"]], ["plan-only", ["--only", "P1", "--plan-only"]], ["e2e", ["--only", "P1", "--plan"]], ["build-from", ["--build-from", fz]]]) {
+      const out = join(base, `out-openai-${label}`);
+      const { omitted, explicit } = omittedAndExplicit(repo, out, [...flags, "--runs", "1"]);
+      assert.ok(Object.keys(omitted).some((k) => k.endsWith("received-argv.json")), `${label}: 子の argv が無い`);
+      assert.deepEqual(explicit, omitted, label);
+      const cond = readJson(join(out, "conditions.json"));
+      assert.equal(cond.params.mode, label);
+      assert.equal(conditionsSignature(cond), cond.signature, label);
+      assert.equal(JSON.stringify(cond).includes('"provider'), false, `${label}: provider の欄がある`);
+    }
+  });
+});
+
+test("#771 再レビュー：比較で --provider openai の明示と省略は、両群の条件の JSON・署名・子の argv と、比較の記録の defaults・shared.params がバイト列で同じ", async () => {
+  await withRepo(async (base) => {
+    const c = makeCompare(join(base, "openai-c"));
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-openai-c.json"), 1);
+    const out = join(base, "out-openai-c");
+    const { omitted, explicit } = omittedAndExplicit(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5"]));
+    for (const g of ["v1", "v1.1a"]) {
+      assert.ok(join(g, "conditions.json") in omitted, g);
+      assert.ok(join(g, "P1-r1", "received-argv.json") in omitted, g);
+    }
+    assert.ok("comparison.json" in omitted);
+    assert.deepEqual(explicit, omitted);
+    const rec = readJson(join(out, "comparison.json"));
+    for (const g of ["v1", "v1.1a"]) {
+      assert.equal("provider" in rec.groups[g].defaults, false, g);
+      assert.equal(rec.groups[g].defaults.api_key_env, "OPENAI_API_KEY", g);
+      const cond = readJson(join(out, g, "conditions.json"));
+      assert.equal(conditionsSignature(cond), cond.signature, g);
+      assert.equal(rec.groups[g].conditions_signature, cond.signature, g);
+    }
+    assert.deepEqual(Object.keys(rec.shared.params), ["effort", "model", "factory_budget_usd", "factory_deadline_min", "mode"]);
+  });
+});
+
+test("同じ Ollama の条件の再開は通り、provider の変更は断る（#771）", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-ollama-resume");
+    const log = join(base, "spawn-ollama-resume.log");
+    const args = ["--only", "P1", "--runs", "1", "--concurrency", "1", "--provider", "ollama"];
+    assert.equal(runAgent(repo, out, args, { FAKE_SPAWN_LOG: log }).status, 0);
+    assert.equal(spawnCount(log), 1);
+    rmSync(join(out, "P1-r1"), { recursive: true, force: true });
+    // 同じ provider の再開は通る
+    const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.deepEqual(spawnLines(log), ["P1-r1", "P1-r1"]);
+    // provider を変えた再開は断る（署名が変わる）
+    const before = treeOf(out);
+    const changed = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--concurrency", "1", "--provider", "openai", "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(changed.status, 3);
+    assert.ok(changed.stderr.includes("[resume:signature]"), changed.stderr);
+    assert.deepEqual(treeOf(out), before);
+  }, { ollama: true });
+});
 
 test("500 文字を超え分かれ UTF-8 の途中で切れた標準出力・標準エラーを、成功でも非 0 でもそのままのバイト列で残す", async () => {
   await withRepo(async (base, repo) => {
@@ -1259,6 +1421,61 @@ function assertCompareRefused(r, code, log, out, label = code) {
   assert.equal(compareLog(log).length + spawnCount(log + ".plain"), 0, `${label}: 子を起こした`);
   assertNothingWritten(out, label);
 }
+
+/** #771（レビュー R1）：比較の両 checkout を Ollama に対応させる。比較元の公開値（鍵の環境変数の名前・既定のモデル）は別に与えられる。baselineOllama を偽にすると比較元は未対応 */
+function makeOllamaCompare(base, { baselineOllama = true, baselineKeyEnv = "OLLAMA_API_KEY", baselineModel = "fake-ollama-model" } = {}) {
+  const c = makeCompare(base);
+  const keyEnvExport = (name) => `export const OLLAMA_API_KEY_ENV = ${JSON.stringify(name)};\n`;
+  writeFileSync(join(c.repo, "packages/factory/dist/cli.js"), fakeCompareCli() + keyEnvExport("OLLAMA_API_KEY"));
+  writeFileSync(join(c.repo, "packages/factory/dist/ollama.js"), fakeOllama);
+  if (baselineOllama) {
+    writeFileSync(join(c.baseline, "packages/factory/dist/cli.js"), fakeCompareCli() + keyEnvExport(baselineKeyEnv));
+    writeFileSync(join(c.baseline, "packages/factory/dist/ollama.js"), `export const DEFAULT_OLLAMA_MODEL = ${JSON.stringify(baselineModel)};\n`);
+  }
+  return c;
+}
+
+test("#771 R1 比較 × --provider ollama：比較元の鍵の環境変数の名前・既定のモデルが候補と違えば、比較元の値で照らして compare:defaults-differ で断る（子 0 本・何も書かない）", async () => {
+  await withRepo(async (base) => {
+    for (const [label, opts] of [["key", { baselineKeyEnv: "BASE_OLLAMA_API_KEY" }], ["model", { baselineModel: "base-ollama-model" }]]) {
+      const c = makeOllamaCompare(join(base, `r1-${label}`), opts);
+      const pairs = makePairsFile(c.repo, c, join(base, `pairs-r1-${label}.json`), 1);
+      const log = join(base, `spawn-r1-${label}.log`), out = join(base, `out-r1-${label}`);
+      assertCompareRefused(runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5", "--provider", "ollama"]), { FAKE_SPAWN_LOG: log }), "compare:defaults-differ", log, out, label);
+    }
+  });
+});
+
+test("#771 R1 比較 × --provider ollama：比較元だけ Ollama に対応していなければ provider:ollama-unavailable で断る（exit 3・子 0 本・何も書かない）", async () => {
+  await withRepo(async (base) => {
+    const c = makeOllamaCompare(join(base, "r1-old"), { baselineOllama: false });
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-r1-old.json"), 1);
+    const log = join(base, "spawn-r1-old.log"), out = join(base, "out-r1-old");
+    assertCompareRefused(runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5", "--provider", "ollama"]), { FAKE_SPAWN_LOG: log }), "provider:ollama-unavailable", log, out);
+  });
+});
+
+test("#771 R1 比較 × --provider ollama：両方が対応し公開値が同じなら、両群の子に provider と dist の既定モデルが渡り、各群の条件・既定・shared.params の provider と鍵の名前が一致する", async () => {
+  await withRepo(async (base) => {
+    const c = makeOllamaCompare(join(base, "r1-ok"));
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-r1-ok.json"), 1);
+    const log = join(base, "spawn-r1-ok.log"), out = join(base, "out-r1-ok");
+    const r = runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5", "--provider", "ollama"]), { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(compareLog(log).length, 4);
+    for (const g of ["v1", "v1.1a"]) {
+      const argv = readJson(join(out, g, "P1-r1", "received-argv.json"));
+      assert.equal(argv[argv.indexOf("--provider") + 1], "ollama", g);
+      assert.equal(argv[argv.indexOf("--model") + 1], "fake-ollama-model", g);
+      const cond = readJson(join(out, g, "conditions.json"));
+      assert.deepEqual([cond.params.provider, cond.params.provider_api_key_env, cond.params.model], ["ollama", "OLLAMA_API_KEY", "fake-ollama-model"], g);
+      assert.equal(conditionsSignature(cond), cond.signature, g);
+    }
+    const rec = readJson(join(out, "comparison.json"));
+    for (const g of ["v1", "v1.1a"]) assert.deepEqual([rec.groups[g].defaults.provider, rec.groups[g].defaults.api_key_env, rec.groups[g].defaults.model_ollama], ["ollama", "OLLAMA_API_KEY", "fake-ollama-model"], g);
+    assert.deepEqual([rec.shared.params.provider, rec.shared.params.provider_api_key_env, rec.shared.params.model], ["ollama", "OLLAMA_API_KEY", "fake-ollama-model"]);
+  });
+});
 
 test("#513 (a) --pipeline：--build-from と v1.1a で子の引数の末尾が --pipeline v1.1a・schema v5・署名が省略時と異なる。省略と v1 は子の引数が今までと同じで署名も同じ。知らない値・組めない組は flags:conflict で子を起こさない", async () => {
   await withRepo(async (base, repo) => {

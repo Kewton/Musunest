@@ -159,6 +159,20 @@ export interface OpenAiAdapterOptions {
   readonly envelope?: EnvelopeId;
 }
 
+/**
+ * Responses API 互換の adapter を作る設定（Issue #771）。`openai.ts` と `ollama.ts` が共有する。
+ * 宛先と「schema を文で示すか」だけを差し替え、要求の組み立て・応答の解釈・誤りの分類は同じ実装を使う。
+ */
+export interface ResponsesAdapterOptions extends OpenAiAdapterOptions {
+  /** 固定の宛先（環境変数からは読まない） */
+  readonly url: string;
+  /**
+   * 段の指示（`developer`）の最後に、JSON Schema の塊を 1 つ足すか（既定は足さない）。
+   * Ollama の Responses API は `text.format` の JSON Schema で応答を縛らないので、形を要求の文でも伝える。
+   */
+  readonly presentSchema?: boolean;
+}
+
 interface WireConfig {
   readonly apiKey: string;
   readonly model: string;
@@ -166,13 +180,16 @@ interface WireConfig {
   readonly fetch: FetchLike;
   readonly timeoutMs: number;
   readonly envelope: EnvelopeId;
+  readonly url: string;
+  readonly presentSchema: boolean;
 }
 
 /**
- * OpenAI の Responses API に対する `LlmClient` を作る（§2.1）。
+ * Responses API 互換の `LlmClient` を作る（Issue #771）。宛先と schema の提示だけを設定で受け、
+ * それ以外は OpenAI の Responses API の実装をそのまま使う。
  * `fetch` を差し込めるので、試験は実 API を呼ばずに要求の中身を観測できる。
  */
-export function createOpenAiLlmClient(options: OpenAiAdapterOptions): LlmClient {
+export function createResponsesLlmClient(options: ResponsesAdapterOptions): LlmClient {
   const request = options.fetch ?? globalThis.fetch;
   if (request === undefined) {
     throw new Error("fetch がありません。options.fetch で渡してください");
@@ -186,12 +203,22 @@ export function createOpenAiLlmClient(options: OpenAiAdapterOptions): LlmClient 
     // 固定の 60 秒ではなく effort ごとの値にする（#302）。
     timeoutMs: options.timeoutMs ?? callTimeoutMsForEffort(options.effort ?? ""),
     envelope: options.envelope ?? "v1",
+    url: options.url,
+    presentSchema: options.presentSchema === true,
   };
   return {
     callStructured: <T>(structuredRequest: LlmStructuredRequest) =>
       callStructuredWire<T>(config, structuredRequest),
     callWithTools: (toolRequest: LlmToolRequest) => callToolsWire(config, toolRequest),
   };
+}
+
+/**
+ * OpenAI の Responses API に対する `LlmClient` を作る（§2.1）。共有の実装の薄い包みで、
+ * 宛先は今の値・schema の提示は無し（body はバイト列で今までと同じ）。Issue #771。
+ */
+export function createOpenAiLlmClient(options: OpenAiAdapterOptions): LlmClient {
+  return createResponsesLlmClient({ ...options, url: RESPONSES_URL, presentSchema: false });
 }
 
 // ── 呼び出し（fetch と timeout。§1.5・§2.1）────────────────────────────────
@@ -226,7 +253,7 @@ async function requestWire(
   try {
     let response: Response;
     try {
-      response = await config.fetch(RESPONSES_URL, {
+      response = await config.fetch(config.url, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -349,6 +376,8 @@ function buildStructuredBody(
       request.rules ?? [],
       request.input,
       entry === undefined ? undefined : stageInstruction(entry.stage),
+      // schema を文で示す adapter（Ollama）だけ、段の指示の最後に schema の塊を足す（Issue #771）
+      config.presentSchema ? schemaInstructionText(presentedStructuredSchema(envelope, request.schema)) : undefined,
     ),
     request.maxOutputTokens,
     request.effort,
@@ -362,6 +391,33 @@ function buildStructuredBody(
     },
   };
   return body;
+}
+
+/** schema の塊の頭の文（Ollama の Responses API は `text.format` で応答を縛らないので、形を文でも伝える。Issue #771） */
+const SCHEMA_INSTRUCTION = "次の JSON Schema に合う JSON だけを返す。";
+
+/** 段の指示の最後に足す schema の塊（固定の文と schema の本文を 1 つの内容の塊にする） */
+function schemaInstructionText(schema: unknown): string {
+  return `${SCHEMA_INSTRUCTION}\n${JSON.stringify(schema)}`;
+}
+
+/**
+ * 文で示す schema（Ollama だけ。Issue #771）。封筒の段なら、**外側の `result` の下にその段の枝を置いた
+ * 「その段だけの封筒全体」**——`text.format` で送る封筒と同じ形を文でも伝える。封筒の無い段はその要求の schema。
+ */
+function presentedStructuredSchema(
+  envelope: ResolvedStageEnvelope | undefined,
+  requestSchema: unknown,
+): unknown {
+  if (envelope === undefined) return requestSchema;
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [ENVELOPE_RESULT_KEY],
+    properties: {
+      [ENVELOPE_RESULT_KEY]: buildStageBranch(envelope.entry),
+    },
+  };
 }
 
 /**
@@ -382,7 +438,14 @@ function stageInstruction(stage: string): string {
  */
 function buildToolBody(config: WireConfig, request: LlmToolRequest): Record<string, unknown> {
   const input = [
-    ...buildInput(request.documents, request.rules ?? [], request.input),
+    ...buildInput(
+      request.documents,
+      request.rules ?? [],
+      request.input,
+      undefined,
+      // 最後の答えの schema を持つ道具付きの要求だけ、schema の塊を足す（schema の無い道具だけの要求には足さない。Issue #771）
+      config.presentSchema && request.schema !== undefined ? schemaInstructionText(request.schema) : undefined,
+    ),
     ...turnsToInput(request.turns),
   ];
   const body = baseBody(config, request.instructions, input, request.maxOutputTokens, request.effort);
@@ -414,14 +477,15 @@ function buildInput(
   rules: readonly string[],
   data: string,
   stageInstructionText?: string,
+  schemaInstruction?: string,
 ): unknown[] {
   const items: unknown[] = [];
   documents.forEach((document, index) => {
     items.push(userText(document, index === documents.length - 1));
   });
   const rulesText = rules.join("\n");
-  if (rulesText !== "" || stageInstructionText !== undefined) {
-    items.push(developerText(rulesText, stageInstructionText));
+  if (rulesText !== "" || stageInstructionText !== undefined || schemaInstruction !== undefined) {
+    items.push(developerText(rulesText, stageInstructionText, schemaInstruction));
   }
   items.push(userText(`<data>\n${data}\n</data>`));
   return items;
@@ -441,11 +505,20 @@ function userText(text: string, cacheBreakpoint = false): Record<string, unknown
  * 段の規則は 1 つ目の内容の塊（`<rules>` の囲み）に、封筒の枝を選ばせる指示（#353）は 2 つ目の
  * 内容の塊に置く——段の規則の本文を変えずに足せる。
  */
-function developerText(rulesText: string, stageInstructionText?: string): Record<string, unknown> {
+function developerText(
+  rulesText: string,
+  stageInstructionText?: string,
+  schemaInstruction?: string,
+): Record<string, unknown> {
   const content: Record<string, unknown>[] = [];
   if (rulesText !== "") content.push({ type: "input_text", text: `<rules>\n${rulesText}\n</rules>` });
   if (stageInstructionText !== undefined) {
     content.push({ type: "input_text", text: stageInstructionText });
+  }
+  // schema の塊は**最後の内容の塊**に置く（Issue #771）。規則も封筒の指示も無い要求では、これだけの
+  // developer を新しく置く（文書の breakpoint より後ろなので、前置きは変わらない）。
+  if (schemaInstruction !== undefined) {
+    content.push({ type: "input_text", text: schemaInstruction });
   }
   return { role: "developer", content };
 }
