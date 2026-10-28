@@ -5520,6 +5520,22 @@ test("#687 README：§10.8.3 の後ろ（末尾）の小節 §10.8.4 に定義�
   assert.doesNotMatch(sec, /\$\d/, "README §10.8.4: 価格の表記");
 });
 
+// ── #771：LLM の adapter（--provider）。条件の params.provider と provider_api_key_env を署名に含め、比較の群の照合からは外さない
+test("#771 provider：条件の params.provider・provider_api_key_env は署名に入り（値が変われば署名が変わる）、比較の群の params の照合では外さない（provider の違う群は不一致）", () => {
+  const cond = { schema: CONDITIONS_V5, params: { effort: "high", pipeline: "v1", budget_usd: 1 }, scoring: {}, scripts: { mode: "post-hoc" } };
+  const ollama = { ...cond, params: { ...cond.params, provider: "ollama", provider_api_key_env: "OLLAMA_API_KEY" } };
+  const openai = { ...cond, params: { ...cond.params, provider: "openai", provider_api_key_env: "OPENAI_API_KEY" } };
+  // provider を省いた条件の署名は、欄を足す前と同じ（ccdfcd7 の条件を再開できる）
+  assert.equal(conditionsSignature(cond), conditionsSignature({ ...cond, params: { ...cond.params } }));
+  assert.notEqual(conditionsSignature(ollama), conditionsSignature(cond));
+  assert.notEqual(conditionsSignature(ollama), conditionsSignature(openai));
+  // 同じ provider の条件は同じ署名（run-agent と score-agent が同じ式）
+  assert.equal(conditionsSignature(JSON.parse(JSON.stringify(ollama))), conditionsSignature(ollama));
+  // 比較の群の照合：provider が違えば params が違い、同じなら同じ（意図した差として外さない）
+  assert.notDeepEqual(comparableParams(ollama.params), comparableParams(openai.params));
+  assert.deepEqual(comparableParams(ollama.params), comparableParams({ ...ollama.params }));
+});
+
 // ── #664：段ごとの effort の口（条件の params.stage_efforts）。採点の道具は条件の読み取り（署名・比較の照合・比較の記録の群の欄）だけ
 import { comparableParams } from "./score-agent.mjs";
 const EFFORTS664 = { "semantic-check": "low" };

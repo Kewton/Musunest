@@ -23,6 +23,8 @@ export * from "./limits.js";
 
 // ── adapter（Issue #284。`fetch` だけを使う。`openai.ts` は外部の入口を持つ唯一の library の file）──
 export * from "./openai.js";
+// Ollama Cloud の Responses API（OpenAI 互換）の adapter（Issue #771。共有の実装の薄い包み）
+export * from "./ollama.js";
 export * from "./schema-check.js";
 
 // ── 判定の口（Issue #330。Jev の adapter・LLM の adapter・偽物。`judge-jev.ts` が Jev の入口を持つ）──
