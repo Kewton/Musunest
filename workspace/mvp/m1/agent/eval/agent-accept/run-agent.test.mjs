@@ -269,17 +269,82 @@ test("Ollama に対応した checkout は、argv に provider と dist の既定
   }, { ollama: true });
 });
 
-test("--provider openai を明示しても、鍵の環境変数は今のまま（#771）", async () => {
+test("--provider openai を明示しても、鍵の環境変数とモデルは今のままで、provider の欄を足さない（#771 再レビュー。省略と同じ形）", async () => {
   await withRepo(async (base, repo) => {
     const out = join(base, "out-provider-openai");
     assert.equal(runAgent(repo, out, ["--only", "P1", "--runs", "1", "--provider", "openai"]).status, 0);
     const cond = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
-    assert.equal(cond.params.provider, "openai");
-    assert.equal(cond.params.provider_api_key_env, "OPENAI_API_KEY");
+    assert.equal("provider" in cond.params, false);
+    assert.equal("provider_api_key_env" in cond.params, false);
+    assert.equal(cond.params.model, "fake-model");
     const received = JSON.parse(readFileSync(join(out, "P1-r1", "received-argv.json"), "utf8"));
-    const at = received.indexOf("--provider");
-    assert.equal(received[at + 1], "openai");
+    assert.equal(received.includes("--provider"), false);
     assert.equal(received[received.indexOf("--model") + 1], "fake-model");
+  });
+});
+
+/**
+ * #771 再レビュー：出力先の条件・署名・子の argv を集める（同じ出力先で省略と明示 openai を比べる）。
+ * 除くのは時刻（条件と比較の記録の started_at）と、started_at を含む比較の記録の署名だけ。群の条件の署名（conditions_signature）は残す
+ */
+function conditionBytesOf(out) {
+  const got = {};
+  const walk = (d) => { for (const n of readdirSync(d).sort()) { const f = join(d, n); if (statSync(f).isDirectory()) { walk(f); continue; }
+    const rel = relative(out, f);
+    if (n === "received-argv.json") got[rel] = readFileSync(f, "utf8");
+    else if (n === "conditions.json") { const { started_at: _t, ...rest } = readJson(f); got[rel] = JSON.stringify(rest); }
+    else if (n === "comparison.json") { const { started_at: _t, signature: _s, ...rest } = readJson(f); got[rel] = JSON.stringify(rest); } } };
+  walk(out);
+  return got;
+}
+/** 同じ出力先へ、省略と --provider openai の明示を順に流し、集めた条件・署名・argv のバイト列を返す（間で出力先を消す） */
+function omittedAndExplicit(repo, out, args, env = {}) {
+  const r0 = runAgent(repo, out, args, env);
+  assert.equal(r0.status, 0, r0.stderr);
+  const omitted = conditionBytesOf(out);
+  rmSync(out, { recursive: true, force: true });
+  const r1 = runAgent(repo, out, [...args, "--provider", "openai"], env);
+  assert.equal(r1.status, 0, r1.stderr);
+  return { omitted, explicit: conditionBytesOf(out) };
+}
+
+test("#771 再レビュー：--provider openai の明示と省略は、通常・Plan だけ・Plan→Build・plan-file の Build で、条件の JSON・署名・子の argv がバイト列で同じ", async () => {
+  await withRepo(async (base, repo) => {
+    const fz = writeFrozen(join(base, "fz-openai"), repo, { envelopes: { P1: envelopeOf("P1"), P3: envelopeOf("P3") }, missing: ["P2"] });
+    for (const [label, flags] of [["build", ["--only", "P1"]], ["plan-only", ["--only", "P1", "--plan-only"]], ["e2e", ["--only", "P1", "--plan"]], ["build-from", ["--build-from", fz]]]) {
+      const out = join(base, `out-openai-${label}`);
+      const { omitted, explicit } = omittedAndExplicit(repo, out, [...flags, "--runs", "1"]);
+      assert.ok(Object.keys(omitted).some((k) => k.endsWith("received-argv.json")), `${label}: 子の argv が無い`);
+      assert.deepEqual(explicit, omitted, label);
+      const cond = readJson(join(out, "conditions.json"));
+      assert.equal(cond.params.mode, label);
+      assert.equal(conditionsSignature(cond), cond.signature, label);
+      assert.equal(JSON.stringify(cond).includes('"provider'), false, `${label}: provider の欄がある`);
+    }
+  });
+});
+
+test("#771 再レビュー：比較で --provider openai の明示と省略は、両群の条件の JSON・署名・子の argv と、比較の記録の defaults・shared.params がバイト列で同じ", async () => {
+  await withRepo(async (base) => {
+    const c = makeCompare(join(base, "openai-c"));
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-openai-c.json"), 1);
+    const out = join(base, "out-openai-c");
+    const { omitted, explicit } = omittedAndExplicit(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5"]));
+    for (const g of ["v1", "v1.1a"]) {
+      assert.ok(join(g, "conditions.json") in omitted, g);
+      assert.ok(join(g, "P1-r1", "received-argv.json") in omitted, g);
+    }
+    assert.ok("comparison.json" in omitted);
+    assert.deepEqual(explicit, omitted);
+    const rec = readJson(join(out, "comparison.json"));
+    for (const g of ["v1", "v1.1a"]) {
+      assert.equal("provider" in rec.groups[g].defaults, false, g);
+      assert.equal(rec.groups[g].defaults.api_key_env, "OPENAI_API_KEY", g);
+      const cond = readJson(join(out, g, "conditions.json"));
+      assert.equal(conditionsSignature(cond), cond.signature, g);
+      assert.equal(rec.groups[g].conditions_signature, cond.signature, g);
+    }
+    assert.deepEqual(Object.keys(rec.shared.params), ["effort", "model", "factory_budget_usd", "factory_deadline_min", "mode"]);
   });
 });
 
