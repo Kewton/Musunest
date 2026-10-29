@@ -2312,6 +2312,9 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
     groups[g] = { dir, cond };
   }
   if (groups[baseGroup].cond.signature === groups[candGroup].cond.signature) throw mismatch("両群の条件の署名が同じ");
+  // #776：Ollama の段の出力の上限の表（params.ollama_stage_output_limits）は比較から外さない（同じ表を求める）。違えば専用の符号で断る
+  const ollamaLimits = GROUPS.map((g) => groups[g].cond.params?.ollama_stage_output_limits ?? null);
+  if (ollamaLimits.some((t) => JSON.stringify(t) !== JSON.stringify(ollamaLimits[0]))) throw refusal("群の Ollama の段の出力の上限の表が違う [compare:ollama-limits-differ]");
   // 共通の比較の形（経路・v1.1α の上限の欄・旗の組を除く）
   const core = (p) => { const rest = comparableParams(p); return rest === null ? null : JSON.stringify(rest); };
   if (core(groups[baseGroup].cond.params) === null || core(groups[baseGroup].cond.params) !== core(groups[candGroup].cond.params)) throw mismatch("群の params");
@@ -3013,6 +3016,9 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
   const [before, after] = STAGE_COMPARE_GROUPS;
   if (groups[before].cond.signature === groups[after].cond.signature) throw mismatch("両群の条件の署名が同じ");
   if (groups[before].cond.schema !== groups[after].cond.schema) throw mismatch("群の条件の版");
+  // #776：Ollama の段の出力の上限の表（params.ollama_stage_output_limits）は比較から外さない（同じ表を求める）。違えば専用の符号で断る
+  const ollamaLimits = STAGE_COMPARE_GROUPS.map((g) => groups[g].cond.params?.ollama_stage_output_limits ?? null);
+  if (ollamaLimits.some((t) => JSON.stringify(t) !== JSON.stringify(ollamaLimits[0]))) throw refusal("群の Ollama の段の出力の上限の表が違う [compare:ollama-limits-differ]");
   // 両群の params（範囲・上流の条件の指紋・本ごとの上流の入力の SHA を含む）と入力なしの本が同じ（上流を固定して効果を局所化する前提）
   // 段ごとの effort（#664）は群の違いとして外す（両群に同じ値を求めない。値は採点の群の欄に並べる）
   const core = (p) => { if (!isObj(p)) return null; const { stage_output_limits_v11a: _l, stage_efforts: _e, ...rest } = p; return JSON.stringify(rest); };
