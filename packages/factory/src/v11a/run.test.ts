@@ -22,11 +22,13 @@ import {
   bundleFiles,
   type AssembledBundle,
 } from "../bundle.js";
+import type { StageOutputLimits } from "../call.js";
 import type { Judge, JudgeAnswer } from "../judge.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { RecordedCall } from "../llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "../llm.js";
 import { AGENT_LIMITS, STAGE_EFFORT_STAGES, maxOutputTokensForEffort } from "../limits.js";
+import { OLLAMA_STAGE_OUTPUT_LIMITS } from "../ollama.js";
 import { createOpenAiLlmClient, type FetchLike } from "../openai.js";
 import { resolveStageEnvelope, type EnvelopeId } from "../schema-envelope.js";
 import { requirementsFromPlan, type RequirementList, type TestSuite } from "../pipeline.js";
@@ -7886,5 +7888,168 @@ describe("最後の答えの枠を取っておく（旗 v12.ids の探索 on の
     expect(offSteps).toHaveLength(1);
     expect(offSteps[0]).not.toHaveProperty("finalize_responses");
     expect(offSteps[0]).not.toHaveProperty("finalize_refused_bundles");
+  });
+});
+
+// ── 段の出力の上限の上書きの表（`stageOutputLimits`。Issue #776）──────────────────────
+//
+// 実行口（`runGenerationV11a`・`runStageRangeV11a`）から実 adapter に偽物の fetch を当て、送った body の
+// `max_output_tokens` を見る。上書きの表を渡した走りだけ、表にある段（意味の点検・宣言の点検・直す）の
+// 上限が表の値に替わり、ほかの段は今の値のまま。表を渡さない走り（＝直す前の挙動）は 3 段とも今の値。
+// **意味の点検は束ごとに呼ばれ、表の値が全部の束に届く。**
+
+describe("段の出力の上限の上書きの表（Issue #776）：実行口から偽物の fetch の body まで", () => {
+  const LIMITS: StageOutputLimits = OLLAMA_STAGE_OUTPUT_LIMITS;
+  /** 直す前の 3 段の上限（effort high。表の段と同じ段を今の値で並べる） */
+  const NOW = { "semantic-check": 16_384, "decl-check": 16_384, repair: 32_768 } as const;
+  /** closeItem の操作を宣言から外した版（場所なしの失敗だけになり、全文の直しへ流れる） */
+  const NO_CLOSE = replaced(
+    RUN_YAML,
+    "  - name: closeItem\n    entity: item\n    kind: update\n    set:\n      kind: beta\n    when: amount > 0\n",
+    "",
+  );
+  const limitOf = (sent: WireSent): unknown => sent.body["max_output_tokens"];
+  const wiresOf = (sent: readonly WireSent[], schemaName: string): readonly WireSent[] =>
+    sent.filter((candidate) => candidate.schemaName === schemaName);
+
+  /** 一気通貫を流す（v1.2 の旗・上書きの表は呼ぶ側が渡す） */
+  async function runLimits(calls: readonly RecordedCall[], flags: Partial<V12Flags>, overrides: Partial<GenerationInputV11a> = {}) {
+    const wire = wireClientOf(calls, "v1.2-ids");
+    const result = await runGenerationV11a(inputOf(wire.client, { flags, ...overrides }));
+    return { result, sent: wire.sent, consumed: wire.consumed() };
+  }
+
+  it("(1)(5)(6) v1.2（flag ids と探索 off の全文の直し）：上書きの表を渡すと、意味の点検・宣言の点検・直すの要求の max_output_tokens が表の値、ほかは今の値。渡さなければ 3 段とも今の値", async () => {
+    // 場所なしの失敗がある往復は全文の直し（道具付き）へ流れる（Issue #751 の台本と同じ形。ids on・探索 off）
+    const calls = (): RecordedCall[] => [...idsHead({ yaml: NO_CLOSE }), repairDone(RUN_YAML), structured(acceptAll())];
+    const flags = { ledger: true, ids: true } as const;
+    const plain = await runLimits(calls(), flags);
+    const tuned = await runLimits(calls(), flags, { stageOutputLimits: LIMITS });
+    for (const run of [plain, tuned]) {
+      expect(run.result.stopped).toBeNull();
+      expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      expect(run.consumed, "台本を使い切った").toBe(calls().length);
+    }
+    // 上書き：意味の点検（束ごとの全部の要求）・宣言の点検・直す（道具付きの往復の全部のターン）が表の値
+    const semantic = wiresOf(tuned.sent, SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(semantic.length).toBeGreaterThan(0);
+    for (const sent of semantic) expect(limitOf(sent)).toBe(32_768);
+    const decl = wiresOf(tuned.sent, DECL_CHECK_SCHEMA_NAME);
+    expect(decl.length).toBeGreaterThan(0);
+    for (const sent of decl) expect(limitOf(sent)).toBe(32_768);
+    const repair = tuned.sent.filter((candidate) => candidate.kind === "tools");
+    expect(repair.length).toBeGreaterThan(0);
+    for (const sent of repair) expect(limitOf(sent)).toBe(65_536);
+    // ほかの段（B1・T2 など）は今の値のまま
+    for (const sent of wiresOf(tuned.sent, WRITE_V11A_SCHEMA_NAME)) expect(limitOf(sent)).toBe(maxOutputTokensForEffort("high", "write"));
+    for (const sent of wiresOf(tuned.sent, TEST_SPEC_SCHEMA_NAME)) expect(limitOf(sent)).toBe(maxOutputTokensForEffort("high", "test-spec"));
+    // 直す前（表なし）：3 段とも今の値（上書きを外す変異で赤）
+    for (const sent of wiresOf(plain.sent, SEMANTIC_CHECK_SCHEMA_NAME)) expect(limitOf(sent)).toBe(NOW["semantic-check"]);
+    for (const sent of wiresOf(plain.sent, DECL_CHECK_SCHEMA_NAME)) expect(limitOf(sent)).toBe(NOW["decl-check"]);
+    for (const sent of plain.sent.filter((candidate) => candidate.kind === "tools")) expect(limitOf(sent)).toBe(NOW.repair);
+    expect(NOW).toEqual({ "semantic-check": maxOutputTokensForEffort("high", "semantic-check"), "decl-check": maxOutputTokensForEffort("high", "decl-check"), repair: maxOutputTokensForEffort("high", "repair") });
+    // 上書きは要求の上限の欄だけを変える（ほかの段の body は表の有無で同じ）
+    const othersOf = (sent: readonly WireSent[]): readonly string[] =>
+      sent
+        .filter((candidate) => candidate.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME && candidate.schemaName !== DECL_CHECK_SCHEMA_NAME && candidate.kind !== "tools")
+        .map((candidate) => JSON.stringify(candidate.body));
+    expect(othersOf(tuned.sent)).toEqual(othersOf(plain.sent));
+  });
+
+  it("(1) 段の走り（runStageRangeV11a）でも同じ表が届く：意味の点検・宣言の点検・直すが表の値、ほかは今の値", async () => {
+    const calls = (): RecordedCall[] => [...idsHead({ yaml: NO_CLOSE }), repairDone(RUN_YAML), structured(acceptAll())];
+    const wire = wireClientOf(calls(), "v1.2-ids");
+    const outcome = await runStageRangeV11a({
+      ...inputOf(wire.client, { flags: { ledger: true, ids: true }, stageOutputLimits: LIMITS }),
+      range: { start: "name-table", end: "judge" },
+    });
+    expect(outcome.stopped).toBeNull();
+    expect(wire.consumed()).toBe(calls().length);
+    for (const sent of wiresOf(wire.sent, SEMANTIC_CHECK_SCHEMA_NAME)) expect(limitOf(sent)).toBe(32_768);
+    for (const sent of wiresOf(wire.sent, DECL_CHECK_SCHEMA_NAME)) expect(limitOf(sent)).toBe(32_768);
+    for (const sent of wire.sent.filter((candidate) => candidate.kind === "tools")) expect(limitOf(sent)).toBe(65_536);
+    for (const sent of wiresOf(wire.sent, WRITE_V11A_SCHEMA_NAME)) expect(limitOf(sent)).toBe(maxOutputTokensForEffort("high", "write"));
+  });
+
+  it("(3) T2 の束ごとの口：製品の表に無い段（test-spec）でも、試験だけで渡す上書きを引き継ぐ", async () => {
+    const calls = (): RecordedCall[] => [...idsHead(), structured(acceptAll())];
+    const plain = await runLimits(calls(), { ledger: true, ids: true });
+    const tuned = await runLimits(calls(), { ledger: true, ids: true }, { stageOutputLimits: { "test-spec": 12_345 } });
+    for (const run of [plain, tuned]) expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
+    const t2 = wiresOf(tuned.sent, TEST_SPEC_SCHEMA_NAME);
+    expect(t2.length).toBeGreaterThan(0);
+    for (const sent of t2) expect(limitOf(sent)).toBe(12_345);
+    // 表に無い段（B1）は今のまま。上書きを外せば T2 も今の値（引き継ぎを外す変異で赤）
+    for (const sent of wiresOf(tuned.sent, WRITE_V11A_SCHEMA_NAME)) expect(limitOf(sent)).toBe(maxOutputTokensForEffort("high", "write"));
+    for (const sent of wiresOf(plain.sent, TEST_SPEC_SCHEMA_NAME)) expect(limitOf(sent)).toBe(maxOutputTokensForEffort("high", "test-spec"));
+  });
+
+  it("(2) 要求の上限で未完了を返す台本：表なしでは意味の点検で incomplete 停止、表ありでは完了して次の段へ進む", async () => {
+    // 偽物の fetch は要求の `max_output_tokens` を見て応答を決める（題材に依らない人工の例）。
+    // 意味の点検の要求の上限が 16,384（今の値）なら未完了、32,768 以上（表の値）なら完了
+    /** wireClientOf と同じ組み立てに、上限による未完了の規則を 1 つ足した偽物の口 */
+    const clientOf = (calls: readonly RecordedCall[]) => {
+      const sent: WireSent[] = [];
+      let index = 0;
+      let current: { readonly schemaName: string; readonly schema: unknown } | undefined;
+      const fetch: FetchLike = async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const tools = body["tools"] !== undefined;
+        const max = body["max_output_tokens"];
+        const entry: WireSent = { kind: tools ? "tools" : "structured", schemaName: tools ? undefined : current?.schemaName, body };
+        sent.push(entry);
+        if (!tools && entry.schemaName === SEMANTIC_CHECK_SCHEMA_NAME && typeof max === "number" && max <= 16_384) {
+          return new Response(JSON.stringify({ id: "resp-cut", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const call = calls[index];
+        index += 1;
+        if (call === undefined) throw new Error(`記録した応答が尽きました（${String(index)} 件目）`);
+        if (tools) {
+          if (call.kind !== "tools") throw new Error("記録した応答の種別が違います（道具付き）");
+          const output =
+            call.response.kind === "toolCalls"
+              ? call.response.toolCalls.map((tool) => ({ type: "function_call", call_id: tool.id, name: tool.name, arguments: JSON.stringify(tool.arguments ?? null) }))
+              : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(call.response.declaration) }] }];
+          return wireCompleted(output);
+        }
+        if (call.kind !== "structured") throw new Error("記録した応答の種別が違います（構造化）");
+        const resolved = current === undefined ? undefined : resolveStageEnvelope(current.schemaName, current.schema, "v1.2-ids");
+        const output =
+          resolved === undefined || typeof call.output !== "object" || call.output === null || Array.isArray(call.output)
+            ? call.output
+            : { result: { stage: resolved.entry.stage, ...(call.output as Record<string, unknown>) } };
+        return wireCompleted([{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(output) }] }]);
+      };
+      const adapter = createOpenAiLlmClient({ apiKey: "sk-FAKE", effort: "high", envelope: "v1.2-ids", fetch });
+      const client: LlmClient = {
+        callStructured<T>(request: LlmStructuredRequest) {
+          current = { schemaName: request.schemaName, schema: request.schema };
+          return adapter.callStructured<T>(request);
+        },
+        callWithTools(request: LlmToolRequest) {
+          current = undefined;
+          return adapter.callWithTools(request);
+        },
+      };
+      return { client, sent, consumed: () => index };
+    };
+    const calls = (): RecordedCall[] => [...idsHead(), structured(acceptAll())];
+    const before = clientOf(calls());
+    const beforeResult = await runGenerationV11a(inputOf(before.client, { flags: { ledger: true, ids: true } }));
+    // 直す前：意味の点検の上限（16,384）で未完了になり、そこで止まる（次の段へ進まない）
+    expect(beforeResult.stopped).toMatchObject({ stage: "semantic-check", kind: "incomplete" });
+    expect(wiresOf(before.sent, SEMANTIC_CHECK_SCHEMA_NAME).every((sent) => limitOf(sent) === 16_384)).toBe(true);
+    expect(wiresOf(before.sent, TEST_SPEC_SCHEMA_NAME)).toHaveLength(0);
+    const after = clientOf(calls());
+    const afterResult = await runGenerationV11a(inputOf(after.client, { flags: { ledger: true, ids: true }, stageOutputLimits: LIMITS }));
+    // 直した後：意味の点検の上限（32,768）で完了し、次の段（T2）へ進んで完走する
+    expect(afterResult.stopped).toBeNull();
+    expect(afterResult.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(after.consumed()).toBe(calls().length);
+    expect(wiresOf(after.sent, SEMANTIC_CHECK_SCHEMA_NAME).every((sent) => limitOf(sent) === 32_768)).toBe(true);
+    expect(wiresOf(after.sent, TEST_SPEC_SCHEMA_NAME).length).toBeGreaterThan(0);
   });
 });

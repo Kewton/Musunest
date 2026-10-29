@@ -4949,7 +4949,7 @@ const stageRecord638 = (id, { kind = "t2-pass", dropped = 0, end = "test-spec", 
   });
 };
 /** 段単位の v1.2 の計測の出力先（条件 v8・開始 T1・終了 end）。runOf(id) ＝ 記録の文字列｜"missing"（読めない記録）｜"unlaunched" */
-function stageFixture638(out, { ids = IDS545, end = "test-spec", runOf, frozenPath, group = null, pairsSha = null, factoryFp = sha256("factory-638"), flags = FLAGS638, pending = [], efforts = null }) {
+function stageFixture638(out, { ids = IDS545, end = "test-spec", runOf, frozenPath, group = null, pairsSha = null, factoryFp = sha256("factory-638"), flags = FLAGS638, pending = [], efforts = null, ollamaLimits = null }) {
   mkdirSync(out, { recursive: true });
   const set = loadEvalSet(join(repo, DEFAULT_SET_PATH)), evDir = join(repo, "workspace/mvp/m1/agent/eval");
   const pids = [...new Set(ids.map((id) => id.split("-")[0]))];
@@ -4960,6 +4960,7 @@ function stageFixture638(out, { ids = IDS545, end = "test-spec", runOf, frozenPa
       ...paramsFor(ids), mode: STAGE_RUN_MODE, plan: false, effort: "high", pipeline: "v1.2", stage_output_limits_v11a: APPROVED513, v12_flags: flags,
       ...(group === null ? { v12_call_limits: { logical_calls: 7, real_attempts: 11, judge_branch: 5 } } : {}),
       ...(efforts === null ? {} : { stage_efforts: efforts }),
+      ...(ollamaLimits === null ? {} : { ollama_stage_output_limits: ollamaLimits }),
       stage_start: "name-table", stage_end: end, budget_scope: "stage-run", stage_from: null, stage_inputs: [],
     },
     child_args: ids.map((id) => ({ id, argv: ["cli.js", id] })),
@@ -5100,7 +5101,7 @@ test("#638 匿名の口：v8 の段単位の採点の --anonymous に経路・�
 });
 
 /** 段だけの対の比較（v1.2 の群）の出力先：両群とも条件 v8・開始 T1・終了 T2'。passOf(群, 本) ＝ 真なら T2' まで通る */
-function stageCompareFixture638(base, name, { passOf, flagsOf = () => FLAGS638, effortsOf = () => null }) {
+function stageCompareFixture638(base, name, { passOf, flagsOf = () => FLAGS638, effortsOf = () => null, limitsOf = () => null }) {
   const out = join(base, name), fzp = frozenFile545(base);
   mkdirSync(out, { recursive: true });
   const stage = { start: "name-table", end: "test-spec", stage_from_sha256: null };
@@ -5108,7 +5109,7 @@ function stageCompareFixture638(base, name, { passOf, flagsOf = () => FLAGS638, 
   writeFileSync(join(out, "pairs.json"), pairsText);
   const pairsSha = sha256(pairsText), groups = {};
   for (const g of ["before", "after"]) {
-    const cond = stageFixture638(join(out, g), { runOf: (id) => stageRecord638(id, { kind: passOf(g, id) ? "t2-pass" : "t2-fail", dropped: 2, flags: flagsOf(g) }), group: g, pairsSha, frozenPath: fzp, factoryFp: sha256(`factory-638-${g}`), flags: flagsOf(g), efforts: effortsOf(g) });
+    const cond = stageFixture638(join(out, g), { runOf: (id) => stageRecord638(id, { kind: passOf(g, id) ? "t2-pass" : "t2-fail", dropped: 2, flags: flagsOf(g) }), group: g, pairsSha, frozenPath: fzp, factoryFp: sha256(`factory-638-${g}`), flags: flagsOf(g), efforts: effortsOf(g), ollamaLimits: limitsOf(g) });
     groups[g] = { role: g === "before" ? "baseline" : "candidate", pipeline: "v1.2", factory: { fingerprint: cond.factory.fingerprint }, conditions_signature: cond.signature };
   }
   writeFileSync(join(out, "comparison.json"), JSON.stringify({ schema: "musunest-eval/stage-compare-record/v1", stage: { ...stage, input_absent: 0 }, pairs: { sha256: pairsSha }, groups, scoring_cost_usd: 0 }));
@@ -5598,4 +5599,45 @@ test("#664 の対象のファイル（工場の 16 本・計測の道具の 4 �
     for (const w of words) assert.ok(!t.includes(w), `${f}: 題材の言葉`);
     assert.doesNotMatch(t, /[¥￥]\s?\d|\d\s?円/, `${f}: 価格の表記`);
   }
+});
+
+// ── #776：Ollama の段の出力の上限の表（条件の params.ollama_stage_output_limits）。署名に入り、比較の照合からは外さない（同じ表を求める）
+// 計測の道具（run-agent.mjs）が --provider ollama の v1.2 の走りに写し、採点は同じ式で署名を照らし、群の表が違えば compare:ollama-limits-differ で断る
+const OLLAMA_TABLE_776 = { "semantic-check": 32768, "decl-check": 32768, repair: 65536 };
+
+test("#776 ollama_stage_output_limits：署名に入り（値が変われば署名が変わる）、比較の群の params の照合からは外さない（表の違う群は不一致）", () => {
+  const cond = { schema: CONDITIONS_V8, params: { effort: "high", pipeline: V12_PIPELINE, budget_usd: 1 }, scoring: {}, scripts: { mode: "post-hoc" } };
+  const withTable = { ...cond, params: { ...cond.params, ollama_stage_output_limits: OLLAMA_TABLE_776 } };
+  const other = { ...cond, params: { ...cond.params, ollama_stage_output_limits: { ...OLLAMA_TABLE_776, repair: 65537 } } };
+  // 表を省いた条件の署名は、欄を足す前と同じ（欄が無ければ署名は変わらない）
+  assert.equal(conditionsSignature(cond), conditionsSignature({ ...cond, params: { ...cond.params } }));
+  assert.notEqual(conditionsSignature(withTable), conditionsSignature(cond));
+  assert.notEqual(conditionsSignature(withTable), conditionsSignature(other));
+  assert.equal(conditionsSignature(JSON.parse(JSON.stringify(withTable))), conditionsSignature(withTable));
+  // 比較の照合では外さない：表が違えば params が違い、同じ表なら同じ（意図した差として外さない）
+  assert.notDeepEqual(comparableParams(withTable.params), comparableParams(cond.params));
+  assert.notDeepEqual(comparableParams(withTable.params), comparableParams(other.params));
+  assert.deepEqual(comparableParams(withTable.params), comparableParams({ ...withTable.params }));
+});
+
+test("#776 段だけの対の比較（v1.2）× Ollama の表：同じ表どうしは通って採点し、表の違う群は compare:ollama-limits-differ で断る", async () => {
+  await withOut(async (base) => {
+    const passOf = () => true;
+    const same = stageCompareFixture638(base, "s776-same", { passOf, limitsOf: () => OLLAMA_TABLE_776 });
+    const differ = stageCompareFixture638(base, "s776-differ", { passOf, limitsOf: (g) => (g === "before" ? OLLAMA_TABLE_776 : { ...OLLAMA_TABLE_776, repair: 65537 }) });
+    const exec = (out) => spawnSync(process.execPath, [scoreFile, repo, out, "--compare"], { encoding: "utf8" });
+    assert.equal(exec(same).status, 0);
+    const rb = exec(differ);
+    assert.equal(rb.status, 3, rb.stderr);
+    assert.ok(rb.stderr.includes("[compare:ollama-limits-differ]"), rb.stderr);
+  });
+});
+
+test("#776 比較の群 v1.1a,v1.2：Ollama の表は v1.2 の群だけが持つので、群の照合は compare:ollama-limits-differ で断る（新しい欄を比較から外さない）", async () => {
+  await withOut(async (base) => {
+    const fixture = compareFixture557(base, "c776-limits", { groups: ["v1.1a", "v1.2"], pids: PIDS557, runOf: runOf557, paramsExtra: { "v1.2": { ollama_stage_output_limits: OLLAMA_TABLE_776 } } });
+    const r = scoreCompareRun(fixture.out);
+    assert.equal(r.status, 3, r.stderr);
+    assert.ok(r.stderr.includes("[compare:ollama-limits-differ]"), r.stderr);
+  });
 });

@@ -30,6 +30,7 @@ import {
   type CallAttemptObserver,
   type CallResult,
   type LlmInputParts,
+  type StageOutputLimits,
 } from "./call.js";
 import {
   AGENT_LIMITS,
@@ -2127,5 +2128,96 @@ describe("実試行の観測の口（Issue #748）：口が確定した分類・
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ── 段の出力の上限の上書きの表（`stageOutputLimits`。Issue #776）─────────────────
+//
+// 共通の口の任意の引数として段 → 値の表を受け取り、`maxOutputTokens(段)` が表の値を返す。要求の
+// `max_output_tokens` と予算の予約（`estimateMaxCostUsd`）がその値で揃い、`forStage(段)`（effort の指定の
+// 有無によらず）と T2 の束ごとの口へ**引き継がれる**。段のコードは provider を分けない。
+
+describe("段の出力の上限の上書きの表（Issue #776）", () => {
+  const TABLE: StageOutputLimits = { "semantic-check": 32_768, "decl-check": 32_768, repair: 65_536 };
+
+  it("(3) 上書きの表は、effort の指定のある段の口にも指定の無い段の口にも引き継がれ、表の値が勝つ（無い段は今の値）", () => {
+    const gateway = new CallGateway({
+      client: spyClient(() => {}),
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "high",
+      stageEfforts: { "semantic-check": "low" },
+      stageOutputLimits: TABLE,
+    });
+    // effort の指定のある段：薄い見方へ引き継がれ、effort が違っても上書きは effort に依らない
+    const view = gateway.forStage("semantic-check");
+    expect(view).not.toBe(gateway);
+    expect(view.effort).toBe("low");
+    expect(view.maxOutputTokens("semantic-check")).toBe(32_768);
+    // effort の指定の無い段：元の口そのもの（上書きを引き継いでいる）
+    const plain = gateway.forStage("decl-check");
+    expect(plain).toBe(gateway);
+    expect(plain.maxOutputTokens("decl-check")).toBe(32_768);
+    expect(plain.maxOutputTokens("repair")).toBe(65_536);
+    // 表に無い段は今の値のまま
+    expect(plain.maxOutputTokens("write")).toBe(maxOutputTokensForEffort("high", "write"));
+    // 段の口から段の口を引いても、上書きは引き継がれる
+    expect(view.forStage("decl-check")).toBe(gateway);
+  });
+
+  it("(3) 上書きを渡さない口は今の値のまま（表の値に依らない。上書きを外す変異で赤）", () => {
+    const plain = new CallGateway({
+      client: spyClient(() => {}),
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 600_000,
+      effort: "high",
+      stageEfforts: { "semantic-check": "low" },
+    });
+    for (const stage of ["semantic-check", "decl-check", "repair"] as const) {
+      expect(plain.forStage(stage).maxOutputTokens(stage)).toBe(maxOutputTokensForEffort(stage === "semantic-check" ? "low" : "high", stage));
+      expect(plain.maxOutputTokens(stage)).toBe(maxOutputTokensForEffort("high", stage));
+    }
+    // 上書きの値（表）は今の値と違う（上書きを外せば値が変わる）
+    expect(TABLE["semantic-check"]).not.toBe(maxOutputTokensForEffort("low", "semantic-check"));
+    expect(TABLE.repair).not.toBe(maxOutputTokensForEffort("high", "repair"));
+  });
+
+  it("(4) 予約は上書きした上限で計算される：上限に比例し、足りなければ呼ばずに予算切れ（fetch 0）", async () => {
+    // 入力は 0、出力は 1 USD / トークン。予約額 = 上限。
+    const rates: TokenRates = { inputPerToken: 0, cachedInputPerToken: 0, outputPerToken: 1 };
+    const call = (budgetUsd: number, limits: StageOutputLimits): { readonly gateway: CallGateway; readonly calls: () => number } => {
+      let calls = 0;
+      const gateway = new CallGateway({
+        client: spyClient(() => {
+          calls += 1;
+        }),
+        budget: new JobBudget(budgetUsd),
+        rates,
+        now: () => 0,
+        deadline: 600_000,
+        effort: "high",
+        stageOutputLimits: limits,
+      });
+      return { gateway, calls: () => calls };
+    };
+    // 上書き 32,768 の段：予約額はちょうど 32,768（上限に比例する）
+    const fit = call(32_768, { "semantic-check": 32_768 });
+    const ok = await fit.gateway.callStructured({ ...STRUCTURED_REQUEST, maxOutputTokens: fit.gateway.maxOutputTokens("semantic-check") });
+    expect(ok.kind).toBe("ok");
+    expect(fit.calls()).toBe(1);
+    // 予算が上限に 1 足りなければ、呼ばずに予算切れ（fetch 0）
+    const short = call(32_767, { "semantic-check": 32_768 });
+    const exceeded = await short.gateway.callStructured({ ...STRUCTURED_REQUEST, maxOutputTokens: short.gateway.maxOutputTokens("semantic-check") });
+    expect(exceeded).toMatchObject({ kind: "budgetExceeded", maxCostUsd: 32_768 });
+    expect(short.calls()).toBe(0);
+    // 同じ予算でも、上書きを外した口（今の値 16,384）は通る（予約が上限に比例している）
+    const base = call(32_767, {});
+    expect(base.gateway.maxOutputTokens("semantic-check")).toBe(16_384);
+    expect((await base.gateway.callStructured({ ...STRUCTURED_REQUEST, maxOutputTokens: base.gateway.maxOutputTokens("semantic-check") })).kind).toBe("ok");
+    expect(base.calls()).toBe(1);
   });
 });

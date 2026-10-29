@@ -75,6 +75,11 @@
 //          OLLAMA_API_KEY_ENV を公開している）ことを確かめ、無ければ provider:ollama-unavailable で断る（子 0 本）。対応していれば子の argv に
 //          --provider ollama と dist の既定モデルを渡し、条件の params.provider・params.provider_api_key_env に provider と鍵の環境変数の名前
 //          （値ではない）を残す。比較では両群に同じ provider とモデルを渡し、provider の違う群は条件の照合で不一致にする。再開は署名の契約のまま
+// #776（Ollama の段の出力の上限。README §5.1）：
+//   --provider ollama の v1.2 の走りに、新しい欄 params.ollama_stage_output_limits（段 → 値の上書きの表）を記録して署名に入れる。
+//          表は対象の各 checkout の dist（ollama.js の OLLAMA_STAGE_OUTPUT_LIMITS）から独立に読む。v1.2 の走りで表が無い・形が違えば
+//          provider:ollama-limits-unavailable で断る（子 0 本）。同じ表どうしの比較と再開は通り、表の違う群の比較は compare:ollama-limits-differ で断る
+//          （新しい欄は比較の照合から外さない）。--provider を省いた走り・明示 openai の走りは欄を足さず、条件と署名は今までと同じ
 // 採点は: node score-agent.mjs <repo> <out> [--label high]（リポジトリ・出力先の順で渡す）。比較は score-agent.mjs <repo> <out> --compare
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
@@ -172,6 +177,18 @@ async function loadOllama(ctx) {
   const keyEnv = ctx.factory?.OLLAMA_API_KEY_ENV;
   if (typeof mod.DEFAULT_OLLAMA_MODEL !== "string" || mod.DEFAULT_OLLAMA_MODEL === "" || typeof keyEnv !== "string" || keyEnv === "") return null;
   return { model: mod.DEFAULT_OLLAMA_MODEL, keyEnv };
+}
+/**
+ * #776：Ollama の段の出力の上限の表（`--provider ollama` の v1.2 の走りだけ）。
+ * dist の公開する表が写像で、値が全部 1 以上の整数なら、その写し（JSON の丸ごとの写し）を返す。
+ * 無い・形が違えば null（v1.2 の走りでは子を起こす前に断る）。表は**対象の各 checkout の dist から独立に読む**
+ */
+async function loadOllamaLimits(ctx) {
+  let mod;
+  try { mod = await import(pathToFileURL(join(ctx.distDir, "ollama.js")).href); } catch { return null; }
+  const table = mod.OLLAMA_STAGE_OUTPUT_LIMITS;
+  const ok = (x) => typeof x === "number" && Number.isInteger(x) && x > 0;
+  return isRec(table) && Object.keys(table).length > 0 && Object.values(table).every(ok) ? JSON.parse(JSON.stringify(table)) : null;
 }
 // #771：Ollama の公開値（既定のモデル・鍵の環境変数の名前）は checkout ごとに持つ（比較元は比較元の dist の値。候補の値を写さない）
 main.ollama = provider === "ollama" ? await loadOllama(main) : null;
@@ -573,7 +590,7 @@ const scoringOf = () => ({ dir: relative(repo, evDir), ...scoringFingerprint(evD
  * ctx ＝ 子を起こす checkout（工場の dist・spec-engine の dist・生成に渡す文書・git の状態はここから）。argvOf ＝ 条件に書く子の引数。
  * pl ＝ 経路、comparison ＝ 比較の群の印（#513。比較でなければ null）
  */
-function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId, efforts = null }) {
+function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId, efforts = null, ollamaLimits = null }) {
   const probe = js[0] ?? { pid: only?.[0] ?? "P1", r: 1 };
   const sampleArgv = argvOf(probe);
   const argOf = (flag) => { const i = sampleArgv.indexOf(flag); return i >= 0 ? sampleArgv[i + 1] : undefined; };
@@ -613,6 +630,8 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId, e
       pipeline: pl, stage_output_limits_v11a: outputLimits.v11a,
       // #771：既定でない --provider を指定したときだけ。LLM の adapter と、鍵を読む環境変数の名前（値は残さない。署名に入る）
       ...(!providerExplicit ? {} : { provider, provider_api_key_env: apiKeyEnvOf(ctx) }),
+      // #776：--provider ollama の v1.2 の走りだけ。上書きした段と値の表（対象の checkout の dist から読む。署名に入る。比較の群の照合からは外さない）
+      ...(ollamaLimits === null ? {} : { ollama_stage_output_limits: ollamaLimits }),
       // #557：経路 v1.2 のときだけ。工場の dist の V12_PIPELINE_FLAGS の写し（署名に入る。旗の組が変われば再開を断る）
       ...(pl === V12_PIPELINE ? { v12_flags: v12Flags } : {}),
       // #618：経路 v1.2 の単独の計測だけ（署名に入る。上限が変われば再開を断る）。比較の群には足さない（採点側の比較が params の同一を見るため）
@@ -792,7 +811,10 @@ else await runSingle();
 
 /** 比較でない計測（今までの流れ。#400〜#497） */
 async function runSingle() {
-  const { measured, signature, signatureLegacy } = conditionsFor(main, { jobs, argvOf: childArgsFor, pl: pipeline, comparison: null, measurementId: basename(outRoot), efforts: stageEfforts });
+  // #776：--provider ollama の v1.2 の走りだけ、対象の checkout の dist から段の出力の上限の表を独立に読む（無い・形が違えば子 0 本）
+  const ollamaLimits = provider === "ollama" && pipeline === V12_PIPELINE ? await loadOllamaLimits(main) : null;
+  if (provider === "ollama" && pipeline === V12_PIPELINE && ollamaLimits === null) refuseCode("provider:ollama-limits-unavailable");
+  const { measured, signature, signatureLegacy } = conditionsFor(main, { jobs, argvOf: childArgsFor, pl: pipeline, comparison: null, measurementId: basename(outRoot), efforts: stageEfforts, ollamaLimits });
   mkdirSync(outRoot, { recursive: true });
   const conditionsPath = join(outRoot, "conditions.json");
   const priorDirs = readdirSync(outRoot).filter((n) => /^P\d+-r\d+$/.test(n));
@@ -862,6 +884,14 @@ async function runCompare() {
   const [baseGroup, candGroup] = GROUPS;
   const pipelineOf = (g) => (stageMode ? pipeline : g);
   const ctxOf = { [baseGroup]: baseline, [candGroup]: main };
+  // #776：Ollama の v1.2 の群だけ、その群の checkout の dist から段の出力の上限の表を独立に読む（無い・形が違えば子 0 本）。
+  // 表の違う群どうしは比較しない（意図した差ではない）
+  const ollamaLimitsOfGroup = {};
+  for (const g of GROUPS) {
+    ollamaLimitsOfGroup[g] = provider === "ollama" && pipelineOf(g) === V12_PIPELINE ? await loadOllamaLimits(ctxOf[g]) : null;
+    if (provider === "ollama" && pipelineOf(g) === V12_PIPELINE && ollamaLimitsOfGroup[g] === null) refuseCode("provider:ollama-limits-unavailable");
+  }
+  if (GROUPS.some((g) => JSON.stringify(ollamaLimitsOfGroup[g]) !== JSON.stringify(ollamaLimitsOfGroup[baseGroup]))) refuseCode("compare:ollama-limits-differ");
   // 工場の既定（子に渡す値の出どころ。片方だけ違えば、同じ引数でも条件の意味が揃わない）
   const defaultsOf = (ctx) => ({
     effort: ctx.factory.DEFAULT_EFFORT, budget_usd: ctx.factory.DEFAULT_BUDGET_USD, deadline_ms: ctx.factory.DEFAULT_DEADLINE_MS, model: ctx.openai.DEFAULT_OPENAI_MODEL,
@@ -889,7 +919,7 @@ async function runCompare() {
   const relArgvOf = (pl, ctx, g) => (job) => argvFor(relative(ctx.checkout, ctx.cliFile), idOf(job), pl, effortsOf(g) !== null);
   const conds = {};
   for (const g of GROUPS) {
-    conds[g] = conditionsFor(ctxOf[g], { jobs, argvOf: relArgvOf(pipelineOf(g), ctxOf[g], g), pl: pipelineOf(g), comparison: { pairs_sha256: pairsSha, group: g, role: ROLES[g], profile }, measurementId: basename(outRoot), efforts: effortsOf(g) });
+    conds[g] = conditionsFor(ctxOf[g], { jobs, argvOf: relArgvOf(pipelineOf(g), ctxOf[g], g), pl: pipelineOf(g), comparison: { pairs_sha256: pairsSha, group: g, role: ROLES[g], profile }, measurementId: basename(outRoot), efforts: effortsOf(g), ollamaLimits: ollamaLimitsOfGroup[g] });
   }
   // 経路 v1.2 を含む組（#557）：各群の条件を版ごとに検証してから（v1・v1.1a は v5、v1.2 は v7）、共通の形で照らす。保存する条件と署名は元のまま
   if (GROUPS.includes(V12_PIPELINE)) for (const g of GROUPS) { const problem = groupConditionsProblem(conds[g].measured, g); if (problem !== null) refuseCode(problem); }

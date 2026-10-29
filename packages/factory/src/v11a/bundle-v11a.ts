@@ -28,6 +28,7 @@ import {
   type BundleArtifact,
   type BundleRejectedCandidate,
 } from "../bundle.js";
+import type { StageOutputLimits } from "../call.js";
 import { BUILD_CLI_RECORD_SCHEMA } from "../cli-plan.js";
 import type { RequirementNature, TestSuite } from "../fixed-test.js";
 import type { StageEfforts } from "../limits.js";
@@ -757,6 +758,10 @@ export interface StageRunConditions {
   readonly v12_call_limits?: StageCallLimits;
   /** `--pipeline v1.2` の段の走りで `--stage-effort` を付けたときだけ：段 → 推論の effort（付けた順。Issue #664） */
   readonly stage_efforts?: StageEfforts;
+  /**
+   * `--provider ollama` の `--pipeline v1.2` の段の走りだけ：上書きした段と値の表（Issue #776）。ほかの走りは欄を持たない
+   */
+  readonly ollama_stage_output_limits?: StageOutputLimits;
 }
 
 /** T2' を通った組の数（`test_spec`。Issue #637） */

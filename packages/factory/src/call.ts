@@ -49,6 +49,15 @@ import type {
 } from "./llm.js";
 
 /**
+ * 段の出力の上限（`max_output_tokens`）の上書きの表（段 → 値。Issue #776）。
+ *
+ * **共通の口の任意の引数**として届く——段のコードに provider の分岐を足さず、provider ごとに違う
+ * 推論の量へ上限を合わせる口である（`CallGatewayOptions.stageOutputLimits`）。表に無い段は
+ * `STAGE_MAX_OUTPUT_TOKENS` の値のまま。effort に依らない（段 → 値）。
+ */
+export type StageOutputLimits = Readonly<Partial<Record<OutputStage, number>>>;
+
+/**
  * 入力の上界を出すための、1 文字あたりのトークン数の上限（案）。
  *
  * 正しいトークン数は tokenizer を呼ばないと分からない。予約は**安全側に倒す**（§1.5）ので、
@@ -353,6 +362,13 @@ export interface CallGatewayOptions {
    */
   readonly stageEfforts?: StageEfforts;
   /**
+   * 段の出力の上限（`max_output_tokens`）の上書きの表（段 → 値。Issue #776）。渡した口では
+   * `maxOutputTokens(段)` が表の値を返し、要求の `max_output_tokens` と予算の予約（`estimateMaxCostUsd`）が
+   * その値で揃う。表に無い段は `STAGE_MAX_OUTPUT_TOKENS` の値のまま。**provider ごとに違う推論の量へ
+   * 上限を合わせる口**で、段のコードに provider の分岐を足さない。省けば今の口と同じ。
+   */
+  readonly stageOutputLimits?: StageOutputLimits;
+  /**
    * 実試行の観測器（Issue #748）。渡した口だけが、**実呼び出しを始めた試行**の始まりと終わりを告げる。
    * 省けば何も告げない（今の振る舞いと同じ）。要求の wire・中断の合図・計量・予約・再送は変えない。
    */
@@ -592,6 +608,8 @@ export class CallGateway {
   readonly #explicitCallTimeoutMs: number | undefined;
   /** 段ごとの effort の組（段の名前で引いた口の出所。Issue #664） */
   readonly #stageEfforts: StageEfforts;
+  /** 段の出力の上限の上書きの表（渡した口だけ。段の名前で引いた口へ引き継ぐ。Issue #776） */
+  readonly #stageOutputLimits: StageOutputLimits;
   /** 実試行の観測器（省けば観測しない。Issue #748） */
   readonly #observer: CallAttemptObserver | undefined;
   /** 段の名前で引いた口の元の口（元の口では自分自身。Issue #664） */
@@ -622,6 +640,7 @@ export class CallGateway {
     this.#gate = options.gate;
     this.#explicitCallTimeoutMs = options.callTimeoutMs;
     this.#stageEfforts = options.stageEfforts ?? {};
+    this.#stageOutputLimits = options.stageOutputLimits ?? {};
     this.#observer = options.observer;
   }
 
@@ -641,6 +660,8 @@ export class CallGateway {
    * 両方の要求に effort を載せる（Issue #751）。
    * 予算・門・締切・時計・単価・上限・試行の回数と**口の計は元の口と共有する**（段の前後の差の取り方は変わらない）。
    * 呼ぶ側が timeout の基準を指定した口では、その指定を引き継ぐ（呼ぶ側の指定が effort の基準に勝つのは今と同じ）。
+   * 段の出力の上限の上書き（`stageOutputLimits`。Issue #776）も引き継ぐ——effort の指定の有無によらず、
+   * 段の名前で引いた口の `maxOutputTokens` が上書きの値を返す。
    * 指定の無い段は**元の口そのもの**を返す（上限・timeout・要求は今と同じ）。
    */
   forStage(stage: StageEffortStage): CallGateway {
@@ -659,6 +680,7 @@ export class CallGateway {
       ...(root.#explicitCallTimeoutMs === undefined ? {} : { callTimeoutMs: root.#explicitCallTimeoutMs }),
       ...(root.#gate === undefined ? {} : { gate: root.#gate }),
       ...(root.#observer === undefined ? {} : { observer: root.#observer }),
+      stageOutputLimits: root.#stageOutputLimits,
     });
     view.#root = root;
     view.#requestEffort = effort;
@@ -669,9 +691,10 @@ export class CallGateway {
   /**
    * 段の出力の上限（`max_output_tokens`）を、effort と段から引く（§1.5・§2）。
    * **値は共通の上限の置き場所（limits.ts）にだけ置く**——段の側で値を書かない。
+   * 上書きの表（`stageOutputLimits`。Issue #776）に段があればその値を返し、無ければ今の値のまま。
    */
   maxOutputTokens(stage: OutputStage): number {
-    return maxOutputTokensForEffort(this.#effort, stage);
+    return this.#stageOutputLimits[stage] ?? maxOutputTokensForEffort(this.#effort, stage);
   }
 
   /** LLM 呼び出しの回数（再試行と例外も数える。§1.5） */

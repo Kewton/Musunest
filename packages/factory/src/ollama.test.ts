@@ -3,7 +3,7 @@
 // 実 API は呼ばない。**差し込んだ `fetch` が受け取った要求**と、**手で書いた応答**だけで閉じる。
 // ここで固定したいのは 6 つ。
 //   1. 宛先は `https://ollama.com/v1/responses`、`Authorization` は渡した鍵、既定のモデルは
-//      `deepseek-v4.1-flash:cloud`（`model` で上書きできる）
+//      `deepseek-v4.1-flash:1017-cloud`（`model` で上書きできる。Issue #776 で同じ系の新しい版へ替えた）
 //   2. body は OpenAI と同じで、段の指示の最後に schema の塊が 1 つ増えるだけ（構造化・schema 付きの道具・
 //      `finalAnswerOnly`）。schema の無い道具だけの要求は OpenAI と同じ。封筒の段では「その段だけの封筒全体」
 //   3. 応答の解釈は OpenAI と同じ（封筒の `result` の取り出し、形の誤り）
@@ -11,10 +11,12 @@
 //   5. 誤りの分類（429・残高切れ・5xx・timeout・未完了）は OpenAI と同じ
 //   6. adapter の source が環境変数を読まない（鍵は入口から渡す）
 import { describe, expect, it } from "vitest";
+import { DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS, createLlmJudge } from "./judge-llm.js";
 import type { LlmStructuredRequest, LlmToolRequest } from "./llm.js";
 import {
   DEFAULT_OLLAMA_MODEL,
   OLLAMA_RESPONSES_URL,
+  OLLAMA_STAGE_OUTPUT_LIMITS,
   createOllamaLlmClient,
   type OllamaAdapterOptions,
 } from "./ollama.js";
@@ -132,7 +134,7 @@ async function bodiesOf(
 // ── 1. 宛先・鍵・モデル ──────────────────────────────────────────────
 
 describe("宛先・鍵・既定のモデル（Issue #771）", () => {
-  it("宛先は https://ollama.com/v1/responses、Authorization は渡した鍵、既定のモデルは deepseek-v4.1-flash:cloud", async () => {
+  it("宛先は https://ollama.com/v1/responses、Authorization は渡した鍵、既定のモデルは deepseek-v4.1-flash:1017-cloud", async () => {
     const { fetch, captured } = recordingFetch(() =>
       jsonResponse(completed(outputText(JSON.stringify({ items: [1] })))),
     );
@@ -145,7 +147,7 @@ describe("宛先・鍵・既定のモデル（Issue #771）", () => {
     expect(call.url).toBe(OLLAMA_RESPONSES_URL);
     expect(call.headers["authorization"]).toBe("Bearer ollama-FAKE");
     expect(call.headers["content-type"]).toBe("application/json");
-    expect(call.body["model"]).toBe("deepseek-v4.1-flash:cloud");
+    expect(call.body["model"]).toBe("deepseek-v4.1-flash:1017-cloud");
     expect(call.body["model"]).toBe(DEFAULT_OLLAMA_MODEL);
   });
 
@@ -157,6 +159,26 @@ describe("宛先・鍵・既定のモデル（Issue #771）", () => {
     await client.callStructured(STRUCTURED_REQUEST);
     expect(captured[0]!.body["model"]).toBe("deepseek-v4.1-flash");
     expect(captured[0]!.body["reasoning"]).toEqual({ effort: "low" });
+  });
+
+  it("段の出力の上限の表は、推論に余白の要る 3 段だけを持つ（Issue #776）", () => {
+    // 段 → 値。effort に依らない。表に無い段は今の値のまま（上書きしない）
+    expect(OLLAMA_STAGE_OUTPUT_LIMITS).toEqual({ "semantic-check": 32_768, "decl-check": 32_768, repair: 65_536 });
+  });
+});
+
+// ── 段の出力の上限の表（負の試験。Issue #776）──────────────────────────
+
+describe("段の出力の上限の表（負の試験。Issue #776）", () => {
+  it("判定の LLM は段の上限の表を通らず、今の既定の上限（2,048）を送る（Ollama の v1.2 でも今のまま）", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ answers: { q: { noul: 0.5 } } })))),
+    );
+    const judge = createLlmJudge({ client: ollamaClient(fetch), model: "same-model" });
+    await judge.judge({ state: {}, questions: { q: { kind: "noul", instructions: "問い" } } });
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.body["max_output_tokens"]).toBe(DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS);
+    expect(DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS).toBe(2_048);
   });
 });
 

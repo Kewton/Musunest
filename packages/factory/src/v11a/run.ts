@@ -84,7 +84,7 @@ import {
   type MaterialKind,
   type RejectedCandidateStage,
 } from "../bundle.js";
-import { CallGateway, callCountsDelta, createCallGate, type CallCounts, type CallGate } from "../call.js";
+import { CallGateway, callCountsDelta, createCallGate, type CallCounts, type CallGate, type StageOutputLimits } from "../call.js";
 import type { TestSuite } from "../fixed-test.js";
 import { createBudgetedJudge, type BudgetedJudge } from "../judge-budget.js";
 import { AGENT_LIMITS, type StageEfforts } from "../limits.js";
@@ -277,6 +277,12 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
    * 要求をその段の名前で引いた口で呼ぶ。省けば、どの段の口も今の口と同じ（要求・記録・要約は今と同じ）。
    */
   readonly stageEfforts?: StageEfforts;
+  /**
+   * 段の出力の上限の上書きの表（段 → 値。Issue #776）。共通の口（`CallGateway`）と T2 の束ごとの口に渡し、
+   * 表にある段の要求の `max_output_tokens` と予算の予約がその値で揃う。省けば今の口と同じ。段のコードは
+   * provider を分けない——上書きは共通の口の任意の引数として届く。
+   */
+  readonly stageOutputLimits?: StageOutputLimits;
 }
 
 /** v1.1α の 1 回の生成の結果（v1 の結果に、境界の材料を任意の欄で足したもの。Issue #636） */
@@ -803,6 +809,7 @@ async function runV11a(
     ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
     ...(callGate === undefined ? {} : { gate: callGate }),
     ...(input.stageEfforts === undefined ? {} : { stageEfforts: input.stageEfforts }),
+    ...(input.stageOutputLimits === undefined ? {} : { stageOutputLimits: input.stageOutputLimits }),
     ...(requestLog === undefined ? {} : { observer: requestLog.observer() }),
   });
   // 判定の口（渡されたときだけ）を、この生成の予算に結び付けた包みで包む（v1 と同じ）。J4・J2 に渡す。旗 `v12.ids` の走りは
@@ -1671,6 +1678,7 @@ async function runV11a(
           ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
           ...(callGate === undefined ? {} : { gate: callGate }),
           ...(input.stageEfforts === undefined ? {} : { stageEfforts: input.stageEfforts }),
+          ...(input.stageOutputLimits === undefined ? {} : { stageOutputLimits: input.stageOutputLimits }),
           ...(requestLog === undefined || unit === undefined ? {} : { observer: requestLog.observer(unit) }),
         }).forStage("test-spec");
         runs[bundle] = { gateway: bundleGatewayOf, meter: bundleMeter, unit, start, end: () => end };
