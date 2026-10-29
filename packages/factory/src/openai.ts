@@ -171,6 +171,20 @@ export interface ResponsesAdapterOptions extends OpenAiAdapterOptions {
    * Ollama の Responses API は `text.format` の JSON Schema で応答を縛らないので、形を要求の文でも伝える。
    */
   readonly presentSchema?: boolean;
+  /**
+   * 応答の本文が 1 組の囲み（```` ``` ```` … ```` ``` ````）で包まれているとき、中身を JSON として読むか
+   * （既定は読まない）。Ollama の Responses API は、この条件で本文を囲みで返すことがある（Issue #777）。
+   * **構造化出力の本文と、道具付きの要求の最後の答え（`done`）の本文だけ**に効く——道具の引数と wire の
+   * JSON の読み方は変えない。囲みの規則に合わない本文（囲みの外に文字・囲みが 2 組以上・中身が JSON でない）は
+   * 今のとおり `malformed` にする。
+   */
+  readonly readFencedJson?: boolean;
+  /**
+   * 最後の答えだけを求める印（`finalAnswerOnly`）のある道具付きの要求で、body から `tools` と `tool_choice` を
+   * 外すか（既定は外さない）。Ollama では `tool_choice: "none"` が効かない応答がある（Issue #777）。
+   * 印の無い要求の body は今のまま（道具の定義を送り、`tool_choice` は送らない）。
+   */
+  readonly finalAnswerWithoutTools?: boolean;
 }
 
 interface WireConfig {
@@ -182,6 +196,8 @@ interface WireConfig {
   readonly envelope: EnvelopeId;
   readonly url: string;
   readonly presentSchema: boolean;
+  readonly readFencedJson: boolean;
+  readonly finalAnswerWithoutTools: boolean;
 }
 
 /**
@@ -205,6 +221,8 @@ export function createResponsesLlmClient(options: ResponsesAdapterOptions): LlmC
     envelope: options.envelope ?? "v1",
     url: options.url,
     presentSchema: options.presentSchema === true,
+    readFencedJson: options.readFencedJson === true,
+    finalAnswerWithoutTools: options.finalAnswerWithoutTools === true,
   };
   return {
     callStructured: <T>(structuredRequest: LlmStructuredRequest) =>
@@ -449,10 +467,16 @@ function buildToolBody(config: WireConfig, request: LlmToolRequest): Record<stri
     ...turnsToInput(request.turns),
   ];
   const body = baseBody(config, request.instructions, input, request.maxOutputTokens, request.effort);
-  body.tools = request.tools.map(toFunctionTool);
-  // 最後の答えだけを求める印があるときだけ、道具を選ばせない（旗 `v12.ids` の探索 on の全文の直し。Issue #768）。
-  // 印が無ければ body はバイト列で今と同じ（道具の定義と履歴は印があっても送る）。
-  if (request.finalAnswerOnly === true) body.tool_choice = "none";
+  // 印のある要求で道具を外す設定のとき（Ollama。Issue #777）は、道具の定義と `tool_choice` の**両方**を
+  // 送らない——`tool_choice: "none"` が効かない応答があるので、道具そのものを外す。instructions・入力・
+  // 履歴・最後の答えの schema・上限・effort は今のまま。印の無い要求の body は今のまま。
+  const answerWithoutTools = config.finalAnswerWithoutTools && request.finalAnswerOnly === true;
+  if (!answerWithoutTools) {
+    body.tools = request.tools.map(toFunctionTool);
+    // 最後の答えだけを求める印があるときだけ、道具を選ばせない（旗 `v12.ids` の探索 on の全文の直し。Issue #768）。
+    // 印が無ければ body はバイト列で今と同じ（道具の定義と履歴は印があっても送る）。
+    if (request.finalAnswerOnly === true) body.tool_choice = "none";
+  }
   if (request.schema !== undefined) {
     body.text = {
       format: {
@@ -574,7 +598,7 @@ async function callStructuredWire<T>(
   requireNoRefusal(wire);
   const text = extractOutputText(wire);
   if (text === undefined) throw new OpenAiAdapterError("malformed", "構造化出力の本文がありません");
-  const parsed = tryParseJson(text);
+  const parsed = parseResponseJson(text, config.readFencedJson);
   if (!parsed.ok) throw new OpenAiAdapterError("malformed", "構造化出力が JSON として読めません");
   const output =
     entry === undefined ? requireSchema(request.schema, parsed.value) : unwrapEnvelope(entry, parsed.value);
@@ -622,9 +646,49 @@ async function callToolsWire(config: WireConfig, request: LlmToolRequest): Promi
   if (toolCalls.length > 0) return { kind: "toolCalls", toolCalls, usage };
   const text = extractOutputText(wire);
   if (text === undefined) throw new OpenAiAdapterError("malformed", "宣言の本文がありません");
-  const parsed = tryParseJson(text);
+  const parsed = parseResponseJson(text, config.readFencedJson);
   if (!parsed.ok) throw new OpenAiAdapterError("malformed", "宣言が JSON として読めません");
   return { kind: "done", declaration: parsed.value, usage };
+}
+
+/**
+ * 応答の本文を JSON として読む（Issue #777）。`readFenced` が真で、本文が 1 組の囲み（```` ``` ```` … ```` ``` ````）
+ * で包まれていれば、中身を読む。包まれていなければ本文をそのまま読む——**囲みの外に文字がある・囲みが 2 組以上・
+ * 中身が JSON でない**ときは、ここで中身を読んで失敗し、今のとおり `malformed` になる。
+ *
+ * 構造化出力の本文と、道具付きの要求の最後の答え（`done`）の本文だけに使う。**道具の引数（`parseToolArguments`）と
+ * wire の JSON（`requestWire`）の読み方は変えない**——道具の引数の囲みは今のとおり読めない。
+ */
+function parseResponseJson(text: string, readFenced: boolean): JsonResult {
+  if (readFenced) {
+    const inner = unfencedBody(text);
+    if (inner !== undefined) return tryParseJson(inner);
+  }
+  return tryParseJson(text);
+}
+
+/**
+ * 前後の空白を除いた本文が 1 組の囲みで包まれていれば、中身（囲みの間の行を改行でつないだもの）を返す。
+ * 包まれていなければ `undefined`（Issue #777）。
+ *
+ *   1 組とみなす条件：最初の行が ```` ``` ```` だけ、または ```` ``` ```` の直後に言語の印を 1 語だけ続けた行で、
+ *   最後の行が ```` ``` ```` だけの行であり、その間に ```` ``` ```` で始まる行が無いこと。改行は `\n`・`\r\n`・`\r` の
+ *   どれでもよい。JSON の文字列の中のバッククォートは囲みとみなさない（最初の行が ```` ``` ```` で始まらないため）。
+ */
+function unfencedBody(text: string): string | undefined {
+  const lines = text.trim().split(/\r\n|\r|\n/);
+  if (lines.length < 2) return undefined;
+  if (!isFenceStart(lines[0] ?? "")) return undefined;
+  if ((lines[lines.length - 1] ?? "").trim() !== "```") return undefined;
+  const inner = lines.slice(1, -1);
+  if (inner.some((line) => line.trimStart().startsWith("```"))) return undefined;
+  return inner.join("\n");
+}
+
+/** 行が囲みの始まりか（```` ``` ```` だけ、または ```` ``` ```` の直後に言語の印を 1 語だけ） */
+function isFenceStart(line: string): boolean {
+  const value = line.trim();
+  return value === "```" || /^```\S+$/.test(value);
 }
 
 /**

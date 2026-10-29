@@ -4,8 +4,11 @@
 // ここで固定したいのは 6 つ。
 //   1. 宛先は `https://ollama.com/v1/responses`、`Authorization` は渡した鍵、既定のモデルは
 //      `deepseek-v4.1-flash:1017-cloud`（`model` で上書きできる。Issue #776 で同じ系の新しい版へ替えた）
-//   2. body は OpenAI と同じで、段の指示の最後に schema の塊が 1 つ増えるだけ（構造化・schema 付きの道具・
-//      `finalAnswerOnly`）。schema の無い道具だけの要求は OpenAI と同じ。封筒の段では「その段だけの封筒全体」
+//   2. body は OpenAI と同じで、段の指示の最後に schema の塊が 1 つ増えるだけ（構造化・schema 付きの道具）。
+//      schema の無い道具だけの要求は OpenAI と同じ。封筒の段では「その段だけの封筒全体」。**最後の答えだけを
+//      求める印（`finalAnswerOnly`）のある要求だけは、道具の定義と `tool_choice` を送らない**（Issue #777）
+//   2'. 応答の本文が 1 組の囲み（``` … ```）で包まれているとき、中身を読む（構造化出力と、道具付きの
+//      最後の答えの本文だけ。囲みの規則に合わない本文・囲みの外に文字・囲み 2 組は今のとおり malformed。Issue #777）
 //   3. 応答の解釈は OpenAI と同じ（封筒の `result` の取り出し、形の誤り）
 //   4. usage は、キャッシュの書き込みの欄が無ければ 0、`reasoning_tokens` 0 をそのまま 0 として読む
 //   5. 誤りの分類（429・残高切れ・5xx・timeout・未完了）は OpenAI と同じ
@@ -225,7 +228,7 @@ describe("body は OpenAI と同じで、段の指示の最後に schema の塊�
     );
   });
 
-  it("schema 付きの道具（finalAnswerOnly も）は schema の塊を足し、道具の定義・履歴・tool_choice は OpenAI と同じ", async () => {
+  it("schema 付きの道具（finalAnswerOnly）：印のある要求は道具の定義と tool_choice を送らず、schema の塊を足し、ほかは OpenAI と同じ", async () => {
     const request: LlmToolRequest = {
       ...TOOL_REQUEST,
       schemaName: "answer",
@@ -233,11 +236,14 @@ describe("body は OpenAI と同じで、段の指示の最後に schema の塊�
       finalAnswerOnly: true,
     };
     const { ollama, openai } = await bodiesOf((client) => client.callWithTools(request));
-    const { input: ollamaInput, ...ollamaRest } = ollama;
-    const { input: openaiInput, ...openaiRest } = openai;
-    expect(ollamaRest).toEqual(openaiRest);
-    expect(ollamaRest["tool_choice"]).toBe("none");
-    expect((ollamaInput as readonly unknown[]).length).toBe((openaiInput as readonly unknown[]).length + 1);
+    // 印のある要求：Ollama は道具の定義と tool_choice の両方を送らない（Issue #777）
+    expect(ollama["tools"]).toBeUndefined();
+    expect(ollama["tool_choice"]).toBeUndefined();
+    // OpenAI は今のまま（道具の定義と tool_choice: "none" を送る。不変）
+    expect(openai["tool_choice"]).toBe("none");
+    expect(openai["tools"] as readonly unknown[]).toHaveLength(1);
+    // schema の塊を 1 つ除き、tools と tool_choice を除けば、body 全体が OpenAI と同じ
+    expect(withoutToolKeys(withoutSchemaBlock(ollama, SCHEMA))).toEqual(withoutToolKeys(openai));
     const blocks = developerBlocks(ollama);
     expect(blocks.at(-1)!.text.startsWith(SCHEMA_INSTRUCTION_PREFIX)).toBe(true);
     expect(blocks.at(-1)!.text).toContain(JSON.stringify(SCHEMA));
@@ -301,6 +307,12 @@ function withoutSchemaBlock(body: Record<string, unknown>, schema: unknown): Rec
   return copy;
 }
 
+/** body から道具の定義（`tools`）と `tool_choice` を除いた写し（Ollama の印のある要求を OpenAI と比べる。Issue #777） */
+function withoutToolKeys(body: Record<string, unknown>): Record<string, unknown> {
+  const { tools: _tools, tool_choice: _choice, ...rest } = body;
+  return rest;
+}
+
 /** 文書 2 つ（最後だけ breakpoint）・規則・データ・履歴を持つ道具の要求（最後の答えの schema 付き） */
 const TOOL_WITH_HISTORY: LlmToolRequest = {
   instructions: "規則",
@@ -352,7 +364,9 @@ describe("schema の塊をちょうど 1 つ除いた body 全体が OpenAI の 
     it(`schema 付きの道具（${finalAnswerOnly === true ? "finalAnswerOnly" : "通常の往復"}）：塊を除けば、道具の定義・履歴・tool_choice を含む body 全体が同じ`, async () => {
       const request: LlmToolRequest = finalAnswerOnly === true ? { ...TOOL_WITH_HISTORY, finalAnswerOnly } : TOOL_WITH_HISTORY;
       const { ollama, openai } = await bodiesOf((client) => client.callWithTools(request));
-      expect(withoutSchemaBlock(ollama, SCHEMA)).toEqual(openai);
+      // 印のある要求（Ollama）だけ、道具の定義と tool_choice の両方を送らない（Issue #777）。印の無い往復は今のまま
+      const expected = finalAnswerOnly === true ? withoutToolKeys(openai) : openai;
+      expect(withoutSchemaBlock(ollama, SCHEMA)).toEqual(expected);
       expect(openai["tool_choice"]).toBe(finalAnswerOnly === true ? "none" : undefined);
       // 履歴（道具の呼び出しと結果）が OpenAI の body に載っている＝比べた範囲に入っている
       expect((openai["input"] as readonly unknown[]).length).toBe(2 + 1 + 1 + 2);
@@ -401,6 +415,146 @@ describe("応答の解釈は OpenAI と同じ（Issue #771）", () => {
     );
     const error = await captureError(() => ollamaClient(fetch).callStructured(envelopeRequest));
     expect(error.kind).toBe("malformed");
+  });
+});
+
+// ── 2''. 囲みの付いた本文の読み取り（Issue #777）────────────────────────
+
+/** 本文を囲み 1 組で包む（言語の印と改行の種類は選べる） */
+function fenced(text: string, language = "", newline = "\n"): string {
+  return `\`\`\`${language}${newline}${text}${newline}\`\`\``;
+}
+
+describe("囲み 1 つの本文を読む（構造化出力と、道具付きの最後の答え。Issue #777。実 API は呼ばない）", () => {
+  const CASES: readonly { readonly name: string; readonly language: string; readonly newline: string }[] = [
+    { name: "言語の印なし・LF", language: "", newline: "\n" },
+    { name: "言語の印あり・LF", language: "json", newline: "\n" },
+    { name: "言語の印あり・CRLF", language: "json", newline: "\r\n" },
+  ];
+
+  it.each(CASES)("構造化出力：囲みの中身を読んで段へ渡す（$name）", async ({ language, newline }) => {
+    const text = fenced(JSON.stringify({ items: [1, 2] }), language, newline);
+    const { fetch } = recordingFetch(() => jsonResponse(completed(outputText(text))));
+    const response = await ollamaClient(fetch).callStructured<{ items: number[] }>(STRUCTURED_REQUEST);
+    expect(response.output).toEqual({ items: [1, 2] });
+  });
+
+  it("構造化出力：囲みの中身が schema に合わなければ今のとおり malformed（検査を緩めない）", async () => {
+    const text = fenced(JSON.stringify({ items: ["x"] }), "json");
+    const { fetch } = recordingFetch(() => jsonResponse(completed(outputText(text))));
+    const error = await captureError(() => ollamaClient(fetch).callStructured(STRUCTURED_REQUEST));
+    expect(error.kind).toBe("malformed");
+  });
+
+  it("道具付きの最後の答え：囲みの中身を done の宣言として読む", async () => {
+    const declaration = { entity: "item" };
+    const { fetch } = recordingFetch(() => jsonResponse(completed(outputText(fenced(JSON.stringify(declaration), "json")))));
+    const response = await ollamaClient(fetch).callWithTools(TOOL_REQUEST);
+    expect(response).toEqual({ kind: "done", declaration, usage: undefined });
+  });
+
+  it("OpenAI の client は囲みを読まない（設定は off）。構造化も最後の答えも今のとおり malformed", async () => {
+    const items = recordingFetch(() => jsonResponse(completed(outputText(fenced(JSON.stringify({ items: [] }))))));
+    const error = await captureError(() => createOpenAiLlmClient({ apiKey: "sk-FAKE", fetch: items.fetch }).callStructured(STRUCTURED_REQUEST));
+    expect(error.kind).toBe("malformed");
+    const done = recordingFetch(() => jsonResponse(completed(outputText(fenced(JSON.stringify({ entity: "item" }))))));
+    const error2 = await captureError(() => createOpenAiLlmClient({ apiKey: "sk-FAKE", fetch: done.fetch }).callWithTools(TOOL_REQUEST));
+    expect(error2.kind).toBe("malformed");
+  });
+});
+
+describe("囲みの反例：どれも今の分類のまま（Issue #777）", () => {
+  const ENVELOPE_REQUEST: LlmStructuredRequest = {
+    instructions: "規則",
+    documents: ["文書"],
+    rules: [],
+    input: "依頼文",
+    schemaName: REVERSE_CHECK_SCHEMA_NAME,
+    schema: REVERSE_CHECK_SCHEMA,
+    maxOutputTokens: 128,
+  };
+
+  const structuredOf = (text: string) => {
+    const { fetch } = recordingFetch(() => jsonResponse(completed(outputText(text))));
+    return captureError(() => ollamaClient(fetch).callStructured(STRUCTURED_REQUEST));
+  };
+
+  it("囲みの外に文字があれば囲みとみなさず、今のとおり malformed", async () => {
+    const error = await structuredOf(`答えはこちら:\n${fenced(JSON.stringify({ items: [] }))}`);
+    expect(error.kind).toBe("malformed");
+  });
+
+  it("囲みが 2 組あれば中身を読まず、今のとおり malformed", async () => {
+    const error = await structuredOf(`${fenced(JSON.stringify({ items: [] }))}\n${fenced(JSON.stringify({ items: [] }))}`);
+    expect(error.kind).toBe("malformed");
+  });
+
+  it("囲みの中身が JSON でなければ malformed", async () => {
+    const error = await structuredOf(fenced("これは JSON ではない", "json"));
+    expect(error.kind).toBe("malformed");
+  });
+
+  it("JSON の文字列の中のバッククォートは囲みとみなさず、今のとおり読む", async () => {
+    const request: LlmStructuredRequest = {
+      ...STRUCTURED_REQUEST,
+      schemaName: "text-note",
+      schema: { type: "object", additionalProperties: false, required: ["note"], properties: { note: { type: "string" } } },
+    };
+    const body = JSON.stringify({ note: "see ```json" }, null, 2);
+    const { fetch } = recordingFetch(() => jsonResponse(completed(outputText(body))));
+    const response = await ollamaClient(fetch).callStructured<{ note: string }>(request);
+    expect(response.output).toEqual({ note: "see ```json" });
+  });
+
+  it("封筒の欠落：囲みの中身に result が無ければ malformed", async () => {
+    const { fetch } = recordingFetch(() => jsonResponse(completed(outputText(fenced(JSON.stringify({ uncovered: [] }))))));
+    const error = await captureError(() => ollamaClient(fetch).callStructured(ENVELOPE_REQUEST));
+    expect(error.kind).toBe("malformed");
+  });
+
+  it("wrong-stage：囲みの中身の stage が違えば malformed", async () => {
+    const { fetch } = recordingFetch(() => jsonResponse(completed(outputText(fenced(JSON.stringify({ result: { stage: "design", uncovered: [] } }))))));
+    const error = await captureError(() => ollamaClient(fetch).callStructured(ENVELOPE_REQUEST));
+    expect(error.kind).toBe("malformed");
+  });
+
+  it("構造化の schema 違反：囲みの中身が schema に合わなければ malformed", async () => {
+    const error = await structuredOf(fenced(JSON.stringify({ items: [{ x: 1 }] })));
+    expect(error.kind).toBe("malformed");
+  });
+
+  it("incomplete：囲みの中身が読めても、未完了の応答は成功にしない", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse({ id: "resp_1", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: outputText(fenced(JSON.stringify({ items: [] }))) }),
+    );
+    const error = await captureError(() => ollamaClient(fetch).callStructured(STRUCTURED_REQUEST));
+    expect(error).toBeInstanceOf(OpenAiIncompleteError);
+    expect(error.kind).toBe("incomplete");
+  });
+
+  it("refusal：囲みの中身があっても拒否は拒否", async () => {
+    const output = [{ type: "message", role: "assistant", content: [{ type: "refusal", refusal: "no" }] }];
+    const { fetch } = recordingFetch(() => jsonResponse(completed(output)));
+    const error = await captureError(() => ollamaClient(fetch).callStructured(STRUCTURED_REQUEST));
+    expect(error.kind).toBe("refusal");
+  });
+
+  it("道具の引数の囲みは今のとおり読めない（どの本文の規則も適用しない）", async () => {
+    const call = [{ type: "function_call", call_id: "c1", name: "staticCheck", arguments: fenced(JSON.stringify({ declaration: "x" }), "json") }];
+    const { fetch } = recordingFetch(() => jsonResponse(completed(call)));
+    const error = await captureError(() => ollamaClient(fetch).callWithTools(TOOL_REQUEST));
+    expect(error.kind).toBe("toolArguments");
+  });
+
+  it("message と function_call の混在：function_call を先に見る", async () => {
+    const output = [
+      { type: "function_call", call_id: "c1", name: "staticCheck", arguments: JSON.stringify({ declaration: "x" }) },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: fenced(JSON.stringify({ entity: "item" })) }] },
+    ];
+    const { fetch } = recordingFetch(() => jsonResponse(completed(output)));
+    const response = await ollamaClient(fetch).callWithTools(TOOL_REQUEST);
+    expect(response.kind).toBe("toolCalls");
+    expect((response as { readonly toolCalls: readonly { readonly id: string }[] }).toolCalls[0]!.id).toBe("c1");
   });
 });
 

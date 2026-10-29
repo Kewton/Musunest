@@ -28,7 +28,7 @@ import { createFakeJudge } from "../judge-fake.js";
 import type { RecordedCall } from "../llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "../llm.js";
 import { AGENT_LIMITS, STAGE_EFFORT_STAGES, maxOutputTokensForEffort } from "../limits.js";
-import { OLLAMA_STAGE_OUTPUT_LIMITS } from "../ollama.js";
+import { OLLAMA_STAGE_OUTPUT_LIMITS, createOllamaLlmClient } from "../ollama.js";
 import { createOpenAiLlmClient, type FetchLike } from "../openai.js";
 import { resolveStageEnvelope, type EnvelopeId } from "../schema-envelope.js";
 import { requirementsFromPlan, type RequirementList, type TestSuite } from "../pipeline.js";
@@ -6632,17 +6632,49 @@ function wireCompleted(output: readonly unknown[]): Response {
  * 記録した応答を順に返す偽物の `fetch` を当てた、実 adapter の client（外部の API は呼ばない）。
  * 構造化の応答は、adapter が選ぶ封筒と同じ枝（`resolveStageEnvelope`）で包む。`failToolOnce` は最初の道具付きの
  * 要求を 1 度だけ HTTP の 5xx で失敗させ、共通の口の通信の再送を通す（記録は消費しない）。
+ *
+ * Issue #777：`adapter` で実 adapter を選べ（既定 `openai`）、`fence` で応答の本文を 1 組の囲みで包める。
+ * `kindByMethod` を真にすると、送った要求の種類を**呼ばれた `LlmClient` のメソッド**で決める——印のある Ollama の
+ * 要求は `tools` を送らないので、`tools` の有無では種類を決められないため（`tools` は wire の検証値として見る）。
+ * `toolsReply` を渡すと、道具付きの要求の応答は台本を消費せず `toolsReply`（body と道具付きの通し番号）から組む
+ * ——本文は囲みの有無を選べる。構造化の台本は構造化の要求だけが順に消費する（Issue #777 の反例の試験）。
  */
-function wireClientOf(calls: readonly RecordedCall[], envelope: EnvelopeId, options: { readonly failToolOnce?: boolean } = {}) {
+function wireClientOf(
+  calls: readonly RecordedCall[],
+  envelope: EnvelopeId,
+  options: {
+    readonly failToolOnce?: boolean;
+    readonly adapter?: "openai" | "ollama";
+    readonly fence?: boolean;
+    readonly kindByMethod?: boolean;
+    readonly toolsReply?: (input: { readonly body: Record<string, unknown>; readonly count: number }) => string | readonly unknown[];
+  } = {},
+) {
   const sent: WireSent[] = [];
   let index = 0;
   let toolFailures = options.failToolOnce === true ? 1 : 0;
+  let toolCount = 0;
   let current: { readonly schemaName: string; readonly schema: unknown } | undefined;
+  let method: "structured" | "tools" = "structured";
+  /** 本文を、設定に応じて囲み 1 組で包む（Issue #777） */
+  const messageText = (value: unknown): string => {
+    const json = JSON.stringify(value);
+    return options.fence === true ? `\`\`\`json\n${json}\n\`\`\`` : json;
+  };
+  /** 本文から、完了した応答を組む */
+  const completed = (text: string): Response =>
+    wireCompleted([{ type: "message", role: "assistant", content: [{ type: "output_text", text }] }]);
   const fetch: FetchLike = async (_url, init) => {
     const body = JSON.parse(String(init.body)) as Record<string, unknown>;
-    const tools = body["tools"] !== undefined;
-    sent.push({ kind: tools ? "tools" : "structured", schemaName: tools ? undefined : current?.schemaName, body });
-    if (tools && toolFailures > 0) {
+    const kind: "structured" | "tools" =
+      options.kindByMethod === true ? method : body["tools"] === undefined ? "structured" : "tools";
+    sent.push({ kind, schemaName: kind === "tools" ? undefined : current?.schemaName, body });
+    if (kind === "tools" && options.toolsReply !== undefined) {
+      toolCount += 1;
+      const value = options.toolsReply({ body, count: toolCount });
+      return typeof value === "string" ? completed(value) : wireCompleted(value);
+    }
+    if (kind === "tools" && toolFailures > 0) {
       toolFailures -= 1;
       return new Response(JSON.stringify({ error: { type: "server_error" } }), {
         status: 503,
@@ -6652,12 +6684,12 @@ function wireClientOf(calls: readonly RecordedCall[], envelope: EnvelopeId, opti
     const call = calls[index];
     index += 1;
     if (call === undefined) throw new Error(`記録した応答が尽きました（${String(index)} 件目）`);
-    if (tools) {
+    if (kind === "tools") {
       if (call.kind !== "tools") throw new Error("記録した応答の種別が違います（道具付き）");
       const output =
         call.response.kind === "toolCalls"
           ? call.response.toolCalls.map((tool) => ({ type: "function_call", call_id: tool.id, name: tool.name, arguments: JSON.stringify(tool.arguments ?? null) }))
-          : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(call.response.declaration) }] }];
+          : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: messageText(call.response.declaration) }] }];
       return wireCompleted(output);
     }
     if (call.kind !== "structured") throw new Error("記録した応答の種別が違います（構造化）");
@@ -6666,15 +6698,18 @@ function wireClientOf(calls: readonly RecordedCall[], envelope: EnvelopeId, opti
       resolved === undefined || typeof call.output !== "object" || call.output === null || Array.isArray(call.output)
         ? call.output
         : { result: { stage: resolved.entry.stage, ...(call.output as Record<string, unknown>) } };
-    return wireCompleted([{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(output) }] }]);
+    return completed(messageText(output));
   };
-  const adapter = createOpenAiLlmClient({ apiKey: "sk-FAKE", effort: "high", envelope, fetch });
+  const adapterOptions = { apiKey: "sk-FAKE", effort: "high", envelope, fetch };
+  const adapter = options.adapter === "ollama" ? createOllamaLlmClient(adapterOptions) : createOpenAiLlmClient(adapterOptions);
   const client: LlmClient = {
     callStructured<T>(request: LlmStructuredRequest) {
+      method = "structured";
       current = { schemaName: request.schemaName, schema: request.schema };
       return adapter.callStructured<T>(request);
     },
     callWithTools(request: LlmToolRequest) {
+      method = "tools";
       current = undefined;
       return adapter.callWithTools(request);
     },
@@ -7888,6 +7923,278 @@ describe("最後の答えの枠を取っておく（旗 v12.ids の探索 on の
     expect(offSteps).toHaveLength(1);
     expect(offSteps[0]).not.toHaveProperty("finalize_responses");
     expect(offSteps[0]).not.toHaveProperty("finalize_refused_bundles");
+  });
+});
+
+// ── 囲みの読み取りと、最後の答えの道具外し（Ollama の adapter。Issue #777）─────────────────
+//
+// 実の Ollama の adapter に偽物の fetch を差し、一気通貫（`runGenerationV11a`）と段の走り
+// （`runStageRangeV11a`）の両方の実行口から body まで通す。要求の種類は**呼ばれた `LlmClient` のメソッド**で
+// 決める（`tools` は wire の検証値として見る）。題材に依らない人工の例（`NO_CLOSE` の台本）だけを使う。
+
+describe("Ollama の adapter（囲みと、最後の答えの道具外し。Issue #777）：実行口から偽物の fetch の body まで", () => {
+  const FLAGS = { ledger: true, ids: true, searchRepair: true } as const;
+  /** closeItem の操作を宣言から外した版（場所なしの失敗だけになり、全文の直しへ流れる） */
+  const NO_CLOSE = replaced(
+    RUN_YAML,
+    "  - name: closeItem\n    entity: item\n    kind: update\n    set:\n      kind: beta\n    when: amount > 0\n",
+    "",
+  );
+  /** 印の無い道具の束（静的チェック 1 個） */
+  const bundle = (round: number): RecordedCall => repairToolCall(`b${String(round)}`, "static-check", RUN_YAML);
+  /** 最後の答えの形が合わない done（宣言が文字列でない） */
+  const malformedDone = (): RecordedCall => ({
+    kind: "tools",
+    response: { kind: "done", declaration: { declaration: 123 }, usage: undefined },
+  });
+  const six = (): RecordedCall[] => Array.from({ length: 6 }, (_, round) => bundle(round));
+  const EXECUTIONS = ["generation", "stage"] as const;
+
+  type Steps = readonly Record<string, unknown>[];
+  const generationSteps = (result: Awaited<ReturnType<typeof runGenerationV11a>>): Steps => {
+    const calls = (result.summary as unknown as { readonly v12_calls?: { readonly repair?: { readonly steps?: Steps } } }).v12_calls;
+    return calls?.repair?.steps ?? [];
+  };
+  const stageSteps = (outcome: Awaited<ReturnType<typeof runStageRangeV11a>>): Steps => {
+    const calls = outcome.v12Calls as { readonly repair?: { readonly steps?: Steps } } | undefined;
+    return calls?.repair?.steps ?? [];
+  };
+
+  /** 一気通貫と段の走りの両方の実行口を、同じ形の結果にそろえて流す */
+  const runPath = async (
+    execution: "generation" | "stage",
+    client: LlmClient,
+  ): Promise<{
+    readonly stopped: unknown;
+    readonly verdict: string | null;
+    readonly outcome: { readonly result: string; readonly verdict: string } | undefined;
+    readonly steps: Steps;
+  }> => {
+    if (execution === "generation") {
+      const result = await runGenerationV11a(inputOf(client, { flags: FLAGS }));
+      return { stopped: result.stopped, verdict: result.outcome.verdict, outcome: result.outcome, steps: generationSteps(result) };
+    }
+    const outcome = await runStageRangeV11a({
+      ...inputOf(client, { flags: FLAGS }),
+      range: { start: "name-table", end: "judge" },
+    });
+    return { stopped: outcome.stopped, verdict: outcome.judgeVerdict, outcome: undefined, steps: stageSteps(outcome) };
+  };
+
+  /** 送った要求が道具付きか（種類は呼ばれたメソッドで決めた値） */
+  const isTools = (sent: WireSent): boolean => sent.kind === "tools";
+  /** body に道具の定義があるか */
+  const hasTools = (sent: WireSent): boolean => sent.body["tools"] !== undefined;
+  /** 印のある要求か（Ollama は道具の定義も tool_choice も送らない） */
+  const isMarked = (sent: WireSent): boolean => isTools(sent) && !hasTools(sent);
+
+  /** 道具の呼び出しの応答（function_call の項目） */
+  const functionCalls = (count: number, prefix: string): readonly unknown[] =>
+    Array.from({ length: count }, (_, index) => ({
+      type: "function_call",
+      call_id: `${prefix}-${String(index)}`,
+      name: "static-check",
+      arguments: JSON.stringify({ declaration: RUN_YAML }),
+    }));
+
+  /** 正しい最後の答え（本文） */
+  const validAnswer = (): string => JSON.stringify({ declaration: RUN_YAML, disputes: [] });
+
+  it.each(EXECUTIONS)("(1) 囲み 1 つの最後の答え：道具の束 6 回 → 印付きの 7 回目の囲みを読み、段は done（%s）", async (execution) => {
+    const calls = [...idsHead({ yaml: NO_CLOSE }), ...six(), repairDone(RUN_YAML), structured(acceptAll())];
+    const wire = wireClientOf(calls, "v1.2-ids", { adapter: "ollama", fence: true, kindByMethod: true });
+    const run = await runPath(execution, wire.client);
+
+    expect(wire.consumed(), "台本を使い切った").toBe(calls.length);
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(7);
+    expect(tools.map(isMarked)).toEqual([false, false, false, false, false, false, true]);
+    // 送った要求に、受入の題材の言葉が無い
+    expectNoAcceptanceMaterial(wire.sent.map((sent) => JSON.stringify(sent.body)));
+    expect(run.stopped).toBeNull();
+    expect(run.verdict).toBe("full");
+    expect(run.steps).toEqual([
+      {
+        responses: 7,
+        tool_bundles: 6,
+        tools_executed: 6,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 6,
+        shape_retries: 0,
+        limit: null,
+        end: "done",
+        finalize_responses: 1,
+        finalize_refused_bundles: 0,
+      },
+    ]);
+  });
+
+  it.each(EXECUTIONS)("(3) 囲み付きの 7 回目が形の違反の done → 8 回目（印付き）の囲みを採る（%s）", async (execution) => {
+    const calls = [...idsHead({ yaml: NO_CLOSE }), ...six(), malformedDone(), repairDone(RUN_YAML), structured(acceptAll())];
+    const wire = wireClientOf(calls, "v1.2-ids", { adapter: "ollama", fence: true, kindByMethod: true });
+    const run = await runPath(execution, wire.client);
+
+    expect(wire.consumed(), "台本を使い切った").toBe(calls.length);
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(8);
+    expect(tools.map(isMarked)).toEqual([false, false, false, false, false, false, true, true]);
+    expect(run.stopped).toBeNull();
+    expect(run.verdict).toBe("full");
+    expect(run.steps).toEqual([
+      {
+        responses: 8,
+        tool_bundles: 6,
+        tools_executed: 6,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 6,
+        shape_retries: 1,
+        limit: null,
+        end: "done",
+        finalize_responses: 2,
+        finalize_refused_bundles: 0,
+      },
+    ]);
+  });
+
+  it.each(EXECUTIONS)("(3) 囲み付きでも 2 回とも形の違反なら今のとおり止まり、9 回目を求めない（%s）", async (execution) => {
+    const calls = [...idsHead({ yaml: NO_CLOSE }), ...six(), malformedDone(), malformedDone()];
+    const wire = wireClientOf(calls, "v1.2-ids", { adapter: "ollama", fence: true, kindByMethod: true });
+    const run = await runPath(execution, wire.client);
+
+    expect(wire.consumed(), "9 回目を求めない").toBe(calls.length);
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(8);
+    expect(tools.map(isMarked)).toEqual([false, false, false, false, false, false, true, true]);
+    expect(run.stopped).not.toBeNull();
+    expect((run.stopped as { readonly kind: string }).kind).toBe("malformed");
+  });
+
+  it.each(EXECUTIONS)("(4) 最後の答え：印付きの要求から道具を外して送り、返った最後の答えを採る（%s）", async (execution) => {
+    // 囲みは使わない（道具を外す効果だけを見る）。7 回目は形の違反の done、8 回目が正しい done
+    const ANSWERS = [JSON.stringify({ declaration: 123 }), validAnswer()];
+    let answer = 0;
+    const wire = wireClientOf([...idsHead({ yaml: NO_CLOSE }), structured(acceptAll())], "v1.2-ids", {
+      adapter: "ollama",
+      kindByMethod: true,
+      toolsReply: ({ body, count }) => {
+        if (body["tools"] !== undefined) return functionCalls(1, `b${String(count)}`);
+        const text = ANSWERS[answer] ?? ANSWERS[ANSWERS.length - 1] ?? "";
+        answer += 1;
+        return text;
+      },
+    });
+    const run = await runPath(execution, wire.client);
+
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(8);
+    // 1〜6 回目は印なし（道具あり）、7・8 回目は印あり（道具も tool_choice も無い）
+    expect(tools.map(isMarked)).toEqual([false, false, false, false, false, false, true, true]);
+    // 送った要求に、受入の題材の言葉が無い
+    expectNoAcceptanceMaterial(wire.sent.map((sent) => JSON.stringify(sent.body)));
+    for (const marked of tools.slice(6)) {
+      expect(marked.body["tools"]).toBeUndefined();
+      expect(marked.body["tool_choice"]).toBeUndefined();
+      // 履歴（function_call と function_call_output）と最後の答えの schema は残る
+      const input = JSON.stringify(marked.body["input"]);
+      expect(input).toContain('"function_call"');
+      expect(input).toContain('"function_call_output"');
+      expect(marked.body["text"]).toBeDefined();
+    }
+    expect(run.stopped).toBeNull();
+    expect(run.verdict).toBe("full");
+    expect(run.steps).toEqual([
+      {
+        responses: 8,
+        tool_bundles: 6,
+        tools_executed: 6,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 6,
+        shape_retries: 1,
+        limit: null,
+        end: "done",
+        finalize_responses: 2,
+        finalize_refused_bundles: 0,
+      },
+    ]);
+  });
+
+  it.each(EXECUTIONS)("(5) 道具を外した要求にも function_call が返る：束は実行せず unmet で止まり、8 回目を求めない（%s）", async (execution) => {
+    const wire = wireClientOf([...idsHead({ yaml: NO_CLOSE })], "v1.2-ids", {
+      adapter: "ollama",
+      kindByMethod: true,
+      toolsReply: ({ count }) => functionCalls(1, `b${String(count)}`),
+    });
+    const run = await runPath(execution, wire.client);
+
+    // 印付きの応答の直前から、道具の実行は 1 つも増えない（往復の上限ではなく、求めた応答の契約への違反）
+    expect(run.stopped).toEqual({
+      stage: "repair",
+      kind: "unmet",
+      problems: [{ field: "", message: "最後の答えだけを求めた要求に道具の呼び出しが返った" }],
+    });
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(7);
+    expect(tools.map(isMarked)).toEqual([false, false, false, false, false, false, true]);
+    expect(run.steps).toEqual([
+      {
+        responses: 7,
+        tool_bundles: 7,
+        tools_executed: 6,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 7,
+        shape_retries: 0,
+        limit: null,
+        end: "unmet",
+        finalize_responses: 1,
+        finalize_refused_bundles: 1,
+      },
+    ]);
+  });
+
+  it("(5) 累計の上限を超える台本では、unmet より先に callLimit を当てる", async () => {
+    // 束 4 個 × 6 回で累計 24（すべて実行する）、印付きの 7 回目の束 1 個で 25 になる
+    const wire = wireClientOf([...idsHead({ yaml: NO_CLOSE })], "v1.2-ids", {
+      adapter: "ollama",
+      kindByMethod: true,
+      toolsReply: ({ body, count }) => functionCalls(body["tools"] !== undefined ? 4 : 1, `b${String(count)}`),
+    });
+    const run = await runPath("generation", wire.client);
+
+    expect(run.stopped).toEqual({ stage: "repair", kind: "call-limit", limit: { name: "toolCalls", max: 24, actual: 25 } });
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(7);
+    expect(tools.map(isMarked)).toEqual([false, false, false, false, false, false, true]);
+    expect(run.steps).toEqual([
+      {
+        responses: 7,
+        tool_bundles: 7,
+        tools_executed: 24,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 25,
+        shape_retries: 0,
+        limit: { name: "toolCalls", max: 24, actual: 25 },
+        end: "call-limit",
+        finalize_responses: 1,
+        finalize_refused_bundles: 1,
+      },
+    ]);
+  });
+
+  it("(6) OpenAI の client の印のある要求の body は base と同じ（道具と tool_choice を送る）", async () => {
+    // 台本は Ollama の試験と同じ（囲みなし・正しい done）。adapter は OpenAI（囲みも道具外しも off）
+    const calls = [...idsHead({ yaml: NO_CLOSE }), ...six(), repairDone(RUN_YAML), structured(acceptAll())];
+    const wire = wireClientOf(calls, "v1.2-ids");
+    const run = await runPath("generation", wire.client);
+
+    expect(wire.consumed(), "台本を使い切った").toBe(calls.length);
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(7);
+    // 7 回目も道具の定義を送り、tool_choice: "none" を足すだけ（今のまま）
+    for (const sent of tools) expect(sent.body["tools"]).toBeDefined();
+    expect(tools[6]?.body["tool_choice"]).toBe("none");
+    expect(tools.slice(0, 6).every((sent) => sent.body["tool_choice"] === undefined)).toBe(true);
+    expect(run.stopped).toBeNull();
+    expect(run.verdict).toBe("full");
   });
 });
 

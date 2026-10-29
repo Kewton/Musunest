@@ -68,5 +68,11 @@ export function createOllamaLlmClient(options: OllamaAdapterOptions): LlmClient 
     model: options.model ?? DEFAULT_OLLAMA_MODEL,
     url: OLLAMA_RESPONSES_URL,
     presentSchema: true,
+    // 応答が 1 組の囲みで包まれていれば中身を読む（Issue #777）。構造化出力の本文と、道具付きの要求の
+    // 最後の答えの本文だけに効く。囲みの規則に合わない本文の検査は緩めない。
+    readFencedJson: true,
+    // 最後の答えだけを求める印のある要求は、道具の定義と `tool_choice` を外して送る（Issue #777。`tool_choice: "none"`
+    // が効かない応答があるため）。印の無い要求の body は今のまま。
+    finalAnswerWithoutTools: true,
   });
 }
