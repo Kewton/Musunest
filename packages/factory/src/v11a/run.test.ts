@@ -8861,6 +8861,36 @@ describe("R2・R3（#783 レビュー）：C3/T2 の複数の束の計数と、a
     }
   });
 
+  it("(2')(4) T2 の 2 束が別の印で落ちると、各束の 6 鍵と errors・全体の 6 鍵と errors・選ばれた束の停止の印を等値で固定する（一気通貫と段の走り）", async () => {
+    // 要件 6・試験 18（構造の要件を取らず全部が値を縛る要件なので、T2 の一覧が 6 件＝2 束になる）
+    const materials = buildSized(6, 18, ALL_ON);
+    const first = materials.ids[0] as string;
+    // 束 0（先頭の要件を含む）は schema、束 1 は envelope。どちらの束の印を採るかで期待が変わる台本にする
+    const behaviour: Behaviour = ({ bundleIds }) => marked(bundleIds.includes(first) ? "schema" : "envelope");
+    for (const execution of ["generation", "stage"] as const) {
+      const result = await runAt(execution, materials, sizedClient(materials, { t2: behaviour }));
+      // 選ばれた失敗（一覧の順で先頭の束＝束 0）の印は schema（最後の束 envelope を借りない）
+      expect(stoppedOf(result), execution).toEqual({ stage: "test-spec", kind: "malformed", malformed_kind: "schema" });
+      const t2 = stagesOf(result, execution).filter((row) => row.stage === "test-spec");
+      expect(t2, execution).toHaveLength(2);
+      // 各束の 6 鍵と errors（束 0 は schema 1・束 1 は envelope 1。各束の errors は 1）
+      expect(
+        t2.map((row) => row.attempts.malformed),
+        execution,
+      ).toEqual([{ ...MALFORMED_ZERO, schema: 1 }, { ...MALFORMED_ZERO, envelope: 1 }]);
+      expect(
+        t2.map((row) => row.attempts.errors),
+        execution,
+      ).toEqual([1, 1]);
+      // 全体の 6 鍵と errors（種類別は各 1・errors は 2。束の和に等しく、二重に数えない）
+      const total = v12CallsOf(result, execution)["test_spec"]["total"];
+      expect(total["attempts"]["malformed"], execution).toEqual({ ...MALFORMED_ZERO, schema: 1, envelope: 1 });
+      expect(total["attempts"]["errors"], execution).toBe(2);
+      expect(total["attempts"]["started"], execution).toBe(2);
+      expect(total["attempts"]["errors"], execution).toBe(t2.reduce((sum, row) => sum + row.attempts.errors, 0));
+    }
+  });
+
   it("(3) 同じ走りで C3 の束 0 が段内検査（problems）、束 1 が adapter の有印の誤り：実試行だけに印と数が残り、選ばれた最後の失敗・stopped・summary には印が無い（別の束の印を借りない）", async () => {
     const materials = buildSized(6, 12, ALL_ON);
     const first = materials.ids[0] as string;
