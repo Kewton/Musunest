@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import type { FixedTest, TestSuite } from "../../fixed-test.js";
 import type { LlmStructuredRequest } from "../../llm.js";
+import { createOllamaLlmClient } from "../../ollama.js";
 import { createOpenAiLlmClient, type FetchLike } from "../../openai.js";
 import { ENVELOPE_SCHEMA_NAME_V11A, ENVELOPE_SCHEMA_V11A, envelopeStageFor } from "../../schema-envelope.js";
 import { makeGateway } from "../../stages/__tests__/prompt.js";
@@ -240,5 +241,98 @@ describe("通信（旗 v12.ids。Issue #667）：追加の場所も往復ごと�
     expect(format.schema).toEqual(fieldRepairSchemaOf(failures.locations));
     expect(JSON.stringify(format.schema)).toContain("validation:item.amount");
     expect(JSON.stringify(format.schema)).not.toContain("anyOf");
+  });
+});
+
+// ── 囲みの付いた本文（Ollama の adapter。Issue #777）────────────────────
+//
+// この段の要求は往復ごとの動的な schema（場所の enum）をそのまま `text.format` に載せる（封筒の外）。
+// **Ollama の adapter** に偽物の fetch を当て、囲み 1 組の本文を返す。囲みを読む設定が on なので中身が
+// 読めて段が進む。同じ本文を OpenAI の adapter（設定は off）に返すと、今のとおり読めずに止まる。
+
+/** 囲み 1 組で包んだ応答（Ollama の Responses API が返す形。Issue #777） */
+function fencedReply(output: unknown): Response {
+  const text = `\`\`\`json\n${JSON.stringify(output)}\n\`\`\``;
+  const body = {
+    id: "resp_1",
+    status: "completed",
+    output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] }],
+    usage: USAGE_WIRE,
+  };
+  return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+/** 送った body を記録し、囲み 1 組の応答を渡した順に返す偽物の fetch */
+function recordingFencedFetch(outputs: readonly unknown[]): { readonly fetch: FetchLike; readonly bodies: Record<string, unknown>[] } {
+  const bodies: Record<string, unknown>[] = [];
+  const fetchImpl: FetchLike = async (_url, init) => {
+    bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    return fencedReply(outputs[bodies.length - 1]);
+  };
+  return { fetch: fetchImpl, bodies };
+}
+
+/**
+ * 囲みの**開始行**が不正な 3 反例（Issue #777 レビュー R1。閉じの行は正規の 3 個）。開始が
+ * バッククォートちょうど 3 個＋印 1 語（印にバッククォートを含まない）でないので、囲みとみなさず
+ * 今のとおり読めない（malformed になる）。
+ */
+const BAD_STARTS: readonly { readonly name: string; readonly start: string }[] = [
+  { name: "開始行がバッククォート 4 個だけ", start: "````" },
+  { name: "開始行がバッククォート 6 個だけ", start: "``````" },
+  { name: "言語の印の末尾にバッククォート 3 個（```json```）", start: "```json```" },
+];
+
+/** 指定の開始行で包んだ応答（閉じは 3 個。Issue #777 レビュー R1） */
+function badStartReply(start: string, output: unknown): Response {
+  const text = `${start}\n${JSON.stringify(output)}\n\`\`\``;
+  const body = {
+    id: "resp_1",
+    status: "completed",
+    output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] }],
+    usage: USAGE_WIRE,
+  };
+  return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+describe("囲み 1 つの本文（Ollama の adapter。Issue #777）：動的な schema の要求でも中身を読む", () => {
+  const failures = locateFailures({
+    source: FIXTURE_YAML,
+    table: fixtureTable(),
+    suite: SUITE,
+    staticCheckPassed: true,
+    diagnostics: [],
+    correspondenceMisses: [],
+    rejections: [],
+    unmarked: [],
+    mismatches: [{ testId: "r3-when" }, { testId: "r4-rate" }],
+    unresolved: [],
+  });
+  const ANSWER = { replacements: [{ location: "action:item.closeItem", element: closeItem }], disputes: [] };
+  const run = (client: ReturnType<typeof createOllamaLlmClient> | ReturnType<typeof createOpenAiLlmClient>) =>
+    runFieldRepair({ source: SOURCE, list: LIST, suite: SUITE, declaration: FIXTURE_YAML, failures, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(client) });
+
+  it("Ollama の client：囲み 1 つの本文を読み、欄だけの直しが進む（動的な schema は今のまま送る）", async () => {
+    const { fetch, bodies } = recordingFencedFetch([ANSWER]);
+    const outcome = await run(createOllamaLlmClient({ apiKey: "test-key", fetch, envelope: "v1.1a" }));
+    expect(outcome.ok).toBe(true);
+    const format = formatOf(bodies[0]);
+    expect(format.name).toBe(FIELD_REPAIR_SCHEMA_NAME);
+    expect(format.schema).toEqual(fieldRepairSchemaOf(failures.locations));
+    expect(JSON.stringify(format.schema)).not.toContain("anyOf");
+  });
+
+  it("OpenAI の client（囲みを読まない設定）は同じ本文で読めず、今のとおり止まる", async () => {
+    const { fetch } = recordingFencedFetch([ANSWER]);
+    const outcome = await run(createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope: "v1.1a" }));
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.failure.kind).toBe("malformed");
+  });
+
+  it.each(BAD_STARTS)("開始行の余分なバッククォート（$name）は今のとおり読めず、欄だけの直しが止まる（R1）", async ({ start }) => {
+    const fetch: FetchLike = async () => badStartReply(start, ANSWER);
+    const outcome = await run(createOllamaLlmClient({ apiKey: "test-key", fetch, envelope: "v1.1a" }));
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.failure.kind).toBe("malformed");
   });
 });

@@ -22,11 +22,13 @@ import {
   bundleFiles,
   type AssembledBundle,
 } from "../bundle.js";
+import type { StageOutputLimits } from "../call.js";
 import type { Judge, JudgeAnswer } from "../judge.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { RecordedCall } from "../llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "../llm.js";
 import { AGENT_LIMITS, STAGE_EFFORT_STAGES, maxOutputTokensForEffort } from "../limits.js";
+import { OLLAMA_STAGE_OUTPUT_LIMITS, createOllamaLlmClient } from "../ollama.js";
 import { createOpenAiLlmClient, type FetchLike } from "../openai.js";
 import { resolveStageEnvelope, type EnvelopeId } from "../schema-envelope.js";
 import { requirementsFromPlan, type RequirementList, type TestSuite } from "../pipeline.js";
@@ -6630,17 +6632,49 @@ function wireCompleted(output: readonly unknown[]): Response {
  * 記録した応答を順に返す偽物の `fetch` を当てた、実 adapter の client（外部の API は呼ばない）。
  * 構造化の応答は、adapter が選ぶ封筒と同じ枝（`resolveStageEnvelope`）で包む。`failToolOnce` は最初の道具付きの
  * 要求を 1 度だけ HTTP の 5xx で失敗させ、共通の口の通信の再送を通す（記録は消費しない）。
+ *
+ * Issue #777：`adapter` で実 adapter を選べ（既定 `openai`）、`fence` で応答の本文を 1 組の囲みで包める。
+ * `kindByMethod` を真にすると、送った要求の種類を**呼ばれた `LlmClient` のメソッド**で決める——印のある Ollama の
+ * 要求は `tools` を送らないので、`tools` の有無では種類を決められないため（`tools` は wire の検証値として見る）。
+ * `toolsReply` を渡すと、道具付きの要求の応答は台本を消費せず `toolsReply`（body と道具付きの通し番号）から組む
+ * ——本文は囲みの有無を選べる。構造化の台本は構造化の要求だけが順に消費する（Issue #777 の反例の試験）。
  */
-function wireClientOf(calls: readonly RecordedCall[], envelope: EnvelopeId, options: { readonly failToolOnce?: boolean } = {}) {
+function wireClientOf(
+  calls: readonly RecordedCall[],
+  envelope: EnvelopeId,
+  options: {
+    readonly failToolOnce?: boolean;
+    readonly adapter?: "openai" | "ollama";
+    readonly fence?: boolean;
+    readonly kindByMethod?: boolean;
+    readonly toolsReply?: (input: { readonly body: Record<string, unknown>; readonly count: number }) => string | readonly unknown[];
+  } = {},
+) {
   const sent: WireSent[] = [];
   let index = 0;
   let toolFailures = options.failToolOnce === true ? 1 : 0;
+  let toolCount = 0;
   let current: { readonly schemaName: string; readonly schema: unknown } | undefined;
+  let method: "structured" | "tools" = "structured";
+  /** 本文を、設定に応じて囲み 1 組で包む（Issue #777） */
+  const messageText = (value: unknown): string => {
+    const json = JSON.stringify(value);
+    return options.fence === true ? `\`\`\`json\n${json}\n\`\`\`` : json;
+  };
+  /** 本文から、完了した応答を組む */
+  const completed = (text: string): Response =>
+    wireCompleted([{ type: "message", role: "assistant", content: [{ type: "output_text", text }] }]);
   const fetch: FetchLike = async (_url, init) => {
     const body = JSON.parse(String(init.body)) as Record<string, unknown>;
-    const tools = body["tools"] !== undefined;
-    sent.push({ kind: tools ? "tools" : "structured", schemaName: tools ? undefined : current?.schemaName, body });
-    if (tools && toolFailures > 0) {
+    const kind: "structured" | "tools" =
+      options.kindByMethod === true ? method : body["tools"] === undefined ? "structured" : "tools";
+    sent.push({ kind, schemaName: kind === "tools" ? undefined : current?.schemaName, body });
+    if (kind === "tools" && options.toolsReply !== undefined) {
+      toolCount += 1;
+      const value = options.toolsReply({ body, count: toolCount });
+      return typeof value === "string" ? completed(value) : wireCompleted(value);
+    }
+    if (kind === "tools" && toolFailures > 0) {
       toolFailures -= 1;
       return new Response(JSON.stringify({ error: { type: "server_error" } }), {
         status: 503,
@@ -6650,12 +6684,12 @@ function wireClientOf(calls: readonly RecordedCall[], envelope: EnvelopeId, opti
     const call = calls[index];
     index += 1;
     if (call === undefined) throw new Error(`記録した応答が尽きました（${String(index)} 件目）`);
-    if (tools) {
+    if (kind === "tools") {
       if (call.kind !== "tools") throw new Error("記録した応答の種別が違います（道具付き）");
       const output =
         call.response.kind === "toolCalls"
           ? call.response.toolCalls.map((tool) => ({ type: "function_call", call_id: tool.id, name: tool.name, arguments: JSON.stringify(tool.arguments ?? null) }))
-          : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(call.response.declaration) }] }];
+          : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: messageText(call.response.declaration) }] }];
       return wireCompleted(output);
     }
     if (call.kind !== "structured") throw new Error("記録した応答の種別が違います（構造化）");
@@ -6664,15 +6698,18 @@ function wireClientOf(calls: readonly RecordedCall[], envelope: EnvelopeId, opti
       resolved === undefined || typeof call.output !== "object" || call.output === null || Array.isArray(call.output)
         ? call.output
         : { result: { stage: resolved.entry.stage, ...(call.output as Record<string, unknown>) } };
-    return wireCompleted([{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(output) }] }]);
+    return completed(messageText(output));
   };
-  const adapter = createOpenAiLlmClient({ apiKey: "sk-FAKE", effort: "high", envelope, fetch });
+  const adapterOptions = { apiKey: "sk-FAKE", effort: "high", envelope, fetch };
+  const adapter = options.adapter === "ollama" ? createOllamaLlmClient(adapterOptions) : createOpenAiLlmClient(adapterOptions);
   const client: LlmClient = {
     callStructured<T>(request: LlmStructuredRequest) {
+      method = "structured";
       current = { schemaName: request.schemaName, schema: request.schema };
       return adapter.callStructured<T>(request);
     },
     callWithTools(request: LlmToolRequest) {
+      method = "tools";
       current = undefined;
       return adapter.callWithTools(request);
     },
@@ -7886,5 +7923,551 @@ describe("最後の答えの枠を取っておく（旗 v12.ids の探索 on の
     expect(offSteps).toHaveLength(1);
     expect(offSteps[0]).not.toHaveProperty("finalize_responses");
     expect(offSteps[0]).not.toHaveProperty("finalize_refused_bundles");
+  });
+});
+
+// ── 囲みの読み取りと、最後の答えの道具外し（Ollama の adapter。Issue #777）─────────────────
+//
+// 実の Ollama の adapter に偽物の fetch を差し、一気通貫（`runGenerationV11a`）と段の走り
+// （`runStageRangeV11a`）の両方の実行口から body まで通す。要求の種類は**呼ばれた `LlmClient` のメソッド**で
+// 決める（`tools` は wire の検証値として見る）。題材に依らない人工の例（`NO_CLOSE` の台本）だけを使う。
+
+describe("Ollama の adapter（囲みと、最後の答えの道具外し。Issue #777）：実行口から偽物の fetch の body まで", () => {
+  const FLAGS = { ledger: true, ids: true, searchRepair: true } as const;
+  /** closeItem の操作を宣言から外した版（場所なしの失敗だけになり、全文の直しへ流れる） */
+  const NO_CLOSE = replaced(
+    RUN_YAML,
+    "  - name: closeItem\n    entity: item\n    kind: update\n    set:\n      kind: beta\n    when: amount > 0\n",
+    "",
+  );
+  /** 印の無い道具の束（静的チェック 1 個） */
+  const bundle = (round: number): RecordedCall => repairToolCall(`b${String(round)}`, "static-check", RUN_YAML);
+  /** 最後の答えの形が合わない done（宣言が文字列でない） */
+  const malformedDone = (): RecordedCall => ({
+    kind: "tools",
+    response: { kind: "done", declaration: { declaration: 123 }, usage: undefined },
+  });
+  const six = (): RecordedCall[] => Array.from({ length: 6 }, (_, round) => bundle(round));
+  const EXECUTIONS = ["generation", "stage"] as const;
+
+  type Steps = readonly Record<string, unknown>[];
+  const generationSteps = (result: Awaited<ReturnType<typeof runGenerationV11a>>): Steps => {
+    const calls = (result.summary as unknown as { readonly v12_calls?: { readonly repair?: { readonly steps?: Steps } } }).v12_calls;
+    return calls?.repair?.steps ?? [];
+  };
+  const stageSteps = (outcome: Awaited<ReturnType<typeof runStageRangeV11a>>): Steps => {
+    const calls = outcome.v12Calls as { readonly repair?: { readonly steps?: Steps } } | undefined;
+    return calls?.repair?.steps ?? [];
+  };
+
+  /** 一気通貫と段の走りの両方の実行口を、同じ形の結果にそろえて流す */
+  const runPath = async (
+    execution: "generation" | "stage",
+    client: LlmClient,
+  ): Promise<{
+    readonly stopped: unknown;
+    readonly verdict: string | null;
+    readonly outcome: { readonly result: string; readonly verdict: string } | undefined;
+    readonly steps: Steps;
+  }> => {
+    if (execution === "generation") {
+      const result = await runGenerationV11a(inputOf(client, { flags: FLAGS }));
+      return { stopped: result.stopped, verdict: result.outcome.verdict, outcome: result.outcome, steps: generationSteps(result) };
+    }
+    const outcome = await runStageRangeV11a({
+      ...inputOf(client, { flags: FLAGS }),
+      range: { start: "name-table", end: "judge" },
+    });
+    return { stopped: outcome.stopped, verdict: outcome.judgeVerdict, outcome: undefined, steps: stageSteps(outcome) };
+  };
+
+  /** 送った要求が道具付きか（種類は呼ばれたメソッドで決めた値） */
+  const isTools = (sent: WireSent): boolean => sent.kind === "tools";
+  /** body に道具の定義があるか */
+  const hasTools = (sent: WireSent): boolean => sent.body["tools"] !== undefined;
+  /** 印のある要求か（Ollama は道具の定義も tool_choice も送らない） */
+  const isMarked = (sent: WireSent): boolean => isTools(sent) && !hasTools(sent);
+
+  /** 道具の呼び出しの応答（function_call の項目） */
+  const functionCalls = (count: number, prefix: string): readonly unknown[] =>
+    Array.from({ length: count }, (_, index) => ({
+      type: "function_call",
+      call_id: `${prefix}-${String(index)}`,
+      name: "static-check",
+      arguments: JSON.stringify({ declaration: RUN_YAML }),
+    }));
+
+  /** 正しい最後の答え（本文） */
+  const validAnswer = (): string => JSON.stringify({ declaration: RUN_YAML, disputes: [] });
+
+  it.each(EXECUTIONS)("(1) 囲み 1 つの最後の答え：道具の束 6 回 → 印付きの 7 回目の囲みを読み、段は done（%s）", async (execution) => {
+    const calls = [...idsHead({ yaml: NO_CLOSE }), ...six(), repairDone(RUN_YAML), structured(acceptAll())];
+    const wire = wireClientOf(calls, "v1.2-ids", { adapter: "ollama", fence: true, kindByMethod: true });
+    const run = await runPath(execution, wire.client);
+
+    expect(wire.consumed(), "台本を使い切った").toBe(calls.length);
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(7);
+    expect(tools.map(isMarked)).toEqual([false, false, false, false, false, false, true]);
+    // 送った要求に、受入の題材の言葉が無い
+    expectNoAcceptanceMaterial(wire.sent.map((sent) => JSON.stringify(sent.body)));
+    expect(run.stopped).toBeNull();
+    expect(run.verdict).toBe("full");
+    expect(run.steps).toEqual([
+      {
+        responses: 7,
+        tool_bundles: 6,
+        tools_executed: 6,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 6,
+        shape_retries: 0,
+        limit: null,
+        end: "done",
+        finalize_responses: 1,
+        finalize_refused_bundles: 0,
+      },
+    ]);
+  });
+
+  it.each(EXECUTIONS)("(3) 囲み付きの 7 回目が形の違反の done → 8 回目（印付き）の囲みを採る（%s）", async (execution) => {
+    const calls = [...idsHead({ yaml: NO_CLOSE }), ...six(), malformedDone(), repairDone(RUN_YAML), structured(acceptAll())];
+    const wire = wireClientOf(calls, "v1.2-ids", { adapter: "ollama", fence: true, kindByMethod: true });
+    const run = await runPath(execution, wire.client);
+
+    expect(wire.consumed(), "台本を使い切った").toBe(calls.length);
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(8);
+    expect(tools.map(isMarked)).toEqual([false, false, false, false, false, false, true, true]);
+    expect(run.stopped).toBeNull();
+    expect(run.verdict).toBe("full");
+    expect(run.steps).toEqual([
+      {
+        responses: 8,
+        tool_bundles: 6,
+        tools_executed: 6,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 6,
+        shape_retries: 1,
+        limit: null,
+        end: "done",
+        finalize_responses: 2,
+        finalize_refused_bundles: 0,
+      },
+    ]);
+  });
+
+  it.each(EXECUTIONS)("(3) 囲み付きでも 2 回とも形の違反なら今のとおり止まり、9 回目を求めない（%s）", async (execution) => {
+    const calls = [...idsHead({ yaml: NO_CLOSE }), ...six(), malformedDone(), malformedDone()];
+    const wire = wireClientOf(calls, "v1.2-ids", { adapter: "ollama", fence: true, kindByMethod: true });
+    const run = await runPath(execution, wire.client);
+
+    expect(wire.consumed(), "9 回目を求めない").toBe(calls.length);
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(8);
+    expect(tools.map(isMarked)).toEqual([false, false, false, false, false, false, true, true]);
+    expect(run.stopped).not.toBeNull();
+    expect((run.stopped as { readonly kind: string }).kind).toBe("malformed");
+  });
+
+  it.each(EXECUTIONS)("(4) 最後の答え：印付きの要求から道具を外して送り、返った最後の答えを採る（%s）", async (execution) => {
+    // 囲みは使わない（道具を外す効果だけを見る）。7 回目は形の違反の done、8 回目が正しい done
+    const ANSWERS = [JSON.stringify({ declaration: 123 }), validAnswer()];
+    let answer = 0;
+    const wire = wireClientOf([...idsHead({ yaml: NO_CLOSE }), structured(acceptAll())], "v1.2-ids", {
+      adapter: "ollama",
+      kindByMethod: true,
+      toolsReply: ({ body, count }) => {
+        if (body["tools"] !== undefined) return functionCalls(1, `b${String(count)}`);
+        const text = ANSWERS[answer] ?? ANSWERS[ANSWERS.length - 1] ?? "";
+        answer += 1;
+        return text;
+      },
+    });
+    const run = await runPath(execution, wire.client);
+
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(8);
+    // 1〜6 回目は印なし（道具あり）、7・8 回目は印あり（道具も tool_choice も無い）
+    expect(tools.map(isMarked)).toEqual([false, false, false, false, false, false, true, true]);
+    // 送った要求に、受入の題材の言葉が無い
+    expectNoAcceptanceMaterial(wire.sent.map((sent) => JSON.stringify(sent.body)));
+    for (const marked of tools.slice(6)) {
+      expect(marked.body["tools"]).toBeUndefined();
+      expect(marked.body["tool_choice"]).toBeUndefined();
+      // 履歴（function_call と function_call_output）と最後の答えの schema は残る
+      const input = JSON.stringify(marked.body["input"]);
+      expect(input).toContain('"function_call"');
+      expect(input).toContain('"function_call_output"');
+      expect(marked.body["text"]).toBeDefined();
+    }
+    expect(run.stopped).toBeNull();
+    expect(run.verdict).toBe("full");
+    expect(run.steps).toEqual([
+      {
+        responses: 8,
+        tool_bundles: 6,
+        tools_executed: 6,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 6,
+        shape_retries: 1,
+        limit: null,
+        end: "done",
+        finalize_responses: 2,
+        finalize_refused_bundles: 0,
+      },
+    ]);
+  });
+
+  it.each(EXECUTIONS)("(5) 道具を外した要求にも function_call が返る：束は実行せず unmet で止まり、8 回目を求めない（%s）", async (execution) => {
+    const wire = wireClientOf([...idsHead({ yaml: NO_CLOSE })], "v1.2-ids", {
+      adapter: "ollama",
+      kindByMethod: true,
+      toolsReply: ({ count }) => functionCalls(1, `b${String(count)}`),
+    });
+    const run = await runPath(execution, wire.client);
+
+    // 印付きの応答の直前から、道具の実行は 1 つも増えない（往復の上限ではなく、求めた応答の契約への違反）
+    expect(run.stopped).toEqual({
+      stage: "repair",
+      kind: "unmet",
+      problems: [{ field: "", message: "最後の答えだけを求めた要求に道具の呼び出しが返った" }],
+    });
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(7);
+    expect(tools.map(isMarked)).toEqual([false, false, false, false, false, false, true]);
+    expect(run.steps).toEqual([
+      {
+        responses: 7,
+        tool_bundles: 7,
+        tools_executed: 6,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 7,
+        shape_retries: 0,
+        limit: null,
+        end: "unmet",
+        finalize_responses: 1,
+        finalize_refused_bundles: 1,
+      },
+    ]);
+  });
+
+  it("(5) 累計の上限を超える台本では、unmet より先に callLimit を当てる", async () => {
+    // 束 4 個 × 6 回で累計 24（すべて実行する）、印付きの 7 回目の束 1 個で 25 になる
+    const wire = wireClientOf([...idsHead({ yaml: NO_CLOSE })], "v1.2-ids", {
+      adapter: "ollama",
+      kindByMethod: true,
+      toolsReply: ({ body, count }) => functionCalls(body["tools"] !== undefined ? 4 : 1, `b${String(count)}`),
+    });
+    const run = await runPath("generation", wire.client);
+
+    expect(run.stopped).toEqual({ stage: "repair", kind: "call-limit", limit: { name: "toolCalls", max: 24, actual: 25 } });
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(7);
+    expect(tools.map(isMarked)).toEqual([false, false, false, false, false, false, true]);
+    expect(run.steps).toEqual([
+      {
+        responses: 7,
+        tool_bundles: 7,
+        tools_executed: 24,
+        tool_calls_at_start: 0,
+        tool_calls_at_end: 25,
+        shape_retries: 0,
+        limit: { name: "toolCalls", max: 24, actual: 25 },
+        end: "call-limit",
+        finalize_responses: 1,
+        finalize_refused_bundles: 1,
+      },
+    ]);
+  });
+
+  it("(6) OpenAI の client の印のある要求の body は base と同じ（道具と tool_choice を送る）", async () => {
+    // 台本は Ollama の試験と同じ（囲みなし・正しい done）。adapter は OpenAI（囲みも道具外しも off）
+    const calls = [...idsHead({ yaml: NO_CLOSE }), ...six(), repairDone(RUN_YAML), structured(acceptAll())];
+    const wire = wireClientOf(calls, "v1.2-ids");
+    const run = await runPath("generation", wire.client);
+
+    expect(wire.consumed(), "台本を使い切った").toBe(calls.length);
+    const tools = wire.sent.filter(isTools);
+    expect(tools).toHaveLength(7);
+    // 7 回目も道具の定義を送り、tool_choice: "none" を足すだけ（今のまま）
+    for (const sent of tools) expect(sent.body["tools"]).toBeDefined();
+    expect(tools[6]?.body["tool_choice"]).toBe("none");
+    expect(tools.slice(0, 6).every((sent) => sent.body["tool_choice"] === undefined)).toBe(true);
+    expect(run.stopped).toBeNull();
+    expect(run.verdict).toBe("full");
+  });
+});
+
+// ── 段の出力の上限の上書きの表（`stageOutputLimits`。Issue #776）──────────────────────
+//
+// 実行口（`runGenerationV11a`・`runStageRangeV11a`）から実 adapter に偽物の fetch を当て、送った body の
+// `max_output_tokens` を見る。上書きの表を渡した走りだけ、表にある段（意味の点検・宣言の点検・直す）の
+// 上限が表の値に替わり、ほかの段は今の値のまま。表を渡さない走り（＝直す前の挙動）は 3 段とも今の値。
+// **意味の点検は束ごとに呼ばれ、表の値が全部の束に届く。**
+
+describe("段の出力の上限の上書きの表（Issue #776）：実行口から偽物の fetch の body まで", () => {
+  const LIMITS: StageOutputLimits = OLLAMA_STAGE_OUTPUT_LIMITS;
+  /** 直す前の 3 段の上限（effort high。表の段と同じ段を今の値で並べる） */
+  const NOW = { "semantic-check": 16_384, "decl-check": 16_384, repair: 32_768 } as const;
+  /** closeItem の操作を宣言から外した版（場所なしの失敗だけになり、全文の直しへ流れる） */
+  const NO_CLOSE = replaced(
+    RUN_YAML,
+    "  - name: closeItem\n    entity: item\n    kind: update\n    set:\n      kind: beta\n    when: amount > 0\n",
+    "",
+  );
+  const limitOf = (sent: WireSent): unknown => sent.body["max_output_tokens"];
+  const wiresOf = (sent: readonly WireSent[], schemaName: string): readonly WireSent[] =>
+    sent.filter((candidate) => candidate.schemaName === schemaName);
+
+  /** 一気通貫を流す（v1.2 の旗・上書きの表は呼ぶ側が渡す） */
+  async function runLimits(calls: readonly RecordedCall[], flags: Partial<V12Flags>, overrides: Partial<GenerationInputV11a> = {}) {
+    const wire = wireClientOf(calls, "v1.2-ids");
+    const result = await runGenerationV11a(inputOf(wire.client, { flags, ...overrides }));
+    return { result, sent: wire.sent, consumed: wire.consumed() };
+  }
+
+  it("(1)(5)(6) v1.2（flag ids と探索 off の全文の直し）：上書きの表を渡すと、意味の点検・宣言の点検・直すの要求の max_output_tokens が表の値、ほかは今の値。渡さなければ 3 段とも今の値", async () => {
+    // 場所なしの失敗がある往復は全文の直し（道具付き）へ流れる（Issue #751 の台本と同じ形。ids on・探索 off）
+    const calls = (): RecordedCall[] => [...idsHead({ yaml: NO_CLOSE }), repairDone(RUN_YAML), structured(acceptAll())];
+    const flags = { ledger: true, ids: true } as const;
+    const plain = await runLimits(calls(), flags);
+    const tuned = await runLimits(calls(), flags, { stageOutputLimits: LIMITS });
+    for (const run of [plain, tuned]) {
+      expect(run.result.stopped).toBeNull();
+      expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      expect(run.consumed, "台本を使い切った").toBe(calls().length);
+    }
+    // 上書き：意味の点検（束ごとの全部の要求）・宣言の点検・直す（道具付きの往復の全部のターン）が表の値
+    const semantic = wiresOf(tuned.sent, SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(semantic.length).toBeGreaterThan(0);
+    for (const sent of semantic) expect(limitOf(sent)).toBe(32_768);
+    const decl = wiresOf(tuned.sent, DECL_CHECK_SCHEMA_NAME);
+    expect(decl.length).toBeGreaterThan(0);
+    for (const sent of decl) expect(limitOf(sent)).toBe(32_768);
+    const repair = tuned.sent.filter((candidate) => candidate.kind === "tools");
+    expect(repair.length).toBeGreaterThan(0);
+    for (const sent of repair) expect(limitOf(sent)).toBe(65_536);
+    // ほかの段（B1・T2 など）は今の値のまま
+    for (const sent of wiresOf(tuned.sent, WRITE_V11A_SCHEMA_NAME)) expect(limitOf(sent)).toBe(maxOutputTokensForEffort("high", "write"));
+    for (const sent of wiresOf(tuned.sent, TEST_SPEC_SCHEMA_NAME)) expect(limitOf(sent)).toBe(maxOutputTokensForEffort("high", "test-spec"));
+    // 直す前（表なし）：3 段とも今の値（上書きを外す変異で赤）
+    for (const sent of wiresOf(plain.sent, SEMANTIC_CHECK_SCHEMA_NAME)) expect(limitOf(sent)).toBe(NOW["semantic-check"]);
+    for (const sent of wiresOf(plain.sent, DECL_CHECK_SCHEMA_NAME)) expect(limitOf(sent)).toBe(NOW["decl-check"]);
+    for (const sent of plain.sent.filter((candidate) => candidate.kind === "tools")) expect(limitOf(sent)).toBe(NOW.repair);
+    expect(NOW).toEqual({ "semantic-check": maxOutputTokensForEffort("high", "semantic-check"), "decl-check": maxOutputTokensForEffort("high", "decl-check"), repair: maxOutputTokensForEffort("high", "repair") });
+    // 上書きは要求の上限の欄だけを変える（ほかの段の body は表の有無で同じ）
+    const othersOf = (sent: readonly WireSent[]): readonly string[] =>
+      sent
+        .filter((candidate) => candidate.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME && candidate.schemaName !== DECL_CHECK_SCHEMA_NAME && candidate.kind !== "tools")
+        .map((candidate) => JSON.stringify(candidate.body));
+    expect(othersOf(tuned.sent)).toEqual(othersOf(plain.sent));
+  });
+
+  it("(1) 段の走り（runStageRangeV11a）でも同じ表が届く：意味の点検・宣言の点検・直すが表の値、ほかは今の値", async () => {
+    const calls = (): RecordedCall[] => [...idsHead({ yaml: NO_CLOSE }), repairDone(RUN_YAML), structured(acceptAll())];
+    const wire = wireClientOf(calls(), "v1.2-ids");
+    const outcome = await runStageRangeV11a({
+      ...inputOf(wire.client, { flags: { ledger: true, ids: true }, stageOutputLimits: LIMITS }),
+      range: { start: "name-table", end: "judge" },
+    });
+    expect(outcome.stopped).toBeNull();
+    expect(wire.consumed()).toBe(calls().length);
+    for (const sent of wiresOf(wire.sent, SEMANTIC_CHECK_SCHEMA_NAME)) expect(limitOf(sent)).toBe(32_768);
+    for (const sent of wiresOf(wire.sent, DECL_CHECK_SCHEMA_NAME)) expect(limitOf(sent)).toBe(32_768);
+    for (const sent of wire.sent.filter((candidate) => candidate.kind === "tools")) expect(limitOf(sent)).toBe(65_536);
+    for (const sent of wiresOf(wire.sent, WRITE_V11A_SCHEMA_NAME)) expect(limitOf(sent)).toBe(maxOutputTokensForEffort("high", "write"));
+  });
+
+  it("(3) T2 の束ごとの口：製品の表に無い段（test-spec）でも、試験だけで渡す上書きを引き継ぐ", async () => {
+    const calls = (): RecordedCall[] => [...idsHead(), structured(acceptAll())];
+    const plain = await runLimits(calls(), { ledger: true, ids: true });
+    const tuned = await runLimits(calls(), { ledger: true, ids: true }, { stageOutputLimits: { "test-spec": 12_345 } });
+    for (const run of [plain, tuned]) expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
+    const t2 = wiresOf(tuned.sent, TEST_SPEC_SCHEMA_NAME);
+    expect(t2.length).toBeGreaterThan(0);
+    for (const sent of t2) expect(limitOf(sent)).toBe(12_345);
+    // 表に無い段（B1）は今のまま。上書きを外せば T2 も今の値（引き継ぎを外す変異で赤）
+    for (const sent of wiresOf(tuned.sent, WRITE_V11A_SCHEMA_NAME)) expect(limitOf(sent)).toBe(maxOutputTokensForEffort("high", "write"));
+    for (const sent of wiresOf(plain.sent, TEST_SPEC_SCHEMA_NAME)) expect(limitOf(sent)).toBe(maxOutputTokensForEffort("high", "test-spec"));
+  });
+
+  it("(2) 要求の上限で未完了を返す台本：表なしでは意味の点検で incomplete 停止、表ありでは完了して次の段へ進む", async () => {
+    // 偽物の fetch は要求の `max_output_tokens` を見て応答を決める（題材に依らない人工の例）。
+    // 意味の点検の要求の上限が 16,384（今の値）なら未完了、32,768 以上（表の値）なら完了
+    /** wireClientOf と同じ組み立てに、上限による未完了の規則を 1 つ足した偽物の口 */
+    const clientOf = (calls: readonly RecordedCall[]) => {
+      const sent: WireSent[] = [];
+      let index = 0;
+      let current: { readonly schemaName: string; readonly schema: unknown } | undefined;
+      const fetch: FetchLike = async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const tools = body["tools"] !== undefined;
+        const max = body["max_output_tokens"];
+        const entry: WireSent = { kind: tools ? "tools" : "structured", schemaName: tools ? undefined : current?.schemaName, body };
+        sent.push(entry);
+        if (!tools && entry.schemaName === SEMANTIC_CHECK_SCHEMA_NAME && typeof max === "number" && max <= 16_384) {
+          return new Response(JSON.stringify({ id: "resp-cut", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const call = calls[index];
+        index += 1;
+        if (call === undefined) throw new Error(`記録した応答が尽きました（${String(index)} 件目）`);
+        if (tools) {
+          if (call.kind !== "tools") throw new Error("記録した応答の種別が違います（道具付き）");
+          const output =
+            call.response.kind === "toolCalls"
+              ? call.response.toolCalls.map((tool) => ({ type: "function_call", call_id: tool.id, name: tool.name, arguments: JSON.stringify(tool.arguments ?? null) }))
+              : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(call.response.declaration) }] }];
+          return wireCompleted(output);
+        }
+        if (call.kind !== "structured") throw new Error("記録した応答の種別が違います（構造化）");
+        const resolved = current === undefined ? undefined : resolveStageEnvelope(current.schemaName, current.schema, "v1.2-ids");
+        const output =
+          resolved === undefined || typeof call.output !== "object" || call.output === null || Array.isArray(call.output)
+            ? call.output
+            : { result: { stage: resolved.entry.stage, ...(call.output as Record<string, unknown>) } };
+        return wireCompleted([{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(output) }] }]);
+      };
+      const adapter = createOpenAiLlmClient({ apiKey: "sk-FAKE", effort: "high", envelope: "v1.2-ids", fetch });
+      const client: LlmClient = {
+        callStructured<T>(request: LlmStructuredRequest) {
+          current = { schemaName: request.schemaName, schema: request.schema };
+          return adapter.callStructured<T>(request);
+        },
+        callWithTools(request: LlmToolRequest) {
+          current = undefined;
+          return adapter.callWithTools(request);
+        },
+      };
+      return { client, sent, consumed: () => index };
+    };
+    const calls = (): RecordedCall[] => [...idsHead(), structured(acceptAll())];
+    const before = clientOf(calls());
+    const beforeResult = await runGenerationV11a(inputOf(before.client, { flags: { ledger: true, ids: true } }));
+    // 直す前：意味の点検の上限（16,384）で未完了になり、そこで止まる（次の段へ進まない）
+    expect(beforeResult.stopped).toMatchObject({ stage: "semantic-check", kind: "incomplete" });
+    expect(wiresOf(before.sent, SEMANTIC_CHECK_SCHEMA_NAME).every((sent) => limitOf(sent) === 16_384)).toBe(true);
+    expect(wiresOf(before.sent, TEST_SPEC_SCHEMA_NAME)).toHaveLength(0);
+    const after = clientOf(calls());
+    const afterResult = await runGenerationV11a(inputOf(after.client, { flags: { ledger: true, ids: true }, stageOutputLimits: LIMITS }));
+    // 直した後：意味の点検の上限（32,768）で完了し、次の段（T2）へ進んで完走する
+    expect(afterResult.stopped).toBeNull();
+    expect(afterResult.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(after.consumed()).toBe(calls().length);
+    expect(wiresOf(after.sent, SEMANTIC_CHECK_SCHEMA_NAME).every((sent) => limitOf(sent) === 32_768)).toBe(true);
+    expect(wiresOf(after.sent, TEST_SPEC_SCHEMA_NAME).length).toBeGreaterThan(0);
+  });
+
+  // ── レビュー R4：複数の C3 束と再点検・全文修復の継続と次の往復を**実際に起こし**、各要求の上限と**回数**を等値で固定する。
+  // 束ごとの口と再点検の束、道具の応答のあとの継続の要求（2 応答目以降）と 2 往復目が、どれも表の値であることを見る。
+
+  /** 束ごとに読む偽物の口（C1・C2・T2 の束。要求は外側で記録する）を組む */
+  const bundledClientOf = (calls: readonly RecordedCall[]) => {
+    const requests: LlmStructuredRequest[] = [];
+    const inner = bundledC2Client(bundledC3Client(bundledT2Client(createFakeLlmClient(calls, { validateAgainstSchema: true }))));
+    const client: LlmClient = {
+      callStructured: (request) => {
+        requests.push(request);
+        return inner.callStructured(request);
+      },
+      callWithTools: (request) => inner.callWithTools(request),
+    };
+    return { client, requests };
+  };
+
+  it("(4a) レビュー R4 複数の C3 束と再点検：一気通貫と段の走りの両方で、全束（再点検の束を含む）の意味の点検の要求が表の値で、要求の数が 4 に固定される", async () => {
+    const flags = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+    // 要件 6（束は 5 件ずつなので C3 は 2 束）・試験 12
+    const materials = buildSized(6, 12, flags);
+    const [entities, fields, behaviors, mapping] = materials.tableResponses();
+    const entries = (mapping as { readonly requirements: readonly { readonly requirementId: string }[] }).requirements;
+    const headId = materials.ids[0] as string;
+    // C3 の 1 回目は先頭の 1 要件を拒否し、C2 の 2 回目はその要件だけを書き直し、C3 の 2 回目（再点検）は全部受理する
+    const rejectHead = materials.judgments({ [headId]: ["unnecessary-ownership", materials.textOf(headId)] });
+    const rewrites = { requirements: entries.filter((entry) => entry.requirementId === headId) };
+    const calls = (): RecordedCall[] => [
+      structured(entities),
+      structured(fields),
+      structured(behaviors),
+      structured(mapping),
+      structured(rejectHead),
+      structured(rewrites),
+      structured(materials.judgments()),
+      structured(materials.t2Response()),
+      structured({ declaration: materials.declaration() }),
+      structured(materials.judgments()),
+    ];
+    const runOf = async (execution: "generation" | "stage", stageOutputLimits?: StageOutputLimits) => {
+      const bundled = bundledClientOf(calls());
+      const input = inputOf(bundled.client, {
+        flags,
+        plan: materials.plan,
+        source: materials.source,
+        judge: createFakeJudge(materials.adviceAnswers()),
+        budgetUsd: 1_000,
+        deadline: 86_400_000,
+        ...(stageOutputLimits === undefined ? {} : { stageOutputLimits }),
+      });
+      const result = execution === "generation" ? await runGenerationV11a(input) : await runStageRangeV11a({ ...input, range: { start: "name-table", end: "judge" } });
+      return { result, requests: bundled.requests };
+    };
+    for (const execution of ["generation", "stage"] as const) {
+      const run = await runOf(execution, LIMITS);
+      expect(run.result.stopped, `${execution}: ${JSON.stringify(run.result.stopped)}`).toBeNull();
+      const c3 = run.requests.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+      // 1 回目の束 2 + 再点検の束 2（要求の数を等値で固定する）
+      expect(c3, execution).toHaveLength(4);
+      for (const request of c3) expect(request.maxOutputTokens, execution).toBe(32_768);
+      // 直す前（表なし）は 4 本とも今の値（上書きを外す変異・2 回目だけ戻す変異・先頭を含まない束だけ戻す変異で赤）
+      const plain = await runOf(execution);
+      expect(plain.result.stopped, `${execution}: ${JSON.stringify(plain.result.stopped)}`).toBeNull();
+      const plainC3 = plain.requests.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+      expect(plainC3, execution).toHaveLength(4);
+      for (const request of plainC3) expect(request.maxOutputTokens, execution).toBe(16_384);
+    }
+  });
+
+  it("(4b) レビュー R4 全文修復の継続と次の往復：一気通貫と段の走りの両方で、道具の応答のあとの継続の要求と 2 往復目の要求が表の値で、要求の数が 6 に固定される", async () => {
+    // 1 往復目は R4 の不一致、2 往復目は R3 の境界の不一致（停滞にしない）。3 つ目の版で通る
+    const BAD_R4 = replaced(RUN_YAML, "    expression: base * 2", "    expression: base * 3");
+    const BAD_R3 = replaced(RUN_YAML, "when: amount > 0", "when: amount > 5");
+    const calls = (): RecordedCall[] => [
+      ...idsHead({ yaml: BAD_R4 }),
+      structured(acceptAll()),
+      // 1 往復目：道具の呼び出し → その結果を受けた継続の要求 → 形の直し → 直した宣言（BAD_R3。まだ不一致）
+      repairToolCall("call-1", "static-check", BAD_R3),
+      repairDone(""),
+      repairDone(BAD_R3),
+      structured(acceptAll()),
+      // 2 往復目：同じく道具の呼び出し → 継続の要求 → 形の直し → 通る宣言
+      repairToolCall("call-2", "static-check", RUN_YAML),
+      repairDone(""),
+      repairDone(RUN_YAML),
+      structured(acceptAll()),
+    ];
+    const runOf = async (execution: "generation" | "stage", stageOutputLimits?: StageOutputLimits) => {
+      const wire = wireClientOf(calls(), "v1.2-ids");
+      const input = inputOf(wire.client, {
+        flags: { ledger: true, ids: true },
+        ...(stageOutputLimits === undefined ? {} : { stageOutputLimits }),
+      });
+      const result = execution === "generation" ? await runGenerationV11a(input) : await runStageRangeV11a({ ...input, range: { start: "name-table", end: "judge" } });
+      return { result, tools: wire.sent.filter((sent) => sent.kind === "tools"), consumed: wire.consumed(), total: calls().length };
+    };
+    for (const execution of ["generation", "stage"] as const) {
+      const run = await runOf(execution, LIMITS);
+      expect(run.result.stopped, `${execution}: ${JSON.stringify(run.result.stopped)}`).toBeNull();
+      expect(run.consumed, `${execution}: 台本を使い切った`).toBe(run.total);
+      // 2 往復 ×（道具の呼び出し + その結果を受けた継続の要求 + 形の直し）= 6 本（要求の数を等値で固定する）
+      expect(run.tools, execution).toHaveLength(6);
+      for (const sent of run.tools) expect(limitOf(sent), execution).toBe(65_536);
+      // 直す前（表なし）は 6 本とも今の値（2 応答目以降だけ戻す変異・次の往復だけ戻す変異で赤）
+      const plain = await runOf(execution);
+      expect(plain.result.stopped, `${execution}: ${JSON.stringify(plain.result.stopped)}`).toBeNull();
+      expect(plain.tools, execution).toHaveLength(6);
+      for (const sent of plain.tools) expect(limitOf(sent), execution).toBe(32_768);
+    }
   });
 });

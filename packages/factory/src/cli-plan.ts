@@ -12,6 +12,7 @@
 // **端末もファイルも扱わない**——`Terminal` は呼ぶ側（cli.ts）が用意し、答えのファイルは文字列で受け取る。
 // 実 API も本物の端末も使わない（試験は偽物を差し込む。CLAUDE.md の不変条件）。
 import { checkConfirmedPlan, planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
+import type { StageOutputLimits } from "./call.js";
 import type { BundleJudgeUsage } from "./bundle.js";
 import type { PlanAnswerDraft } from "./plan/answers.js";
 import type { PlanQuestion } from "./plan/questions.js";
@@ -1063,6 +1064,12 @@ export interface PlanCliConditions {
   readonly contract_version: string;
   readonly factory_version: string;
   readonly spec_engine_version: string;
+  /**
+   * `--provider ollama` の `--pipeline v1.2` の Build の走りだけ：上書きした段と値の表（Issue #776）。
+   * **必須の欄ではない**——`parsePlanFile` の必須の条件の照合には足さない（人が作る包みに求めない）。
+   * OpenAI の走り・Ollama の v1・v1.1a・Plan だけの走りは欄を持たない。
+   */
+  readonly ollama_stage_output_limits?: StageOutputLimits;
 }
 
 /** Plan だけの結果を置くファイルの名前（`--out` の直下。納品物には入れない。Issue #495） */

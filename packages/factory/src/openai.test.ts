@@ -304,11 +304,22 @@ describe("要求の組み立て（02 §2・§2.2）", () => {
     const marked = bodyOf(captured, 1);
     expect(plain).not.toHaveProperty("tool_choice");
     expect(marked.tool_choice).toBe("none");
-    // 印は道具を選ばせない指定だけを足す（履歴・schema・effort・道具の定義・入力は同じ）
+    // 印は道具を選ばせない指定だけを足す（道具の定義は残る。履歴・schema・effort・入力も同じ）
+    expect((marked.tools as readonly unknown[])[0]).toMatchObject({ type: "function", name: "staticCheck" });
     const { tool_choice: _choice, ...rest } = marked;
     expect(rest).toEqual(plain);
     // 印が無ければ今の body とバイト列で同じ
     expect(JSON.stringify(bodyOf(captured, 2))).toBe(JSON.stringify(plain));
+  });
+
+  it("囲みの付いた本文は今のとおり malformed（OpenAI は囲みを読まない。Issue #777）", async () => {
+    const fenced = (value: unknown): string => `\`\`\`json\n${JSON.stringify(value)}\n\`\`\``;
+    const structured = recordingFetch(() => jsonResponse(completed(outputText(fenced({ items: [] })), USAGE_WIRE)));
+    const structuredError = await captureError(() => clientWith(structured.fetch).callStructured(STRUCTURED_REQUEST));
+    expect(structuredError.kind).toBe("malformed");
+    const tools = recordingFetch(() => jsonResponse(completed(outputText(fenced({ entity: "item" })), USAGE_WIRE)));
+    const toolsError = await captureError(() => clientWith(tools.fetch).callWithTools(TOOL_REQUEST));
+    expect(toolsError.kind).toBe("malformed");
   });
 
   it("往復（助手の呼び出し・道具の結果）を入力の項目に直して送る（R-2）", async () => {
@@ -425,6 +436,31 @@ describe("要求の組み立て（02 §2・§2.2）", () => {
     for (const call of captured) {
       expect(call.body.prompt_cache_key).toBe(OPENAI_PROMPT_CACHE_KEY);
     }
+  });
+});
+
+// ── 3.3. 囲みの開始行の余分なバッククォート（Issue #777 レビュー R1）──────────────
+//
+// OpenAI の client は囲みを読まない（`readFencedJson` は off）ので、開始行がどうであれ本文は今のとおり
+// malformed になる。この 3 反例は Ollama の client（設定 on）で始まりの検査が効く（`ollama.test.ts`）。
+
+/** 囲みの開始行が不正な 3 反例（Issue #777 レビュー R1。閉じは 3 個） */
+const R1_BAD_STARTS: readonly { readonly name: string; readonly start: string }[] = [
+  { name: "開始行がバッククォート 4 個だけ", start: "````" },
+  { name: "開始行がバッククォート 6 個だけ", start: "``````" },
+  { name: "言語の印の末尾にバッククォート 3 個（```json```）", start: "```json```" },
+];
+
+describe("囲みの開始行の余分なバッククォートは今のとおり malformed（Issue #777 レビュー R1。OpenAI は囲みを読まない）", () => {
+  const fenced = (start: string, payload: unknown): string => `${start}\n${JSON.stringify(payload)}\n\`\`\``;
+
+  it.each(R1_BAD_STARTS)("$name：構造化出力も最後の答えも malformed", async ({ start }) => {
+    const structured = recordingFetch(() => jsonResponse(completed(outputText(fenced(start, { items: [] })), USAGE_WIRE)));
+    const structuredError = await captureError(() => clientWith(structured.fetch).callStructured(STRUCTURED_REQUEST));
+    expect(structuredError.kind).toBe("malformed");
+    const tools = recordingFetch(() => jsonResponse(completed(outputText(fenced(start, { entity: "item" })), USAGE_WIRE)));
+    const toolsError = await captureError(() => clientWith(tools.fetch).callWithTools(TOOL_REQUEST));
+    expect(toolsError.kind).toBe("malformed");
   });
 });
 

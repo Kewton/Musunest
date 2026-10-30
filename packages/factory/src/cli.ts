@@ -55,6 +55,7 @@
 // appspec-schema の contract.ts と同じやり方）。
 import { planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
 import type { TokenRates } from "./budget.js";
+import type { StageOutputLimits } from "./call.js";
 import { buildRejectedCandidateFiles, bundleFiles } from "./bundle.js";
 import {
   buildBuildCliRecord,
@@ -94,7 +95,7 @@ import {
   type StageEffortStage,
 } from "./limits.js";
 import type { LlmClient } from "./llm.js";
-import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL } from "./ollama.js";
+import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL, OLLAMA_STAGE_OUTPUT_LIMITS } from "./ollama.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL } from "./openai.js";
 import type { EnvelopeId } from "./schema-envelope.js";
 import { runPlan, type PlanResponder, type PlanResult } from "./plan/run-plan.js";
@@ -213,6 +214,15 @@ export function apiKeyEnvOf(provider: Provider): string {
 /** その provider の既定の単価（試験用の `deps.rates` が優先する） */
 export function ratesOf(provider: Provider): TokenRates {
   return provider === "ollama" ? OLLAMA_RATES : DEFAULT_RATES;
+}
+
+/**
+ * 段の出力の上限の上書きの表（段 → 値。Issue #776）。**`--provider ollama` かつ `--pipeline v1.2` の走りだけ**
+ * Ollama の表を渡し、ほかは今の値のまま（`undefined`）。段のコードは provider を分けない——上書きは共通の口の
+ * 任意の引数として届く。v1・v1.1a・Plan だけの走りには渡さない。
+ */
+export function stageOutputLimitsOf(provider: Provider, pipeline: Pipeline | undefined): StageOutputLimits | undefined {
+  return provider === "ollama" && pipeline === "v1.2" ? OLLAMA_STAGE_OUTPUT_LIMITS : undefined;
 }
 
 /** 終了コード：成功（納品物を書いた） */
@@ -720,6 +730,8 @@ interface BuildJob {
   readonly pipeline?: Pipeline;
   /** 段ごとの effort（`--pipeline v1.2` で `--stage-effort` を付けたときだけ。Issue #664） */
   readonly stageEfforts?: StageEfforts;
+  /** 段の出力の上限の上書きの表（`--provider ollama` の `--pipeline v1.2` の走りだけ。Issue #776） */
+  readonly stageOutputLimits?: StageOutputLimits;
 }
 
 /**
@@ -754,6 +766,7 @@ async function runBuild(
           plan: v11aPlan,
           ...(flags === undefined ? {} : { flags, recordV12Flags: true, ...(flags.ids ? { collectBoundaries: true } : {}) }),
           ...(job.stageEfforts === undefined ? {} : { stageEfforts: job.stageEfforts }),
+          ...(job.stageOutputLimits === undefined ? {} : { stageOutputLimits: job.stageOutputLimits }),
         });
   const written = await writeBuildRun(deps, job, run, log);
   return run.boundaries === undefined || flags === undefined ? written : { ...written, boundaries: run.boundaries, flags };
@@ -1095,6 +1108,11 @@ async function runBuildFromPlanFile(
     ...(parsed.timeoutMs === undefined ? {} : { timeoutMs: parsed.timeoutMs }),
     ...(parsed.pipeline === undefined ? {} : { pipeline: parsed.pipeline }),
     ...(parsed.stageEfforts === undefined ? {} : { stageEfforts: parsed.stageEfforts }),
+    // Ollama の v1.2 の走りだけ、段の出力の上限の上書きの表を実行口へ渡す（Issue #776）
+    ...(() => {
+      const limits = stageOutputLimitsOf(provider, parsed.pipeline);
+      return limits === undefined ? {} : { stageOutputLimits: limits };
+    })(),
   };
   const build = await runBuild(deps, { ...job, plan: validation.plan }, log);
   await deps.makeDirectory(job.outDir);
@@ -1305,6 +1323,8 @@ async function runStageFromPlanFile(
     ...(parsed.timeoutMs === undefined ? {} : { timeoutMs: parsed.timeoutMs }),
     pipeline,
   };
+  // Ollama の v1.2 の段の走りだけ、段の出力の上限の上書きの表を実行口へ渡し、条件の記録にも残す（Issue #776）
+  const stageOutputLimits = stageOutputLimitsOf(provider, pipeline);
   const outcome = await runStageRangeV11a({
     ...generationInputOf(deps, job, promptVersionOf(pipeline)),
     plan: validation.plan,
@@ -1312,6 +1332,7 @@ async function runStageFromPlanFile(
     ...(resume === undefined ? {} : { resume }),
     ...(flags === undefined ? {} : { flags }),
     ...(parsed.stageEfforts === undefined ? {} : { stageEfforts: parsed.stageEfforts }),
+    ...(stageOutputLimits === undefined ? {} : { stageOutputLimits }),
   });
 
   await deps.makeDirectory(job.outDir);
@@ -1351,6 +1372,8 @@ async function runStageFromPlanFile(
       : { pipeline: "v1.2", v12_flags: toPublicV12Flags(flags), ...(flags.ids ? { v12_call_limits: v12CallLimitsRecord() } : {}) }),
     // `--stage-effort` を付けた v1.2 の段の走りだけ：段 → 推論の effort（付けた順。付けなければ欄を出さない。Issue #664）
     ...(parsed.stageEfforts === undefined ? {} : { stage_efforts: parsed.stageEfforts }),
+    // Ollama の v1.2 の段の走りだけ：上書きした段と値の表（付けなければ欄を出さない。Issue #776）
+    ...(stageOutputLimits === undefined ? {} : { ollama_stage_output_limits: stageOutputLimits }),
   };
   const record = buildStageRunRecord({
     range,
@@ -1443,8 +1466,13 @@ export async function runCli(deps: CliDeps): Promise<number> {
         };
   // `--stage-effort` を付けた v1.2 の走りだけ、段 → 推論の effort を末尾に足す（付けなければ欄を出さない。Issue #664）
   const stageEffortConditions = parsed.stageEfforts === undefined ? {} : { stage_efforts: parsed.stageEfforts };
+  // Ollama の v1.2 の走りだけ、上書きした段と値の表を末尾に足す（Issue #776。Plan だけの走り・ほかの走りは欄を出さない）
+  const ollamaLimits = stageOutputLimitsOf(parsed.provider ?? "openai", parsed.pipeline);
+  const ollamaLimitConditions = ollamaLimits === undefined ? {} : { ollama_stage_output_limits: ollamaLimits };
   const recordConditions: PlanCliConditions =
-    v12Conditions === undefined ? conditions : { ...conditions, ...v12Conditions, ...stageEffortConditions };
+    v12Conditions === undefined
+      ? { ...conditions, ...ollamaLimitConditions }
+      : { ...conditions, ...v12Conditions, ...stageEffortConditions, ...ollamaLimitConditions };
 
   // `--plan-file`：包みを検査してから client を作る（検査で断れば API を呼ばない。Issue #495）
   if (parsed.planFile !== undefined) {

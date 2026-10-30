@@ -33,9 +33,10 @@ import {
   parseStageEfforts,
   runCli,
   main,
+  stageOutputLimitsOf,
 } from "./cli.js";
 import { AGENT_LIMITS, maxOutputTokensForEffort } from "./limits.js";
-import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL } from "./ollama.js";
+import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL, OLLAMA_STAGE_OUTPUT_LIMITS } from "./ollama.js";
 import * as planRunModule from "./plan/run-plan.js";
 import type { PlanResult } from "./plan/run-plan.js";
 import { BUILD_CLI_RECORD_FILE, PLAN_ONLY_RESULT_SCHEMA } from "./cli-plan.js";
@@ -59,6 +60,7 @@ import {
   type EnvelopeId,
 } from "./schema-envelope.js";
 import { requirementsFromPlan, type Requirement, type RequirementList } from "./pipeline.js";
+import { buildSized } from "./v11a/__tests__/sizes.js";
 import { captureCliBaseline, type BaselineCliCapture, type BaselineCliScenarios } from "./__tests__/baseline-capture.js";
 import {
   STAGE_DECLARATION_FILE,
@@ -84,6 +86,7 @@ import {
   createCheckedRecordingClient,
   bundledC2Client,
   bundledC3Client,
+  bundledT2Client,
   draftOf,
   fixtureList,
   fixtureTable,
@@ -143,7 +146,7 @@ import {
 } from "./bundle.js";
 import * as runModule from "./run.js";
 import type { Judge, JudgeRequest } from "./judge.js";
-import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse, LlmUsage } from "./llm.js";
+import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse, LlmUsage } from "./llm.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, ACCEPTANCE_MATERIAL_WORDS } from "./stages/__tests__/prompt.js";
 import { ATTEMPT_KEYS, FAILURE_KINDS, RETRY_KEYS, STAGE_IDS } from "./record.js";
 import { CONFIRMED_PLAN, DESIGN_OUTPUT_MAPPED, SOURCE_TEXT, recordedRun, structured, USAGE as RECORDED_USAGE } from "./__tests__/run.js";
@@ -1222,17 +1225,28 @@ async function runV11aCli(input: {
   readonly pipeline?: "v1.1a" | "v1.2";
   /** 末尾に足す引数（`--stage-effort` など。省けば今の引数。Issue #664） */
   readonly args?: readonly string[];
+  /** 入口に渡す環境変数（省けば OpenAI の鍵だけ。`--provider ollama` の試験で差し替える。Issue #776） */
+  readonly env?: Readonly<Record<string, string>>;
+  /** 入口に渡す LLM（省けば `calls` の記録。束ごとに読む口や往復の順を照らさない口に差し替える。Issue #776 レビュー R4） */
+  readonly client?: LlmClient;
+  /** 確定した仕様の包み（省けば `v11aEnvelope()`。大きさの生成器の材料で流すときに差し替える。Issue #776 レビュー R4） */
+  readonly envelope?: Record<string, unknown>;
+  /** 依頼文（省けば `V11A_SOURCE`。Issue #776 レビュー R4） */
+  readonly source?: string;
+  /** 判定の偽物（省けば `v11aJudge`。Issue #776 レビュー R4） */
+  readonly judge?: Judge;
 }) {
   const planPath = `${input.dir}-plan.json`;
-  const planText = JSON.stringify(await v11aEnvelope());
+  const planText = JSON.stringify(input.envelope ?? (await v11aEnvelope()));
   const recording = createCheckedRecordingClient(input.calls);
-  const makeClient = vi.fn((_options: { readonly envelope?: EnvelopeId }) => recording.client);
+  const base = input.client ?? recording.client;
+  const makeClient = vi.fn((_options: { readonly envelope?: EnvelopeId }) => base);
   const lines: string[] = [];
   const written: string[] = [];
   const code = await runCli({
     argv: ["--", "request.txt", "--out", input.dir, "--pipeline", input.pipeline ?? "v1.1a", "--plan-file", planPath, ...(input.args ?? [])],
-    env: { [API_KEY_ENV]: "sk-FAKE" },
-    readFile: async (path) => (path === planPath ? planText : V11A_SOURCE),
+    env: input.env ?? { [API_KEY_ENV]: "sk-FAKE" },
+    readFile: async (path) => (path === planPath ? planText : (input.source ?? V11A_SOURCE)),
     writeFile: async (path, text) => {
       written.push(path.slice(input.dir.length + 1));
       await fs.writeFile(path, text, "utf8");
@@ -1242,7 +1256,7 @@ async function runV11aCli(input: {
     },
     loadDocuments: async () => FIXTURE_DOCUMENTS,
     makeClient,
-    makeLlmJudge: () => v11aJudge(),
+    makeLlmJudge: () => input.judge ?? v11aJudge(),
     now: () => 0,
     log: (line) => lines.push(line),
   });
@@ -3658,6 +3672,8 @@ async function runStageCli(input: {
   readonly client?: LlmClient;
   /** 判定の偽物（省けば `v11aJudge`） */
   readonly judge?: Judge;
+  /** 入口に渡す環境変数（省けば OpenAI の鍵だけ。`--provider ollama` の試験で差し替える。Issue #776） */
+  readonly env?: Readonly<Record<string, string>>;
 }) {
   const planPath = `${input.dir}-plan.json`;
   const planText = JSON.stringify(input.envelope ?? (await v11aEnvelope()));
@@ -3686,7 +3702,7 @@ async function runStageCli(input: {
   const directories: string[] = [];
   const code = await runCli({
     argv: ["--", "request.txt", "--out", input.dir, "--pipeline", input.pipeline ?? "v1.1a", "--plan-file", planPath, ...input.args],
-    env: { [API_KEY_ENV]: "sk-FAKE" },
+    env: input.env ?? { [API_KEY_ENV]: "sk-FAKE" },
     readFile: async (path) => {
       if (path === planPath) return planText;
       if (path === "request.txt") return input.source ?? V11A_SOURCE;
@@ -7019,6 +7035,27 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     expect(await sha256Hex(ACCEPTANCE_MATERIAL_WORDS.join("・"))).toBe("e4cb9426e93a171e20821092d041bb621c5aa6f6a4455dc4cb239c0346abe7f7");
   });
 
+  it("R7 題材の言葉が、今回変更したファイル（Issue #776：段の出力の上限の上書きの表）に無い", async () => {
+    const root = new URL("./", import.meta.url).pathname;
+    const files = [
+      "call.ts",
+      "call.test.ts",
+      "cli.ts",
+      "cli.test.ts",
+      "cli-plan.ts",
+      "ollama.ts",
+      "ollama.test.ts",
+      "index.test.ts",
+      "v11a/run.ts",
+      "v11a/run.test.ts",
+      "v11a/bundle-v11a.ts",
+    ];
+    for (const name of files) {
+      const text = await fs.readFile(`${root}${name}`, "utf8");
+      for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text.includes(word), `${name}: ${word}`).toBe(false);
+    }
+  });
+
   /**
    * (5) T2 の束の遅着を、確定の前・確定のあとの B1 の実行中・段と段の間で起こし、`late.metered_stage_index`
    * と、段の行のトークン・usage の無い応答の数の照合の規則で確かめる。usage あり・なしの 2 回。
@@ -7400,4 +7437,287 @@ describe("main の依存の注入が provider の adapter を組む（本物の 
       expectWire(tap, c);
     });
   }
+});
+
+// ── 段の出力の上限の上書きの表（`--provider ollama` の v1.2。Issue #776）──────────────────
+//
+// `--provider ollama` の v1.2 の走りだけ、Ollama の段の出力の上限の表が実行口（共通の口の任意の
+// 引数）へ届き、要求の `max_output_tokens` と条件の記録（Build だけの記録・段の走りの記録）が変わる。
+// v1・v1.1a・Plan だけの走りと、OpenAI の走り（省略・明示）は今の値のまま。
+
+describe("段の出力の上限の上書きの表（`--provider ollama` の v1.2。Issue #776）", () => {
+  const OL_ENV = { [OLLAMA_API_KEY_ENV]: "ol-FAKE" } as const;
+  /** 表にしか無い値（今の表の段のどの値とも違う。v1・v1.1a・Plan・OpenAI の要求に出ない） */
+  const OVERRIDE_ONLY = 65_536;
+  const limitOf = (request: LlmStructuredRequest): unknown => request.maxOutputTokens;
+  const requestsOf = (requests: readonly LlmStructuredRequest[], schemaName: string): readonly LlmStructuredRequest[] =>
+    requests.filter((request) => request.schemaName === schemaName);
+
+  it("(1)(6) 一気通貫：Ollama の v1.2 の走りだけ、意味の点検・宣言の点検の要求の上限が表の値になり、Build の記録の条件の末尾に上書きの表が載る。鍵・モデル・封筒は今のまま", async () => {
+    const calls = (): RecordedCall[] => [...v12Head(), structured(v11aJudgments())];
+    const dir = `${directory}/v12-ollama-limits-build`;
+    const run = await runV11aCli({ dir, calls: calls(), pipeline: "v1.2", args: ["--provider", "ollama"], env: OL_ENV });
+    expect(run.code).toBe(EXIT_OK);
+    // 意味の点検（C3 の束ごとの全部の要求）と宣言の点検（B3'）が表の値
+    const semantic = requestsOf(run.recording.structured, SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(semantic.length).toBeGreaterThan(0);
+    for (const request of semantic) expect(limitOf(request)).toBe(32_768);
+    const decl = requestsOf(run.recording.structured, DECL_CHECK_SCHEMA_NAME);
+    expect(decl.length).toBeGreaterThan(0);
+    for (const request of decl) expect(limitOf(request)).toBe(32_768);
+    // ほかの段（B1・T2）は今の値のまま（表に無い段）
+    for (const request of requestsOf(run.recording.structured, WRITE_V11A_SCHEMA_NAME)) expect(limitOf(request)).toBe(maxOutputTokensForEffort("high", "write"));
+    for (const request of requestsOf(run.recording.structured, TEST_SPEC_SCHEMA_NAME)) expect(limitOf(request)).toBe(maxOutputTokensForEffort("high", "test-spec"));
+    // 条件の記録：末尾に上書きの表
+    expect(run.record.conditions["ollama_stage_output_limits"]).toEqual(OLLAMA_STAGE_OUTPUT_LIMITS);
+    expect(Object.keys(run.record.conditions).at(-1)).toBe("ollama_stage_output_limits");
+    // adapter の設定は今のまま（表は実行口へ渡す。段のコードは provider を分けない）
+    expect(run.makeClient.mock.calls[0]).toEqual([
+      { apiKey: "ol-FAKE", model: DEFAULT_OLLAMA_MODEL, effort: "high", envelope: "v1.2-ids", provider: "ollama" },
+    ]);
+  });
+
+  it("(1)(6) 段の走り：Ollama の v1.2 の段の走りで、直す（欄だけの直し）の要求の上限が表の値になり、段の走りの記録の条件に上書きの表が載る", async () => {
+    // 条件の違う宣言から、欄だけの直し 2 回で元の条件へ戻す（Issue #664 の段の走りの試験と同じ台本）
+    const BAD_YAML = V11A_YAML.replace("when: amount > 0", "when: amount > 5");
+    const closeBody = (expression: string): string =>
+      ["- name: closeItem", "  entity: item", "  kind: update", "  set:", "    kind: beta", `  when: ${expression}`].join("\n");
+    const fieldRepair = (expression: string): RecordedCall => ({
+      kind: "structured",
+      output: { replacements: [{ location: "action:item.closeItem", element: closeBody(expression) }], disputes: [] },
+      usage: undefined,
+    });
+    const calls = (): RecordedCall[] => [
+      ...v12Head().slice(0, -1),
+      structured({ declaration: BAD_YAML }),
+      structured(v11aJudgments()),
+      fieldRepair("amount > 1"),
+      structured(v11aJudgments()),
+      fieldRepair("amount > 0"),
+      structured(v11aJudgments()),
+    ];
+    const dir = `${directory}/v12-ollama-limits-stage`;
+    const args = ["--stage-start", "vocabulary", "--stage-end", "judge", "--provider", "ollama"];
+    const run = await runStageCli({ dir, args, calls: calls(), pipeline: "v1.2", env: OL_ENV });
+    expect(run.code).toBe(EXIT_OK);
+    const repairs = requestsOf(run.structuredRequests, FIELD_REPAIR_SCHEMA_NAME);
+    expect(repairs.length).toBeGreaterThan(0);
+    for (const request of repairs) expect(limitOf(request)).toBe(65_536);
+    for (const request of requestsOf(run.structuredRequests, SEMANTIC_CHECK_SCHEMA_NAME)) expect(limitOf(request)).toBe(32_768);
+    for (const request of requestsOf(run.structuredRequests, DECL_CHECK_SCHEMA_NAME)) expect(limitOf(request)).toBe(32_768);
+    // 段の走りの記録の条件の末尾に上書きの表
+    const record = await stageRecordOf(dir);
+    const conditions = record["conditions"] as Record<string, unknown>;
+    expect(conditions["ollama_stage_output_limits"]).toEqual(OLLAMA_STAGE_OUTPUT_LIMITS);
+    expect(Object.keys(conditions).at(-1)).toBe("ollama_stage_output_limits");
+  });
+
+  it("(5)(6) OpenAI（省略・明示）の v1.2 と Ollama の v1.1a は、要求の上限が今の値で、条件の記録に上書きの欄が無い", async () => {
+    for (const [name, args, env] of [
+      ["省略", [] as readonly string[], { [API_KEY_ENV]: "sk-FAKE" }],
+      ["openai 明示", ["--provider", "openai"], { [API_KEY_ENV]: "sk-FAKE" }],
+    ] as const) {
+      const run = await runV11aCli({
+        dir: `${directory}/v12-no-override-${name}`,
+        calls: [...v12Head(), structured(v11aJudgments())],
+        pipeline: "v1.2",
+        args,
+        env,
+      });
+      expect(run.code, name).toBe(EXIT_OK);
+      expect(run.record.conditions, name).not.toHaveProperty("ollama_stage_output_limits");
+      for (const request of requestsOf(run.recording.structured, SEMANTIC_CHECK_SCHEMA_NAME)) expect(limitOf(request), name).toBe(16_384);
+      expect(run.recording.structured.some((request) => limitOf(request) === OVERRIDE_ONLY), name).toBe(false);
+    }
+    // Ollama の v1.1a の走り（v1.1a の封筒・表は無い）
+    const v11a = await runV11aCli({
+      dir: `${directory}/v11a-ollama-limits`,
+      calls: [...v11aHead(), structured(v11aJudgments())],
+      pipeline: "v1.1a",
+      args: ["--provider", "ollama"],
+      env: OL_ENV,
+    });
+    expect(v11a.code).toBe(EXIT_OK);
+    expect(v11a.record.conditions).not.toHaveProperty("ollama_stage_output_limits");
+    expect(requestsOf(v11a.recording.structured, SEMANTIC_CHECK_SCHEMA_NAME).every((request) => limitOf(request) === 16_384)).toBe(true);
+    expect(v11a.recording.structured.some((request) => limitOf(request) === OVERRIDE_ONLY)).toBe(false);
+  });
+
+  it("(5)(6) 上書きの表を渡すのは --provider ollama かつ --pipeline v1.2 のときだけ（v1・v1.1a・Plan には渡さない）", () => {
+    expect(stageOutputLimitsOf("ollama", "v1.2")).toEqual(OLLAMA_STAGE_OUTPUT_LIMITS);
+    for (const [provider, pipeline] of [
+      ["ollama", "v1"],
+      ["ollama", "v1.1a"],
+      ["ollama", undefined],
+      ["openai", "v1.2"],
+      ["openai", "v1.1a"],
+      ["openai", undefined],
+    ] as const) {
+      expect(stageOutputLimitsOf(provider, pipeline), `${provider}/${String(pipeline)}`).toBeUndefined();
+    }
+  });
+
+  it("(5) Ollama の v1 の走りは今の値のまま（上書きの表にしか無い値が要求に無い）", async () => {
+    const recording = createRecordingClient(recordedRun());
+    const lines: string[] = [];
+    const dir = `${directory}-ollama-v1-limits`;
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--provider", "ollama"],
+      env: OL_ENV,
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      log: (line) => lines.push(line),
+    });
+    expect(code).toBe(EXIT_OK);
+    expect(recording.structured.every((request) => limitOf(request) !== OVERRIDE_ONLY)).toBe(true);
+  });
+
+  // ── レビュー R4：複数の C3 束と再点検・全文修復の継続と次の往復を、入口（一気通貫と段の走りの両方）から実際に起こす ──
+
+  /** 記録した応答を順に返すだけの偽物の口（往復の順は照らさない。要求を構造化と道具付きで記録する） */
+  const sequentialClient = (calls: readonly RecordedCall[]) => {
+    const structuredRequests: LlmStructuredRequest[] = [];
+    const toolRequests: LlmToolRequest[] = [];
+    let index = 0;
+    const next = (): RecordedCall => {
+      const call = calls[index];
+      index += 1;
+      if (call === undefined) throw new Error(`記録した応答が尽きました（${String(index)} 件目）`);
+      return call;
+    };
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        structuredRequests.push(request);
+        const call = next();
+        if (call.kind !== "structured") throw new Error("記録した応答の種別が違います（構造化）");
+        return { output: call.output as T, usage: call.usage };
+      },
+      async callWithTools(request): Promise<LlmToolResponse> {
+        toolRequests.push(request);
+        const call = next();
+        if (call.kind !== "tools") throw new Error("記録した応答の種別が違います（道具付き）");
+        return call.response;
+      },
+    };
+    return { client, structuredRequests, toolRequests };
+  };
+
+  /** 直す段（道具付き）の道具の呼び出し（1 つ） */
+  const repairCall = (id: string, name: string, declaration: string): RecordedCall => ({
+    kind: "tools",
+    response: { kind: "toolCalls", toolCalls: [{ id, name, arguments: { declaration } }], usage: undefined },
+  });
+  /** 直す段（道具付き）の最後の答え（直した宣言） */
+  const repairAnswer = (declaration: string): RecordedCall => ({
+    kind: "tools",
+    response: { kind: "done", declaration: { declaration, disputes: [] }, usage: undefined },
+  });
+  /** 大きさの生成器の材料の確定した仕様から、`--plan-file` の包みを組む（確認の SHA を中身に合わせる） */
+  const envelopeOfMaterial = async (materials: ReturnType<typeof buildSized>): Promise<Record<string, unknown>> => {
+    const plan = { ...materials.plan, confirmation: { ...materials.plan.confirmation, sha256: await planDigest(materials.plan) } };
+    return {
+      schema_version: PLAN_ONLY_RESULT_SCHEMA,
+      outcome: "confirmed",
+      plan,
+      plan_sha256: await planDigest(plan),
+      source_sha256: await sha256Hex(materials.source),
+      conditions: null,
+      stop: null,
+    };
+  };
+
+  it("(4a) レビュー R4 複数の C3 束と再点検：一気通貫と段の走りの入口の両方で、全束（再点検の束を含む）の意味の点検の要求が表の値で、要求の数が 4 に固定される", async () => {
+    const flags = factory.fromPublicV12Flags(factory.V12_PIPELINE_FLAGS);
+    // 要件 6（束は 5 件ずつなので C3 は 2 束）・試験 12
+    const materials = buildSized(6, 12, flags);
+    const envelope = await envelopeOfMaterial(materials);
+    const judge = createFakeJudge(materials.adviceAnswers());
+    const [entities, fields, behaviors, mapping] = materials.tableResponses();
+    const entries = (mapping as { readonly requirements: readonly { readonly requirementId: string }[] }).requirements;
+    const headId = materials.ids[0] as string;
+    // C3 の 1 回目は先頭の 1 要件を拒否し、C2 の 2 回目はその要件だけを書き直し、C3 の 2 回目（再点検）は全部受理する
+    const rejectHead = materials.judgments({ [headId]: ["unnecessary-ownership", materials.textOf(headId)] });
+    const rewrites = { requirements: entries.filter((entry) => entry.requirementId === headId) };
+    const script = (): RecordedCall[] => [
+      structured(entities),
+      structured(fields),
+      structured(behaviors),
+      structured(mapping),
+      structured(rejectHead),
+      structured(rewrites),
+      structured(materials.judgments()),
+      structured(materials.t2Response()),
+      structured({ declaration: materials.declaration() }),
+      structured(materials.judgments()),
+    ];
+    /** 束ごとに読む口（要求は外側で記録する） */
+    const bundled = (calls: readonly RecordedCall[]) => {
+      const inner = sequentialClient(calls);
+      const wrapped = bundledC2Client(bundledC3Client(bundledT2Client(inner.client)));
+      const structuredRequests: LlmStructuredRequest[] = [];
+      const client: LlmClient = {
+        callStructured: (request) => {
+          structuredRequests.push(request);
+          return wrapped.callStructured(request);
+        },
+        callWithTools: (request) => wrapped.callWithTools(request),
+      };
+      return { client, structuredRequests };
+    };
+    const runOf = async (execution: "generation" | "stage") => {
+      const made = bundled(script());
+      const dir = `${directory}/r4a-${execution}`;
+      const args = ["--provider", "ollama"];
+      const stageArgs = ["--stage-start", "vocabulary", "--stage-end", "judge", "--provider", "ollama"];
+      const run =
+        execution === "generation"
+          ? await runV11aCli({ dir, calls: [], pipeline: "v1.2", args, env: OL_ENV, client: made.client, envelope, source: materials.source, judge })
+          : await runStageCli({ dir, args: stageArgs, env: OL_ENV, calls: [], pipeline: "v1.2", client: made.client, envelope, source: materials.source, judge });
+      return { run, structuredRequests: made.structuredRequests };
+    };
+    for (const execution of ["generation", "stage"] as const) {
+      const run = await runOf(execution);
+      expect(run.run.code, `${execution}: exit ${String(run.run.code)}`).toBe(EXIT_OK);
+      const c3 = requestsOf(run.structuredRequests, SEMANTIC_CHECK_SCHEMA_NAME);
+      // 1 回目の束 2 + 再点検の束 2（要求の数を等値で固定する）
+      expect(c3, execution).toHaveLength(4);
+      for (const request of c3) expect(limitOf(request), execution).toBe(32_768);
+      // ほかの段（B1）は今の値のまま（上書きを外す変異で赤）
+      for (const request of requestsOf(run.structuredRequests, WRITE_V11A_SCHEMA_NAME)) expect(limitOf(request), execution).toBe(maxOutputTokensForEffort("high", "write"));
+    }
+  });
+
+  it("(4b) レビュー R4 全文修復の継続と次の往復：一気通貫と段の走りの入口の両方で、道具の応答のあとの継続の要求と 2 往復目の要求が表の値で、要求の数が 4 に固定される", async () => {
+    // 場所を作れない失敗（閉じる操作を宣言から外した版）は全文の直し（道具付き）へ流れる。
+    // 1 往復目は同じ版を返して採られず、2 往復目で通る版を返す（探索型の直しの 2 往復）
+    const NO_CLOSE = V11A_YAML.replace("  - name: closeItem\n    entity: item\n    kind: update\n    set:\n      kind: beta\n    when: amount > 0\n", "");
+    const script = (): RecordedCall[] => [
+      ...v12Head().slice(0, -1),
+      structured({ declaration: NO_CLOSE }),
+      // 1 往復目：道具の呼び出し → その結果を受けた継続の要求（2 応答目）→ 同じ版（採られない）
+      repairCall("call-1", "static-check", NO_CLOSE),
+      repairAnswer(NO_CLOSE),
+      // 2 往復目：道具の呼び出し → 継続の要求 → 通る版
+      repairCall("call-2", "static-check", V11A_YAML),
+      repairAnswer(V11A_YAML),
+      structured(v11aJudgments()),
+    ];
+    const runOf = async (execution: "generation" | "stage") => {
+      const made = sequentialClient(script());
+      const dir = `${directory}/r4b-${execution}`;
+      const run =
+        execution === "generation"
+          ? await runV11aCli({ dir, calls: [], pipeline: "v1.2", args: ["--provider", "ollama"], env: OL_ENV, client: made.client })
+          : await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "judge", "--provider", "ollama"], env: OL_ENV, calls: [], pipeline: "v1.2", client: made.client });
+      return { run, toolRequests: made.toolRequests };
+    };
+    for (const execution of ["generation", "stage"] as const) {
+      const run = await runOf(execution);
+      expect(run.run.code, `${execution}: exit ${String(run.run.code)}`).toBe(EXIT_OK);
+      // 2 往復 ×（道具の呼び出し + その結果を受けた継続の要求）= 4 本（要求の数を等値で固定する）
+      const limits = run.toolRequests.map((request) => request.maxOutputTokens);
+      expect(limits, execution).toEqual([65_536, 65_536, 65_536, 65_536]);
+    }
+  });
 });
