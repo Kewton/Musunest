@@ -112,6 +112,38 @@ test("生成に失敗した本を含む組：補正前（v1）は分母から落
   });
 });
 
+test("Issue #783：新しい欄（attempts.malformed・failure.malformed_kind）がある summary.line.json でも、採点の結果は同じ", async () => {
+  await withOut(async (base) => {
+    // 段の記録と失敗の帰属はもともとある形のまま、新しい欄だけを足す（既存の欄は 1 つも変えない）
+    const summaryText = (decorate) => {
+      const sl = JSON.parse(summaryLine(true));
+      sl.summary.stages = [{ stage: "write", status: "ok", duration_ms: 7, calls: 1, missing_usage_calls: 0, input_tokens: 1, cached_input_tokens: 0, cache_write_tokens: 0, output_tokens: 1, reasoning_tokens: 0, failure_kind: null, attempts: { started: 1, responded: 1, errors: 0, cancelled_deadline: 0, cancelled_timeout: 0, not_started: { deadline: 0, budget: 0, limit: 0, timeout: 0 } }, retries: { communication: 0, shape: 0, content: 0 } }];
+      sl.summary.failure = { stage: "write", kind: "malformed", code: null, problems: 0 };
+      if (decorate) {
+        sl.summary.stages[0].attempts.malformed = { "no-body": 0, "not-json": 0, envelope: 0, "wrong-stage": 0, schema: 1, other: 0 };
+        sl.summary.failure.malformed_kind = "schema";
+      }
+      return JSON.stringify(sl);
+    };
+    const write = (name, decorate) => {
+      const out = join(base, name);
+      addRun(out, "P1-r1", { spec: PASS_A });
+      writeFileSync(join(out, "P1-r1", "summary.line.json"), summaryText(decorate));
+      conditions(out, ["P1-r1"]);
+      scoreRun(out);
+      return readScore(out);
+    };
+    const plain = write("plain", false), marked = write("marked", true);
+    assert.deepEqual(marked.metrics, plain.metrics);
+    assert.deepEqual(marked.bySubject, plain.bySubject);
+    assert.deepEqual(marked.fulfillment, plain.fulfillment);
+    assert.deepEqual(marked.funnel, plain.funnel);
+    // 本ごとの採点の欄も同じ（もとの欄の写しの `failure` だけが新しい欄を持つ）
+    const scored = (full) => full.rows.map((r) => ({ verdict: r.verdict, spec_verdict: r.spec_verdict, factory_verdict: r.factory_verdict, fulfilled: r.fulfilled, failed: r.failed, final_static: r.final_static, stop: r.stop, fulfillment_v2: r.fulfillment_v2 }));
+    assert.deepEqual(scored(marked), scored(plain));
+  });
+});
+
 test("静的 NG・役割が見つからない・不合格の本を含む組：v1 と v2 の分母が別の版として並ぶ", async () => {
   await withOut(async (base) => {
     const out = join(base, "out");

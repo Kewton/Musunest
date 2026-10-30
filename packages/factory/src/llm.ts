@@ -14,6 +14,39 @@
 import type { ReasoningEffort } from "./limits.js";
 
 /**
+ * adapter が構造化出力の本文を形の誤り（malformed）としたときの印（種類。Issue #783）。
+ *
+ * 今までは `malformed` の 1 種類だけで、どの崩れ方かが記録から分からなかった。adapter（openai.ts）は、
+ * **構造化出力の口（`callStructuredWire`）で今の検査の順のまま**、投げる所に印を付ける。共通の口（call.ts）は
+ * **この表で検証する**——口は adapter の型に依存しない（印はこの共有の型で確かめる）。表に無い値・印の無い
+ * malformed（道具付きの要求の呼び出しの形・wire の JSON・外側・status の欠落・宣言の口）は `other` として数える。
+ */
+export const MALFORMED_KINDS = [
+  "no-body", // 構造化出力の本文が無い
+  "not-json", // 本文が JSON として読めない（囲みの規則に合わないものを含む）
+  "envelope", // 封筒の外側が object でない・`result` が object でない（封筒ありの段だけ）
+  "wrong-stage", // 封筒の `stage` がその段でない（封筒ありの段だけ）
+  "schema", // schema に合わない（封筒ありは段の枝、封筒なしは要求の schema）
+] as const;
+export type MalformedKind = (typeof MALFORMED_KINDS)[number];
+
+/**
+ * 形の誤りの**集計の鍵**（印 5 つに `other` を足した 6 つ。Issue #783）。`other` は
+ * 「分類が malformed で、検証済みの 5 つの印が無いもの」だけ——印の無い malformed・表に無い印を持つ malformed
+ * である。`toolArguments` などほかの分類は、どの鍵にも数えない。
+ */
+export const MALFORMED_KIND_KEYS = [...MALFORMED_KINDS, "other"] as const;
+export type MalformedKindKey = (typeof MALFORMED_KIND_KEYS)[number];
+
+/** 形の誤りの集計の鍵ごとの数（段の記録と計測の口に写す欄） */
+export type MalformedKindCounts = { readonly [K in MalformedKindKey]: number };
+
+/** 値が表の印か（共通の口が adapter の型に依らず確かめる） */
+export function isMalformedKind(value: unknown): value is MalformedKind {
+  return (MALFORMED_KINDS as readonly unknown[]).includes(value);
+}
+
+/**
  * LLM が返すトークンの数（§1.5）。入力・キャッシュに当たった入力・出力・推論の 4 つを持つ。
  * 推論（`reasoningTokens`）は出力（`outputTokens`）の**内訳**である（二重に数えない）。
  */

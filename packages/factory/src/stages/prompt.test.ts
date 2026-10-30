@@ -7,7 +7,8 @@
 import { describe, expect, it } from "vitest";
 import { CONTRACT_DIR, packageFile, semanticsFile, vocabularyFile } from "@musunest/appspec-schema/files";
 import { estimateInputUpperBoundTokens, structuredInputParts } from "../call.js";
-import { estimateMaxCostUsd, type TokenRates } from "../budget.js";
+import { CallGateway } from "../call.js";
+import { JobBudget, estimateMaxCostUsd, type TokenRates } from "../budget.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "../llm.js";
 import { OpenAiIncompleteError } from "../openai.js";
 import {
@@ -740,6 +741,74 @@ describe("未完了の応答は、拒否と分けて段の失敗にする（02 �
     if (outcome.ok) return;
     expect(outcome.failure).toEqual({ kind: "incomplete", reason: "max_output_tokens" });
     expect(calls).toBe(1);
+  });
+});
+
+// ── adapter の形の誤りの印を、段の失敗に写す（Issue #783）─────────────────
+//
+// 共通の口が分類した malformed の失敗が印を持つとき、段の失敗（`StageFailure`）の malformed に
+// `malformedKind` を写す。印の無い malformed・段の検査が落とした malformed（problems あり）は写さない。
+describe("adapter の形の誤りの印を、段の失敗に写す（Issue #783）", () => {
+  /** 印つきの malformed を返す偽物（adapter が投げる形をまねる） */
+  const malformedClient = (malformedKind?: string): LlmClient => ({
+    async callStructured() {
+      throw malformedKind === undefined
+        ? Object.assign(new Error("形の誤り"), { kind: "malformed" })
+        : Object.assign(new Error("形の誤り"), { kind: "malformed", malformedKind });
+    },
+    async callWithTools() {
+      throw new Error("未使用");
+    },
+  });
+
+  it("印を持つ失敗は、段の失敗の malformedKind に写る。印の無い失敗・設定 off は写らない", async () => {
+    for (const mark of ["no-body", "not-json", "envelope", "wrong-stage", "schema"] as const) {
+      const outcome = await callStructuredChecked(makeGateway(malformedClient(mark), { recordMalformedKinds: true }), PLAN);
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) return;
+      // 形の誤りはやり直さないので、実試行は 1 回
+      expect(outcome.failure).toEqual({ kind: "malformed", attempts: 1, problems: [], malformedKind: mark });
+    }
+    // 印の無い malformed（other の側）は malformedKind を持たない
+    const plain = await callStructuredChecked(makeGateway(malformedClient(undefined), { recordMalformedKinds: true }), PLAN);
+    expect(plain.ok).toBe(false);
+    if (plain.ok) return;
+    expect(plain.failure).toEqual({ kind: "malformed", attempts: 1, problems: [] });
+    // 設定を外す変異：印を持つ例外でも、段の失敗は印を持たない（今の走りと同じ）
+    const off = await callStructuredChecked(makeGateway(malformedClient("schema")), PLAN);
+    expect(off.ok).toBe(false);
+    if (off.ok) return;
+    expect(off.failure).toEqual({ kind: "malformed", attempts: 1, problems: [] });
+  });
+
+  it("(3) 段の検査が落とした malformed（形のやり直しの後に problems あり）には印を付けない", async () => {
+    const recording = createRecordingClient([
+      { kind: "structured", output: { bad: true }, usage: undefined },
+      { kind: "structured", output: { also: "bad" }, usage: undefined },
+    ]);
+    const outcome = await callStructuredChecked(makeGateway(recording.client, { recordMalformedKinds: true }), PLAN);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("malformed");
+    expect(outcome.failure).not.toHaveProperty("malformedKind");
+    if (outcome.failure.kind !== "malformed") return;
+    expect(outcome.failure.problems.length).toBeGreaterThan(0);
+  });
+
+  it("(4) 束ごとの口（forStage の effort あり）でも、選ばれた失敗そのものが印を運ぶ", async () => {
+    const gateway = new CallGateway({
+      client: malformedClient("schema"),
+      budget: new JobBudget(10),
+      rates: { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 },
+      now: () => 0,
+      deadline: 60_000,
+      recordMalformedKinds: true,
+      stageEfforts: { write: "low" },
+    });
+    const outcome = await callStructuredChecked(gateway.forStage("write"), PLAN);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure).toEqual({ kind: "malformed", attempts: 1, problems: [], malformedKind: "schema" });
   });
 });
 

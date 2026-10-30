@@ -65,7 +65,8 @@
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex, type Diagnostic } from "@musunest/spec-engine";
 import { JobBudget } from "../budget.js";
-import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse } from "../llm.js";
+import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse, MalformedKindCounts, MalformedKindKey } from "../llm.js";
+import { MALFORMED_KIND_KEYS } from "../llm.js";
 import {
   assembleBundle,
   buildDiagnostics,
@@ -283,6 +284,12 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
    * provider を分けない——上書きは共通の口の任意の引数として届く。
    */
   readonly stageOutputLimits?: StageOutputLimits;
+  /**
+   * 形の誤りの種類を段の記録と要約に残すか（Issue #783）。entry（cli.ts）が `--pipeline v1.2` のときだけ真を渡す。
+   * 共通の口（`CallGateway`）と T2 の束ごとの口に渡し、段の名前で引いた口（`forStage`）へも引き継ぐ。
+   * **この欄は経路を自分で判断しない**——省けば偽（今の走りと同じ）。
+   */
+  readonly recordMalformedKinds?: boolean;
 }
 
 /** v1.1α の 1 回の生成の結果（v1 の結果に、境界の材料を任意の欄で足したもの。Issue #636） */
@@ -372,29 +379,48 @@ function sumCallCounts(counts: readonly CallCounts[]): CallCounts {
     },
     retries: { communication: 0, shape: 0, content: 0 },
   };
-  return counts.reduce<CallCounts>(
+  const attemptSum = counts.reduce<CallCounts["attempts"]>(
     (sum, item) => ({
-      attempts: {
-        started: sum.attempts.started + item.attempts.started,
-        responded: sum.attempts.responded + item.attempts.responded,
-        errors: sum.attempts.errors + item.attempts.errors,
-        cancelled_deadline: sum.attempts.cancelled_deadline + item.attempts.cancelled_deadline,
-        cancelled_timeout: sum.attempts.cancelled_timeout + item.attempts.cancelled_timeout,
-        not_started: {
-          deadline: sum.attempts.not_started.deadline + item.attempts.not_started.deadline,
-          budget: sum.attempts.not_started.budget + item.attempts.not_started.budget,
-          limit: sum.attempts.not_started.limit + item.attempts.not_started.limit,
-          timeout: sum.attempts.not_started.timeout + item.attempts.not_started.timeout,
-        },
-      },
-      retries: {
-        communication: sum.retries.communication + item.retries.communication,
-        shape: sum.retries.shape + item.retries.shape,
-        content: sum.retries.content + item.retries.content,
+      started: sum.started + item.attempts.started,
+      responded: sum.responded + item.attempts.responded,
+      errors: sum.errors + item.attempts.errors,
+      cancelled_deadline: sum.cancelled_deadline + item.attempts.cancelled_deadline,
+      cancelled_timeout: sum.cancelled_timeout + item.attempts.cancelled_timeout,
+      not_started: {
+        deadline: sum.not_started.deadline + item.attempts.not_started.deadline,
+        budget: sum.not_started.budget + item.attempts.not_started.budget,
+        limit: sum.not_started.limit + item.attempts.not_started.limit,
+        timeout: sum.not_started.timeout + item.attempts.not_started.timeout,
       },
     }),
-    zero,
+    zero.attempts,
   );
+  // 形の誤りの種類ごとの数は、束のどれかが欄を持つときだけ足す（0 でない鍵が無ければ欄を持たない。Issue #783）
+  const malformed = sumMalformedCounts(counts.map((item) => item.attempts.malformed));
+  return {
+    attempts: malformed === undefined ? attemptSum : { ...attemptSum, malformed },
+    retries: counts.reduce<CallCounts["retries"]>(
+      (sum, item) => ({
+        communication: sum.communication + item.retries.communication,
+        shape: sum.shape + item.retries.shape,
+        content: sum.content + item.retries.content,
+      }),
+      zero.retries,
+    ),
+  };
+}
+
+/** 形の誤りの種類ごとの数の合計（0 でない鍵が無ければ欄を持たない。Issue #783） */
+function sumMalformedCounts(counts: readonly (MalformedKindCounts | undefined)[]): MalformedKindCounts | undefined {
+  if (counts.every((item) => item === undefined)) return undefined;
+  const total = {} as Record<MalformedKindKey, number>;
+  let any = false;
+  for (const key of MALFORMED_KIND_KEYS) {
+    const sum = counts.reduce((acc, item) => acc + (item?.[key] ?? 0), 0);
+    total[key] = sum;
+    if (sum !== 0) any = true;
+  }
+  return any ? (total as MalformedKindCounts) : undefined;
 }
 
 /** 全件持ち越しの停止の問題（固定文。値を埋めない） */
@@ -472,7 +498,19 @@ function stageFailureAttribution(stage: StageId, failure: StageFailure, withLimi
     return { stage, kind, limit: { name: failure.limit, max: failure.max, actual: failure.actual } };
   }
   if (failure.kind === "invalidRequest") return { stage, kind, code: failure.code };
-  if ((failure.kind === "malformed" || failure.kind === "unmet") && failure.problems.length > 0) {
+  if (failure.kind === "malformed") {
+    // 選ばれた失敗が形の誤りの印を持つときだけ足す（段の検査が落とした malformed〔problems あり〕は印を持たない。Issue #783）
+    if (failure.malformedKind !== undefined) return { stage, kind, malformed_kind: failure.malformedKind };
+    if (failure.problems.length > 0) {
+      return {
+        stage,
+        kind,
+        problems: failure.problems.map((problem) => ({ field: problem.field, message: problem.message })),
+      };
+    }
+    return { stage, kind };
+  }
+  if (failure.kind === "unmet" && failure.problems.length > 0) {
     return {
       stage,
       kind,
@@ -810,6 +848,7 @@ async function runV11a(
     ...(callGate === undefined ? {} : { gate: callGate }),
     ...(input.stageEfforts === undefined ? {} : { stageEfforts: input.stageEfforts }),
     ...(input.stageOutputLimits === undefined ? {} : { stageOutputLimits: input.stageOutputLimits }),
+    ...(input.recordMalformedKinds === true ? { recordMalformedKinds: true } : {}),
     ...(requestLog === undefined ? {} : { observer: requestLog.observer() }),
   });
   // 判定の口（渡されたときだけ）を、この生成の予算に結び付けた包みで包む（v1 と同じ）。J4・J2 に渡す。旗 `v12.ids` の走りは
@@ -1679,6 +1718,7 @@ async function runV11a(
           ...(callGate === undefined ? {} : { gate: callGate }),
           ...(input.stageEfforts === undefined ? {} : { stageEfforts: input.stageEfforts }),
           ...(input.stageOutputLimits === undefined ? {} : { stageOutputLimits: input.stageOutputLimits }),
+          ...(input.recordMalformedKinds === true ? { recordMalformedKinds: true } : {}),
           ...(requestLog === undefined || unit === undefined ? {} : { observer: requestLog.observer(unit) }),
         }).forStage("test-spec");
         runs[bundle] = { gateway: bundleGatewayOf, meter: bundleMeter, unit, start, end: () => end };

@@ -493,6 +493,106 @@ describe("形・未達の失敗の帰属に、欄の名前と種類を写す（0
   });
 });
 
+// ── 形の誤りの種類を、段の記録と失敗の帰属に写す（Issue #783）──
+
+describe("形の誤りの種類を、段の記録と失敗の帰属に写す（Issue #783）", () => {
+  const MALFORMED_ZERO = { "no-body": 0, "not-json": 0, envelope: 0, "wrong-stage": 0, schema: 0, other: 0 };
+  const usage = {
+    calls: 1,
+    missing_usage_calls: 0,
+    input_tokens: 10,
+    cached_input_tokens: 2,
+    cache_write_tokens: 3,
+    output_tokens: 4,
+    reasoning_tokens: 1,
+  };
+
+  it("(6) 段の記録：0 でない鍵があるときだけ malformed の欄を持ち、集計の鍵 6 つを名指しで写す", () => {
+    const counts: CallCounts = {
+      attempts: { ...COUNTS.attempts, malformed: { ...MALFORMED_ZERO, schema: 1 } },
+      retries: COUNTS.retries,
+    };
+    const built = makeStageRecord("write", "failed", 12, usage, counts, "malformed");
+    expect(built.attempts.malformed).toEqual({ ...MALFORMED_ZERO, schema: 1 });
+    // 余分な鍵は写さない
+    const raw = {
+      attempts: { ...COUNTS.attempts, malformed: { ...MALFORMED_ZERO, schema: 1, extra: 9 } },
+      retries: COUNTS.retries,
+    } as unknown as CallCounts;
+    const named = makeStageRecord("write", "failed", 12, usage, raw, "malformed");
+    expect(Object.keys(named.attempts.malformed ?? {}).sort()).toEqual(Object.keys(MALFORMED_ZERO).sort());
+  });
+
+  it("(2') 0 だけの段・欄の無い段は、malformed の欄を持たない", () => {
+    const zeroCounts: CallCounts = {
+      attempts: { ...COUNTS.attempts, malformed: { ...MALFORMED_ZERO } },
+      retries: COUNTS.retries,
+    };
+    const zero = makeStageRecord("write", "ok", 12, usage, zeroCounts, null);
+    expect("malformed" in (zero.attempts as unknown as Record<string, unknown>)).toBe(false);
+    const absent = makeStageRecord("write", "ok", 12, usage, COUNTS, null);
+    expect("malformed" in (absent.attempts as unknown as Record<string, unknown>)).toBe(false);
+    // 段の記録の差でも同じ：記録と要約の両方で欄が無い
+    expect(Object.keys(buildRunRecord(record()).stages[0]?.attempts ?? {}).sort()).toEqual([...ATTEMPT_KEYS].sort());
+    expect(Object.keys(summary().stages[0]?.attempts ?? {}).sort()).toEqual([...ATTEMPT_KEYS].sort());
+  });
+
+  it("(2')(6) 段の差分の和：集計の鍵の合計は errors を超えない（保存と要約で値が残る）", () => {
+    const counts: CallCounts = {
+      attempts: { ...COUNTS.attempts, malformed: { ...MALFORMED_ZERO, "no-body": 1 } },
+      retries: COUNTS.retries,
+    };
+    const stageWithMalformed = makeStageRecord("write", "failed", 12, usage, counts, "malformed");
+    const withStage = buildRunRecord({ ...record(), stages: [stageWithMalformed] });
+    const sum = Object.values(withStage.stages[0]!.attempts.malformed!).reduce((a, b) => a + b, 0);
+    expect(sum).toBeLessThanOrEqual(withStage.stages[0]!.attempts.errors);
+    expect(summary().stages[0]?.attempts.malformed).toBeUndefined();
+  });
+
+  it("(6) 失敗の帰属：印を持つときだけ malformed_kind を写す（保存と要約の両方）", () => {
+    const withMark: RunRecord = { ...record(), failure: { stage: "repair", kind: "malformed", malformed_kind: "envelope" } };
+    const picked = buildRunRecord(withMark);
+    expect(picked.failure).toEqual({ stage: "repair", kind: "malformed", malformed_kind: "envelope" });
+    const built = buildSummary(withMark, {
+      run_id: "run-1",
+      verdict: "none",
+      assurance: "none",
+      duration_secs: 0,
+      provider_cost_usd: 0,
+      stop_class: "malformed",
+      exit_code: 1,
+    });
+    expect(built.failure).toEqual({ stage: "repair", kind: "malformed", malformed_kind: "envelope" });
+  });
+
+  it("(3) 印の無い malformed（段の検査の problems あり・other の側）は malformed_kind を持たない", () => {
+    const problem = { field: "declaration", message: "直した宣言は空でない文字列であること" };
+    const noMark = buildRunRecord({ ...record(), failure: { stage: "repair", kind: "malformed", problems: [problem] } });
+    expect(noMark.failure).toEqual({ stage: "repair", kind: "malformed", problems: [problem] });
+    expect("malformed_kind" in (noMark.failure ?? {})).toBe(false);
+    // 余分な欄（malformed_kind を持つ malformed に problems を渡す）は、どちらも写す
+    const both = buildRunRecord({
+      ...record(),
+      failure: { stage: "repair", kind: "malformed", problems: [problem], malformed_kind: "schema" },
+    });
+    expect(both.failure).toEqual({ stage: "repair", kind: "malformed", malformed_kind: "schema", problems: [problem] });
+  });
+
+  it("(2') 段の実試行の行（CallRequestLog）：error_kind が malformed の行だけ malformed_kind を持つ", () => {
+    const log = new CallRequestLog(0, () => 0);
+    const unit = log.beginUnit();
+    const observer = log.observer(unit);
+    observer.beginAttempt().settle({ kind: "error", errorKind: "malformed", malformedKind: "wrong-stage" });
+    observer.beginAttempt().settle({ kind: "error", errorKind: "malformed" });
+    observer.beginAttempt().settle({ kind: "error", errorKind: "network" });
+    log.finishUnit(unit, 0);
+    const rows = log.requests();
+    expect(rows[0]).toMatchObject({ error_kind: "malformed", malformed_kind: "wrong-stage" });
+    expect("malformed_kind" in (rows[1] ?? {})).toBe(false);
+    expect("malformed_kind" in (rows[2] ?? {})).toBe(false);
+  });
+});
+
 describe("段の識別子は v1 の並びを保ち、v1.1α の段を末尾に足す（07 §3・Issue #505）", () => {
   it("先頭 12 個は今までどおりの並びで、v1.1α の 7 個が末尾にある", () => {
     expect(STAGE_IDS.slice(0, 12)).toEqual([

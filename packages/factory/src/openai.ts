@@ -38,6 +38,7 @@ import type {
   LlmToolResponse,
   LlmTurn,
   LlmUsage,
+  MalformedKind,
 } from "./llm.js";
 import {
   ENVELOPE_RESULT_KEY,
@@ -104,14 +105,26 @@ export class OpenAiAdapterError extends Error {
   readonly status: number | undefined;
   /** 要求が不正なときの API の誤りの種類（例: `invalid_json_schema`）。無ければ `undefined` */
   readonly code: string | undefined;
+  /**
+   * 構造化出力の本文を形の誤り（`malformed`）とした種類の印（Issue #783）。**構造化出力の口**
+   * （`callStructuredWire`）で今の検査の順のまま付ける。付かない `malformed`（道具付きの要求の呼び出しの形・
+   * wire の JSON・外側・status の欠落・宣言の口）は `undefined`（共通の口が `other` として数える）。
+   */
+  readonly malformedKind: MalformedKind | undefined;
 
-  constructor(kind: OpenAiErrorKind, message: string, status?: number, code?: string) {
+  constructor(kind: OpenAiErrorKind, message: string, status?: number, code?: string, malformedKind?: MalformedKind) {
     super(message);
     this.name = "OpenAiAdapterError";
     this.kind = kind;
     this.status = status;
     this.code = code;
+    this.malformedKind = malformedKind;
   }
+}
+
+/** 構造化出力の本文の形の誤りを、種類の印つきで投げる（Issue #783。共通の口がこの印を数える） */
+function malformedWire(malformedKind: MalformedKind, message: string): OpenAiAdapterError {
+  return new OpenAiAdapterError("malformed", message, undefined, undefined, malformedKind);
 }
 
 /**
@@ -597,9 +610,9 @@ async function callStructuredWire<T>(
   requireCompleted(wire, usage);
   requireNoRefusal(wire);
   const text = extractOutputText(wire);
-  if (text === undefined) throw new OpenAiAdapterError("malformed", "構造化出力の本文がありません");
+  if (text === undefined) throw malformedWire("no-body", "構造化出力の本文がありません");
   const parsed = parseResponseJson(text, config.readFencedJson);
-  if (!parsed.ok) throw new OpenAiAdapterError("malformed", "構造化出力が JSON として読めません");
+  if (!parsed.ok) throw malformedWire("not-json", "構造化出力が JSON として読めません");
   const output =
     entry === undefined ? requireSchema(request.schema, parsed.value) : unwrapEnvelope(entry, parsed.value);
   return { output: output as T, usage };
@@ -609,7 +622,7 @@ async function callStructuredWire<T>(
 function requireSchema(schema: unknown, value: unknown): unknown {
   const schemaError = validateSchema(schema, value);
   if (schemaError !== undefined) {
-    throw new OpenAiAdapterError("malformed", `schema に合いません: ${schemaError}`);
+    throw malformedWire("schema", `schema に合いません: ${schemaError}`);
   }
   return value;
 }
@@ -622,14 +635,14 @@ function requireSchema(schema: unknown, value: unknown): unknown {
  */
 function unwrapEnvelope(entry: StageEnvelopeEntry, value: unknown): unknown {
   if (!isRecord(value)) {
-    throw new OpenAiAdapterError("malformed", "封筒の応答が object ではありません");
+    throw malformedWire("envelope", "封筒の応答が object ではありません");
   }
   const result = value[ENVELOPE_RESULT_KEY];
   if (!isRecord(result)) {
-    throw new OpenAiAdapterError("malformed", "封筒の応答に result がありません");
+    throw malformedWire("envelope", "封筒の応答に result がありません");
   }
   if (result[ENVELOPE_STAGE_KEY] !== entry.stage) {
-    throw new OpenAiAdapterError("malformed", `封筒の stage が違います（期待 ${entry.stage}）`);
+    throw malformedWire("wrong-stage", `封筒の stage が違います（期待 ${entry.stage}）`);
   }
   requireSchema(buildStageBranch(entry), result);
   const output: Record<string, unknown> = { ...result };

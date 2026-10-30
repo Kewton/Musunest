@@ -574,6 +574,57 @@ describe("囲みの反例：どれも今の分類のまま（Issue #777）", () 
   });
 });
 
+// ── 2''. 囲みを通る形の誤りにも、種類の印を付ける（Issue #783）──────────────
+
+describe("囲みを通る本文の形の誤りにも、種類の印を付ける（Issue #783。Ollama は囲みを読む）", () => {
+  const ENVELOPE_REQUEST: LlmStructuredRequest = {
+    instructions: "規則",
+    documents: ["文書"],
+    rules: [],
+    input: "依頼文",
+    schemaName: REVERSE_CHECK_SCHEMA_NAME,
+    schema: REVERSE_CHECK_SCHEMA,
+    maxOutputTokens: 128,
+  };
+  const markOf = async (text: string, request: LlmStructuredRequest = STRUCTURED_REQUEST) => {
+    const { fetch } = recordingFetch(() => jsonResponse(completed(outputText(text))));
+    const error = await captureError(() => ollamaClient(fetch).callStructured(request));
+    expect(error.kind).toBe("malformed");
+    return error.malformedKind;
+  };
+
+  it("囲みが 2 組（規則に合わない）：not-json", async () => {
+    const two = `${fenced(JSON.stringify({ items: [] }))}\n${fenced(JSON.stringify({ items: [] }))}`;
+    expect(await markOf(two)).toBe("not-json");
+  });
+
+  it("囲みの中身が JSON でない：not-json", async () => {
+    expect(await markOf(fenced("これは JSON ではない", "json"))).toBe("not-json");
+  });
+
+  it("囲みの中身が schema に合わない：schema", async () => {
+    expect(await markOf(fenced(JSON.stringify({ items: ["x"] }), "json"))).toBe("schema");
+  });
+
+  it("封筒の欠落は envelope、stage 違いは wrong-stage", async () => {
+    expect(await markOf(fenced(JSON.stringify({ uncovered: [] })), ENVELOPE_REQUEST)).toBe("envelope");
+    expect(await markOf(fenced(JSON.stringify({ result: { stage: "design", uncovered: [] } })), ENVELOPE_REQUEST)).toBe(
+      "wrong-stage",
+    );
+  });
+
+  it("囲みの外に文字がある（規則に合わない）本文も：not-json", async () => {
+    expect(await markOf(`答えはこちら:\n${fenced(JSON.stringify({ items: [] }))}`)).toBe("not-json");
+  });
+
+  it("道具付きの最後の答えの本文の誤りには印を付けない（other の側）", async () => {
+    const { fetch } = recordingFetch(() => jsonResponse(completed(outputText("これは JSON ではない"))));
+    const error = await captureError(() => ollamaClient(fetch).callWithTools(TOOL_REQUEST));
+    expect(error.kind).toBe("malformed");
+    expect(error.malformedKind).toBeUndefined();
+  });
+});
+
 // ── 2'''. 囲みの開始行の余分なバッククォート（Issue #777 レビュー R1）──────────────
 
 describe("囲みの開始行の余分なバッククォートは始まりとみなさない（Issue #777 レビュー R1）", () => {
