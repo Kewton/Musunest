@@ -2109,6 +2109,19 @@ export function groupConditionsProblem(cond, group) {
 export const comparableParams = (p) => { if (!isObj(p)) return null; const { pipeline: _p, stage_output_limits_v11a: _l, v12_flags: _f, stage_efforts: _e, ...rest } = p; return rest; };
 /** 群の段ごとの effort（#664。条件の params.stage_efforts。どちらかの群が持つときだけ、両群の採点の欄に並べる。持たない群は null） */
 const stageEffortsOf = (cond) => (isObj(cond?.params?.stage_efforts) ? cond.params.stage_efforts : null);
+/**
+ * #776 レビュー R3：Ollama の段の出力の上限の表（`params.ollama_stage_output_limits`）を、キーの並び順に依らない形
+ * （キー昇順）へ正規化する。計測の道具（run-agent.mjs）は読んだ時点で正規化して書くが、採点は書き換えた出力先や
+ * 手で置いた条件も読むので、比べる前にここでも正規化する。表を持たない条件・欄はそのまま返す
+ */
+const canonicalOllamaLimits = (table) => (isObj(table) ? Object.fromEntries(Object.keys(table).sort().map((k) => [k, table[k]])) : table);
+/** 条件の params の写し（上限の表だけキー昇順に正規化。ほかの欄とキーの位置は変えない） */
+const withCanonicalLimits = (p) =>
+  isObj(p) && isObj(p.ollama_stage_output_limits) ? { ...p, ollama_stage_output_limits: canonicalOllamaLimits(p.ollama_stage_output_limits) } : p;
+/** 2 つの上限表が同じか（キーの並び順に依らない。null は「表を持たない群」）。Issue #776 レビュー R3 */
+const sameOllamaLimits = (a, b) =>
+  JSON.stringify(a === null || a === undefined ? null : canonicalOllamaLimits(a)) ===
+  JSON.stringify(b === null || b === undefined ? null : canonicalOllamaLimits(b));
 
 /** 全体の予算の打ち切り（D17）：済みの額＋走行中の本の予約＋新しく起こす 1 本の予約 ≤ 上限のときだけ起こす（等しければ起こす）。小数の誤差を避けて 100 万分の 1 USD の整数で比べる */
 const microUsd = (x) => Math.round(x * 1e6);
@@ -2312,11 +2325,12 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
     groups[g] = { dir, cond };
   }
   if (groups[baseGroup].cond.signature === groups[candGroup].cond.signature) throw mismatch("両群の条件の署名が同じ");
-  // #776：Ollama の段の出力の上限の表（params.ollama_stage_output_limits）は比較から外さない（同じ表を求める）。違えば専用の符号で断る
+  // #776：Ollama の段の出力の上限の表（params.ollama_stage_output_limits）は比較から外さない（同じ表を求める）。違えば専用の符号で断る。
+  // レビュー R3：同じ表の並び順違いは同じとみなす（キー昇順に正規化してから比べる）
   const ollamaLimits = GROUPS.map((g) => groups[g].cond.params?.ollama_stage_output_limits ?? null);
-  if (ollamaLimits.some((t) => JSON.stringify(t) !== JSON.stringify(ollamaLimits[0]))) throw refusal("群の Ollama の段の出力の上限の表が違う [compare:ollama-limits-differ]");
+  if (ollamaLimits.some((t) => !sameOllamaLimits(t, ollamaLimits[0]))) throw refusal("群の Ollama の段の出力の上限の表が違う [compare:ollama-limits-differ]");
   // 共通の比較の形（経路・v1.1α の上限の欄・旗の組を除く）
-  const core = (p) => { const rest = comparableParams(p); return rest === null ? null : JSON.stringify(rest); };
+  const core = (p) => { const rest = comparableParams(p); return rest === null ? null : JSON.stringify(withCanonicalLimits(rest)); };
   if (core(groups[baseGroup].cond.params) === null || core(groups[baseGroup].cond.params) !== core(groups[candGroup].cond.params)) throw mismatch("群の params");
   const plannedIds = pv.pairs.map((p) => `${p.pid}-r${p.r}`);
   for (const g of GROUPS) if (runDirs(groups[g].dir).some((d) => !plannedIds.includes(d))) throw mismatch("予定外の本");
@@ -3016,12 +3030,13 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
   const [before, after] = STAGE_COMPARE_GROUPS;
   if (groups[before].cond.signature === groups[after].cond.signature) throw mismatch("両群の条件の署名が同じ");
   if (groups[before].cond.schema !== groups[after].cond.schema) throw mismatch("群の条件の版");
-  // #776：Ollama の段の出力の上限の表（params.ollama_stage_output_limits）は比較から外さない（同じ表を求める）。違えば専用の符号で断る
+  // #776：Ollama の段の出力の上限の表（params.ollama_stage_output_limits）は比較から外さない（同じ表を求める）。違えば専用の符号で断る。
+  // レビュー R3：同じ表の並び順違いは同じとみなす（キー昇順に正規化してから比べる）
   const ollamaLimits = STAGE_COMPARE_GROUPS.map((g) => groups[g].cond.params?.ollama_stage_output_limits ?? null);
-  if (ollamaLimits.some((t) => JSON.stringify(t) !== JSON.stringify(ollamaLimits[0]))) throw refusal("群の Ollama の段の出力の上限の表が違う [compare:ollama-limits-differ]");
+  if (ollamaLimits.some((t) => !sameOllamaLimits(t, ollamaLimits[0]))) throw refusal("群の Ollama の段の出力の上限の表が違う [compare:ollama-limits-differ]");
   // 両群の params（範囲・上流の条件の指紋・本ごとの上流の入力の SHA を含む）と入力なしの本が同じ（上流を固定して効果を局所化する前提）
   // 段ごとの effort（#664）は群の違いとして外す（両群に同じ値を求めない。値は採点の群の欄に並べる）
-  const core = (p) => { if (!isObj(p)) return null; const { stage_output_limits_v11a: _l, stage_efforts: _e, ...rest } = p; return JSON.stringify(rest); };
+  const core = (p) => { if (!isObj(p)) return null; const { stage_output_limits_v11a: _l, stage_efforts: _e, ...rest } = p; return JSON.stringify(withCanonicalLimits(rest)); };
   if (core(groups[before].cond.params) === null || core(groups[before].cond.params) !== core(groups[after].cond.params)) throw mismatch("群の params");
   if (JSON.stringify(groups[before].cond.stage_input_absent) !== JSON.stringify(groups[after].cond.stage_input_absent)) throw mismatch("群の入力なしの本");
   const plannedIds = pv.pairs.map((p) => `${p.pid}-r${p.r}`);

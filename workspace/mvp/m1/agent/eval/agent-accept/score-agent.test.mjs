@@ -5641,3 +5641,19 @@ test("#776 比較の群 v1.1a,v1.2：Ollama の表は v1.2 の群だけが持つ
     assert.ok(r.stderr.includes("[compare:ollama-limits-differ]"), r.stderr);
   });
 });
+
+test("#776 レビュー R3 段だけの対の比較：比較元の表だけキーを逆順にした同じ表は通り（キー昇順に正規化して比べる）、値が違えば今のとおり compare:ollama-limits-differ で断る", async () => {
+  await withOut(async (base) => {
+    // 比較元だけキーの並びを逆にした同じ表（値は同じ）
+    const REVERSED = { repair: 65536, "semantic-check": 32768, "decl-check": 32768 };
+    const passOf = () => true;
+    const same = stageCompareFixture638(base, "s776-r3-same", { passOf, limitsOf: (g) => (g === "before" ? REVERSED : OLLAMA_TABLE_776) });
+    const differ = stageCompareFixture638(base, "s776-r3-differ", { passOf, limitsOf: (g) => (g === "before" ? { ...REVERSED, repair: 65537 } : OLLAMA_TABLE_776) });
+    const exec = (out) => spawnSync(process.execPath, [scoreFile, repo, out, "--compare"], { encoding: "utf8" });
+    const r = exec(same);
+    assert.equal(r.status, 0, r.stderr);
+    const rb = exec(differ);
+    assert.equal(rb.status, 3, rb.stderr);
+    assert.ok(rb.stderr.includes("[compare:ollama-limits-differ]"), rb.stderr);
+  });
+});
