@@ -46,7 +46,11 @@ import type {
   LlmToolResponse,
   LlmTurn,
   LlmUsage,
+  MalformedKind,
+  MalformedKindCounts,
+  MalformedKindKey,
 } from "./llm.js";
+import { isMalformedKind, MALFORMED_KIND_KEYS } from "./llm.js";
 
 /**
  * 段の出力の上限（`max_output_tokens`）の上書きの表（段 → 値。Issue #776）。
@@ -207,7 +211,15 @@ export interface CategorizedCallError {
 export type CallAttemptEnd =
   | { readonly kind: "response"; readonly usage: LlmUsage | undefined }
   | { readonly kind: "incomplete"; readonly usage: LlmUsage | undefined }
-  | { readonly kind: "error"; readonly errorKind: CallErrorKind | "invalid-request" }
+  | {
+      readonly kind: "error";
+      readonly errorKind: CallErrorKind | "invalid-request";
+      /**
+       * 形の誤り（`malformed`）の種類の印（表の値のときだけ。Issue #783）。口の設定が on で、例外が印を持つときだけ載る。
+       * #748 の行は、`error_kind` が malformed のときだけこの印を `malformed_kind` として写す。
+       */
+      readonly malformedKind?: MalformedKind;
+    }
   /** 呼び出しごとの timeout で打ち切った */
   | { readonly kind: "timeout" }
   /** ジョブの締切で打ち切った */
@@ -284,11 +296,17 @@ export function isRetryableCallError(error: CategorizedCallError): boolean {
 /**
  * 試行が例外で終わったときの、観測の口へ渡す分類（Issue #748）。未完了・要求の不正を分け、
  * 残りは adapter の種類をそのまま写す。**例外の文は写さない**。
+ *
+ * Issue #783：口の設定（`recordMalformedKinds`）が on で、分類が `malformed` のときは、例外の
+ * `malformedKind`（表の値）を印として載せる——#748 の行に `malformed_kind` を残せるようにする。
  */
-function attemptEndOfError(error: unknown): CallAttemptEnd {
+function attemptEndOfError(error: unknown, recordMalformedKinds: boolean): CallAttemptEnd {
   if (isIncompleteResponseError(error)) return { kind: "incomplete", usage: error.usage };
   if (isInvalidRequestError(error)) return { kind: "error", errorKind: "invalid-request" };
-  return { kind: "error", errorKind: categorizeCallError(error).kind };
+  const errorKind = categorizeCallError(error).kind;
+  if (!recordMalformedKinds || errorKind !== "malformed") return { kind: "error", errorKind };
+  const malformedKind = malformedKindOfError(error);
+  return malformedKind === undefined ? { kind: "error", errorKind } : { kind: "error", errorKind, malformedKind };
 }
 
 /**
@@ -325,6 +343,12 @@ export type CallResult<T> =
       readonly attempts: number;
       /** HTTP の誤りの状態コード（それ以外は持たない） */
       readonly status?: number;
+      /**
+       * その試行の形の誤り（`malformed`）の印（種類。Issue #783）。**口の設定（`recordMalformedKinds`）が on で、
+       * 印が表の値のときだけ**持つ——`other`（印の無い・表に無い印の malformed）と off の走りは持たない。
+       * 段はこの欄を失敗の帰属へ写す（stages/prompt.ts）。
+       */
+      readonly malformedKind?: MalformedKind;
     };
 
 /** 共通の口の設定 */
@@ -373,6 +397,13 @@ export interface CallGatewayOptions {
    * 省けば何も告げない（今の振る舞いと同じ）。要求の wire・中断の合図・計量・予約・再送は変えない。
    */
   readonly observer?: CallAttemptObserver;
+  /**
+   * 形の誤り（adapter の構造化出力の本文）の種類を数えるか（Issue #783）。既定は偽（今の振る舞いと同じ）。
+   * 真の口だけが、実試行の終端の誤りが `malformed` のとき、例外の `malformedKind`（表の値）を印、
+   * そうでなければ `other` として `AttemptCounts.malformed` に足し、失敗の結果と観測の行に印を載せる。
+   * **分類・再送の規則・試行の数え方は変えない。** 段の名前で引いた口（`forStage`）へ引き継ぐ。
+   */
+  readonly recordMalformedKinds?: boolean;
 }
 
 /** 口の計（試行・再試行・道具の数。段の名前で引いた口と共有する。Issue #446・#664） */
@@ -393,6 +424,8 @@ interface GatewayCounters {
   // 形・中身の再試行（段が告げる。Issue #446）
   retriesShape: number;
   retriesContent: number;
+  // 形の誤りの種類ごとの数（口の設定が on のときだけ足す。Issue #783）
+  malformedKinds: Record<MalformedKindKey, number>;
 }
 
 function newGatewayCounters(): GatewayCounters {
@@ -411,7 +444,24 @@ function newGatewayCounters(): GatewayCounters {
     notStartedTimeout: 0,
     retriesShape: 0,
     retriesContent: 0,
+    malformedKinds: Object.fromEntries(MALFORMED_KIND_KEYS.map((key) => [key, 0])) as Record<MalformedKindKey, number>,
   };
+}
+
+/** 形の誤りの種類ごとの数を、集計の鍵 6 つを名指しで写す（余分な鍵は写さない。Issue #783） */
+function pickMalformedCounts(counts: Record<MalformedKindKey, number>): MalformedKindCounts {
+  return Object.fromEntries(MALFORMED_KIND_KEYS.map((key) => [key, counts[key]])) as MalformedKindCounts;
+}
+
+/**
+ * 例外から、構造化出力の本文の形の誤りの印（種類）を読む（Issue #783）。口は adapter の型に依存しないので、
+ * `malformedKind` の**形で**見分け、**共有の表（`MALFORMED_KINDS`）で検証する**——表に無い値は `undefined`
+ * （呼ぶ側が `other` として数える）。
+ */
+function malformedKindOfError(error: unknown): MalformedKind | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const value = (error as { malformedKind?: unknown }).malformedKind;
+  return isMalformedKind(value) ? value : undefined;
 }
 
 /**
@@ -493,6 +543,14 @@ export interface AttemptCounts {
   readonly cancelled_timeout: number;
   /** 未着手（実呼び出しを始めなかった。理由別） */
   readonly not_started: NotStartedCounts;
+  /**
+   * 形の誤り（adapter の構造化出力の本文）の**種類ごとの数**（集計の鍵は印 5 つ＋ `other`。Issue #783）。
+   * 口の設定（`recordMalformedKinds`）が on で、**実試行の終端の誤りが `malformed`** のときだけ、その印
+   * （表の値なら印、そうでなければ `other`）を 1 つ足す。打ち切りのあとに遅れて返った応答（`late`）では足さない。
+   * **0 でない鍵が無いときは欄を持たない**（今の記録と同じ形。差分の判定は `attemptsDelta` と
+   * 段の記録の写し（record.ts）が行う）。
+   */
+  readonly malformed?: MalformedKindCounts;
 }
 
 /**
@@ -538,6 +596,7 @@ export type RetryKind = "shape" | "content";
 
 /** 2 つの時点の差（試行の終端。段の前後で取って差を出す。Issue #446） */
 export function attemptsDelta(before: AttemptCounts, after: AttemptCounts): AttemptCounts {
+  const malformed = malformedCountsDelta(before.malformed, after.malformed);
   return {
     started: after.started - before.started,
     responded: after.responded - before.responded,
@@ -550,7 +609,27 @@ export function attemptsDelta(before: AttemptCounts, after: AttemptCounts): Atte
       limit: after.not_started.limit - before.not_started.limit,
       timeout: after.not_started.timeout - before.not_started.timeout,
     },
+    ...(malformed === undefined ? {} : { malformed }),
   };
+}
+
+/**
+ * 形の誤りの種類ごとの数の差（Issue #783）。**0 でない鍵が無ければ欄を持たない**——累計が 0 でない口でも、
+ * その区間の差分が 0 なら欄を出さない（前の区間の数を引き継がない）。`after` に欄が無ければ差も無い。
+ */
+function malformedCountsDelta(
+  before: MalformedKindCounts | undefined,
+  after: MalformedKindCounts | undefined,
+): MalformedKindCounts | undefined {
+  if (after === undefined) return undefined;
+  const counts = {} as Record<MalformedKindKey, number>;
+  let any = false;
+  for (const key of MALFORMED_KIND_KEYS) {
+    const delta = after[key] - (before?.[key] ?? 0);
+    counts[key] = delta;
+    if (delta !== 0) any = true;
+  }
+  return any ? (counts as MalformedKindCounts) : undefined;
 }
 
 /** 2 つの時点の差（再試行の数。段の前後で取って差を出す。Issue #446） */
@@ -612,6 +691,8 @@ export class CallGateway {
   readonly #stageOutputLimits: StageOutputLimits;
   /** 実試行の観測器（省けば観測しない。Issue #748） */
   readonly #observer: CallAttemptObserver | undefined;
+  /** 形の誤りの種類を数えるか（既定は偽。Issue #783） */
+  readonly #recordMalformedKinds: boolean;
   /** 段の名前で引いた口の元の口（元の口では自分自身。Issue #664） */
   #root: CallGateway = this;
   /** 要求に載せる effort（段の名前で引いた口だけが持つ。無ければ載せない＝今の要求。構造化と道具付きの両方。Issue #664・#751） */
@@ -642,6 +723,7 @@ export class CallGateway {
     this.#stageEfforts = options.stageEfforts ?? {};
     this.#stageOutputLimits = options.stageOutputLimits ?? {};
     this.#observer = options.observer;
+    this.#recordMalformedKinds = options.recordMalformedKinds === true;
   }
 
   /** 推論の effort（段の出力の上限の出所。§2） */
@@ -680,6 +762,7 @@ export class CallGateway {
       ...(root.#explicitCallTimeoutMs === undefined ? {} : { callTimeoutMs: root.#explicitCallTimeoutMs }),
       ...(root.#gate === undefined ? {} : { gate: root.#gate }),
       ...(root.#observer === undefined ? {} : { observer: root.#observer }),
+      ...(root.#recordMalformedKinds ? { recordMalformedKinds: true } : {}),
       stageOutputLimits: root.#stageOutputLimits,
     });
     view.#root = root;
@@ -714,7 +797,7 @@ export class CallGateway {
 
   /** 試行の終端の計（いまの計。段の前後で差を取る。Issue #446） */
   get attempts(): AttemptCounts {
-    return {
+    const counts: AttemptCounts = {
       started: this.#counts.attemptsStarted,
       responded: this.#counts.attemptsResponded,
       errors: this.#counts.attemptsErrors,
@@ -727,6 +810,8 @@ export class CallGateway {
         timeout: this.#counts.notStartedTimeout,
       },
     };
+    // 形の誤りの種類ごとの数は、口の設定が on のときだけ持つ（off の走りは今の形のまま。Issue #783）
+    return this.#recordMalformedKinds ? { ...counts, malformed: pickMalformedCounts(this.#counts.malformedKinds) } : counts;
   }
 
   /** 再試行の数の計（種類別。いまの計。段の前後で差を取る。Issue #446） */
@@ -871,12 +956,20 @@ export class CallGateway {
         // この試行の終端は**誤り**である——やり直してよい誤りでも、この試行は誤りで終わっている
         // （Issue #446）。やり直すのは次の試行からで、そちらも別に数える。
         this.#counts.attemptsErrors += 1;
+        // 形の誤りの種類を数える（口の設定が on のときだけ。Issue #783）。印が表の値ならその印、そうでなければ
+        // `other`。**誤りの文・値・本文は数にも観測の口にも渡さない**——数えるのは固定の鍵だけである。
+        const malformedKind =
+          this.#recordMalformedKinds && classified.kind === "malformed" ? malformedKindOfError(error) : undefined;
+        if (this.#recordMalformedKinds && classified.kind === "malformed") {
+          this.#counts.malformedKinds[malformedKind ?? "other"] += 1;
+        }
         if (!isRetryableCallError(classified)) {
           return {
             kind: "failed",
             errorKind: classified.kind,
             attempts,
             ...(classified.status === undefined ? {} : { status: classified.status }),
+            ...(malformedKind === undefined ? {} : { malformedKind }),
           };
         }
         // 例外のときは usage が分からないので、予約は残したまま次を試す（§1.5）
@@ -934,7 +1027,7 @@ export class CallGateway {
               else observation.late(result.usage);
             },
             (error) => {
-              const end = attemptEndOfError(error);
+              const end = attemptEndOfError(error, this.#recordMalformedKinds);
               if (cancelled === undefined) observation.settle(end);
               else if (end.kind === "incomplete") observation.late(end.usage);
             },

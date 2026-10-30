@@ -721,11 +721,18 @@ const numOf = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 /** 数の写像（試行・再試行・裁定の数）：工場の record.ts の既知の鍵だけを、どの階層でも名指しで写す（値は有限の数か null。未知の鍵は写さない） */
 const NOT_STARTED_KEYS = ["deadline", "budget", "limit", "timeout"], RETRY_KEYS = ["communication", "shape", "content"], ARBITRATION_KEYS = ["upheld", "overturned", "undecidable"];
 const ATTEMPT_NUMBER_KEYS = ["started", "responded", "errors", "cancelled_deadline", "cancelled_timeout"];
+// #783：形の誤りの種類。集計の鍵は印 5 つに other を足した 6 つ（段の記録の attempts.malformed を名指しで写す）。
+// 失敗の帰属の malformed_kind は印 5 つだけを写し、表に無い値は unknown（record.ts と同じ値）
+const MALFORMED_KINDS = ["no-body", "not-json", "envelope", "wrong-stage", "schema"];
+const MALFORMED_KEYS = [...MALFORMED_KINDS, "other"];
 const numsOf = (x, keys) => (!isRec(x) ? null : Object.fromEntries(keys.map((k) => [k, numOf(x[k])])));
-const attemptsOf = (x) => (!isRec(x) ? null : { ...numsOf(x, ATTEMPT_NUMBER_KEYS), not_started: numsOf(x.not_started, NOT_STARTED_KEYS) });
+// 元の欄が無いときは新しい欄を作らない（null・unknown の欄も足さない。Issue #783）
+const attemptsOf = (x) => (!isRec(x) ? null : { ...numsOf(x, ATTEMPT_NUMBER_KEYS), not_started: numsOf(x.not_started, NOT_STARTED_KEYS), ...(isRec(x.malformed) ? { malformed: numsOf(x.malformed, MALFORMED_KEYS) } : {}) });
 const STAGE_NUMBERS = ["duration_ms", "calls", "missing_usage_calls", "input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens"];
 const stageOf = (st) => ({ stage: enumOf(STAGE_IDS, st?.stage ?? null) ?? "unknown", operation: enumOf(["redo-design"], st?.operation ?? null), status: enumOf(["ok", "failed"], st?.status ?? null), ...Object.fromEntries(STAGE_NUMBERS.map((k) => [k, numOf(st?.[k])])), attempts: attemptsOf(st?.attempts), retries: numsOf(st?.retries, RETRY_KEYS), failure_kind: enumOf(FAILURE_KINDS, st?.failure_kind ?? null) });
-const failureOf = (f) => (!isRec(f) ? null : { stage: enumOf(STAGE_IDS, f.stage ?? null) ?? "unknown", kind: enumOf(FAILURE_KINDS, f.kind ?? null) ?? "unknown", code: f.code === undefined ? null : "present", problems: Array.isArray(f.problems) ? f.problems.length : 0 });
+// 失敗の帰属の形の誤りの印（印 5 つだけ。表に無い値は unknown。元の欄が無ければ足さない。Issue #783）
+const malformedKindOf = (v) => (v === undefined ? null : MALFORMED_KINDS.includes(v) ? v : "unknown");
+const failureOf = (f) => (!isRec(f) ? null : { stage: enumOf(STAGE_IDS, f.stage ?? null) ?? "unknown", kind: enumOf(FAILURE_KINDS, f.kind ?? null) ?? "unknown", code: f.code === undefined ? null : "present", problems: Array.isArray(f.problems) ? f.problems.length : 0, ...(f.malformed_kind === undefined ? {} : { malformed_kind: malformedKindOf(f.malformed_kind) }) });
 const SUMMARY_NUMBERS = ["score", "duration_secs", "provider_cost_usd", "directive_round", "exit_code", "budget_remaining_usd", "budget_reserved_usd", "missing_usage_calls"];
 const summaryOf = (s) => ({
   schema_version: "commandagent.headless-summary/v1", verdict: verdictOf(s.verdict), stop_class: enumOf(STOP_VALUES, s.stop_class), stop_reason: enumOf(STOP_VALUES, s.stop_reason),
@@ -736,7 +743,8 @@ const planCostOf = (c) => (c === null ? null : { schema_version: "musunest-facto
 /** 段の走りの記録（#545。工場の --out の stage-run.json）から起動の記録へ写す欄：段の通過（真偽）・到達した段・停止（段と種類）・費用・終了コード。読めなければ null */
 const stageRunOf = (rec) => (!isRec(rec) ? null : {
   stage_pass: typeof rec.stage_pass === "boolean" ? rec.stage_pass : null, reached_stage: enumOf(STAGE_IDS, rec.reached_stage ?? null),
-  stopped: !isRec(rec.stopped) ? null : { stage: enumOf(STAGE_IDS, rec.stopped.stage ?? null) ?? "unknown", kind: enumOf(FAILURE_KINDS, rec.stopped.kind ?? null) ?? "unknown" },
+  // 停止の原因の形の誤りの印は、記録の欄があるときだけ写す（表に無い値は unknown。Issue #783）
+  stopped: !isRec(rec.stopped) ? null : { stage: enumOf(STAGE_IDS, rec.stopped.stage ?? null) ?? "unknown", kind: enumOf(FAILURE_KINDS, rec.stopped.kind ?? null) ?? "unknown", ...(rec.stopped.malformed_kind === undefined ? {} : { malformed_kind: malformedKindOf(rec.stopped.malformed_kind) }) },
   provider_cost_usd: numOf(rec.provider_cost_usd), exit_code: numOf(rec.exit_code),
 });
 

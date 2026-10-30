@@ -1523,6 +1523,102 @@ describe("誤りの分類（02 §2.2）", () => {
   });
 });
 
+// ── 3.8. 構造化出力の形の誤りの種類の印（Issue #783）────────────────────────
+//
+// adapter は、構造化出力の本文を形の誤りとしたとき、**今の検査の順のまま**投げる所に印（`malformedKind`）を付ける。
+// 印は 5 つ：`no-body`・`not-json`・`envelope`・`wrong-stage`・`schema`。付かない malformed（道具付きの宣言の
+// 本文・wire の JSON・status の欠落）は `undefined`（共通の口が `other` として数える）。
+describe("構造化出力の形の誤りに、種類の印を付ける（Issue #783）", () => {
+  /** 封筒ありの段（要求の schema は封筒の枝と等しい）で印を取る */
+  async function envelopeMarkOf(reply: () => Response | Promise<Response>): Promise<string | undefined> {
+    const { fetch } = recordingFetch(reply);
+    const error = await captureError(() =>
+      clientWith(fetch).callStructured(stageRequest(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_LIST_SCHEMA)),
+    );
+    expect(error.kind).toBe("malformed");
+    return error.malformedKind;
+  }
+
+  it("本文が無い：no-body", async () => {
+    expect(await envelopeMarkOf(() => jsonResponse(completed([], USAGE_WIRE)))).toBe("no-body");
+  });
+
+  it("本文が JSON として読めない：not-json", async () => {
+    expect(await envelopeMarkOf(() => jsonResponse(completed(outputText("これは JSON ではない"))))).toBe("not-json");
+  });
+
+  it("封筒の外側が object でない：envelope", async () => {
+    expect(await envelopeMarkOf(() => jsonResponse(completed(outputText(JSON.stringify(["配列"])))))).toBe("envelope");
+  });
+
+  it("result が object でない：envelope", async () => {
+    expect(await envelopeMarkOf(() => jsonResponse(completed(outputText(JSON.stringify({ result: "文字列" })))))).toBe("envelope");
+  });
+
+  it("封筒の stage がその段でない：wrong-stage", async () => {
+    const wrong = JSON.stringify(enveloped(REVERSE_CHECK_SCHEMA_NAME, REVERSE_OUTPUT));
+    expect(await envelopeMarkOf(() => jsonResponse(completed(outputText(wrong))))).toBe("wrong-stage");
+  });
+
+  it("封筒の段の枝の schema に合わない：schema", async () => {
+    const bad = JSON.stringify(enveloped(REQUIREMENTS_SCHEMA_NAME, { requirements: "文字列" }));
+    expect(await envelopeMarkOf(() => jsonResponse(completed(outputText(bad))))).toBe("schema");
+  });
+
+  it.each([
+    { name: "本文が無い", mark: "no-body", reply: () => jsonResponse(completed([], USAGE_WIRE)) },
+    { name: "JSON として読めない", mark: "not-json", reply: () => jsonResponse(completed(outputText("これは JSON ではない"))) },
+    { name: "要求の schema に合わない", mark: "schema", reply: () => jsonResponse(completed(outputText(JSON.stringify({ items: ["文字列"] })))) },
+  ])("封筒の外の段（判定の口の schema）：$name に印 $mark を付ける", async ({ mark, reply }) => {
+    const { fetch } = recordingFetch(reply);
+    const error = await captureError(() =>
+      clientWith(fetch).callStructured(stageRequest("judge-answers", SCHEMA)),
+    );
+    expect(error.kind).toBe("malformed");
+    expect(error.malformedKind).toBe(mark);
+  });
+
+  it("印を付けない malformed：道具付きの宣言の本文・wire の JSON・status の欠落", async () => {
+    const toolsNoBody = await captureError(() =>
+      clientWith(recordingFetch(() => jsonResponse(completed([], USAGE_WIRE))).fetch).callWithTools(TOOL_REQUEST),
+    );
+    expect(toolsNoBody.kind).toBe("malformed");
+    expect(toolsNoBody.malformedKind).toBeUndefined();
+
+    const wireNotJson = await captureError(() =>
+      clientWith(recordingFetch(() => new Response("これは JSON ではない", { status: 200 })).fetch).callStructured(
+        STRUCTURED_REQUEST,
+      ),
+    );
+    expect(wireNotJson.kind).toBe("malformed");
+    expect(wireNotJson.malformedKind).toBeUndefined();
+
+    const noStatus = await captureError(() =>
+      clientWith(
+        recordingFetch(() =>
+          jsonResponse({ output: outputText(JSON.stringify(enveloped(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_OUTPUT))) }),
+        ).fetch,
+      ).callStructured(stageRequest(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_LIST_SCHEMA)),
+    );
+    expect(noStatus.kind).toBe("malformed");
+    expect(noStatus.malformedKind).toBeUndefined();
+  });
+
+  it("道具の引数の誤り（toolArguments）は malformed ではなく、印も持たない", async () => {
+    const error = await captureError(() =>
+      clientWith(
+        recordingFetch(() =>
+          jsonResponse(
+            completed([{ type: "function_call", call_id: "call-1", name: "staticCheck", arguments: "これは JSON ではない" }]),
+          ),
+        ).fetch,
+      ).callWithTools(TOOL_REQUEST),
+    );
+    expect(error.kind).toBe("toolArguments");
+    expect(error.malformedKind).toBeUndefined();
+  });
+});
+
 // ── 7. 環境変数を読まない（02 §2.1・R-15）────────────────────────────
 
 describe("adapter は環境変数を読まない（02 §2.1・R-15）", () => {

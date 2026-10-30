@@ -43,6 +43,8 @@ export interface GatewayOptions {
   readonly deadline?: number;
   /** 推論の effort（段の出力の上限を試すのに使う。既定 `high`） */
   readonly effort?: string;
+  /** 形の誤りの種類を数えるか（Issue #783。既定は偽＝今の口と同じ） */
+  readonly recordMalformedKinds?: boolean;
 }
 
 /** 試験用の共通の口。予算は十分に取り、時計は 0 に固定する（締切は絶対時刻） */
@@ -55,6 +57,7 @@ export function makeGateway(client: LlmClient, options: GatewayOptions = {}): Ca
     deadline: options.deadline ?? 60_000,
     ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
     ...(options.effort === undefined ? {} : { effort: options.effort }),
+    ...(options.recordMalformedKinds === true ? { recordMalformedKinds: true } : {}),
   });
 }
 

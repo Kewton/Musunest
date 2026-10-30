@@ -767,6 +767,8 @@ async function runBuild(
           ...(flags === undefined ? {} : { flags, recordV12Flags: true, ...(flags.ids ? { collectBoundaries: true } : {}) }),
           ...(job.stageEfforts === undefined ? {} : { stageEfforts: job.stageEfforts }),
           ...(job.stageOutputLimits === undefined ? {} : { stageOutputLimits: job.stageOutputLimits }),
+          // `--pipeline v1.2` の走りだけ、形の誤りの種類を段の記録と要約に残す（Issue #783。v1・v1.1α は欄を足さない）
+          ...(job.pipeline === "v1.2" ? { recordMalformedKinds: true } : {}),
         });
   const written = await writeBuildRun(deps, job, run, log);
   return run.boundaries === undefined || flags === undefined ? written : { ...written, boundaries: run.boundaries, flags };
@@ -1333,6 +1335,8 @@ async function runStageFromPlanFile(
     ...(flags === undefined ? {} : { flags }),
     ...(parsed.stageEfforts === undefined ? {} : { stageEfforts: parsed.stageEfforts }),
     ...(stageOutputLimits === undefined ? {} : { stageOutputLimits }),
+    // v1.2 の段の走りだけ、形の誤りの種類を段の記録に残す（Issue #783。v1.1α の段の走りは欄を足さない）
+    ...(pipeline === "v1.2" ? { recordMalformedKinds: true } : {}),
   });
 
   await deps.makeDirectory(job.outDir);

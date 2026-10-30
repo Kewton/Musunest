@@ -776,6 +776,81 @@ describe("②・②' が断った候補の診断（Issue #501）", () => {
 
 // ── 追加の成果物（v1.1α A6'。07 §1.4・Issue #506）──────────────────────────────
 
+// ── 形の誤りの種類を、納品物の要約に写す（Issue #783）──────────────
+
+describe("形の誤りの種類を、納品物の要約（summary.json）に写す（Issue #783）", () => {
+  type Attempts = RunRecord["stages"][number]["attempts"];
+  const BASE_ATTEMPTS: Attempts = {
+    started: 1,
+    responded: 0,
+    errors: 1,
+    cancelled_deadline: 0,
+    cancelled_timeout: 0,
+    not_started: { deadline: 0, budget: 0, limit: 0, timeout: 0 },
+  };
+  const MALFORMED = { "no-body": 0, "not-json": 0, envelope: 0, "wrong-stage": 0, schema: 1, other: 0 };
+  const recordOf = (attempts: Attempts, failure: RunRecord["failure"]): RunRecord => ({
+    builder: "musunest-factory",
+    model: "gpt-test",
+    effort: "high",
+    prompt_version: "v1",
+    contract_version: "v0.2",
+    spec_engine_version: "0.0.0",
+    factory_version: "0.0.0",
+    stages: [
+      {
+        stage: "write",
+        operation: null,
+        status: "failed",
+        duration_ms: 5,
+        calls: 1,
+        missing_usage_calls: 0,
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        cache_write_tokens: 0,
+        output_tokens: 0,
+        reasoning_tokens: 0,
+        attempts,
+        retries: { communication: 0, shape: 0, content: 0 },
+        failure_kind: "malformed",
+      },
+    ],
+    arbitration: { upheld: 0, overturned: 0, undecidable: 0 },
+    budget_remaining_usd: 0.1,
+    missing_usage_calls: 0,
+    failure,
+  });
+  const summaryWith = (record: RunRecord): BundleSummary => ({
+    ...buildSummary(record, {
+      run_id: "run-1",
+      verdict: "none",
+      assurance: "none",
+      duration_secs: 0,
+      provider_cost_usd: 0,
+      stop_class: "malformed",
+      exit_code: 1,
+    }),
+    judge: { calls_by_adapter: { jev: 0, llm: 0, fake: 0 }, cost_usd: 0 },
+    nature_discrepancies: [],
+  });
+
+  it("印のある走りは値が残り、印の無い走りは欄が無い", async () => {
+    const marked = await assembleBundle(
+      input({ summary: summaryWith(recordOf({ ...BASE_ATTEMPTS, malformed: MALFORMED }, { stage: "write", kind: "malformed", malformed_kind: "schema" })) }),
+    );
+    const written = JSON.parse(findText(marked.artifacts, "artifacts/summary.json")) as BundleSummary;
+    expect(written.stages[0]?.attempts.malformed).toEqual(MALFORMED);
+    expect(written.failure).toEqual({ stage: "write", kind: "malformed", malformed_kind: "schema" });
+
+    const plain = await assembleBundle(
+      input({ summary: summaryWith(recordOf(BASE_ATTEMPTS, { stage: "write", kind: "malformed" })) }),
+    );
+    const plainWritten = JSON.parse(findText(plain.artifacts, "artifacts/summary.json")) as BundleSummary;
+    expect("malformed" in (plainWritten.stages[0]?.attempts ?? {})).toBe(false);
+    expect("malformed_kind" in (plainWritten.failure ?? {})).toBe(false);
+  });
+});
+
 describe("追加の成果物の差し込み口（v1.1α・Issue #506）", () => {
   const EXTRA = [
     { path: `${ARTIFACTS_DIR}/name-table.json`, text: '{"rows":[]}\n' },

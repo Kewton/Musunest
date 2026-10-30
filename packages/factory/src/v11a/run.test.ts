@@ -8471,3 +8471,112 @@ describe("段の出力の上限の上書きの表（Issue #776）：実行口か
     }
   });
 });
+
+// ── 形の誤りの種類を、段の記録・失敗の帰属・実試行の行に残す（Issue #783）──────
+//
+// 実の adapter に、**生の wire と本文を返せる偽物の fetch** を差し、一気通貫（`runGenerationV11a`）と段の走り
+// （`runStageRangeV11a`）の両方の実行口から、印が段の記録（`attempts.malformed`・失敗の帰属の `malformed_kind`・
+// 実試行の行の `malformed_kind`）に残ることを見る。台本は題材に依らない人工の例である（`wireClientOf` は JSON を
+// 自動で直列化・封筒で包むので、非 JSON・封筒の欠落には使えない）。
+
+describe("v1.2 の形の誤りの種類を、段の記録・失敗の帰属・実試行の行に残す（Issue #783）", () => {
+  const MARKS = ["no-body", "not-json", "envelope", "wrong-stage", "schema"] as const;
+  const MALFORMED_ZERO = { "no-body": 0, "not-json": 0, envelope: 0, "wrong-stage": 0, schema: 0, other: 0 };
+  const counted = (key: string): Record<string, number> => ({ ...MALFORMED_ZERO, [key]: 1 });
+  // v1.2（旗 ids off）の最初の構造化出力の段は T1（name-table）。T1 は adapter の形の誤りを `unmet` へ写し替えない
+  // （`unmet` へ写す段〔C1・C2・T2 など〕では、印は段の記録の `malformed` に残るが、失敗の帰属の `malformed_kind` は付かない）。
+  const FLAGS = { ledger: true };
+
+  /**
+   * 構造化出力の本文を**生の値で**返す台本の実 adapter。`reply` が `undefined` を返せば本文の無い応答にする。
+   * 最初の構造化出力の要求（T1）が必ず 1 本目なので、台本は 1 本目だけに効けばよい。
+   */
+  const malformedClientOf = (reply: (ctx: { readonly schemaName: string }) => string | undefined, envelope: EnvelopeId = "v1.2") => {
+    const sent: WireSent[] = [];
+    let current: { readonly schemaName: string; readonly schema: unknown } | undefined;
+    const fetch: FetchLike = async (_url, init) => {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      const tools = body["tools"] !== undefined;
+      sent.push({ kind: tools ? "tools" : "structured", schemaName: tools ? undefined : current?.schemaName, body });
+      const text = reply({ schemaName: current?.schemaName ?? "" });
+      const output =
+        text === undefined ? [] : [{ type: "message", role: "assistant", content: [{ type: "output_text", text }] }];
+      return wireCompleted(output);
+    };
+    const adapter = createOpenAiLlmClient({ apiKey: "sk-FAKE", effort: "high", envelope, fetch });
+    const client: LlmClient = {
+      callStructured<T>(request: LlmStructuredRequest) {
+        current = { schemaName: request.schemaName, schema: request.schema };
+        return adapter.callStructured<T>(request);
+      },
+      callWithTools(request: LlmToolRequest) {
+        current = undefined;
+        return adapter.callWithTools(request);
+      },
+    };
+    return { client, sent };
+  };
+
+  const replyFor = (mark: (typeof MARKS)[number]) => (ctx: { readonly schemaName: string }): string | undefined => {
+    switch (mark) {
+      case "no-body":
+        return undefined;
+      case "not-json":
+        return "これは JSON ではない";
+      case "envelope":
+        return JSON.stringify(["配列"]);
+      case "wrong-stage":
+        return JSON.stringify({ result: { stage: "この段ではない" } });
+      case "schema":
+        return JSON.stringify({ result: { stage: ctx.schemaName } });
+    }
+  };
+
+  it.each(MARKS)(
+    "(1) 印 %s：T1 で止まり、止まり方・試行の数は今までどおりで、段の記録・失敗の帰属・要約にその印が 1 つ残る",
+    async (mark) => {
+      const wire = malformedClientOf(replyFor(mark));
+      const result = await runGenerationV11a(inputOf(wire.client, { flags: FLAGS, recordMalformedKinds: true }));
+      // 止まり方・試行の数は今までと同じ（印を足すだけ）
+      expect(result.stopped).toEqual({ stage: "name-table", kind: "malformed", malformed_kind: mark });
+      expect(result.record.stages.map((stage) => stage.stage)).toEqual(["name-table"]);
+      expect(result.record.stages[0]!.attempts.errors).toBe(1);
+      expect(result.record.stages[0]!.attempts.malformed).toEqual(counted(mark));
+      // 要約（計測の口が読む所）にも同じ値
+      expect(result.summary.stages[0]!.attempts.malformed).toEqual(counted(mark));
+      expect(result.summary.failure).toEqual({ stage: "name-table", kind: "malformed", malformed_kind: mark });
+    },
+  );
+
+  it("(1) 設定を外す変異：段の記録にも要約にも欄が無い（今の走りと同じ）", async () => {
+    const wire = malformedClientOf(replyFor("schema"));
+    const result = await runGenerationV11a(inputOf(wire.client, { flags: FLAGS }));
+    expect(result.stopped).toEqual({ stage: "name-table", kind: "malformed" });
+    expect(Object.keys(result.record.stages[0]!.attempts)).not.toContain("malformed");
+    expect(Object.keys(result.summary.failure ?? {})).not.toContain("malformed_kind");
+  });
+
+  it("(2) 印の無い malformed（wire そのものの JSON の誤り）は other に数え、malformed_kind は付けない", async () => {
+    const fetch: FetchLike = async () => new Response("これは JSON ではない", { status: 200 });
+    const client = createOpenAiLlmClient({ apiKey: "sk-FAKE", effort: "high", envelope: "v1.2", fetch });
+    const result = await runGenerationV11a(inputOf(client, { flags: FLAGS, recordMalformedKinds: true }));
+    expect(result.stopped).toEqual({ stage: "name-table", kind: "malformed" });
+    expect(result.record.stages[0]!.attempts.malformed).toEqual(counted("other"));
+    expect(Object.keys(result.summary.failure ?? {})).not.toContain("malformed_kind");
+  });
+
+  it("(1)(6) 段の走り（ids on の C1 語彙）：段の記録の malformed と実試行の行の malformed_kind に印が残る", async () => {
+    const wire = malformedClientOf(replyFor("wrong-stage"), "v1.2-ids");
+    const outcome = await runStageRangeV11a({
+      ...inputOf(wire.client, { flags: { ledger: true, ids: true }, recordMalformedKinds: true }),
+      range: { start: "name-table", end: "judge" },
+    });
+    // C1 は adapter の形の誤りを今までどおり `unmet` へ写す（止まり方は変えない）が、段の記録の malformed と実試行の行には印が残る
+    expect(outcome.stopped).toEqual({ stage: "vocabulary", kind: "unmet" });
+    expect(outcome.stages[0]!.attempts.malformed).toEqual(counted("wrong-stage"));
+    // 実試行の行：error_kind が malformed の行だけが malformed_kind を持つ
+    const rows = outcome.requests ?? [];
+    expect(rows.filter((row) => row.malformed_kind !== undefined)).toHaveLength(1);
+    expect(rows.find((row) => row.error_kind === "malformed")).toMatchObject({ malformed_kind: "wrong-stage" });
+  });
+});
