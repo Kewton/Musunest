@@ -439,6 +439,31 @@ describe("要求の組み立て（02 §2・§2.2）", () => {
   });
 });
 
+// ── 3.3. 囲みの開始行の余分なバッククォート（Issue #777 レビュー R1）──────────────
+//
+// OpenAI の client は囲みを読まない（`readFencedJson` は off）ので、開始行がどうであれ本文は今のとおり
+// malformed になる。この 3 反例は Ollama の client（設定 on）で始まりの検査が効く（`ollama.test.ts`）。
+
+/** 囲みの開始行が不正な 3 反例（Issue #777 レビュー R1。閉じは 3 個） */
+const R1_BAD_STARTS: readonly { readonly name: string; readonly start: string }[] = [
+  { name: "開始行がバッククォート 4 個だけ", start: "````" },
+  { name: "開始行がバッククォート 6 個だけ", start: "``````" },
+  { name: "言語の印の末尾にバッククォート 3 個（```json```）", start: "```json```" },
+];
+
+describe("囲みの開始行の余分なバッククォートは今のとおり malformed（Issue #777 レビュー R1。OpenAI は囲みを読まない）", () => {
+  const fenced = (start: string, payload: unknown): string => `${start}\n${JSON.stringify(payload)}\n\`\`\``;
+
+  it.each(R1_BAD_STARTS)("$name：構造化出力も最後の答えも malformed", async ({ start }) => {
+    const structured = recordingFetch(() => jsonResponse(completed(outputText(fenced(start, { items: [] })), USAGE_WIRE)));
+    const structuredError = await captureError(() => clientWith(structured.fetch).callStructured(STRUCTURED_REQUEST));
+    expect(structuredError.kind).toBe("malformed");
+    const tools = recordingFetch(() => jsonResponse(completed(outputText(fenced(start, { entity: "item" })), USAGE_WIRE)));
+    const toolsError = await captureError(() => clientWith(tools.fetch).callWithTools(TOOL_REQUEST));
+    expect(toolsError.kind).toBe("malformed");
+  });
+});
+
 // ── 3.4. 送る max_output_tokens は段と effort の値（02 §1.5・Issue #399）──────────
 
 describe("送る max_output_tokens は、段と effort の値になる（02 §1.5・Issue #399）", () => {

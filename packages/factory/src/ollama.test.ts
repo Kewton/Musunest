@@ -425,6 +425,22 @@ function fenced(text: string, language = "", newline = "\n"): string {
   return `\`\`\`${language}${newline}${text}${newline}\`\`\``;
 }
 
+/**
+ * 囲みの**開始行**が不正な 3 反例（Issue #777 レビュー R1。閉じの行は正規の 3 個）。開始が
+ * バッククォートちょうど 3 個＋印 1 語（印にバッククォートを含まない）でないので、囲みとみなさず
+ * 今のとおり malformed になる。
+ */
+const BAD_STARTS: readonly { readonly name: string; readonly start: string }[] = [
+  { name: "開始行がバッククォート 4 個だけ", start: "````" },
+  { name: "開始行がバッククォート 6 個だけ", start: "``````" },
+  { name: "言語の印の末尾にバッククォート 3 個（```json```）", start: "```json```" },
+];
+
+/** 不正な開始行で包んだ本文（閉じは 3 個。Issue #777 レビュー R1） */
+function badFence(start: string, payload: unknown): string {
+  return `${start}\n${JSON.stringify(payload)}\n\`\`\``;
+}
+
 describe("囲み 1 つの本文を読む（構造化出力と、道具付きの最後の答え。Issue #777。実 API は呼ばない）", () => {
   const CASES: readonly { readonly name: string; readonly language: string; readonly newline: string }[] = [
     { name: "言語の印なし・LF", language: "", newline: "\n" },
@@ -555,6 +571,22 @@ describe("囲みの反例：どれも今の分類のまま（Issue #777）", () 
     const response = await ollamaClient(fetch).callWithTools(TOOL_REQUEST);
     expect(response.kind).toBe("toolCalls");
     expect((response as { readonly toolCalls: readonly { readonly id: string }[] }).toolCalls[0]!.id).toBe("c1");
+  });
+});
+
+// ── 2'''. 囲みの開始行の余分なバッククォート（Issue #777 レビュー R1）──────────────
+
+describe("囲みの開始行の余分なバッククォートは始まりとみなさない（Issue #777 レビュー R1）", () => {
+  it.each(BAD_STARTS)("構造化出力：$name は今のとおり malformed", async ({ start }) => {
+    const { fetch } = recordingFetch(() => jsonResponse(completed(outputText(badFence(start, { items: [] })))));
+    const error = await captureError(() => ollamaClient(fetch).callStructured(STRUCTURED_REQUEST));
+    expect(error.kind).toBe("malformed");
+  });
+
+  it.each(BAD_STARTS)("道具付きの最後の答え：$name は今のとおり malformed", async ({ start }) => {
+    const { fetch } = recordingFetch(() => jsonResponse(completed(outputText(badFence(start, { entity: "item" })))));
+    const error = await captureError(() => ollamaClient(fetch).callWithTools(TOOL_REQUEST));
+    expect(error.kind).toBe("malformed");
   });
 });
 
