@@ -26,7 +26,7 @@ import type { StageOutputLimits } from "../call.js";
 import type { Judge, JudgeAnswer } from "../judge.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { RecordedCall } from "../llm-fake.js";
-import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "../llm.js";
+import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse, LlmUsage } from "../llm.js";
 import { AGENT_LIMITS, STAGE_EFFORT_STAGES, maxOutputTokensForEffort } from "../limits.js";
 import { OLLAMA_STAGE_OUTPUT_LIMITS, createOllamaLlmClient } from "../ollama.js";
 import { createOpenAiLlmClient, type FetchLike } from "../openai.js";
@@ -64,6 +64,7 @@ import {
   fixtureDefaultValueTable,
   casesResponseOf,
   requestListedIds,
+  semanticRequestIds,
   codeIdRenameOf,
   idsResponseList,
   idsResponsesOf,
@@ -134,6 +135,7 @@ import { GENERATED_TEST_ID_PREFIX, generateTests, isGeneratedTestId } from "../v
 import type { FixedTest } from "../fixed-test.js";
 import { constraintIdsIn, ruleTexts, SHAPE_PROBLEMS_DATA_NAME } from "../stages/prompt.js";
 import { MAPPING_LEDGER_DATA_NAMES, MAPPING_REWRITE_MESSAGES, MAPPING_SCHEMA_NAME } from "../v12/stages/mapping.js";
+import { VOCABULARY_SCHEMA_NAMES } from "../v12/stages/vocabulary.js";
 import { structuralReadingText } from "../v12/structural-meanings.js";
 import { FIELD_REPAIR_DIAGNOSTIC_DATA_NAME, FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "../v12/stages/field-repair.js";
 import { natureQuestionName } from "../stages/test-suite.js";
@@ -6648,6 +6650,12 @@ function wireClientOf(
     readonly fence?: boolean;
     readonly kindByMethod?: boolean;
     readonly toolsReply?: (input: { readonly body: Record<string, unknown>; readonly count: number }) => string | readonly unknown[];
+    /**
+     * 構造化出力の本文を、生の値で差し替える（Issue #783 の R1）。`schemaName` が返した文字列のときは、
+     * 記録を消費せずにその本文を返す（非 JSON・封筒の欠落・段違い・schema 不適合の台本を作る）。
+     * `null` は本文の無い応答、`undefined` は差し替えない（記録を消費する）。
+     */
+    readonly rawText?: (input: { readonly schemaName: string | undefined }) => string | null | undefined;
   } = {},
 ) {
   const sent: WireSent[] = [];
@@ -6680,6 +6688,11 @@ function wireClientOf(
         status: 503,
         headers: { "content-type": "application/json" },
       });
+    }
+    // 生の本文で差し替える（記録を消費しない。Issue #783 の R1）
+    if (kind === "structured" && options.rawText !== undefined) {
+      const raw = options.rawText({ schemaName: current?.schemaName });
+      if (raw !== undefined) return raw === null ? wireCompleted([]) : completed(raw);
     }
     const call = calls[index];
     index += 1;
@@ -8578,5 +8591,301 @@ describe("v1.2 の形の誤りの種類を、段の記録・失敗の帰属・�
     const rows = outcome.requests ?? [];
     expect(rows.filter((row) => row.malformed_kind !== undefined)).toHaveLength(1);
     expect(rows.find((row) => row.error_kind === "malformed")).toMatchObject({ malformed_kind: "wrong-stage" });
+  });
+});
+
+// ── R1（#783 独立レビュー w78）：C1・C2（mapping）・動的 schema の field-repair まで届く受入試験 ──
+//
+// 実の adapter に**生の wire と本文を返せる偽物の fetch** を差し、C1・C2・field-repair に実際に届く台本で、
+// 段の記録の `attempts.malformed`・実試行の行の `malformed_kind`・止まり方を等値で固定する。窓口の裁定
+// （`w78-783-decision.md`）のとおり、C1・C2 は止まり方が `unmet` で失敗の帰属に `malformed_kind` を持たない。
+// field-repair は `unmet` へ写さないので `malformed` のまま止まり、帰属に印を持つ。
+
+describe("R1（#783 レビュー）：C1・C2・field-repair まで届く形の誤りの台本（一気通貫と段の走りの両方）", () => {
+  const MARKS = ["no-body", "not-json", "envelope", "wrong-stage", "schema"] as const;
+  // field-repair の schema は封筒の外（動的 schema）なので、envelope・wrong-stage の印は付かない（schema に落ちる）
+  const FIELD_REPAIR_MARKS = ["no-body", "not-json", "schema"] as const;
+  const MALFORMED_ZERO = { "no-body": 0, "not-json": 0, envelope: 0, "wrong-stage": 0, schema: 0, other: 0 };
+  const counted = (key: string): Record<string, number> => ({ ...MALFORMED_ZERO, [key]: 1 });
+
+  const rawReply = (mark: string, schemaName: string): string | null => {
+    switch (mark) {
+      case "no-body":
+        return null;
+      case "not-json":
+        return "これは JSON ではない";
+      case "envelope":
+        return JSON.stringify(["配列"]);
+      case "wrong-stage":
+        return JSON.stringify({ result: { stage: "この段ではない" } });
+      default:
+        return JSON.stringify({ result: { stage: schemaName } });
+    }
+  };
+  /** 対象の段の要求だけ生の本文を返す、実 adapter の client（記録は消費しない） */
+  const clientFor = (script: readonly RecordedCall[], envelope: EnvelopeId, target: string, mark: string): LlmClient =>
+    wireClientOf(script, envelope, {
+      rawText: ({ schemaName }) => (schemaName === target ? rawReply(mark, target) : undefined),
+    }).client;
+  type Row = { readonly stage: string; readonly attempts: { readonly errors: number; readonly malformed?: Record<string, number> } };
+  const generationStages = (result: Awaited<ReturnType<typeof runGenerationV11a>>): readonly Row[] =>
+    result.record.stages as readonly Row[];
+  const stageStages = (result: Awaited<ReturnType<typeof runStageRangeV11a>>): readonly Row[] =>
+    result.stages as readonly Row[];
+  const rowsOf = (outcome: Awaited<ReturnType<typeof runStageRangeV11a>>) =>
+    outcome.requests ?? [];
+
+  /** 同じ台本を、一気通貫と段の走りの両方の実行口で流す（台本は実行ごとに作り直す） */
+  const runBoth = async (
+    script: () => readonly RecordedCall[],
+    envelope: EnvelopeId,
+    flags: Partial<V12Flags>,
+    target: string,
+    mark: string,
+  ) => {
+    const inputOfScript = () => inputOf(clientFor(script(), envelope, target, mark), { flags, recordMalformedKinds: true });
+    const generation = await runGenerationV11a(inputOfScript());
+    const stage = await runStageRangeV11a({ ...inputOfScript(), range: { start: "name-table", end: "judge" } });
+    return { generation, stage };
+  };
+
+  it.each(MARKS)(
+    "C1（語彙の最初の束）で印 %s：段の記録に印が 1・実試行の行に印・止まり方は unmet（帰属に印なし）。両方の実行口",
+    async (mark) => {
+      const { generation, stage } = await runBoth(idsHead, "v1.2-ids", { ledger: true, ids: true }, VOCABULARY_SCHEMA_NAMES.entities, mark);
+      // 止まり方・試行の数は今までどおり（C1 は unmet へ写す）
+      expect(generation.stopped, "generation").toEqual({ stage: "vocabulary", kind: "unmet" });
+      expect(stage.stopped, "stage").toEqual({ stage: "vocabulary", kind: "unmet" });
+      for (const [label, rows] of [["generation", generationStages(generation)], ["stage", stageStages(stage)]] as const) {
+        const vocab = rows.filter((row) => row.stage === "vocabulary");
+        expect(vocab, label).toHaveLength(1);
+        expect(vocab[0]!.attempts.errors, label).toBe(1);
+        expect(vocab[0]!.attempts.malformed, label).toEqual(counted(mark));
+      }
+      // 実試行の行（段の走りだけが持つ）：adapter の誤りの行だけに印
+      const marked = rowsOf(stage).filter((row) => row.malformed_kind !== undefined);
+      expect(marked, "stage rows").toHaveLength(1);
+      expect(marked[0]!.malformed_kind, "stage rows").toBe(mark);
+      // 帰属には印を付けない（unmet へ写す段）
+      expect(Object.keys(generation.summary.failure ?? {}), "generation failure").not.toContain("malformed_kind");
+      expect(Object.keys(stage.stopped ?? {}), "stage stopped").not.toContain("malformed_kind");
+    },
+  );
+
+  it.each(MARKS)(
+    "C2（mapping）で印 %s：段の記録に印が 1・実試行の行に印・止まり方は unmet（帰属に印なし）。両方の実行口",
+    async (mark) => {
+      // C1 の 3 束は記録どおり通し、4 本目（mapping）の本文だけを生の値にする
+      const { generation, stage } = await runBoth(idsHead, "v1.2-ids", { ledger: true, ids: true }, MAPPING_SCHEMA_NAME, mark);
+      expect(generation.stopped, "generation").toEqual({ stage: "mapping", kind: "unmet" });
+      expect(stage.stopped, "stage").toEqual({ stage: "mapping", kind: "unmet" });
+      for (const [label, rows] of [["generation", generationStages(generation)], ["stage", stageStages(stage)]] as const) {
+        const mapping = rows.filter((row) => row.stage === "mapping");
+        expect(mapping, label).toHaveLength(1);
+        expect(mapping[0]!.attempts.errors, label).toBe(1);
+        expect(mapping[0]!.attempts.malformed, label).toEqual(counted(mark));
+      }
+      const marked = rowsOf(stage).filter((row) => row.malformed_kind !== undefined);
+      expect(marked, "stage rows").toHaveLength(1);
+      expect(marked[0]!.malformed_kind, "stage rows").toBe(mark);
+      expect(Object.keys(generation.summary.failure ?? {}), "generation failure").not.toContain("malformed_kind");
+      expect(Object.keys(stage.stopped ?? {}), "stage stopped").not.toContain("malformed_kind");
+    },
+  );
+
+  it.each(FIELD_REPAIR_MARKS)(
+    "field-repair（動的 schema）で印 %s：段の記録に印が 1・実試行の行に印・止まり方は malformed で帰属に印。両方の実行口",
+    async (mark) => {
+      // 旗 ids on・search-repair on で B1 の静的チェックの失敗から field-repair（欄だけの直し）へ入る台本
+      const script = (): readonly RecordedCall[] => [
+        ...idsHead({ yaml: W2 }),
+        structured(acceptAll()),
+        fieldRepair("amount > 1"),
+        structured(acceptAll()),
+        fieldRepair("amount > 0"),
+        structured(acceptAll()),
+      ];
+      const { generation, stage } = await runBoth(script, "v1.2-ids", { ledger: true, ids: true, searchRepair: true }, FIELD_REPAIR_SCHEMA_NAME, mark);
+      // field-repair は unmet へ写さないので、malformed のまま止まり帰属に印を持つ
+      expect(generation.stopped, "generation").toEqual({ stage: "repair", kind: "malformed", malformed_kind: mark });
+      expect(stage.stopped, "stage").toEqual({ stage: "repair", kind: "malformed", malformed_kind: mark });
+      for (const [label, rows] of [["generation", generationStages(generation)], ["stage", stageStages(stage)]] as const) {
+        const repair = rows.filter((row) => row.stage === "repair");
+        expect(repair, label).toHaveLength(1);
+        expect(repair[0]!.attempts.errors, label).toBe(1);
+        expect(repair[0]!.attempts.malformed, label).toEqual(counted(mark));
+      }
+      const marked = rowsOf(stage).filter((row) => row.malformed_kind !== undefined);
+      expect(marked, "stage rows").toHaveLength(1);
+      expect(marked[0]!.malformed_kind, "stage rows").toBe(mark);
+      expect(generation.summary.failure, "generation failure").toMatchObject({ stage: "repair", kind: "malformed", malformed_kind: mark });
+    },
+  );
+});
+
+// ── R2・R3（#783 独立レビュー w78）：複数の束の計数と、adapter の印と段内検査の混在 ──
+//
+// `buildSized` の決定的な材料（要件 6・試験 12）で C3 と T2 が 2 束になる。偽物の client は要求のデータから
+// 束を見分け、束ごとに「正常」「印つきの adapter の誤り」「段内検査で落ちる応答」を返す（完了の順に依らない）。
+
+describe("R2・R3（#783 レビュー）：C3/T2 の複数の束の計数と、adapter の印と段内検査の混在（実行口から）", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+  const MALFORMED_ZERO = { "no-body": 0, "not-json": 0, envelope: 0, "wrong-stage": 0, schema: 0, other: 0 };
+  const counted = (key: string, count = 1): Record<string, number> => ({ ...MALFORMED_ZERO, [key]: count });
+  type Answer = { readonly output: unknown } | { readonly error: Error };
+  type Behaviour = (ctx: { readonly bundleIds: readonly string[] }) => Answer;
+  const marked = (mark: string): Answer => ({ error: Object.assign(new Error("形の誤り"), { kind: "malformed", malformedKind: mark }) });
+
+  /** `buildSized` の材料を、束ごとに配る偽物の client（C1・C2・C3・T2 の束を要求のデータで見分ける） */
+  const sizedClient = (materials: SizedMaterials, behaviour: { readonly c3?: Behaviour; readonly t2?: Behaviour } = {}): LlmClient => {
+    const [entities, fields, behaviors, mapping] = materials.tableResponses() as readonly Record<string, unknown>[];
+    const mappingEntries = (mapping?.["requirements"] ?? []) as readonly { readonly requirementId: string }[];
+    const judgments = (materials.judgments()["judgments"] ?? []) as readonly { readonly requirementId: string }[];
+    const cases = materials.testSpecCasesResponse() as {
+      readonly classifications?: readonly { readonly requirementId: string }[];
+      readonly cases: readonly { readonly requirementId?: string }[];
+    };
+    const pick = (fn: Behaviour | undefined, bundleIds: readonly string[], normal: () => unknown): unknown => {
+      const chosen = fn?.({ bundleIds });
+      if (chosen === undefined) return normal();
+      if ("error" in chosen) throw chosen.error;
+      return chosen.output;
+    };
+    return {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        const name = request.schemaName;
+        const listed = requestListedIds(request);
+        if (name === VOCABULARY_SCHEMA_NAMES.entities) return { output: entities as T, usage: undefined };
+        if (name === VOCABULARY_SCHEMA_NAMES.fields) return { output: fields as T, usage: undefined };
+        if (name === VOCABULARY_SCHEMA_NAMES.behaviors) return { output: behaviors as T, usage: undefined };
+        if (name === MAPPING_SCHEMA_NAME) {
+          const filtered = mappingEntries.filter((entry) => listed.includes(entry.requirementId));
+          return { output: { requirements: filtered } as T, usage: undefined };
+        }
+        if (name === SEMANTIC_CHECK_SCHEMA_NAME) {
+          const ids = semanticRequestIds(request);
+          const normal = { judgments: judgments.filter((entry) => ids.includes(entry.requirementId)) };
+          return { output: pick(behaviour.c3, ids, () => normal) as T, usage: undefined };
+        }
+        if (name === TEST_SPEC_SCHEMA_NAME) {
+          const normal = {
+            ...cases,
+            classifications: (cases.classifications ?? []).filter((entry) => listed.includes(entry.requirementId)),
+            cases: cases.cases.filter((entry) => typeof entry.requirementId === "string" && listed.includes(entry.requirementId)),
+          };
+          return { output: pick(behaviour.t2, listed, () => normal) as T, usage: undefined };
+        }
+        if (name === WRITE_V11A_SCHEMA_NAME) return { output: { declaration: materials.declaration() } as T, usage: undefined };
+        throw new Error(`前提が壊れた：想定しない schema ${String(name)}`);
+      },
+      async callWithTools(): Promise<LlmToolResponse> {
+        throw new Error("前提が壊れた：道具付きは呼ばない");
+      },
+    };
+  };
+
+  const inputFor = (materials: SizedMaterials, client: LlmClient): GenerationInputV11a =>
+    inputOf(client, {
+      flags: ALL_ON,
+      plan: materials.plan,
+      source: materials.source,
+      judge: createFakeJudge(materials.adviceAnswers()),
+      budgetUsd: 1_000,
+      deadline: 86_400_000,
+      recordMalformedKinds: true,
+    });
+  const runAt = async (execution: "generation" | "stage", materials: SizedMaterials, client: LlmClient) =>
+    execution === "generation"
+      ? await runGenerationV11a(inputFor(materials, client))
+      : await runStageRangeV11a({ ...inputFor(materials, client), range: { start: "name-table", end: "judge" } });
+
+  type Row = { readonly stage: string; readonly attempts: { readonly started: number; readonly errors: number; readonly malformed?: Record<string, number> } };
+  const stagesOf = (result: unknown, execution: "generation" | "stage"): readonly Row[] =>
+    execution === "generation"
+      ? (result as { readonly record: { readonly stages: readonly Row[] } }).record.stages
+      : (result as { readonly stages: readonly Row[] }).stages;
+  const stoppedOf = (result: unknown): unknown => (result as { readonly stopped: unknown }).stopped;
+  const v12CallsOf = (result: unknown, execution: "generation" | "stage"): Record<string, any> =>
+    execution === "generation"
+      ? (result as { readonly summary: Record<string, any> }).summary["v12_calls"]
+      : (result as { readonly v12Calls: Record<string, any> }).v12Calls;
+  const rowsOf = (result: unknown, execution: "generation" | "stage") =>
+    execution === "stage"
+      ? ((result as { readonly requests?: readonly { readonly error_kind: string | null; readonly malformed_kind?: string }[] }).requests ?? [])
+      : [];
+
+  it("(2')(4) C3 の 2 束が同じ印で落ちると段の数が 2・errors の内側。選ばれた失敗も印を持つ（一気通貫と段の走り）", async () => {
+    const materials = buildSized(6, 12, ALL_ON);
+    for (const execution of ["generation", "stage"] as const) {
+      const result = await runAt(execution, materials, sizedClient(materials, { c3: () => marked("schema") }));
+      expect(stoppedOf(result), execution).toEqual({ stage: "semantic-check", kind: "malformed", malformed_kind: "schema" });
+      const c3 = stagesOf(result, execution).filter((row) => row.stage === "semantic-check");
+      expect(c3, execution).toHaveLength(1);
+      expect(c3[0]!.attempts.malformed, execution).toEqual(counted("schema", 2));
+      const sum = Object.values(c3[0]!.attempts.malformed!).reduce((a, b) => a + b, 0);
+      expect(sum, execution).toBeLessThanOrEqual(c3[0]!.attempts.errors);
+      if (execution === "stage") {
+        const rows = rowsOf(result, execution).filter((row) => row.malformed_kind !== undefined);
+        expect(rows, `${execution} rows`).toHaveLength(2);
+        for (const row of rows) expect(row.malformed_kind, `${execution} rows`).toBe("schema");
+      }
+    }
+  });
+
+  it("(2')(4) C3 の 2 束が別の印で混在するとそれぞれ 1。選ばれた失敗は先頭の束の印", async () => {
+    const materials = buildSized(6, 12, ALL_ON);
+    const first = materials.ids[0] as string;
+    const behaviour: Behaviour = ({ bundleIds }) => marked(bundleIds.includes(first) ? "schema" : "envelope");
+    for (const execution of ["generation", "stage"] as const) {
+      const result = await runAt(execution, materials, sizedClient(materials, { c3: behaviour }));
+      expect(stoppedOf(result), execution).toEqual({ stage: "semantic-check", kind: "malformed", malformed_kind: "schema" });
+      const c3 = stagesOf(result, execution).find((row) => row.stage === "semantic-check");
+      expect(c3!.attempts.malformed, execution).toEqual({ ...MALFORMED_ZERO, schema: 1, envelope: 1 });
+    }
+  });
+
+  it("(2')(4) T2 の 2 束が同じ印で落ちると束ごとの段の数が 1・全体の数が 2。二重に数えない（一気通貫と段の走り）", async () => {
+    // 要件 6・試験 18（構造の要件を取らず全部が値を縛る要件なので、T2 の一覧が 6 件＝2 束になる）
+    const materials = buildSized(6, 18, ALL_ON);
+    for (const execution of ["generation", "stage"] as const) {
+      const result = await runAt(execution, materials, sizedClient(materials, { t2: () => marked("not-json") }));
+      expect(stoppedOf(result), execution).toEqual({ stage: "test-spec", kind: "malformed", malformed_kind: "not-json" });
+      const t2 = stagesOf(result, execution).filter((row) => row.stage === "test-spec");
+      expect(t2, execution).toHaveLength(2);
+      for (const record of t2) expect(record.attempts.malformed, execution).toEqual(counted("not-json", 1));
+      const total = v12CallsOf(result, execution)["test_spec"]["total"];
+      expect(total["attempts"]["malformed"], execution).toEqual(counted("not-json", 2));
+      // 二重に数えない：全体の started・errors・malformed は束の和（T2 の合計を別の段へ足さない）
+      expect(total["attempts"]["started"], execution).toBe(t2.reduce((sum, row) => sum + row.attempts.started, 0));
+      expect(total["attempts"]["errors"], execution).toBe(t2.reduce((sum, row) => sum + row.attempts.errors, 0));
+    }
+  });
+
+  it("(3) 同じ走りで C3 の束 0 が段内検査（problems）、束 1 が adapter の有印の誤り：実試行だけに印と数が残り、選ばれた最後の失敗・stopped・summary には印が無い（別の束の印を借りない）", async () => {
+    const materials = buildSized(6, 12, ALL_ON);
+    const first = materials.ids[0] as string;
+    // 束 0 は schema は通るが段内検査で落ちる応答（judgments が空）、束 1 は adapter の有印の誤り
+    const behaviour: Behaviour = ({ bundleIds }) => (bundleIds.includes(first) ? { output: { judgments: [] } } : marked("schema"));
+    for (const execution of ["generation", "stage"] as const) {
+      const result = await runAt(execution, materials, sizedClient(materials, { c3: behaviour }));
+      const stopped = stoppedOf(result) as { readonly stage: string; readonly kind: string; readonly problems?: readonly unknown[] };
+      expect(stopped.stage, execution).toBe("semantic-check");
+      expect(stopped.kind, execution).toBe("malformed");
+      expect((stopped.problems ?? []).length, execution).toBeGreaterThan(0);
+      expect(Object.keys(stopped), execution).not.toContain("malformed_kind");
+      // adapter の実試行（束 1）だけに印と数が残る
+      const c3 = stagesOf(result, execution).find((row) => row.stage === "semantic-check");
+      expect(c3!.attempts.malformed, execution).toEqual(counted("schema", 1));
+      if (execution === "generation") {
+        const failure = (result as { readonly summary: { readonly failure: Record<string, unknown> | null } }).summary.failure;
+        expect(Object.keys(failure ?? {}), "generation summary.failure").not.toContain("malformed_kind");
+      }
+      if (execution === "stage") {
+        // 実試行の行：印を持つのは束 1 の adapter の誤りの行だけ（束 0 の段内検査は response の行）
+        const rows = rowsOf(result, execution);
+        expect(rows.filter((row) => row.malformed_kind !== undefined), "stage rows").toHaveLength(1);
+        expect(rows.find((row) => row.malformed_kind !== undefined)!.malformed_kind, "stage rows").toBe("schema");
+      }
+    }
   });
 });

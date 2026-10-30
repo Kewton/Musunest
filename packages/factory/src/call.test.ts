@@ -1566,6 +1566,48 @@ describe("形の誤りの種類を数える（口の設定。Issue #783）", () 
     }
   });
 
+  it("(2') ジョブの締切で打ち切ったあとに遅れて返った malformed でも増えない（締切の分岐）", async () => {
+    vi.useFakeTimers();
+    try {
+      const client: LlmClient = {
+        callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+          return new Promise<never>((_resolve, reject) => {
+            request.signal?.addEventListener("abort", () => {
+              // 締切で打ち切ったあとに、形の誤りで遅れて拒否する
+              setTimeout(() => reject(malformedError("wrong-stage")), 0);
+            });
+          });
+        },
+        callWithTools(): Promise<LlmToolResponse> {
+          return Promise.reject(new Error("使わない"));
+        },
+      };
+      // 呼び出しごとの timeout が締切の残りに達しているので、打ち切りはジョブの締切（deadline）として扱う
+      const gateway = new CallGateway({
+        client,
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => 0,
+        deadline: 1_000,
+        maxAttempts: 1,
+        callTimeoutMs: 1_000,
+        recordMalformedKinds: true,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+      // 締切の打ち切り（timeout ではない）
+      expect(result).toEqual({ kind: "deadlineExceeded" });
+      expect(gateway.attempts.malformed).toEqual(MALFORMED_ZERO);
+      // 遅着を進めても増えない
+      await vi.advanceTimersByTimeAsync(10);
+      await Promise.resolve();
+      expect(gateway.attempts.malformed).toEqual(MALFORMED_ZERO);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("(1) 観測の行：malformed の行だけが malformed_kind を持つ。設定を外せば印も持たない", async () => {
     const onEnds: CallAttemptEnd[] = [];
     const observerOn: CallAttemptObserver = {
