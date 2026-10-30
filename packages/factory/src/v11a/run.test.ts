@@ -8359,4 +8359,115 @@ describe("段の出力の上限の上書きの表（Issue #776）：実行口か
     expect(wiresOf(after.sent, SEMANTIC_CHECK_SCHEMA_NAME).every((sent) => limitOf(sent) === 32_768)).toBe(true);
     expect(wiresOf(after.sent, TEST_SPEC_SCHEMA_NAME).length).toBeGreaterThan(0);
   });
+
+  // ── レビュー R4：複数の C3 束と再点検・全文修復の継続と次の往復を**実際に起こし**、各要求の上限と**回数**を等値で固定する。
+  // 束ごとの口と再点検の束、道具の応答のあとの継続の要求（2 応答目以降）と 2 往復目が、どれも表の値であることを見る。
+
+  /** 束ごとに読む偽物の口（C1・C2・T2 の束。要求は外側で記録する）を組む */
+  const bundledClientOf = (calls: readonly RecordedCall[]) => {
+    const requests: LlmStructuredRequest[] = [];
+    const inner = bundledC2Client(bundledC3Client(bundledT2Client(createFakeLlmClient(calls, { validateAgainstSchema: true }))));
+    const client: LlmClient = {
+      callStructured: (request) => {
+        requests.push(request);
+        return inner.callStructured(request);
+      },
+      callWithTools: (request) => inner.callWithTools(request),
+    };
+    return { client, requests };
+  };
+
+  it("(4a) レビュー R4 複数の C3 束と再点検：一気通貫と段の走りの両方で、全束（再点検の束を含む）の意味の点検の要求が表の値で、要求の数が 4 に固定される", async () => {
+    const flags = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+    // 要件 6（束は 5 件ずつなので C3 は 2 束）・試験 12
+    const materials = buildSized(6, 12, flags);
+    const [entities, fields, behaviors, mapping] = materials.tableResponses();
+    const entries = (mapping as { readonly requirements: readonly { readonly requirementId: string }[] }).requirements;
+    const headId = materials.ids[0] as string;
+    // C3 の 1 回目は先頭の 1 要件を拒否し、C2 の 2 回目はその要件だけを書き直し、C3 の 2 回目（再点検）は全部受理する
+    const rejectHead = materials.judgments({ [headId]: ["unnecessary-ownership", materials.textOf(headId)] });
+    const rewrites = { requirements: entries.filter((entry) => entry.requirementId === headId) };
+    const calls = (): RecordedCall[] => [
+      structured(entities),
+      structured(fields),
+      structured(behaviors),
+      structured(mapping),
+      structured(rejectHead),
+      structured(rewrites),
+      structured(materials.judgments()),
+      structured(materials.t2Response()),
+      structured({ declaration: materials.declaration() }),
+      structured(materials.judgments()),
+    ];
+    const runOf = async (execution: "generation" | "stage", stageOutputLimits?: StageOutputLimits) => {
+      const bundled = bundledClientOf(calls());
+      const input = inputOf(bundled.client, {
+        flags,
+        plan: materials.plan,
+        source: materials.source,
+        judge: createFakeJudge(materials.adviceAnswers()),
+        budgetUsd: 1_000,
+        deadline: 86_400_000,
+        ...(stageOutputLimits === undefined ? {} : { stageOutputLimits }),
+      });
+      const result = execution === "generation" ? await runGenerationV11a(input) : await runStageRangeV11a({ ...input, range: { start: "name-table", end: "judge" } });
+      return { result, requests: bundled.requests };
+    };
+    for (const execution of ["generation", "stage"] as const) {
+      const run = await runOf(execution, LIMITS);
+      expect(run.result.stopped, `${execution}: ${JSON.stringify(run.result.stopped)}`).toBeNull();
+      const c3 = run.requests.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+      // 1 回目の束 2 + 再点検の束 2（要求の数を等値で固定する）
+      expect(c3, execution).toHaveLength(4);
+      for (const request of c3) expect(request.maxOutputTokens, execution).toBe(32_768);
+      // 直す前（表なし）は 4 本とも今の値（上書きを外す変異・2 回目だけ戻す変異・先頭を含まない束だけ戻す変異で赤）
+      const plain = await runOf(execution);
+      expect(plain.result.stopped, `${execution}: ${JSON.stringify(plain.result.stopped)}`).toBeNull();
+      const plainC3 = plain.requests.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+      expect(plainC3, execution).toHaveLength(4);
+      for (const request of plainC3) expect(request.maxOutputTokens, execution).toBe(16_384);
+    }
+  });
+
+  it("(4b) レビュー R4 全文修復の継続と次の往復：一気通貫と段の走りの両方で、道具の応答のあとの継続の要求と 2 往復目の要求が表の値で、要求の数が 6 に固定される", async () => {
+    // 1 往復目は R4 の不一致、2 往復目は R3 の境界の不一致（停滞にしない）。3 つ目の版で通る
+    const BAD_R4 = replaced(RUN_YAML, "    expression: base * 2", "    expression: base * 3");
+    const BAD_R3 = replaced(RUN_YAML, "when: amount > 0", "when: amount > 5");
+    const calls = (): RecordedCall[] => [
+      ...idsHead({ yaml: BAD_R4 }),
+      structured(acceptAll()),
+      // 1 往復目：道具の呼び出し → その結果を受けた継続の要求 → 形の直し → 直した宣言（BAD_R3。まだ不一致）
+      repairToolCall("call-1", "static-check", BAD_R3),
+      repairDone(""),
+      repairDone(BAD_R3),
+      structured(acceptAll()),
+      // 2 往復目：同じく道具の呼び出し → 継続の要求 → 形の直し → 通る宣言
+      repairToolCall("call-2", "static-check", RUN_YAML),
+      repairDone(""),
+      repairDone(RUN_YAML),
+      structured(acceptAll()),
+    ];
+    const runOf = async (execution: "generation" | "stage", stageOutputLimits?: StageOutputLimits) => {
+      const wire = wireClientOf(calls(), "v1.2-ids");
+      const input = inputOf(wire.client, {
+        flags: { ledger: true, ids: true },
+        ...(stageOutputLimits === undefined ? {} : { stageOutputLimits }),
+      });
+      const result = execution === "generation" ? await runGenerationV11a(input) : await runStageRangeV11a({ ...input, range: { start: "name-table", end: "judge" } });
+      return { result, tools: wire.sent.filter((sent) => sent.kind === "tools"), consumed: wire.consumed(), total: calls().length };
+    };
+    for (const execution of ["generation", "stage"] as const) {
+      const run = await runOf(execution, LIMITS);
+      expect(run.result.stopped, `${execution}: ${JSON.stringify(run.result.stopped)}`).toBeNull();
+      expect(run.consumed, `${execution}: 台本を使い切った`).toBe(run.total);
+      // 2 往復 ×（道具の呼び出し + その結果を受けた継続の要求 + 形の直し）= 6 本（要求の数を等値で固定する）
+      expect(run.tools, execution).toHaveLength(6);
+      for (const sent of run.tools) expect(limitOf(sent), execution).toBe(65_536);
+      // 直す前（表なし）は 6 本とも今の値（2 応答目以降だけ戻す変異・次の往復だけ戻す変異で赤）
+      const plain = await runOf(execution);
+      expect(plain.result.stopped, `${execution}: ${JSON.stringify(plain.result.stopped)}`).toBeNull();
+      expect(plain.tools, execution).toHaveLength(6);
+      for (const sent of plain.tools) expect(limitOf(sent), execution).toBe(32_768);
+    }
+  });
 });

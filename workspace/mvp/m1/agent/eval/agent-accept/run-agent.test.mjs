@@ -3274,3 +3274,78 @@ test("#776 段だけの対の比較 × Ollama の v1.2：同じ表どうしは�
     assertNothingWritten(bad, "limits-differ");
   });
 });
+
+// ── #776 レビュー R2：上限表のキーの集合（ちょうど 3 段）。未知のキー・必要なキーの欠落・余分なキー・値の型/範囲の違いは、
+// 単独（v1.2 の走り）でも比較（段だけの対の比較）でも provider:ollama-limits-unavailable（exit 3・子 0 本・何も書かない）
+test("#776 レビュー R2 上限表のキー集合：ちょうど 3 段（semantic-check・decl-check・repair）でない表は、単独と比較の両方で provider:ollama-limits-unavailable（exit 3・子 0 本・何も書かない）", async () => {
+  const INVALID_LIMITS = [
+    ["unknown-key", '{ "semantic-check": 32768, "decl-check": 32768, unknown: 65536 }'],
+    ["extra-key", '{ "semantic-check": 32768, "decl-check": 32768, repair: 65536, "test-spec": 1 }'],
+    ["missing-repair", '{ "semantic-check": 32768, "decl-check": 32768 }'],
+    ["missing-decl", '{ "semantic-check": 32768, repair: 65536 }'],
+    ["only-repair", "{ repair: 65536 }"],
+    ["zero", '{ "semantic-check": 32768, "decl-check": 32768, repair: 0 }'],
+    ["negative", '{ "semantic-check": -1, "decl-check": 32768, repair: 65536 }'],
+    ["non-integer", '{ "semantic-check": 32768.5, "decl-check": 32768, repair: 65536 }'],
+    ["string-value", '{ "semantic-check": "32768", "decl-check": 32768, repair: 65536 }'],
+  ];
+  const exportOf = (literal) => `export const OLLAMA_STAGE_OUTPUT_LIMITS = ${literal};\n`;
+
+  // 単独（--provider ollama --pipeline v1.2 の Build）
+  await withRepo(async (base) => {
+    for (const [label, literal] of INVALID_LIMITS) {
+      const repo = makeV12OllamaRepo(join(base, `s-${label}`), { limits: exportOf(literal) });
+      const fz = frozen557(join(base, `sfz-${label}`), repo), log = join(base, `s-${label}.log`), out = join(base, `sout-${label}`);
+      assertRefused(
+        runAgent(repo, out, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--provider", "ollama"], { FAKE_SPAWN_LOG: log }),
+        "provider:ollama-limits-unavailable", log, 0, `単独 ${label}`,
+      );
+      assertNothingWritten(out, `単独 ${label}`);
+    }
+  });
+
+  // 比較（段だけの対の比較。両群とも v1.2）。候補（<repo>）の dist の表だけを不正にする
+  await withRepo(async (base) => {
+    const repo = makeStageOllamaRepo(base, "cand"), baseline = makeStageOllamaRepo(base, "base"), fz = frozen545(base, repo), log = join(base, "cmp.log");
+    const up = runUpstream638(repo, join(base, "up"), fz, log);
+    const pairs = join(base, "pairs.json");
+    const mp = runAgent(repo, join(base, "unused"), ["--make-pairs", pairs, "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "write", "--stage-from", up, "--runs", "3"]);
+    assert.equal(mp.status, 0, mp.stderr);
+    const args = ["--compare", "--baseline", baseline, "--pairs", pairs, "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "write", "--stage-from", up, "--budget-usd", "10", "--concurrency", "4", "--provider", "ollama"];
+    for (const [label, literal] of INVALID_LIMITS) {
+      writeFileSync(join(repo, "packages/factory/dist/ollama.js"), ollamaJsOf(exportOf(literal)));
+      const out = join(base, `cout-${label}`), before = spawnCount(log);
+      assertRefused(runAgent(repo, out, args, { FAKE_SPAWN_LOG: log }), "provider:ollama-limits-unavailable", log, before, `比較 ${label}`);
+      assertNothingWritten(out, `比較 ${label}`);
+    }
+  });
+});
+
+// ── #776 レビュー R3：上限表のキーの並び順に依らない。比較元の表だけキーを逆順にした同じ表は通り（条件は両群ともキー昇順）、
+// 値が違う表は今のとおり compare:ollama-limits-differ で断る
+test("#776 レビュー R3 上限表の並び順：比較元の表だけキーを逆順にした同じ表は通り（条件は両群ともキー昇順）、値が違う表は今のとおり compare:ollama-limits-differ", async () => {
+  await withRepo(async (base) => {
+    const REVERSED = 'export const OLLAMA_STAGE_OUTPUT_LIMITS = { repair: 65536, "semantic-check": 32768, "decl-check": 32768 };\n';
+    const repo = makeStageOllamaRepo(base, "cand"), baseline = makeStageOllamaRepo(base, "base", { limits: REVERSED }), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream638(repo, join(base, "up"), fz, log);
+    const pairs = join(base, "pairs.json");
+    assert.equal(runAgent(repo, join(base, "unused"), ["--make-pairs", pairs, "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "write", "--stage-from", up, "--runs", "3"]).status, 0);
+    const cmp = (bl) => ["--compare", "--baseline", bl, "--pairs", pairs, "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "write", "--stage-from", up, "--budget-usd", "10", "--concurrency", "4", "--provider", "ollama"];
+    const out = join(base, "cmp"), n0 = spawnCount(log);
+    const r = runAgent(repo, out, cmp(baseline), { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(spawnCount(log) - n0, 30);
+    for (const g of ["before", "after"]) {
+      const c = readJson(join(out, g, "conditions.json"));
+      // 記録はキー昇順に正規化され、両群とも同じ表・同じ署名（再開でも一致する形）
+      assert.deepEqual(Object.keys(c.params.ollama_stage_output_limits), ["decl-check", "repair", "semantic-check"], `${g}: キー昇順`);
+      assert.deepEqual(c.params.ollama_stage_output_limits, FAKE_OLLAMA_LIMITS_TABLE, g);
+      assert.equal(conditionsSignature(c), c.signature, g);
+    }
+    // 値の違う表（並び順は同じ）は今のとおり断る
+    const differ = makeStageOllamaRepo(base, "other", { limits: 'export const OLLAMA_STAGE_OUTPUT_LIMITS = { "semantic-check": 32768, "decl-check": 32768, repair: 65537 };\n' });
+    const n1 = spawnCount(log), bad = join(base, "cmp-bad");
+    assertRefused(runAgent(repo, bad, cmp(differ), { FAKE_SPAWN_LOG: log }), "compare:ollama-limits-differ", log, n1, "値の違う表");
+    assertNothingWritten(bad, "値の違う表");
+  });
+});

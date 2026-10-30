@@ -179,17 +179,35 @@ async function loadOllama(ctx) {
   return { model: mod.DEFAULT_OLLAMA_MODEL, keyEnv };
 }
 /**
+ * #776：上書きする段の名前（**キーの集合をこれに固定する**。Issue #776 レビュー R2）。並びはキー昇順
+ * （`decl-check` < `repair` < `semantic-check`）で、記録・署名・比較の正規の形でもある（レビュー R3）
+ */
+const OLLAMA_LIMIT_STAGES = ["decl-check", "repair", "semantic-check"];
+/** 上限表をキー昇順の写しにする（キーの並び順に依らない記録・比較のため。Issue #776 レビュー R3） */
+const canonicalOllamaLimits = (table) => Object.fromEntries(Object.keys(table).sort().map((k) => [k, table[k]]));
+/**
  * #776：Ollama の段の出力の上限の表（`--provider ollama` の v1.2 の走りだけ）。
- * dist の公開する表が写像で、値が全部 1 以上の整数なら、その写し（JSON の丸ごとの写し）を返す。
- * 無い・形が違えば null（v1.2 の走りでは子を起こす前に断る）。表は**対象の各 checkout の dist から独立に読む**
+ * dist の公開する表が**ちょうど 3 段**（`semantic-check`・`decl-check`・`repair`）の写像で、各値が 1 以上の整数のときだけ、
+ * **キー昇順に正規化した写し**を返す（Issue #776 レビュー R2・R3）。
+ * 無い・未知のキー・必要なキーの欠落・余分なキー・形の違いは null（v1.2 の走りでは子を起こす前に断る）。
+ * 表は**対象の各 checkout の dist から独立に読む**
  */
 async function loadOllamaLimits(ctx) {
   let mod;
   try { mod = await import(pathToFileURL(join(ctx.distDir, "ollama.js")).href); } catch { return null; }
   const table = mod.OLLAMA_STAGE_OUTPUT_LIMITS;
   const ok = (x) => typeof x === "number" && Number.isInteger(x) && x > 0;
-  return isRec(table) && Object.keys(table).length > 0 && Object.values(table).every(ok) ? JSON.parse(JSON.stringify(table)) : null;
+  if (!isRec(table)) return null;
+  const keys = Object.keys(table);
+  if (keys.length !== OLLAMA_LIMIT_STAGES.length || !OLLAMA_LIMIT_STAGES.every((k) => Object.hasOwn(table, k))) return null;
+  if (!OLLAMA_LIMIT_STAGES.every((k) => ok(table[k]))) return null;
+  return canonicalOllamaLimits(table);
 }
+/** 2 つの上限表が同じか（キーの並び順に依らない。null は「表を渡さない群」。Issue #776 レビュー R3） */
+const sameOllamaLimits = (a, b) => {
+  const canon = (t) => (t === null || t === undefined ? null : JSON.stringify(canonicalOllamaLimits(t)));
+  return canon(a) === canon(b);
+};
 // #771：Ollama の公開値（既定のモデル・鍵の環境変数の名前）は checkout ごとに持つ（比較元は比較元の dist の値。候補の値を写さない）
 main.ollama = provider === "ollama" ? await loadOllama(main) : null;
 if (provider === "ollama" && main.ollama === null) refuseCode("provider:ollama-unavailable");
@@ -891,7 +909,7 @@ async function runCompare() {
     ollamaLimitsOfGroup[g] = provider === "ollama" && pipelineOf(g) === V12_PIPELINE ? await loadOllamaLimits(ctxOf[g]) : null;
     if (provider === "ollama" && pipelineOf(g) === V12_PIPELINE && ollamaLimitsOfGroup[g] === null) refuseCode("provider:ollama-limits-unavailable");
   }
-  if (GROUPS.some((g) => JSON.stringify(ollamaLimitsOfGroup[g]) !== JSON.stringify(ollamaLimitsOfGroup[baseGroup]))) refuseCode("compare:ollama-limits-differ");
+  if (GROUPS.some((g) => !sameOllamaLimits(ollamaLimitsOfGroup[g], ollamaLimitsOfGroup[baseGroup]))) refuseCode("compare:ollama-limits-differ");
   // 工場の既定（子に渡す値の出どころ。片方だけ違えば、同じ引数でも条件の意味が揃わない）
   const defaultsOf = (ctx) => ({
     effort: ctx.factory.DEFAULT_EFFORT, budget_usd: ctx.factory.DEFAULT_BUDGET_USD, deadline_ms: ctx.factory.DEFAULT_DEADLINE_MS, model: ctx.openai.DEFAULT_OPENAI_MODEL,
