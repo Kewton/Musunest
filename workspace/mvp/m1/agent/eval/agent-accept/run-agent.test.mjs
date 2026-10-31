@@ -124,6 +124,10 @@ const fakeOpenai = 'export const DEFAULT_OPENAI_MODEL = "fake-model";\n';
 const FAKE_OLLAMA_LIMITS = 'export const OLLAMA_STAGE_OUTPUT_LIMITS = { "semantic-check": 32768, "decl-check": 32768, repair: 65536 };\n';
 const fakeOllama = `export const DEFAULT_OLLAMA_MODEL = "fake-ollama-model";\n${FAKE_OLLAMA_LIMITS}`;
 const FAKE_OLLAMA_KEY_ENV_EXPORT = 'export const OLLAMA_API_KEY_ENV = "OLLAMA_API_KEY";\n';
+// #788：OpenRouter に対応した工場の dist（openrouter.js の既定のモデルと、cli.js の OPENROUTER_API_KEY_ENV）
+const FAKE_OPENROUTER_MODEL = "fake-openrouter-model";
+const fakeOpenRouter = `export const DEFAULT_OPENROUTER_MODEL = ${JSON.stringify(FAKE_OPENROUTER_MODEL)};\n`;
+const FAKE_OPENROUTER_KEY_ENV_EXPORT = 'export const OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY";\n';
 const fakeLimits = 'export const DEFAULT_REASONING_EFFORT = "high";\nexport const STAGE_MAX_OUTPUT_TOKENS = { low: { requirements: 2048 }, medium: { requirements: 16384 }, high: { requirements: 16384 } };\n';
 // 偽物の appspec-schema の files（工場の入口が生成に渡す文書の置き場所を引く口。packages/appspec-schema/src/files.ts と同じ形）
 const fakeSchemaFiles = `export const CONTRACT_DIR = "contract";
@@ -145,18 +149,19 @@ function makeSet(over = {}) {
   return { schema: EVAL_SET_SCHEMA, id: "dev-p1-p10", version: 1, role: "development", title: "t", source: { document: "workspace/mvp/m1/grammar-trial/stage1-patterns.md" }, styles: { S1: "s1", S2: "s2" }, items, ...over };
 }
 
-/** 一時の偽物のリポジトリを作る。dist は src より後に書くので「作り直した」根拠が立つ。ollama を真にすると Ollama に対応した dist になる（#771）。ollamaLimits を偽にすると ollama.js が既定のモデルだけになる（#776） */
-function makeRepo(base, { ollama = false, ollamaLimits = true } = {}) {
+/** 一時の偽物のリポジトリを作る。dist は src より後に書くので「作り直した」根拠が立つ。ollama を真にすると Ollama に対応した dist になる（#771）。ollamaLimits を偽にすると ollama.js が既定のモデルだけになる（#776）。openrouter を真にすると OpenRouter に対応した dist になる（#788） */
+function makeRepo(base, { ollama = false, ollamaLimits = true, openrouter = false } = {}) {
   const repo = join(base, "repo");
   mkdirSync(join(repo, "packages/factory/dist"), { recursive: true });
   mkdirSync(join(repo, "packages/factory/src"), { recursive: true });
   mkdirSync(join(repo, "workspace/mvp/m1/grammar-trial"), { recursive: true });
   writeFileSync(join(repo, "packages/factory/package.json"), JSON.stringify({ type: "module" }));
   writeFileSync(join(repo, "packages/factory/src/index.ts"), "export {};\n");
-  writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeCli + (ollama ? FAKE_OLLAMA_KEY_ENV_EXPORT : ""));
+  writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeCli + (ollama ? FAKE_OLLAMA_KEY_ENV_EXPORT : "") + (openrouter ? FAKE_OPENROUTER_KEY_ENV_EXPORT : ""));
   writeFileSync(join(repo, "packages/factory/dist/cli-plan.js"), fakeCliPlan);
   writeFileSync(join(repo, "packages/factory/dist/openai.js"), fakeOpenai);
   if (ollama) writeFileSync(join(repo, "packages/factory/dist/ollama.js"), ollamaLimits ? fakeOllama : 'export const DEFAULT_OLLAMA_MODEL = "fake-ollama-model";\n');
+  if (openrouter) writeFileSync(join(repo, "packages/factory/dist/openrouter.js"), fakeOpenRouter);
   writeFileSync(join(repo, "packages/factory/dist/limits.js"), fakeLimits);
   writeFileSync(join(repo, "workspace/mvp/m1/grammar-trial/stage1-patterns.md"), makeTable());
   // #425：spec-engine の dist・生成に渡す文書・採点の定義と集計のコード（指紋を取るだけ。中身は動かさない）
@@ -369,6 +374,151 @@ test("同じ Ollama の条件の再開は通り、provider の変更は断る（
     assert.ok(changed.stderr.includes("[resume:signature]"), changed.stderr);
     assert.deepEqual(treeOf(out), before);
   }, { ollama: true });
+});
+
+// ── #788：LLM の adapter に OpenRouter を足す（--provider openrouter。README §5.1）
+// run-agent は --provider ollama と同じ形で openrouter を受ける：対象の checkout の dist が対応していることを子を起こす前に確かめ、
+// 子の argv に provider と dist の既定モデルを渡し、条件に provider と鍵の環境変数の名前（値ではない）を残す。Ollama の上限の表は載せない
+
+test("#788 旧の checkout（OpenRouter に対応していない dist）は --provider openrouter を子を起こす前に固定の理由で断る", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-openrouter-old");
+    const log = join(base, "spawn-openrouter-old.log");
+    const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--provider", "openrouter"], { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 3);
+    assert.ok(r.stderr.includes("[provider:openrouter-unavailable]"), r.stderr);
+    assert.equal(spawnCount(log), 0);
+    assert.ok(!existsSync(out) || readdirSync(out).length === 0);
+  });
+});
+
+/** #788：対応しているふりをした壊れた dist を作る（`openrouter.js` はあるが公開値が欠ける・`cli.js` が鍵の名前を公開しない） */
+async function withBrokenOpenRouter(kind, fn) {
+  await withRepo(async (base, repo) => {
+    if (kind === "no-model") writeFileSync(join(repo, "packages/factory/dist/openrouter.js"), "export const OTHER = 1;\n");
+    if (kind === "empty-model") writeFileSync(join(repo, "packages/factory/dist/openrouter.js"), 'export const DEFAULT_OPENROUTER_MODEL = "";\n');
+    if (kind === "no-keyenv") writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeCli);
+    await fn(base, repo);
+  }, { openrouter: true });
+}
+
+test("#788 dist の公開値の検査：openrouter.js が既定のモデルを公開しない・空・cli.js が OPENROUTER_API_KEY_ENV を公開しない dist は、provider:openrouter-unavailable と断る（子 0 本・何も書かない）", async () => {
+  for (const kind of ["no-model", "empty-model", "no-keyenv"]) {
+    await withBrokenOpenRouter(kind, async (base, repo) => {
+      const out = join(base, `out-openrouter-${kind}`);
+      const log = join(base, `spawn-openrouter-${kind}.log`);
+      const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--provider", "openrouter"], { FAKE_SPAWN_LOG: log });
+      assert.equal(r.status, 3, `${kind}: ${r.stderr}`);
+      assert.ok(r.stderr.includes("[provider:openrouter-unavailable]"), `${kind}: ${r.stderr}`);
+      assert.equal(spawnCount(log), 0, kind);
+      assert.ok(!existsSync(out) || readdirSync(out).length === 0, kind);
+    });
+  }
+});
+
+test("#788 OpenRouter に対応した checkout は、argv に provider と dist の既定モデルを渡し、条件に provider と鍵の名前だけを残す（Ollama の上限の表は無い）", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-openrouter");
+    const keyValue = "or-SECRET-MARK";
+    const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--provider", "openrouter"], { OPENROUTER_API_KEY: keyValue });
+    assert.equal(r.status, 0, r.stderr);
+    const received = JSON.parse(readFileSync(join(out, "P1-r1", "received-argv.json"), "utf8"));
+    const at = received.indexOf("--provider");
+    assert.ok(at >= 0, "argv に --provider が無い");
+    assert.equal(received[at + 1], "openrouter");
+    assert.equal(received[received.indexOf("--model") + 1], FAKE_OPENROUTER_MODEL);
+    const cond = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    assert.equal(cond.params.provider, "openrouter");
+    assert.equal(cond.params.provider_api_key_env, "OPENROUTER_API_KEY");
+    assert.equal(cond.params.model, FAKE_OPENROUTER_MODEL);
+    // Ollama の段の出力の上限の表の欄は openrouter の走りに載らない
+    assert.equal("ollama_stage_output_limits" in cond.params, false);
+    // run-agent と score-agent が同じ署名の式で一致する
+    assert.equal(conditionsSignature(cond), cond.signature);
+    // 鍵の値は記録にも出力にも残らない
+    assert.equal(readFileSync(join(out, "conditions.json"), "utf8").includes(keyValue), false);
+    assert.equal(r.stdout.includes(keyValue), false);
+    assert.equal(r.stderr.includes(keyValue), false);
+  }, { openrouter: true });
+});
+
+test("#788 同じ OpenRouter の条件の再開は通り、provider の変更は断る", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-openrouter-resume");
+    const log = join(base, "spawn-openrouter-resume.log");
+    const args = ["--only", "P1", "--runs", "1", "--concurrency", "1", "--provider", "openrouter"];
+    assert.equal(runAgent(repo, out, args, { FAKE_SPAWN_LOG: log }).status, 0);
+    assert.equal(spawnCount(log), 1);
+    rmSync(join(out, "P1-r1"), { recursive: true, force: true });
+    // 同じ provider の再開は通る
+    const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.deepEqual(spawnLines(log), ["P1-r1", "P1-r1"]);
+    // provider を変えた再開は断る（署名が変わる）
+    const before = treeOf(out);
+    const changed = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--concurrency", "1", "--provider", "ollama", "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(changed.status, 3);
+    assert.ok(changed.stderr.includes("[resume:signature]"), changed.stderr);
+    assert.deepEqual(treeOf(out), before);
+  }, { openrouter: true, ollama: true });
+});
+
+// ── #788：比較 × OpenRouter
+
+/** #788：比較の両 checkout を OpenRouter に対応させる。比較元の公開値（鍵の名前・既定のモデル）は別に与えられる。baselineOpenRouter を偽にすると比較元は未対応 */
+function makeOpenRouterCompare(base, { baselineOpenRouter = true, baselineKeyEnv = "OPENROUTER_API_KEY", baselineModel = FAKE_OPENROUTER_MODEL } = {}) {
+  const c = makeCompare(base);
+  const keyEnvExport = (name) => `export const OPENROUTER_API_KEY_ENV = ${JSON.stringify(name)};\n`;
+  writeFileSync(join(c.repo, "packages/factory/dist/cli.js"), fakeCompareCli() + keyEnvExport("OPENROUTER_API_KEY"));
+  writeFileSync(join(c.repo, "packages/factory/dist/openrouter.js"), fakeOpenRouter);
+  if (baselineOpenRouter) {
+    writeFileSync(join(c.baseline, "packages/factory/dist/cli.js"), fakeCompareCli() + keyEnvExport(baselineKeyEnv));
+    writeFileSync(join(c.baseline, "packages/factory/dist/openrouter.js"), `export const DEFAULT_OPENROUTER_MODEL = ${JSON.stringify(baselineModel)};\n`);
+  }
+  return c;
+}
+
+test("#788 比較 × --provider openrouter：比較元の鍵の環境変数の名前・既定のモデルが候補と違えば compare:defaults-differ で断る（子 0 本・何も書かない）", async () => {
+  await withRepo(async (base) => {
+    for (const [label, opts] of [["key", { baselineKeyEnv: "BASE_OPENROUTER_API_KEY" }], ["model", { baselineModel: "base-openrouter-model" }]]) {
+      const c = makeOpenRouterCompare(join(base, `r788-${label}`), opts);
+      const pairs = makePairsFile(c.repo, c, join(base, `pairs-r788-${label}.json`), 1);
+      const log = join(base, `spawn-r788-${label}.log`), out = join(base, `out-r788-${label}`);
+      assertCompareRefused(runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5", "--provider", "openrouter"]), { FAKE_SPAWN_LOG: log }), "compare:defaults-differ", log, out, label);
+    }
+  });
+});
+
+test("#788 比較 × --provider openrouter：比較元だけ対応していなければ provider:openrouter-unavailable で断る（exit 3・子 0 本・何も書かない）", async () => {
+  await withRepo(async (base) => {
+    const c = makeOpenRouterCompare(join(base, "r788-old"), { baselineOpenRouter: false });
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-r788-old.json"), 1);
+    const log = join(base, "spawn-r788-old.log"), out = join(base, "out-r788-old");
+    assertCompareRefused(runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5", "--provider", "openrouter"]), { FAKE_SPAWN_LOG: log }), "provider:openrouter-unavailable", log, out);
+  });
+});
+
+test("#788 比較 × --provider openrouter：両方が対応し公開値が同じなら、両群の子に provider と既定モデルが渡り、各群の条件・既定・shared.params の provider と鍵の名前が一致する", async () => {
+  await withRepo(async (base) => {
+    const c = makeOpenRouterCompare(join(base, "r788-ok"));
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-r788-ok.json"), 1);
+    const log = join(base, "spawn-r788-ok.log"), out = join(base, "out-r788-ok");
+    const r = runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5", "--provider", "openrouter"]), { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(compareLog(log).length, 4);
+    for (const g of ["v1", "v1.1a"]) {
+      const argv = readJson(join(out, g, "P1-r1", "received-argv.json"));
+      assert.equal(argv[argv.indexOf("--provider") + 1], "openrouter", g);
+      assert.equal(argv[argv.indexOf("--model") + 1], FAKE_OPENROUTER_MODEL, g);
+      const cond = readJson(join(out, g, "conditions.json"));
+      assert.deepEqual([cond.params.provider, cond.params.provider_api_key_env, cond.params.model], ["openrouter", "OPENROUTER_API_KEY", FAKE_OPENROUTER_MODEL], g);
+      assert.equal("ollama_stage_output_limits" in cond.params, false, g);
+      assert.equal(conditionsSignature(cond), cond.signature, g);
+    }
+    const rec = readJson(join(out, "comparison.json"));
+    for (const g of ["v1", "v1.1a"]) assert.deepEqual([rec.groups[g].defaults.provider, rec.groups[g].defaults.api_key_env, rec.groups[g].defaults.model_openrouter], ["openrouter", "OPENROUTER_API_KEY", FAKE_OPENROUTER_MODEL], g);
+    assert.deepEqual([rec.shared.params.provider, rec.shared.params.provider_api_key_env, rec.shared.params.model], ["openrouter", "OPENROUTER_API_KEY", FAKE_OPENROUTER_MODEL]);
+  });
 });
 
 test("500 文字を超え分かれ UTF-8 の途中で切れた標準出力・標準エラーを、成功でも非 0 でもそのままのバイト列で残す", async () => {

@@ -9,7 +9,7 @@
 //   5. 誤りを型付きで分類する（HTTP・timeout・拒否・未完了・形が合わない・道具の引数）（§2.2）
 //   6. 未完了の応答は、出力が JSON として読めても成功にしない（§2.2）
 //   7. adapter のソースが環境変数を読まない（§2.1・R-15）
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   LlmStructuredRequest,
   LlmToolRequest,
@@ -18,13 +18,22 @@ import type {
 import { OUTPUT_STAGES, maxOutputTokensForEffort } from "./limits.js";
 import {
   OPENAI_PROMPT_CACHE_KEY,
+  RESPONSES_BODY_RESERVED_KEYS,
   OpenAiAdapterError,
   OpenAiIncompleteError,
   createOpenAiLlmClient,
+  createResponsesLlmClient,
   type FetchLike,
   type OpenAiErrorKind,
   type OpenAiUsage,
 } from "./openai.js";
+import {
+  SHARED_BODY_MODEL,
+  SHARED_STRUCTURED_BODY_JSON,
+  SHARED_STRUCTURED_REQUEST,
+  SHARED_TOOL_BODY_JSON,
+  SHARED_TOOL_REQUEST,
+} from "./__tests__/openai.js";
 import {
   ENVELOPE_SCHEMA,
   ENVELOPE_SCHEMA_NAME,
@@ -1628,5 +1637,79 @@ describe("adapter は環境変数を読まない（02 §2.1・R-15）", () => {
     for (const token of forbidden) {
       expect(source.includes(token), `openai.ts に ${token} がある`).toBe(false);
     }
+  });
+});
+
+// ── 3.9. 共有の body の末尾に足す固定の欄（`extraBody`。Issue #788）────────────────────
+
+/** `extraBody` を渡せる client（宛先は固定の偽の値。偽物の fetch で body を観測する） */
+const responsesClient = (fetch: FetchLike, extraBody?: Readonly<Record<string, unknown>>) =>
+  createResponsesLlmClient({
+    apiKey: "test-key",
+    model: SHARED_BODY_MODEL,
+    url: "https://example.test/v1/responses",
+    fetch,
+    ...(extraBody === undefined ? {} : { extraBody }),
+  });
+
+describe("extraBody：body を組み終えた最後に固定の欄を足す（Issue #788）", () => {
+  it("渡さなければ body は今とバイト列で同じ（比較元の固定値と一致する）", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
+    const client = responsesClient(fetch);
+    await client.callStructured(SHARED_STRUCTURED_REQUEST);
+    expect(JSON.stringify(captured[0]!.body)).toBe(SHARED_STRUCTURED_BODY_JSON);
+    await client.callWithTools(SHARED_TOOL_REQUEST);
+    expect(JSON.stringify(captured[1]!.body)).toBe(SHARED_TOOL_BODY_JSON);
+  });
+
+  it("構造化出力の body の**最後**に 1 欄を足す（ほかの欄の並びと値は同じ）", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
+    const provider = { only: ["x"], require_parameters: true, allow_fallbacks: false };
+    await responsesClient(fetch, { provider }).callStructured(SHARED_STRUCTURED_REQUEST);
+    const body = captured[0]!.body;
+    expect(Object.keys(body).at(-1)).toBe("provider");
+    const { provider: _provider, ...rest } = body;
+    expect(JSON.stringify(rest)).toBe(SHARED_STRUCTURED_BODY_JSON);
+  });
+
+  it("道具付きの body（通常・finalAnswerOnly）のどちらの最後にも足す", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ entity: "item" })))));
+    const client = responsesClient(fetch, { provider: "fixed" });
+    await client.callWithTools(SHARED_TOOL_REQUEST);
+    await client.callWithTools({ ...TOOL_REQUEST, schemaName: "answer", schema: SCHEMA, finalAnswerOnly: true });
+    for (const index of [0, 1]) {
+      expect(Object.keys(captured[index]!.body).at(-1), String(index)).toBe("provider");
+      expect(captured[index]!.body["provider"], String(index)).toBe("fixed");
+      const { provider: _provider, ...rest } = captured[index]!.body;
+      expect(rest["tools"], String(index)).toBeDefined();
+    }
+  });
+
+  it("予約名（要求で省かれる欄の名前を含む全部）は受けず、作るときに投げる（fetch 0 回）", () => {
+    for (const key of RESPONSES_BODY_RESERVED_KEYS) {
+      const recording = recordingFetch(() => jsonResponse(completed(outputText("{}"))));
+      const fetch = vi.fn(recording.fetch);
+      expect(() => responsesClient(fetch, { [key]: 1 }), key).toThrow();
+      expect(fetch, key).not.toHaveBeenCalled();
+    }
+  });
+
+  it("整数の形の名前は受けず、作るときに投げる（fetch 0 回）", () => {
+    for (const key of ["0", "1", "42"]) {
+      const recording = recordingFetch(() => jsonResponse(completed(outputText("{}"))));
+      const fetch = vi.fn(recording.fetch);
+      expect(() => responsesClient(fetch, { [key]: 1 }), key).toThrow();
+      expect(fetch, key).not.toHaveBeenCalled();
+    }
+  });
+
+  it("値は作るときに複製して固定する（あとで元を書き換えても送る body は変わらない）", async () => {
+    const value = { only: ["x"], nested: [1, 2] };
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
+    const client = responsesClient(fetch, { provider: value });
+    value.only.push("y");
+    value.nested.push(3);
+    await client.callStructured(SHARED_STRUCTURED_REQUEST);
+    expect(captured[0]!.body["provider"]).toEqual({ only: ["x"], nested: [1, 2] });
   });
 });

@@ -97,6 +97,7 @@ import {
 import type { LlmClient } from "./llm.js";
 import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL, OLLAMA_STAGE_OUTPUT_LIMITS } from "./ollama.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL } from "./openai.js";
+import { createOpenRouterLlmClient, DEFAULT_OPENROUTER_MODEL } from "./openrouter.js";
 import type { EnvelopeId } from "./schema-envelope.js";
 import { runPlan, type PlanResponder, type PlanResult } from "./plan/run-plan.js";
 import {
@@ -155,8 +156,8 @@ export const PROMPT_VERSION_V12 = "v1.2" as const;
 export const PIPELINES = ["v1", "v1.1a", "v1.2"] as const;
 /** 経路の型 */
 export type Pipeline = (typeof PIPELINES)[number];
-/** `--provider` で選べる LLM の adapter（既定 openai。Issue #771） */
-export const PROVIDERS = ["openai", "ollama"] as const;
+/** `--provider` で選べる LLM の adapter（既定 openai。Issue #771・#788） */
+export const PROVIDERS = ["openai", "ollama", "openrouter"] as const;
 /** LLM の adapter の型 */
 export type Provider = (typeof PROVIDERS)[number];
 /** 契約の版（`03-evaluation.md` §1 が v0.2 に固定する） */
@@ -181,6 +182,11 @@ export const API_KEY_ENV = "OPENAI_API_KEY" as const;
  * **鍵を読むのは手元の入口だけ**（adapter は環境変数を読まない）。
  */
 export const OLLAMA_API_KEY_ENV = "OLLAMA_API_KEY" as const;
+/**
+ * OpenRouter の鍵を読む環境変数の名前（`--provider openrouter` のとき。Issue #788）。
+ * **鍵を読むのは手元の入口だけ**（adapter は環境変数を読まない）。
+ */
+export const OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY" as const;
 /** Jev の鍵を読む環境変数の名前。**鍵を読むのは手元の入口だけ**（adapter は環境変数を読まない。§4） */
 export const JEV_API_KEY_ENV = "JEV_API_KEY" as const;
 
@@ -206,14 +212,31 @@ export const OLLAMA_RATES: TokenRates = {
   outputPerToken: 0,
 };
 
+/**
+ * OpenRouter の単価（USD / 1 トークン。Issue #788）。**従量課金なので、LLM の費用を単価で数える**（予算の
+ * 上限が効く）。値は所有者が 2026-10-31 に示した提供元 OpenInference の公開値（100 万あたり）：入力 $0.0249・
+ * キャッシュの読み取り $0.0207・キャッシュの書き込みは入力と同じ $0.0249・出力 $0.0755。
+ * 出典：2026-10-31 の OpenRouter の `/models/z-ai/glm-5.3-flash/endpoints`（量子化 fp4）。
+ */
+export const OPENROUTER_RATES: TokenRates = {
+  inputPerToken: 0.0249 / 1_000_000,
+  cachedInputPerToken: 0.0207 / 1_000_000,
+  cacheWritePerToken: 0.0249 / 1_000_000,
+  outputPerToken: 0.0755 / 1_000_000,
+};
+
 /** LLM の adapter が読む鍵の環境変数の名前（`--provider` の既定は openai） */
 export function apiKeyEnvOf(provider: Provider): string {
-  return provider === "ollama" ? OLLAMA_API_KEY_ENV : API_KEY_ENV;
+  if (provider === "ollama") return OLLAMA_API_KEY_ENV;
+  if (provider === "openrouter") return OPENROUTER_API_KEY_ENV;
+  return API_KEY_ENV;
 }
 
 /** その provider の既定の単価（試験用の `deps.rates` が優先する） */
 export function ratesOf(provider: Provider): TokenRates {
-  return provider === "ollama" ? OLLAMA_RATES : DEFAULT_RATES;
+  if (provider === "ollama") return OLLAMA_RATES;
+  if (provider === "openrouter") return OPENROUTER_RATES;
+  return DEFAULT_RATES;
 }
 
 /**
@@ -244,7 +267,7 @@ export const EXIT_STAGE_INPUT = 4;
 
 /** 使い方の文（誤りを人に見せる） */
 export const USAGE =
-  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--provider openai|ollama] [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル> [--pipeline v1|v1.1a|v1.2]]";
+  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--provider openai|ollama|openrouter] [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル> [--pipeline v1|v1.1a|v1.2]]";
 
 /** 段単位の実行口の使い方（段の旗の誤りのときだけ、`USAGE` のあとに出す。Issue #544） */
 export const STAGE_USAGE =
@@ -595,7 +618,13 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   return {
     requestFile,
     outDir,
-    model: explicitModel ?? (provider === "ollama" ? DEFAULT_OLLAMA_MODEL : DEFAULT_OPENAI_MODEL),
+    model:
+      explicitModel ??
+      (provider === "ollama"
+        ? DEFAULT_OLLAMA_MODEL
+        : provider === "openrouter"
+          ? DEFAULT_OPENROUTER_MODEL
+          : DEFAULT_OPENAI_MODEL),
     effort,
     ...(provider === undefined ? {} : { provider }),
     ...(budgetUsd === undefined ? {} : { budgetUsd }),
@@ -1636,10 +1665,12 @@ export async function main(): Promise<void> {
       await fs.mkdir(path, { recursive: true });
     },
     loadDocuments: loadDocumentsFromFiles,
-    makeClient: ({ apiKey, model, effort, envelope, provider }) =>
-      provider === "ollama"
-        ? createOllamaLlmClient({ apiKey, model, effort, ...(envelope === undefined ? {} : { envelope }) })
-        : createOpenAiLlmClient({ apiKey, model, effort, ...(envelope === undefined ? {} : { envelope }) }),
+    makeClient: ({ apiKey, model, effort, envelope, provider }) => {
+      const options = { apiKey, model, effort, ...(envelope === undefined ? {} : { envelope }) };
+      if (provider === "ollama") return createOllamaLlmClient(options);
+      if (provider === "openrouter") return createOpenRouterLlmClient(options);
+      return createOpenAiLlmClient(options);
+    },
     terminal: createNodeTerminal(proc),
     log: (line) => proc.stdout.write(`${line}\n`),
     logError: (line) => proc.stderr.write(`${line}\n`),
