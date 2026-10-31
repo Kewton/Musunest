@@ -7844,10 +7844,10 @@ describe("OpenRouter の工場の入口の既定（鍵の名前・単価・段�
     // 既定の単価は OpenAI とも Ollama とも違う（従量課金の値。100 万あたり）
     expect(ratesOf("openrouter")).not.toEqual(DEFAULT_RATES);
     expect(ratesOf("openrouter")).not.toEqual(OLLAMA_RATES);
-    expect(OPENROUTER_RATES.inputPerToken).toBeCloseTo(0.0249 / 1_000_000, 15);
-    expect(OPENROUTER_RATES.cachedInputPerToken).toBeCloseTo(0.0207 / 1_000_000, 15);
-    expect(OPENROUTER_RATES.cacheWritePerToken).toBeCloseTo(0.0249 / 1_000_000, 15);
-    expect(OPENROUTER_RATES.outputPerToken).toBeCloseTo(0.0755 / 1_000_000, 15);
+    expect(OPENROUTER_RATES.inputPerToken).toBeCloseTo(0.042 / 1_000_000, 15);
+    expect(OPENROUTER_RATES.cachedInputPerToken).toBeCloseTo(0.018 / 1_000_000, 15);
+    expect(OPENROUTER_RATES.cacheWritePerToken).toBeCloseTo(0.042 / 1_000_000, 15);
+    expect(OPENROUTER_RATES.outputPerToken).toBeCloseTo(0.3 / 1_000_000, 15);
     // Ollama の段の上限の表は ollama の v1.2 の走りだけ（openrouter には渡さない）
     expect(stageOutputLimitsOf("openrouter", "v1.2")).toBeUndefined();
     for (const pipeline of ["v1", "v1.1a", "v1.2", undefined] as const) {
@@ -7878,15 +7878,18 @@ describe("OpenRouter の工場の入口の既定（鍵の名前・単価・段�
     });
   });
 
-  it("OPENROUTER_RATES の単価で、キャッシュの内訳の混ざった usage の額が手で計算した額と一致する（推論のトークンを二重に足さない）", () => {
+  it("OPENROUTER_RATES（morph/fp8）の単価で、キャッシュの内訳の混ざった usage の額が試験に固定した額と一致する（推論のトークンを二重に足さない）", () => {
     const usage = { inputTokens: 1000, cachedInputTokens: 200, cacheWriteTokens: 100, outputTokens: 500, reasoningTokens: 300 };
+    // morph/fp8 の公開値（100 万あたり。入力 0.042・読み取り 0.018・書き込み 0.042・出力 0.30）から手で計算した固定の額
+    const expected = 0.0001872;
     const uncached = 1000 - 200 - 100;
     const cacheWritePerToken = OPENROUTER_RATES.cacheWritePerToken ?? OPENROUTER_RATES.inputPerToken;
-    const expected =
+    const computed =
       uncached * OPENROUTER_RATES.inputPerToken +
       100 * cacheWritePerToken +
       200 * OPENROUTER_RATES.cachedInputPerToken +
       500 * OPENROUTER_RATES.outputPerToken;
+    expect(computed).toBeCloseTo(expected, 15);
     expect(factory.costOfUsageUsd(usage, OPENROUTER_RATES)).toBeCloseTo(expected, 15);
     // 推論のトークンは output_tokens に含まれる（二重に足さない）：reasoning を増やしても額は変わらない
     expect(factory.costOfUsageUsd({ ...usage, reasoningTokens: 999 }, OPENROUTER_RATES)).toBeCloseTo(expected, 15);

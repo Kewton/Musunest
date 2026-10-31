@@ -213,16 +213,16 @@ export const OLLAMA_RATES: TokenRates = {
 };
 
 /**
- * OpenRouter の単価（USD / 1 トークン。Issue #788）。**従量課金なので、LLM の費用を単価で数える**（予算の
- * 上限が効く）。値は所有者が 2026-10-31 に示した提供元 OpenInference の公開値（100 万あたり）：入力 $0.0249・
- * キャッシュの読み取り $0.0207・キャッシュの書き込みは入力と同じ $0.0249・出力 $0.0755。
- * 出典：2026-10-31 の OpenRouter の `/models/z-ai/glm-5.3-flash/endpoints`（量子化 fp4）。
+ * OpenRouter の単価（USD / 1 トークン。Issue #788・#790）。**従量課金なので、LLM の費用を単価で数える**（予算の
+ * 上限が効く）。値は所有者が 2026-10-31 に示した提供元 fp8 の `morph/fp8` の公開値（100 万あたり）：入力 $0.042・
+ * キャッシュの読み取り $0.018・キャッシュの書き込みは入力と同じ $0.042・出力 $0.30。
+ * 出典：2026-10-31 の OpenRouter の `/models/z-ai/glm-5.3-flash/endpoints`（量子化 fp8）。
  */
 export const OPENROUTER_RATES: TokenRates = {
-  inputPerToken: 0.0249 / 1_000_000,
-  cachedInputPerToken: 0.0207 / 1_000_000,
-  cacheWritePerToken: 0.0249 / 1_000_000,
-  outputPerToken: 0.0755 / 1_000_000,
+  inputPerToken: 0.042 / 1_000_000,
+  cachedInputPerToken: 0.018 / 1_000_000,
+  cacheWritePerToken: 0.042 / 1_000_000,
+  outputPerToken: 0.3 / 1_000_000,
 };
 
 /** LLM の adapter が読む鍵の環境変数の名前（`--provider` の既定は openai） */
