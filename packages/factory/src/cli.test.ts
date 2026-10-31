@@ -22,6 +22,8 @@ import {
   JEV_API_KEY_ENV,
   OLLAMA_API_KEY_ENV,
   OLLAMA_RATES,
+  OPENROUTER_API_KEY_ENV,
+  OPENROUTER_RATES,
   CONTRACT_VERSION,
   PROMPT_VERSION_V11A,
   PROMPT_VERSION_V12,
@@ -29,14 +31,17 @@ import {
   STAGE_USAGE,
   VOCABULARY_VERSION,
   USAGE,
+  apiKeyEnvOf,
   parseCliArguments,
   parseStageEfforts,
+  ratesOf,
   runCli,
   main,
   stageOutputLimitsOf,
 } from "./cli.js";
 import { AGENT_LIMITS, maxOutputTokensForEffort } from "./limits.js";
 import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL, OLLAMA_STAGE_OUTPUT_LIMITS } from "./ollama.js";
+import { createOpenRouterLlmClient, DEFAULT_OPENROUTER_MODEL } from "./openrouter.js";
 import * as planRunModule from "./plan/run-plan.js";
 import type { PlanResult } from "./plan/run-plan.js";
 import { BUILD_CLI_RECORD_FILE, PLAN_ONLY_RESULT_SCHEMA } from "./cli-plan.js";
@@ -250,12 +255,31 @@ describe("--provider の読み取り（Issue #771）", () => {
     });
   });
 
+  it("--provider openrouter は既定のモデルを OpenRouter のものにする（Issue #788）", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--provider", "openrouter"])).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: DEFAULT_OPENROUTER_MODEL,
+      effort: "high",
+      provider: "openrouter",
+    });
+    // --model は --provider の前でも後でも勝つ
+    for (const argv of [
+      ["--", "request.txt", "--out", "out", "--model", "z-ai/glm-5.3-flash:free", "--provider", "openrouter"],
+      ["--", "request.txt", "--out", "out", "--provider", "openrouter", "--model", "z-ai/glm-5.3-flash:free"],
+    ]) {
+      const parsed = parseCliArguments(argv);
+      if ("error" in parsed) throw new Error(parsed.error);
+      expect(parsed.model).toBe("z-ai/glm-5.3-flash:free");
+    }
+  });
+
   it("--provider の値の誤りは使い方の誤り", () => {
     expect(parseCliArguments(["--", "request.txt", "--out", "out", "--provider", "nope"])).toEqual({
-      error: "--provider には openai か ollama を指定してください",
+      error: "--provider には openai か ollama か openrouter を指定してください",
     });
     expect(parseCliArguments(["--", "request.txt", "--out", "out", "--provider"])).toEqual({
-      error: "--provider には openai か ollama を指定してください",
+      error: "--provider には openai か ollama か openrouter を指定してください",
     });
   });
 
@@ -263,8 +287,8 @@ describe("--provider の読み取り（Issue #771）", () => {
     expect(parseCliArguments(["--", "request.txt", "--out", "out"])).not.toHaveProperty("provider");
   });
 
-  it("使い方の文に --provider openai|ollama がある", () => {
-    expect(USAGE).toContain("[--provider openai|ollama]");
+  it("使い方の文に --provider openai|ollama|openrouter がある", () => {
+    expect(USAGE).toContain("[--provider openai|ollama|openrouter]");
   });
 });
 
@@ -444,6 +468,27 @@ describe("鍵が無いときは、API を呼ばずに使い方の誤りで終わ
     expect(makeClient).not.toHaveBeenCalled();
     expect(writeFile).not.toHaveBeenCalled();
     expect(log.mock.calls.some(([line]) => String(line).includes(OLLAMA_API_KEY_ENV))).toBe(true);
+  });
+
+  it("--provider openrouter で OPENROUTER_API_KEY が無ければ、makeClient を呼ばずに 2 を返し、何も書かない（Issue #788）", async () => {
+    const makeClient = vi.fn();
+    const log = vi.fn();
+    const writeFile = vi.fn(async () => {});
+    const code = await runCli({
+      // ほかの provider の鍵だけがあっても、選んだ provider の鍵が無ければ使い方の誤り
+      argv: ["--", "request.txt", "--out", "out", "--provider", "openrouter"],
+      env: { [API_KEY_ENV]: "sk-FAKE", [OLLAMA_API_KEY_ENV]: "ol-FAKE" },
+      readFile: async () => SOURCE_TEXT,
+      writeFile,
+      makeDirectory: async () => {},
+      loadDocuments: async () => [],
+      makeClient,
+      log,
+    });
+    expect(code).toBe(EXIT_USAGE);
+    expect(makeClient).not.toHaveBeenCalled();
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(log.mock.calls.some(([line]) => String(line).includes(OPENROUTER_API_KEY_ENV))).toBe(true);
   });
 
   it("引数が足りないときも 2 を返す", async () => {
@@ -893,6 +938,16 @@ describe("--pipeline の読み取り（Issue #511）", () => {
     },
     { name: "知らない値", args: ["--pipeline", "v2"], error: "--pipeline には v1 か v1.1a か v1.2 を指定してください" },
     { name: "値が無い", args: ["--pipeline"], error: "--pipeline には v1 か v1.1a か v1.2 を指定してください" },
+    {
+      name: "--provider の知らない値（候補の一覧に openrouter が入る。Issue #788）",
+      args: ["--provider", "nope"],
+      error: "--provider には openai か ollama か openrouter を指定してください",
+    },
+    {
+      name: "--provider の値が無い（候補の一覧に openrouter が入る。Issue #788）",
+      args: ["--provider"],
+      error: "--provider には openai か ollama か openrouter を指定してください",
+    },
     {
       name: "--pipeline v1.2 だけ（--plan-file が無い）",
       args: ["--pipeline", "v1.2"],
@@ -7072,6 +7127,28 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     }
   });
 
+  it("R7 題材の言葉が、今回変更したファイル（Issue #788：OpenRouter の adapter）に無い", async () => {
+    const root = new URL("./", import.meta.url).pathname;
+    const files = [
+      "openai.ts",
+      "openai.test.ts",
+      "ollama.test.ts",
+      "openrouter.ts",
+      "openrouter.test.ts",
+      "cli.ts",
+      "cli.test.ts",
+      "index.ts",
+      "index.test.ts",
+      "__tests__/openai.ts",
+    ];
+    for (const name of files) {
+      const text = await fs.readFile(`${root}${name}`, "utf8");
+      for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text.includes(word), `${name}: ${word}`).toBe(false);
+      // 題材の言葉の走査と同じく、鍵の値を書かない（偽物の鍵は長い秘密の形をしていない）
+      expect(text, name).not.toMatch(/OPENROUTER_API_KEY\s*[:=]\s*["'][^"']+["']/);
+    }
+  });
+
   /**
    * (5) T2 の束の遅着を、確定の前・確定のあとの B1 の実行中・段と段の間で起こし、`late.metered_stage_index`
    * と、段の行のトークン・usage の無い応答の数の照合の規則で確かめる。usage あり・なしの 2 回。
@@ -7202,6 +7279,15 @@ const PROVIDER_WIRING = [
     rates: OLLAMA_RATES,
   },
   {
+    label: "--provider openrouter",
+    args: ["--provider", "openrouter"],
+    provider: "openrouter" as const,
+    url: "https://openrouter.ai/api/v1/responses",
+    key: "or-FAKE-R2",
+    model: DEFAULT_OPENROUTER_MODEL,
+    rates: OPENROUTER_RATES,
+  },
+  {
     label: "--provider 省略（openai）",
     args: [],
     provider: undefined,
@@ -7212,7 +7298,13 @@ const PROVIDER_WIRING = [
   },
 ] as const;
 type ProviderWiring = (typeof PROVIDER_WIRING)[number];
-const BOTH_KEYS = { [API_KEY_ENV]: "sk-FAKE-R2", [OLLAMA_API_KEY_ENV]: "ol-FAKE-R2" };
+const BOTH_KEYS = {
+  [API_KEY_ENV]: "sk-FAKE-R2",
+  [OLLAMA_API_KEY_ENV]: "ol-FAKE-R2",
+  [OPENROUTER_API_KEY_ENV]: "or-FAKE-R2",
+};
+/** 偽物の出力先の名前の印（provider ごとに分ける。`undefined` は openai） */
+const providerSlug = (c: ProviderWiring): string => c.provider ?? "openai";
 
 /** 偽物の fetch：宛先・鍵・モデルを残して HTTP 400 を返す（外部の API は呼ばない。400 は再送されない） */
 function wireTap() {
@@ -7255,7 +7347,11 @@ async function runWired(input: {
         ...(options.envelope === undefined ? {} : { envelope: options.envelope }),
         fetch: input.tap.fetch,
       };
-      return options.provider === "ollama" ? createOllamaLlmClient(adapterOptions) : createOpenAiLlmClient(adapterOptions);
+      return options.provider === "ollama"
+        ? createOllamaLlmClient(adapterOptions)
+        : options.provider === "openrouter"
+          ? createOpenRouterLlmClient(adapterOptions)
+          : createOpenAiLlmClient(adapterOptions);
     },
   );
   const llmJudges: { readonly client: LlmClient; readonly model: string; readonly judge: Judge }[] = [];
@@ -7322,7 +7418,7 @@ describe("入口の全部の実行口が provider の adapter・鍵・モデル�
       const wired = await runWired({
         c,
         tap,
-        dir: `${directory}/r2-plan-only-${c.args.length}`,
+        dir: `${directory}/r2-plan-only-${providerSlug(c)}`,
         args: ["--plan-only", "--answers", "answers.json"],
         readFile: async (path) => (path === "answers.json" ? "{}" : SOURCE_TEXT),
         documents: [],
@@ -7349,7 +7445,7 @@ describe("入口の全部の実行口が provider の adapter・鍵・モデル�
       const wired = await runWired({
         c,
         tap,
-        dir: `${directory}/r2-plan-build-${c.args.length}`,
+        dir: `${directory}/r2-plan-build-${providerSlug(c)}`,
         args: ["--plan", "--answers", "answers.json"],
         readFile: async (path) => (path === "answers.json" ? "{}" : SOURCE_TEXT),
         documents: [],
@@ -7371,14 +7467,14 @@ describe("入口の全部の実行口が provider の adapter・鍵・モデル�
     for (const pipeline of ["v1", "v1.1a"] as const) {
       it(`--plan-file の Build（--pipeline ${pipeline}・${c.label}）`, async () => {
         const tap = wireTap();
-        const planPath = `${directory}/r2-plan-file-${pipeline}-${c.args.length}-plan.json`;
+        const planPath = `${directory}/r2-plan-file-${pipeline}-${providerSlug(c)}-plan.json`;
         const planText = JSON.stringify(await v11aEnvelope());
         const v1Spy = vi.spyOn(runModule, "runGeneration");
         const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
         const wired = await runWired({
           c,
           tap,
-          dir: `${directory}/r2-plan-file-${pipeline}-${c.args.length}`,
+          dir: `${directory}/r2-plan-file-${pipeline}-${providerSlug(c)}`,
           args: ["--pipeline", pipeline, "--plan-file", planPath],
           readFile: async (path) => (path === planPath ? planText : V11A_SOURCE),
           documents: FIXTURE_DOCUMENTS,
@@ -7394,13 +7490,13 @@ describe("入口の全部の実行口が provider の adapter・鍵・モデル�
 
     it(`段の走り（--pipeline v1.1a・name-table..semantic-check・${c.label}）`, async () => {
       const tap = wireTap();
-      const planPath = `${directory}/r2-stage-${c.args.length}-plan.json`;
+      const planPath = `${directory}/r2-stage-${providerSlug(c)}-plan.json`;
       const planText = JSON.stringify(await v11aEnvelope());
       const spy = vi.spyOn(v11aRunModule, "runStageRangeV11a");
       const wired = await runWired({
         c,
         tap,
-        dir: `${directory}/r2-stage-${c.args.length}`,
+        dir: `${directory}/r2-stage-${providerSlug(c)}`,
         args: ["--pipeline", "v1.1a", "--plan-file", planPath, "--stage-start", "name-table", "--stage-end", "semantic-check"],
         readFile: async (path) => (path === planPath ? planText : V11A_SOURCE),
         documents: FIXTURE_DOCUMENTS,
@@ -7735,5 +7831,66 @@ describe("段の出力の上限の上書きの表（`--provider ollama` の v1.2
       const limits = run.toolRequests.map((request) => request.maxOutputTokens);
       expect(limits, execution).toEqual([65_536, 65_536, 65_536, 65_536]);
     }
+  });
+});
+
+// ── OpenRouter の工場の入口の既定（鍵の名前・単価・段の上限の表。Issue #788）──────────────
+
+describe("OpenRouter の工場の入口の既定（鍵の名前・単価・段の上限の表。Issue #788）", () => {
+  it("apiKeyEnvOf・ratesOf が OpenRouter の値になり、段の上限の表は渡さない（Ollama の表は openrouter の走りに載らない）", () => {
+    expect(apiKeyEnvOf("openrouter")).toBe(OPENROUTER_API_KEY_ENV);
+    expect(apiKeyEnvOf("openrouter")).toBe("OPENROUTER_API_KEY");
+    expect(ratesOf("openrouter")).toEqual(OPENROUTER_RATES);
+    // 既定の単価は OpenAI とも Ollama とも違う（従量課金の値。100 万あたり）
+    expect(ratesOf("openrouter")).not.toEqual(DEFAULT_RATES);
+    expect(ratesOf("openrouter")).not.toEqual(OLLAMA_RATES);
+    expect(OPENROUTER_RATES.inputPerToken).toBeCloseTo(0.0249 / 1_000_000, 15);
+    expect(OPENROUTER_RATES.cachedInputPerToken).toBeCloseTo(0.0207 / 1_000_000, 15);
+    expect(OPENROUTER_RATES.cacheWritePerToken).toBeCloseTo(0.0249 / 1_000_000, 15);
+    expect(OPENROUTER_RATES.outputPerToken).toBeCloseTo(0.0755 / 1_000_000, 15);
+    // Ollama の段の上限の表は ollama の v1.2 の走りだけ（openrouter には渡さない）
+    expect(stageOutputLimitsOf("openrouter", "v1.2")).toBeUndefined();
+    for (const pipeline of ["v1", "v1.1a", "v1.2", undefined] as const) {
+      expect(stageOutputLimitsOf("openrouter", pipeline), String(pipeline)).toBeUndefined();
+    }
+  });
+
+  it("--provider openrouter の走りは、選んだ鍵・モデル・provider を makeClient に渡し、単価を OpenRouter の既定にする（Issue #788）", async () => {
+    const recording = createRecordingClient(recordedRun());
+    const makeClient = vi.fn(() => recording.client);
+    const lines: string[] = [];
+    const dir = `${directory}-openrouter`;
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--provider", "openrouter"],
+      // ほかの provider の鍵は渡さない（選んだ provider の鍵だけを読む）
+      env: { [OPENROUTER_API_KEY_ENV]: "or-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient,
+      log: (line) => lines.push(line),
+    });
+    expect(code).toBe(EXIT_OK);
+    expect(makeClient).toHaveBeenCalledWith({
+      apiKey: "or-FAKE",
+      model: DEFAULT_OPENROUTER_MODEL,
+      effort: "high",
+      provider: "openrouter",
+    });
+  });
+
+  it("OPENROUTER_RATES の単価で、キャッシュの内訳の混ざった usage の額が手で計算した額と一致する（推論のトークンを二重に足さない）", () => {
+    const usage = { inputTokens: 1000, cachedInputTokens: 200, cacheWriteTokens: 100, outputTokens: 500, reasoningTokens: 300 };
+    const uncached = 1000 - 200 - 100;
+    const cacheWritePerToken = OPENROUTER_RATES.cacheWritePerToken ?? OPENROUTER_RATES.inputPerToken;
+    const expected =
+      uncached * OPENROUTER_RATES.inputPerToken +
+      100 * cacheWritePerToken +
+      200 * OPENROUTER_RATES.cachedInputPerToken +
+      500 * OPENROUTER_RATES.outputPerToken;
+    expect(factory.costOfUsageUsd(usage, OPENROUTER_RATES)).toBeCloseTo(expected, 15);
+    // 推論のトークンは output_tokens に含まれる（二重に足さない）：reasoning を増やしても額は変わらない
+    expect(factory.costOfUsageUsd({ ...usage, reasoningTokens: 999 }, OPENROUTER_RATES)).toBeCloseTo(expected, 15);
+    // OpenAI の既定の単価で数えると別の額になる（単価の取り違えが額に出る）
+    expect(factory.costOfUsageUsd(usage, DEFAULT_RATES)).not.toBeCloseTo(expected, 15);
   });
 });

@@ -71,6 +71,24 @@ const RESPONSES_URL = "https://api.openai.com/v1/responses";
  */
 export const OPENAI_PROMPT_CACHE_KEY = "musunest-factory";
 
+/**
+ * `extraBody` で受け付けない予約名（Issue #788）。**今の body が持ちうる欄の名前の全部**——要求によって省かれる欄
+ * （`reasoning`・`text`・`tools`・`tool_choice`）も含む。`baseBody`・`buildStructuredBody`・`buildToolBody` が置く欄である。
+ */
+export const RESPONSES_BODY_RESERVED_KEYS: readonly string[] = [
+  "model",
+  "store",
+  "max_output_tokens",
+  "instructions",
+  "prompt_cache_key",
+  "prompt_cache_options",
+  "input",
+  "reasoning",
+  "text",
+  "tools",
+  "tool_choice",
+];
+
 /** fetch の差し替え口。Workers・ブラウザ・Node のどれでも同じ形で呼べる範囲だけを要求する（§2.1） */
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -198,6 +216,14 @@ export interface ResponsesAdapterOptions extends OpenAiAdapterOptions {
    * 印の無い要求の body は今のまま（道具の定義を送り、`tool_choice` は送らない）。
    */
   readonly finalAnswerWithoutTools?: boolean;
+  /**
+   * body を組み終えた**後（送る直前）に末尾へ足す固定の欄**（Issue #788）。渡さなければ body は今とバイト列で同じ。
+   * 値は JSON の値だけ（関数・`undefined` を含まない）で、client を作るときに複製して固定する。
+   * **予約名**（今の body が持ちうる欄の名前の全部＝`RESPONSES_BODY_RESERVED_KEYS`）と、JSON の列挙で先頭に
+   * 来る整数の形の名前は受けず、client を作るときに投げる（fetch は 0 回）。
+   * 構造化出力と道具付き（通常・`finalAnswerOnly`）のどちらの要求にも、同じ規則で足す。
+   */
+  readonly extraBody?: Readonly<Record<string, unknown>>;
 }
 
 interface WireConfig {
@@ -211,6 +237,8 @@ interface WireConfig {
   readonly presentSchema: boolean;
   readonly readFencedJson: boolean;
   readonly finalAnswerWithoutTools: boolean;
+  /** body の末尾へ足す固定の欄（複製して固定済み。渡さなければ `undefined`。Issue #788） */
+  readonly extraBody: Readonly<Record<string, unknown>> | undefined;
 }
 
 /**
@@ -236,6 +264,8 @@ export function createResponsesLlmClient(options: ResponsesAdapterOptions): LlmC
     presentSchema: options.presentSchema === true,
     readFencedJson: options.readFencedJson === true,
     finalAnswerWithoutTools: options.finalAnswerWithoutTools === true,
+    // 予約名・整数の形の名前を弾いてから複製して固定する（作るときに投げる。fetch は 0 回。Issue #788）
+    extraBody: prepareExtraBody(options.extraBody),
   };
   return {
     callStructured: <T>(structuredRequest: LlmStructuredRequest) =>
@@ -250,6 +280,53 @@ export function createResponsesLlmClient(options: ResponsesAdapterOptions): LlmC
  */
 export function createOpenAiLlmClient(options: OpenAiAdapterOptions): LlmClient {
   return createResponsesLlmClient({ ...options, url: RESPONSES_URL, presentSchema: false });
+}
+
+/**
+ * 整数の形の名前（JSON の列挙で先頭に来る＝`Object.assign` の末尾追加を破る）か（Issue #788）。
+ * `"0"`・`"12"` は真、`"01"`・`"-1"`・`"1.5"`・`"x"` は偽。
+ */
+function isIntegerFormKey(key: string): boolean {
+  const value = Number(key);
+  return Number.isInteger(value) && value >= 0 && String(value) === key;
+}
+
+/** 値を深く凍らせる（複製した固定の欄が、あとから書き換わらないようにする。Issue #788） */
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null) {
+    for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
+ * `extraBody` を検査し、複製して固定する（Issue #788）。**予約名**（`RESPONSES_BODY_RESERVED_KEYS`）と
+ * **整数の形の名前**は受けず、client を作るときに投げる（fetch 0 回）。値は JSON の値だけ——JSON の往復で
+ * 複製し、深く凍らせる（作るときの 1 回だけ。要求ごとには組み直さない）。
+ */
+function prepareExtraBody(
+  extraBody: Readonly<Record<string, unknown>> | undefined,
+): Readonly<Record<string, unknown>> | undefined {
+  if (extraBody === undefined) return undefined;
+  const reserved = new Set(RESPONSES_BODY_RESERVED_KEYS);
+  for (const key of Object.keys(extraBody)) {
+    if (reserved.has(key)) throw new Error(`extraBody に予約名は渡せません: ${key}`);
+    if (isIntegerFormKey(key)) throw new Error(`extraBody に整数の形の名前は渡せません: ${key}`);
+  }
+  return deepFreeze(JSON.parse(JSON.stringify(extraBody)) as Record<string, unknown>);
+}
+
+/**
+ * 組み終えた body の**末尾**に固定の欄を足す（送る直前。Issue #788）。予約名と整数の形の名前は作るときに
+ * 弾いてあるので、`Object.assign` で足すと必ず既存の欄の後ろに並ぶ。渡さなければ body をそのまま返す。
+ */
+function applyExtraBody(
+  body: Record<string, unknown>,
+  extraBody: Readonly<Record<string, unknown>> | undefined,
+): Record<string, unknown> {
+  if (extraBody === undefined || Object.keys(extraBody).length === 0) return body;
+  return Object.assign(body, extraBody);
 }
 
 // ── 呼び出し（fetch と timeout。§1.5・§2.1）────────────────────────────────
@@ -605,7 +682,11 @@ async function callStructuredWire<T>(
   // 送る封筒と応答の取り出しは同じ枝で行う（その要求の schema と深く等しい枝。Issue #549 の直し）
   const envelope = resolveStageEnvelope(request.schemaName, request.schema, config.envelope);
   const entry = envelope?.entry;
-  const wire = await requestWire(config, buildStructuredBody(config, request, envelope), request.signal);
+  const wire = await requestWire(
+    config,
+    applyExtraBody(buildStructuredBody(config, request, envelope), config.extraBody),
+    request.signal,
+  );
   const usage = parseUsage(wire.usage);
   requireCompleted(wire, usage);
   requireNoRefusal(wire);
@@ -651,7 +732,7 @@ function unwrapEnvelope(entry: StageEnvelopeEntry, value: unknown): unknown {
 }
 
 async function callToolsWire(config: WireConfig, request: LlmToolRequest): Promise<LlmToolResponse> {
-  const wire = await requestWire(config, buildToolBody(config, request), request.signal);
+  const wire = await requestWire(config, applyExtraBody(buildToolBody(config, request), config.extraBody), request.signal);
   const usage = parseUsage(wire.usage);
   requireCompleted(wire, usage);
   requireNoRefusal(wire);

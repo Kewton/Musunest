@@ -47,9 +47,12 @@ import {
   createLlmJudge,
   createOllamaLlmClient,
   createOpenAiLlmClient,
+  createOpenRouterLlmClient,
   DEFAULT_OLLAMA_MODEL,
   DEFAULT_OPENAI_MODEL,
+  DEFAULT_OPENROUTER_MODEL,
   OLLAMA_STAGE_OUTPUT_LIMITS,
+  OPENROUTER_PROVIDER_ROUTING,
   decideOutcome,
   estimateMaxCostUsd,
   nextPlanStep,
@@ -120,6 +123,15 @@ describe("公開する面", () => {
   it("Ollama の段の出力の上限の表が、根から読める（Issue #776）", () => {
     // 上書きする 3 段（意味の点検・宣言の点検・直す）だけを持ち、値は issue の表のとおり
     expect(OLLAMA_STAGE_OUTPUT_LIMITS).toEqual({ "semantic-check": 32_768, "decl-check": 32_768, repair: 65_536 });
+  });
+
+  it("OpenRouter の adapter・既定のモデル・提供元の指定が、根から読める（Issue #788）", () => {
+    expect(createOpenRouterLlmClient).toBeTypeOf("function");
+    expect(DEFAULT_OPENROUTER_MODEL).toBe("z-ai/glm-5.3-flash");
+    expect(OPENROUTER_PROVIDER_ROUTING).toEqual({ only: ["open-inference"], require_parameters: true, allow_fallbacks: false });
+    // OpenAI と Ollama の既定は今のまま（provider を省いた走り・ollama の走りを変えない）
+    expect(DEFAULT_OPENAI_MODEL).toBe("gpt-6-luna");
+    expect(DEFAULT_OLLAMA_MODEL).toBe("deepseek-v4.1-flash:1017-cloud");
   });
 
   it("判定の口の型と 3 つの adapter が、根から読める（Issue #330）", () => {

@@ -29,6 +29,14 @@ import {
   createOpenAiLlmClient,
   type FetchLike,
 } from "./openai.js";
+import {
+  SHARED_BODY_MODEL,
+  SHARED_STRUCTURED_BODY_JSON,
+  SHARED_STRUCTURED_REQUEST,
+  SHARED_TOOL_BODY_JSON,
+  SHARED_TOOL_REQUEST,
+  withoutSchemaBlock as stripSharedSchemaBlock,
+} from "./__tests__/openai.js";
 import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
 import { buildStageBranch, envelopeStageFor } from "./schema-envelope.js";
 
@@ -729,6 +737,23 @@ describe("誤りの分類は OpenAI と同じ（Issue #771）", () => {
 });
 
 // ── 6. adapter は環境変数を読まない ─────────────────────────────────
+
+// ── 6'. 共有の body は比較元の固定値とバイト列で同じ（Issue #788）──────────────────
+
+describe("共有の body は比較元の固定値とバイト列で同じ（Ollama は schema の塊を除いて。Issue #788）", () => {
+  it("構造化出力と道具付きの body が、比較元の固定値と一致する（欄の並び・text・tools まで）", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ items: [] })))),
+    );
+    const client = ollamaClient(fetch, { model: SHARED_BODY_MODEL });
+    await client.callStructured(SHARED_STRUCTURED_REQUEST);
+    // schema の塊（Ollama だけが足す 1 つ）を除けば、欄の並びも値も比較元の構造化出力の body と同じ
+    expect(JSON.stringify(stripSharedSchemaBlock(captured[0]!.body))).toBe(SHARED_STRUCTURED_BODY_JSON);
+    await client.callWithTools(SHARED_TOOL_REQUEST);
+    // schema の無い道具だけの要求は、塊を足さないので body 全体が比較元と同じ
+    expect(JSON.stringify(captured[1]!.body)).toBe(SHARED_TOOL_BODY_JSON);
+  });
+});
 
 describe("adapter は環境変数を読まない（Issue #771）", () => {
   it("ollama.ts に環境変数の入口と宛先の環境変数が無い", async () => {

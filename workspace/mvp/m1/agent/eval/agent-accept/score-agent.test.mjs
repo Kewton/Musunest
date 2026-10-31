@@ -5558,15 +5558,33 @@ test("#771 provider：条件の params.provider・provider_api_key_env は署名
   const cond = { schema: CONDITIONS_V5, params: { effort: "high", pipeline: "v1", budget_usd: 1 }, scoring: {}, scripts: { mode: "post-hoc" } };
   const ollama = { ...cond, params: { ...cond.params, provider: "ollama", provider_api_key_env: "OLLAMA_API_KEY" } };
   const openai = { ...cond, params: { ...cond.params, provider: "openai", provider_api_key_env: "OPENAI_API_KEY" } };
+  // #788：OpenRouter も同じ欄を持つ（provider の値と鍵の環境変数の名前が署名に入る）
+  const openrouter = { ...cond, params: { ...cond.params, provider: "openrouter", provider_api_key_env: "OPENROUTER_API_KEY" } };
   // provider を省いた条件の署名は、欄を足す前と同じ（ccdfcd7 の条件を再開できる）
   assert.equal(conditionsSignature(cond), conditionsSignature({ ...cond, params: { ...cond.params } }));
   assert.notEqual(conditionsSignature(ollama), conditionsSignature(cond));
   assert.notEqual(conditionsSignature(ollama), conditionsSignature(openai));
+  assert.notEqual(conditionsSignature(openrouter), conditionsSignature(cond));
+  assert.notEqual(conditionsSignature(openrouter), conditionsSignature(ollama));
+  assert.notEqual(conditionsSignature(openrouter), conditionsSignature(openai));
   // 同じ provider の条件は同じ署名（run-agent と score-agent が同じ式）
   assert.equal(conditionsSignature(JSON.parse(JSON.stringify(ollama))), conditionsSignature(ollama));
+  assert.equal(conditionsSignature(JSON.parse(JSON.stringify(openrouter))), conditionsSignature(openrouter));
   // 比較の群の照合：provider が違えば params が違い、同じなら同じ（意図した差として外さない）
   assert.notDeepEqual(comparableParams(ollama.params), comparableParams(openai.params));
+  assert.notDeepEqual(comparableParams(openrouter.params), comparableParams(openai.params));
+  assert.notDeepEqual(comparableParams(openrouter.params), comparableParams(ollama.params));
   assert.deepEqual(comparableParams(ollama.params), comparableParams({ ...ollama.params }));
+  assert.deepEqual(comparableParams(openrouter.params), comparableParams({ ...openrouter.params }));
+});
+
+test("#788 比較の群 v1,v1.1a：片方だけ provider を openrouter にした比較は、群の params の照合（provider を外さない）で断る", async () => {
+  await withOut(async (base) => {
+    const fixture = compareFixture557(base, "c788-provider", { groups: ["v1", "v1.1a"], pids: PIDS557, runOf: runOf557, paramsExtra: { "v1.1a": { provider: "openrouter", provider_api_key_env: "OPENROUTER_API_KEY" } } });
+    const r = scoreCompareRun(fixture.out);
+    assert.equal(r.status, 3, r.stderr);
+    assert.ok(r.stderr.includes("群の params"), r.stderr);
+  });
 });
 
 // ── #664：段ごとの effort の口（条件の params.stage_efforts）。採点の道具は条件の読み取り（署名・比較の照合・比較の記録の群の欄）だけ
@@ -5620,10 +5638,10 @@ test("#664 段だけの対の比較（v1.2）：after だけ・両群で違う�
   });
 });
 
-test("#664 の対象のファイル（工場の 16 本・計測の道具の 4 本）に題材の言葉と価格の表記が無い", () => {
+test("#664 の対象のファイル（工場の 18 本・計測の道具の 4 本）に題材の言葉と価格の表記が無い", () => {
   // 語は符号の列で持つ（この試験のファイル自身に書かない。#687 の走査と同じ語）
   const words = [[0x6301, 0x3061, 0x5bc4, 0x308a], [0x5f53, 0x756a, 0x8868], [0x4f1a, 0x8cbb], [0x51fa, 0x6b20], [0x8cb8, 0x3057, 0x51fa, 0x3057]].map((cs) => String.fromCodePoint(...cs));
-  const factoryFiles = ["llm.ts", "call.ts", "call.test.ts", "limits.ts", "limits.test.ts", "openai.ts", "openai.test.ts", "cli.ts", "cli.test.ts", "v11a/run.ts", "v11a/run.test.ts", "v11a/bundle-v11a.ts", "v11a/bundle-v11a.test.ts", "v11a/stage-range.test.ts", "run-wiring.test.ts", "index.ts"].map((f) => `packages/factory/src/${f}`);
+  const factoryFiles = ["llm.ts", "call.ts", "call.test.ts", "limits.ts", "limits.test.ts", "openai.ts", "openai.test.ts", "ollama.ts", "ollama.test.ts", "openrouter.ts", "openrouter.test.ts", "cli.ts", "cli.test.ts", "v11a/run.ts", "v11a/run.test.ts", "v11a/bundle-v11a.ts", "v11a/bundle-v11a.test.ts", "v11a/stage-range.test.ts", "run-wiring.test.ts", "index.ts"].map((f) => `packages/factory/src/${f}`);
   const toolFiles = ["run-agent.mjs", "run-agent.test.mjs", "score-agent.mjs", "score-agent.test.mjs"].map((f) => `workspace/mvp/m1/agent/eval/agent-accept/${f}`);
   const scanned = (t) => t.split("\n").filter((l) => !/for \(const (word|w) of \[/.test(l)).join("\n");
   for (const f of [...factoryFiles, ...toolFiles]) {
