@@ -1,18 +1,23 @@
-// OpenRouter（Responses API 互換・提供元を固定）の adapter（Issue #788）の unit テスト。
+// OpenRouter（Responses API 互換・提供元を固定）の adapter（Issue #788・#790）の unit テスト。
 //
 // 実 API は呼ばない。**差し込んだ `fetch` が受け取った要求**と、**手で書いた応答**だけで閉じる。
-// ここで固定したいのは 7 つ。
+// ここで固定したいのは 10 ある。
 //   1. 宛先は `https://openrouter.ai/api/v1/responses`、`Authorization` は渡した鍵、既定のモデルは
 //      `z-ai/glm-5.3-flash`（`model` で上書きできる）
 //   2. body は OpenAI と同じで、**最後に `provider` が 1 つ増えるだけ**（構造化・schema 付きの道具・
 //      `finalAnswerOnly`・schema の無い道具だけ）。schema の塊は足さない（OpenAI と同じ）
-//   2'. 共有の body は比較元の固定値とバイト列で同じ（`provider` を除いて）
+//   2'. 共有の body は比較元の固定値とバイト列で同じ（`provider` を除いて。封筒の段の `text.format.schema` だけは 7 の形）
 //   3. 応答の解釈は OpenAI と同じ（封筒の `result` の取り出し、形の誤り）。**囲みは読まない**（今のとおり malformed）
 //   4. usage は OpenAI と同じ読み方で、OpenRouter 独自の欄（`cost`・`is_byok`・`cost_details`）は読まずに捨てる
 //   5. 誤りの分類（404・429・残高切れ・5xx・timeout・未完了）は OpenAI と同じ
 //   6. adapter の source が環境変数を読まない（鍵は入口から渡す）
+//   7. 封筒の段の構造化出力は、`text.format.schema` が**その段の枝 1 つだけ**の封筒（`anyOf` が無い）。OpenAI・Ollama は
+//      同じ要求でも全段の `anyOf` のまま（Issue #790）
+//   8. 封筒の無い段・道具付きの要求・判定の口の要求は、`stageOnlyEnvelope` の有無で body が同じ（Issue #790）
+//   9. 応答：その段の枝の正しい応答は取り出せ、別の段の `stage` は `wrong-stage`、枝に合わない応答は `schema` の malformed（#783 の印も同じ）
+//   10. 提供元の指定は `morph/fp8` で body の末尾にあり、単価は fp8 の値である（Issue #790）
 import { describe, expect, it } from "vitest";
-import type { LlmStructuredRequest, LlmToolRequest } from "./llm.js";
+import type { LlmClient, LlmStructuredRequest, LlmToolRequest } from "./llm.js";
 import {
   DEFAULT_OPENROUTER_MODEL,
   OPENROUTER_PROVIDER_ROUTING,
@@ -20,8 +25,26 @@ import {
   createOpenRouterLlmClient,
   type OpenRouterAdapterOptions,
 } from "./openrouter.js";
-import { OpenAiAdapterError, OpenAiIncompleteError, createOpenAiLlmClient, type FetchLike } from "./openai.js";
+import {
+  OpenAiAdapterError,
+  OpenAiIncompleteError,
+  createOpenAiLlmClient,
+  createResponsesLlmClient,
+  type FetchLike,
+} from "./openai.js";
+import { createOllamaLlmClient } from "./ollama.js";
 import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
+import { SURFACE_DIFF_SCHEMA_NAME } from "./plan/surface.js";
+import { SEMANTIC_CHECK_SCHEMA, SEMANTIC_CHECK_SCHEMA_NAME } from "./v11a/stages/semantic-check.js";
+import { VOCABULARY_SCHEMA_NAMES, vocabularySchemaOf } from "./v12/stages/vocabulary.js";
+import {
+  ENVELOPE_SCHEMA,
+  ENVELOPE_SCHEMA_NAME,
+  ENVELOPE_SCHEMA_NAME_V11A,
+  ENVELOPE_SCHEMA_NAME_V12,
+  ENVELOPE_SCHEMA_V11A,
+  type EnvelopeId,
+} from "./schema-envelope.js";
 import {
   SHARED_BODY_MODEL,
   SHARED_STRUCTURED_BODY_JSON,
@@ -144,8 +167,8 @@ describe("宛先・鍵・既定のモデル（Issue #788）", () => {
     expect(captured[0]!.body["reasoning"]).toEqual({ effort: "low" });
   });
 
-  it("提供元を固定する指定は open-inference だけを許し、落とし先を許さない（Issue #788）", () => {
-    expect(OPENROUTER_PROVIDER_ROUTING).toEqual({ only: ["open-inference"], require_parameters: true, allow_fallbacks: false });
+  it("提供元を固定する指定は morph/fp8 だけを許し、落とし先を許さない（Issue #788・#790）", () => {
+    expect(OPENROUTER_PROVIDER_ROUTING).toEqual({ only: ["morph/fp8"], require_parameters: true, allow_fallbacks: false });
   });
 });
 
@@ -160,8 +183,8 @@ function expectProviderRoutingAtEnd(body: Record<string, unknown>): void {
   expect(Object.keys(body).filter((key) => key === "provider"), "provider がちょうど 1 つではない").toHaveLength(1);
   expect(Object.keys(body).at(-1), "provider が末尾ではない").toBe("provider");
   expect(body["provider"]).toEqual(OPENROUTER_PROVIDER_ROUTING);
-  // 固定の値（提供元を open-inference に限り、落とし先を許さない）
-  expect(body["provider"]).toEqual({ only: ["open-inference"], require_parameters: true, allow_fallbacks: false });
+  // 固定の値（提供元を fp8 の morph/fp8 に限り、落とし先を許さない。Issue #790）
+  expect(body["provider"]).toEqual({ only: ["morph/fp8"], require_parameters: true, allow_fallbacks: false });
 }
 
 describe("body は OpenAI と同じで、最後に provider が 1 つ増えるだけ（Issue #788）", () => {
@@ -197,7 +220,7 @@ describe("body は OpenAI と同じで、最後に provider が 1 つ増える�
     expect(withoutProvider(openrouter)).toEqual(openai);
   });
 
-  it("封筒の段の構造化出力でも、provider を末尾に 1 つ持ち、除けば OpenAI と同じ", async () => {
+  it("封筒の段の構造化出力でも、provider を末尾に 1 つ持ち、`text.format.schema` を除けば OpenAI と同じ（#790 で schema だけその段の枝に変わる）", async () => {
     const request: LlmStructuredRequest = {
       ...STRUCTURED_REQUEST,
       schemaName: REVERSE_CHECK_SCHEMA_NAME,
@@ -205,7 +228,9 @@ describe("body は OpenAI と同じで、最後に provider が 1 つ増える�
     };
     const { openrouter, openai } = await bodiesOf((client) => client.callStructured(request));
     expectProviderRoutingAtEnd(openrouter);
-    expect(withoutProvider(openrouter)).toEqual(openai);
+    // `text.format.schema` だけは #790 でその段の枝 1 つに変わる（ほかの欄・ほかの `text.format` の欄は変わらない）
+    expect(withoutFormatSchema(withoutProvider(openrouter))).toEqual(withoutFormatSchema(openai));
+    expect(formatOf(openai).schema).toEqual(ENVELOPE_SCHEMA);
   });
 });
 
@@ -245,12 +270,13 @@ describe("応答の解釈は OpenAI と同じ（Issue #788）", () => {
     expect(response.output).toEqual({ uncovered: [] });
   });
 
-  it("schema に合わない応答は malformed（strict の schema が縛ることを理由に検査を緩めない）", async () => {
+  it("schema に合わない応答は malformed（strict の schema が縛ることを理由に検査を緩めない。#783 の印は schema）", async () => {
     const { fetch } = recordingFetch(() =>
       jsonResponse(completed(outputText(JSON.stringify({ result: { stage: REVERSE_CHECK_SCHEMA_NAME, uncovered: [{ start: 1 }] } })))),
     );
     const error = await captureError(() => openrouterClient(fetch).callStructured(envelopeRequest));
     expect(error.kind).toBe("malformed");
+    expect(error.malformedKind).toBe("schema");
   });
 
   it("囲みで包んだ本文は今のとおり malformed（OpenRouter は囲みを読まない）", async () => {
@@ -359,5 +385,265 @@ describe("adapter は環境変数を読まない（Issue #788）", () => {
     }
     // 宛先は固定（環境変数から読まない）
     expect(source).toContain("https://openrouter.ai/api/v1/responses");
+  });
+});
+
+// ── 7. 封筒の段は「その段の枝 1 つだけの封筒」を送る（Issue #790）─────────────
+
+/** body の `text.format` を読む */
+function formatOf(body: Record<string, unknown>): {
+  readonly name: unknown;
+  readonly schema: unknown;
+  readonly strict: unknown;
+} {
+  return (body["text"] as { readonly format: { readonly name: unknown; readonly schema: unknown; readonly strict: unknown } }).format;
+}
+
+/** body の `text.format.schema.properties.result` を読む */
+function resultBranchOf(body: Record<string, unknown>): Record<string, unknown> {
+  const schema = formatOf(body).schema as { readonly properties: { readonly result: Record<string, unknown> } };
+  return schema.properties.result;
+}
+
+/** `text.format.schema` を目印に置き換えた写しを返す（その欄だけを比べない。Issue #790） */
+function withoutFormatSchema(body: Record<string, unknown>): Record<string, unknown> {
+  const copy = JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
+  const text = copy["text"] as { format: Record<string, unknown> };
+  text.format["schema"] = "<schema>";
+  return copy;
+}
+
+/** 1 つの要求の body を捕まえる（応答の解釈は見ない。誤りは捨てる） */
+async function captureBody(
+  makeClient: (fetch: FetchLike) => LlmClient,
+  run: (client: LlmClient) => Promise<unknown>,
+): Promise<Record<string, unknown>> {
+  const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ result: {} })))));
+  await run(makeClient(fetch)).catch(() => {});
+  return captured[0]!.body;
+}
+
+/** 期待の枝：`reverse-check`（v1 の封筒。試験の側で独立に書いた固定値） */
+const REVERSE_CHECK_BRANCH = {
+  type: "object",
+  additionalProperties: false,
+  required: ["stage", "uncovered"],
+  properties: {
+    stage: { type: "string", enum: ["reverse-check"], description: "この枝の段（reverse-check）" },
+    uncovered: {
+      type: "array",
+      description: "どの要件にも対応しない原文の部分（文字の範囲）",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["start", "end"],
+        properties: { start: { type: "integer", minimum: 0 }, end: { type: "integer", minimum: 0 } },
+      },
+    },
+  },
+};
+
+/** 期待の枝：`semantic-check`（v1.1a・v1.2 の封筒。試験の側で独立に書いた固定値） */
+const SEMANTIC_CHECK_BRANCH = {
+  type: "object",
+  additionalProperties: false,
+  required: ["stage", "judgments"],
+  properties: {
+    stage: { type: "string", enum: ["semantic-check"], description: "この枝の段（semantic-check）" },
+    judgments: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["requirementId", "verdict", "kind", "quote"],
+        properties: {
+          requirementId: { type: "string" },
+          verdict: { type: "string", enum: ["accept", "reject"] },
+          kind: {
+            type: ["string", "null"],
+            enum: ["unnecessary-ownership", "missing-target", "weak-verification", null],
+            description: "拒否の種類（受理は null）",
+          },
+          quote: { type: ["string", "null"], description: "拒否の根拠の引用（受理は null）" },
+        },
+      },
+    },
+  },
+};
+
+/** 期待の枝：`vocabulary-entities`（v1.2-ids の封筒。試験の側で独立に書いた固定値） */
+const VOCABULARY_ENTITIES_BRANCH = {
+  type: "object",
+  additionalProperties: false,
+  required: ["stage", "entities"],
+  properties: {
+    stage: { type: "string", enum: ["vocabulary-entities"], description: "この枝の段（vocabulary-entities）" },
+    entities: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "role"],
+        properties: {
+          name: { type: "string", description: "宣言で使う名前" },
+          role: { type: "string", description: "役割の説明（1 文）" },
+        },
+      },
+    },
+  },
+};
+
+describe("封筒の段の構造化出力は、その段の枝 1 つだけの封筒を送る（anyOf を使わない。Issue #790）", () => {
+  const cases: readonly {
+    readonly label: string;
+    readonly envelope: EnvelopeId;
+    readonly schemaName: string;
+    readonly schema: unknown;
+    readonly name: string;
+    readonly branch: unknown;
+  }[] = [
+    { label: "v1", envelope: "v1", schemaName: REVERSE_CHECK_SCHEMA_NAME, schema: REVERSE_CHECK_SCHEMA, name: ENVELOPE_SCHEMA_NAME, branch: REVERSE_CHECK_BRANCH },
+    { label: "v1.1a", envelope: "v1.1a", schemaName: SEMANTIC_CHECK_SCHEMA_NAME, schema: SEMANTIC_CHECK_SCHEMA, name: ENVELOPE_SCHEMA_NAME_V11A, branch: SEMANTIC_CHECK_BRANCH },
+    { label: "v1.2", envelope: "v1.2", schemaName: SEMANTIC_CHECK_SCHEMA_NAME, schema: SEMANTIC_CHECK_SCHEMA, name: ENVELOPE_SCHEMA_NAME_V12, branch: SEMANTIC_CHECK_BRANCH },
+    { label: "v1.2-ids", envelope: "v1.2-ids", schemaName: VOCABULARY_SCHEMA_NAMES.entities, schema: vocabularySchemaOf("entities"), name: ENVELOPE_SCHEMA_NAME_V12, branch: VOCABULARY_ENTITIES_BRANCH },
+  ];
+
+  for (const c of cases) {
+    it(`識別子 ${c.label}：result がその段の枝 1 つだけで anyOf を持たず、name は今の封筒の名前（試験の側の固定値と一致）`, async () => {
+      const request: LlmStructuredRequest = { ...STRUCTURED_REQUEST, schemaName: c.schemaName, schema: c.schema };
+      const body = await captureBody(
+        (fetch) => openrouterClient(fetch, { envelope: c.envelope }),
+        (client) => client.callStructured(request),
+      );
+      const format = formatOf(body);
+      expect(format.name).toBe(c.name);
+      expect(format.strict).toBe(true);
+      const result = resultBranchOf(body);
+      expect(result, "anyOf を持っている").not.toHaveProperty("anyOf");
+      expect(JSON.stringify(result)).toBe(JSON.stringify(c.branch));
+      expect(result).toEqual(c.branch);
+    });
+  }
+
+  it("要求ごとに schema を差し替える段（同じ段名で schema が違う）は、解決した枝 1 つだけを送る（起動時の定数の枝ではない）", async () => {
+    const swapped = {
+      type: "object",
+      additionalProperties: false,
+      required: ["note"],
+      properties: { note: { type: "string" } },
+    };
+    const request: LlmStructuredRequest = { ...STRUCTURED_REQUEST, schemaName: SEMANTIC_CHECK_SCHEMA_NAME, schema: swapped };
+    const body = await captureBody((fetch) => openrouterClient(fetch, { envelope: "v1.2" }), (client) => client.callStructured(request));
+    expect(formatOf(body).name).toBe(ENVELOPE_SCHEMA_NAME_V12);
+    const result = resultBranchOf(body);
+    expect(result).not.toHaveProperty("anyOf");
+    expect(result).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["stage", "note"],
+      properties: {
+        stage: { type: "string", enum: [SEMANTIC_CHECK_SCHEMA_NAME], description: "この枝の段（semantic-check）" },
+        note: { type: "string" },
+      },
+    });
+  });
+
+  it("OpenAI・Ollama の同じ要求は、全段の anyOf のまま（#790 は OpenRouter だけ）", async () => {
+    const request: LlmStructuredRequest = { ...STRUCTURED_REQUEST, schemaName: SEMANTIC_CHECK_SCHEMA_NAME, schema: SEMANTIC_CHECK_SCHEMA };
+    const reply = (): Response =>
+      jsonResponse(completed(outputText(JSON.stringify({ result: { stage: SEMANTIC_CHECK_SCHEMA_NAME, judgments: [] } }))));
+    const openai = recordingFetch(reply);
+    await createOpenAiLlmClient({ apiKey: "sk-FAKE", fetch: openai.fetch, envelope: "v1.1a" }).callStructured(request).catch(() => {});
+    expect(formatOf(openai.captured[0]!.body).schema).toEqual(ENVELOPE_SCHEMA_V11A);
+    expect(Array.isArray(resultBranchOf(openai.captured[0]!.body)["anyOf"])).toBe(true);
+    const ollama = recordingFetch(reply);
+    await createOllamaLlmClient({ apiKey: "ollama-FAKE", fetch: ollama.fetch, envelope: "v1.1a" }).callStructured(request).catch(() => {});
+    expect(formatOf(ollama.captured[0]!.body).schema).toEqual(ENVELOPE_SCHEMA_V11A);
+    expect(Array.isArray(resultBranchOf(ollama.captured[0]!.body)["anyOf"])).toBe(true);
+  });
+});
+
+// ── 8. stageOnlyEnvelope は封筒の段だけを変える（Issue #790）────────────────
+
+describe("stageOnlyEnvelope は封筒の段の text.format.schema だけを変える（Issue #790）", () => {
+  const withFlag = (flag: boolean, run: (client: LlmClient) => Promise<unknown>): Promise<Record<string, unknown>> =>
+    captureBody(
+      (fetch) =>
+        createResponsesLlmClient({
+          apiKey: "or-FAKE",
+          model: "same-model",
+          url: OPENROUTER_RESPONSES_URL,
+          extraBody: { provider: OPENROUTER_PROVIDER_ROUTING },
+          stageOnlyEnvelope: flag,
+          fetch,
+        }),
+      run,
+    );
+  const same = async (run: (client: LlmClient) => Promise<unknown>): Promise<void> => {
+    expect(JSON.stringify(await withFlag(true, run))).toBe(JSON.stringify(await withFlag(false, run)));
+  };
+
+  it("封筒の無い段（差分専用の schema）の構造化出力は、有無で body が同じ", async () => {
+    const request: LlmStructuredRequest = { ...STRUCTURED_REQUEST, schemaName: SURFACE_DIFF_SCHEMA_NAME, schema: SCHEMA };
+    await same((client) => client.callStructured(request));
+  });
+
+  it("判定の口の要求は、有無で body が同じ", async () => {
+    const request: LlmStructuredRequest = { ...STRUCTURED_REQUEST, schemaName: "judge-questions", schema: SCHEMA };
+    await same((client) => client.callStructured(request));
+  });
+
+  it("道具付きの要求（通常の往復）は、有無で body が同じ", async () => {
+    const request: LlmToolRequest = { ...TOOL_REQUEST, schemaName: "answer", schema: SCHEMA };
+    await same((client) => client.callWithTools(request));
+  });
+
+  it("道具付きの要求（finalAnswerOnly）は、有無で body が同じ", async () => {
+    const request: LlmToolRequest = { ...TOOL_REQUEST, schemaName: "answer", schema: SCHEMA, finalAnswerOnly: true };
+    await same((client) => client.callWithTools(request));
+  });
+
+  it("封筒の段は、有無で text.format.schema だけが変わる（そのほかは同じ）", async () => {
+    const request: LlmStructuredRequest = { ...STRUCTURED_REQUEST, schemaName: REVERSE_CHECK_SCHEMA_NAME, schema: REVERSE_CHECK_SCHEMA };
+    const on = await withFlag(true, (client) => client.callStructured(request));
+    const off = await withFlag(false, (client) => client.callStructured(request));
+    expect(JSON.stringify(on)).not.toBe(JSON.stringify(off));
+    expect(JSON.stringify(withoutFormatSchema(on))).toBe(JSON.stringify(withoutFormatSchema(off)));
+  });
+});
+
+// ── 9. 封筒の段の応答の扱いは今のまま（Issue #790）─────────────────────────
+
+describe("封筒の段の応答の扱いは今のまま（wrong-stage と schema の印も。Issue #790）", () => {
+  const semanticRequest: LlmStructuredRequest = {
+    ...STRUCTURED_REQUEST,
+    schemaName: SEMANTIC_CHECK_SCHEMA_NAME,
+    schema: SEMANTIC_CHECK_SCHEMA,
+  };
+
+  it("その段の枝の正しい応答は取り出せる（stage を落として段へ渡す）", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ result: { stage: SEMANTIC_CHECK_SCHEMA_NAME, judgments: [] } })))),
+    );
+    const response = await openrouterClient(fetch, { envelope: "v1.2" }).callStructured<{ judgments: readonly unknown[] }>(semanticRequest);
+    expect(response.output).toEqual({ judgments: [] });
+  });
+
+  it("別の段の stage の応答は wrong-stage（#783 の印も今のまま）", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ result: { stage: REVERSE_CHECK_SCHEMA_NAME, judgments: [] } })))),
+    );
+    const error = await captureError(() => openrouterClient(fetch, { envelope: "v1.2" }).callStructured(semanticRequest));
+    expect(error.kind).toBe("malformed");
+    expect(error.malformedKind).toBe("wrong-stage");
+  });
+
+  it("段の枝に合わない応答は schema の malformed（#783 の印も今のまま）", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ result: { stage: SEMANTIC_CHECK_SCHEMA_NAME, judgments: "文字列" } })))),
+    );
+    const error = await captureError(() => openrouterClient(fetch, { envelope: "v1.2" }).callStructured(semanticRequest));
+    expect(error.kind).toBe("malformed");
+    expect(error.malformedKind).toBe("schema");
   });
 });

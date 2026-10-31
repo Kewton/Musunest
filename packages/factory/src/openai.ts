@@ -217,6 +217,15 @@ export interface ResponsesAdapterOptions extends OpenAiAdapterOptions {
    */
   readonly finalAnswerWithoutTools?: boolean;
   /**
+   * 封筒の段の構造化出力の要求だけ、`text.format.schema` を「外側の `result` の下にその段の枝
+   * （`buildStageBranch`）を 1 つだけ置いた、その段だけの封筒全体」にするか（既定はしない。Issue #790）。
+   * on にすると、**送る schema の上でも**その段の枝だけが正解になり、形の似た別の段の枝が選ばれにくくなる
+   * （提供元が strict の schema を応答の生成に強く効かせる場合。OpenRouter の fp8 の走りで使う）。`text.format.name`
+   * は今の封筒の名前のまま。**封筒の無い段・道具付きの要求・判定の口の要求は変えない**。off のとき body は
+   * バイト列で今と同じ（OpenAI・Ollama の要求を変えない）。
+   */
+  readonly stageOnlyEnvelope?: boolean;
+  /**
    * body を組み終えた**後（送る直前）に末尾へ足す固定の欄**（Issue #788）。渡さなければ body は今とバイト列で同じ。
    * 値は **JSON の値だけ**（再帰的に検査する）で、client を作るときに複製して固定する。**関数・`undefined`・
    * `bigint`・`symbol`・有限でない数・変換の口（`toJSON`）を持つ値**、**予約名**（今の body が持ちうる欄の
@@ -238,6 +247,8 @@ interface WireConfig {
   readonly presentSchema: boolean;
   readonly readFencedJson: boolean;
   readonly finalAnswerWithoutTools: boolean;
+  /** 封筒の段の `text.format.schema` をその段の枝 1 つだけにするか（Issue #790） */
+  readonly stageOnlyEnvelope: boolean;
   /** body の末尾へ足す固定の欄（複製して固定済み。渡さなければ `undefined`。Issue #788） */
   readonly extraBody: Readonly<Record<string, unknown>> | undefined;
 }
@@ -265,6 +276,8 @@ export function createResponsesLlmClient(options: ResponsesAdapterOptions): LlmC
     presentSchema: options.presentSchema === true,
     readFencedJson: options.readFencedJson === true,
     finalAnswerWithoutTools: options.finalAnswerWithoutTools === true,
+    // 封筒の段の schema をその段の枝 1 つだけにするか（既定 off。off は今とバイト列で同じ。Issue #790）
+    stageOnlyEnvelope: options.stageOnlyEnvelope === true,
     // 予約名・整数の形の名前を弾いてから複製して固定する（作るときに投げる。fetch は 0 回。Issue #788）
     extraBody: prepareExtraBody(options.extraBody),
   };
@@ -547,11 +560,36 @@ function buildStructuredBody(
     format: {
       type: "json_schema",
       name: envelope === undefined ? request.schemaName : envelope.name,
-      schema: envelope === undefined ? request.schema : envelope.schema,
+      // 封筒の段：既定は全段の枝の `anyOf`（今までと同じバイト列）。`stageOnlyEnvelope` が on のときだけ、
+      // その段の枝 1 つだけの封筒にする（Issue #790）。封筒の無い段はその要求の schema のまま。
+      schema:
+        envelope === undefined
+          ? request.schema
+          : config.stageOnlyEnvelope
+            ? buildStageOnlyEnvelopeSchema(envelope.entry)
+            : envelope.schema,
       strict: true,
     },
   };
   return body;
+}
+
+/**
+ * 外側の `result` の下に**その段の枝 1 つだけ**を置いた、その段だけの封筒全体を組む（Issue #790）。
+ * `buildEnvelopeSchema` の枝を 1 つに絞った形で、`anyOf` を使わない。**`text.format` で送る schema**
+ * （`stageOnlyEnvelope` が on の封筒の段）と、**Ollama が文で示す schema の塊**（`presentedStructuredSchema`）が
+ * 同じ関数を共有する——送る形と文で示す形を 1 か所に固定する。枝は**その要求の schema から解決した枝**
+ * （`resolveStageEnvelope` の `entry`）を渡す（起動時の定数の枝を渡さない）。
+ */
+function buildStageOnlyEnvelopeSchema(entry: StageEnvelopeEntry): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [ENVELOPE_RESULT_KEY],
+    properties: {
+      [ENVELOPE_RESULT_KEY]: buildStageBranch(entry),
+    },
+  };
 }
 
 /** schema の塊の頭の文（Ollama の Responses API は `text.format` で応答を縛らないので、形を文でも伝える。Issue #771） */
@@ -571,14 +609,7 @@ function presentedStructuredSchema(
   requestSchema: unknown,
 ): unknown {
   if (envelope === undefined) return requestSchema;
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: [ENVELOPE_RESULT_KEY],
-    properties: {
-      [ENVELOPE_RESULT_KEY]: buildStageBranch(envelope.entry),
-    },
-  };
+  return buildStageOnlyEnvelopeSchema(envelope.entry);
 }
 
 /**

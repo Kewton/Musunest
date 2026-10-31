@@ -125,10 +125,10 @@ describe("公開する面", () => {
     expect(OLLAMA_STAGE_OUTPUT_LIMITS).toEqual({ "semantic-check": 32_768, "decl-check": 32_768, repair: 65_536 });
   });
 
-  it("OpenRouter の adapter・既定のモデル・提供元の指定が、根から読める（Issue #788）", () => {
+  it("OpenRouter の adapter・既定のモデル・提供元の指定が、根から読める（Issue #788・#790）", () => {
     expect(createOpenRouterLlmClient).toBeTypeOf("function");
     expect(DEFAULT_OPENROUTER_MODEL).toBe("z-ai/glm-5.3-flash");
-    expect(OPENROUTER_PROVIDER_ROUTING).toEqual({ only: ["open-inference"], require_parameters: true, allow_fallbacks: false });
+    expect(OPENROUTER_PROVIDER_ROUTING).toEqual({ only: ["morph/fp8"], require_parameters: true, allow_fallbacks: false });
     // OpenAI と Ollama の既定は今のまま（provider を省いた走り・ollama の走りを変えない）
     expect(DEFAULT_OPENAI_MODEL).toBe("gpt-6-luna");
     expect(DEFAULT_OLLAMA_MODEL).toBe("deepseek-v4.1-flash:1017-cloud");
