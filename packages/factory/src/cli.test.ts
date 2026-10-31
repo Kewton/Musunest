@@ -151,6 +151,11 @@ import {
 } from "./bundle.js";
 import * as runModule from "./run.js";
 import type { Judge, JudgeRequest } from "./judge.js";
+import { createFallbackJudge } from "./judge.js";
+import { JEV_RATES, JobBudget } from "./budget.js";
+import { createBudgetedJudge } from "./judge-budget.js";
+import { createJevJudge } from "./judge-jev.js";
+import { createLlmJudge, DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS } from "./judge-llm.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse, LlmUsage } from "./llm.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, ACCEPTANCE_MATERIAL_WORDS } from "./stages/__tests__/prompt.js";
 import { ATTEMPT_KEYS, FAILURE_KINDS, RETRY_KEYS, STAGE_IDS } from "./record.js";
@@ -8060,5 +8065,125 @@ describe("OpenRouter の client を作る 3 経路は、既定でない deps.rat
     expect(r.planRun.mock.calls[0]![0].judge).toBeDefined();
     // Jev の鍵は Jev の adapter にだけ渡る（Jev の会計は今のまま。LLM の会計は Plan にも注入した rates で数える）
     expect(r.planRun.mock.calls[0]![0].rates).toEqual(INJECTED_RATES);
+  });
+});
+
+// ── Jev の主・落とし先・再点検の会計（JEV_RATES と注入した LLM の単価。Issue #788 レビュー 79C R5）──
+//
+// 偽の応答で Jev の主の成功・Jev の失敗の後の LLM（落とし先）・LLM の再点検まで**実際に到達**させ、
+// 予約額（max(Jev, LLM)）・精算額（Jev は JEV_RATES の入力だけ、LLM は注入した単価）・残高を、試験に書いた
+// 独立の固定値で確かめる。判定が 1 回も呼ばれない構成では通らない（呼び出しの回数も固定する）。
+
+describe("Jev の主・落とし先・再点検の会計（JEV_RATES と注入した LLM の単価。Issue #788 レビュー 79C R5）", () => {
+  /** 注入する LLM の単価（4 欄とも既定と違う） */
+  const LLM_RATES = {
+    inputPerToken: 11 / 1_000_000,
+    cachedInputPerToken: 12 / 1_000_000,
+    cacheWritePerToken: 13 / 1_000_000,
+    outputPerToken: 14 / 1_000_000,
+  };
+  const BUDGET_USD = 1;
+  /** Jev が申告する入力のトークン数（出力は無料） */
+  const JEV_INPUT_TOKENS = 120;
+  const JEV_SUCCESS = { answers: { q: { noul: 0.5 } }, model: "jev-1.13.0", usage: { input_tokens: JEV_INPUT_TOKENS } };
+  /** LLM（OpenRouter の client）が返す Responses API の応答（入力 200・出力 50） */
+  const LLM_SUCCESS = {
+    status: "completed",
+    output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ answers: { q: { noul: 0.5 } } }) }] }],
+    usage: {
+      input_tokens: 200,
+      input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+      output_tokens: 50,
+      output_tokens_details: { reasoning_tokens: 0 },
+    },
+  };
+  const REQUEST: JudgeRequest = { state: {}, questions: { q: { kind: "noul", instructions: "問い" } } };
+  // 独立の固定値（JEV_RATES と LLM_RATES から手で計算した額）
+  //   予約 = max(Jev: 0 + 2048*0, LLM: 66*13/1e6 + 2048*14/1e6) = 0.02953
+  //   精算（Jev）= 120 * 0.042/1e6 = 0.00000504（入力だけ。出力は無料）
+  //   精算（LLM）= 200 * 11/1e6 + 50 * 14/1e6 = 0.0029
+  const RESERVATION_USD = 0.02953;
+  const JEV_COST_USD = 0.00000504;
+  const LLM_COST_USD = 0.0029;
+
+  const judgeJsonResponse = (payload: unknown): Response =>
+    new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+
+  /** 偽の Jev と LLM（OpenRouter の client）を、同じ予算の包み（同じ台帳）に通す */
+  function setup(jevResponds: () => Response) {
+    const budget = new JobBudget(BUDGET_USD);
+    const seen = { jev: 0, llm: 0, reservedAtJev: [] as number[], reservedAtLlm: [] as number[] };
+    const jevFetch = async (): Promise<Response> => {
+      seen.jev += 1;
+      seen.reservedAtJev.push(budget.reservedUsd);
+      return jevResponds();
+    };
+    const llmFetch = async (): Promise<Response> => {
+      seen.llm += 1;
+      seen.reservedAtLlm.push(budget.reservedUsd);
+      return judgeJsonResponse(LLM_SUCCESS);
+    };
+    const jev = createJevJudge({ apiKey: "jev-FAKE", fetch: jevFetch, sleep: async () => {} });
+    const llm = createLlmJudge({
+      client: createOpenRouterLlmClient({ apiKey: "or-FAKE", model: DEFAULT_OPENROUTER_MODEL, fetch: llmFetch }),
+      model: DEFAULT_OPENROUTER_MODEL,
+    });
+    const budgeted = createBudgetedJudge({
+      judge: createFallbackJudge({ primary: jev, fallback: llm }),
+      budget,
+      rates: LLM_RATES,
+      recheck: llm,
+    });
+    return { budget, budgeted, seen };
+  }
+
+  it("固定値の前提：Jev の単価は出力が無料・LLM 判定の出力の上界は 2048", () => {
+    expect(JEV_RATES.outputPerToken).toBe(0);
+    expect(DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS).toBe(2_048);
+  });
+
+  it("Jev の主が成功：予約は max(Jev, LLM)・精算は JEV_RATES（入力だけ）・残高が合い、判定は Jev 1 回・LLM 0 回", async () => {
+    const { budget, budgeted, seen } = setup(() => judgeJsonResponse(JEV_SUCCESS));
+    const response = await budgeted.judge(REQUEST);
+    expect(response.answeredBy).toBe("jev");
+    // 判定が実際に呼ばれた（Jev 1 回・LLM 0 回）
+    expect([seen.jev, seen.llm]).toEqual([1, 0]);
+    // 予約額（呼ぶ前。Jev と LLM の見積もりの大きい方）
+    expect(seen.reservedAtJev).toHaveLength(1);
+    expect(seen.reservedAtJev[0]).toBeCloseTo(RESERVATION_USD, 15);
+    // 精算額（JEV_RATES の入力だけ）と残高
+    expect(budget.spentUsd).toBeCloseTo(JEV_COST_USD, 15);
+    expect(budget.remainingUsd).toBeCloseTo(BUDGET_USD - JEV_COST_USD, 15);
+    expect(budget.reservedUsd).toBeCloseTo(0, 15);
+    expect(budgeted.callsByAdapter).toEqual({ jev: 1, llm: 0, fake: 0 });
+    expect(budgeted.attemptsByAdapter).toEqual({ jev: 1, llm: 0, fake: 0, unknown: 0 });
+  });
+
+  it("Jev が失敗したあと LLM（落とし先）が答える：精算は注入した LLM の単価・残高が合い、判定は Jev 1 回・LLM 1 回", async () => {
+    const { budget, budgeted, seen } = setup(() => new Response(JSON.stringify({ error: { type: "server_error" } }), { status: 500 }));
+    const response = await budgeted.judge(REQUEST);
+    expect(response.answeredBy).toBe("llm");
+    // 主（Jev）1 回・落とし先（LLM）1 回
+    expect([seen.jev, seen.llm]).toEqual([1, 1]);
+    expect(seen.reservedAtJev[0]).toBeCloseTo(RESERVATION_USD, 15);
+    expect(seen.reservedAtLlm[0]).toBeCloseTo(RESERVATION_USD, 15);
+    // 精算額（注入した LLM の単価）と残高
+    expect(budget.spentUsd).toBeCloseTo(LLM_COST_USD, 15);
+    expect(budget.remainingUsd).toBeCloseTo(BUDGET_USD - LLM_COST_USD, 15);
+    expect(budget.reservedUsd).toBeCloseTo(0, 15);
+    expect(budgeted.callsByAdapter).toEqual({ jev: 0, llm: 1, fake: 0 });
+    expect(budgeted.attemptsByAdapter).toEqual({ jev: 1, llm: 1, fake: 0, unknown: 0 });
+  });
+
+  it("LLM の再点検（落とし先の口）：Jev を呼ばず LLM が答え、同じ予算に注入した LLM の単価で積まれる", async () => {
+    const { budget, budgeted, seen } = setup(() => judgeJsonResponse(JEV_SUCCESS));
+    const response = await budgeted.fallback!.judge(REQUEST);
+    expect(response.answeredBy).toBe("llm");
+    expect([seen.jev, seen.llm]).toEqual([0, 1]);
+    expect(seen.reservedAtLlm[0]).toBeCloseTo(RESERVATION_USD, 15);
+    expect(budget.spentUsd).toBeCloseTo(LLM_COST_USD, 15);
+    expect(budget.remainingUsd).toBeCloseTo(BUDGET_USD - LLM_COST_USD, 15);
+    expect(budget.reservedUsd).toBeCloseTo(0, 15);
+    expect(budgeted.callsByAdapter).toEqual({ jev: 0, llm: 1, fake: 0 });
   });
 });
