@@ -1652,6 +1652,24 @@ const responsesClient = (fetch: FetchLike, extraBody?: Readonly<Record<string, u
     ...(extraBody === undefined ? {} : { extraBody }),
   });
 
+/**
+ * 予約名の**試験側の独立した固定の一覧**（Issue #788 の 11 名。要求で省かれる欄の名前を含む全部）。
+ * 実装の `RESPONSES_BODY_RESERVED_KEYS` を列挙しない——実装から名前が抜けると試験対象も抜けるため（レビュー R4）。
+ */
+const RESERVED_BODY_NAMES_FIXED = [
+  "model",
+  "store",
+  "max_output_tokens",
+  "instructions",
+  "prompt_cache_key",
+  "prompt_cache_options",
+  "input",
+  "reasoning",
+  "text",
+  "tools",
+  "tool_choice",
+] as const;
+
 describe("extraBody：body を組み終えた最後に固定の欄を足す（Issue #788）", () => {
   it("渡さなければ body は今とバイト列で同じ（比較元の固定値と一致する）", async () => {
     const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
@@ -1685,8 +1703,14 @@ describe("extraBody：body を組み終えた最後に固定の欄を足す（Is
     }
   });
 
-  it("予約名（要求で省かれる欄の名前を含む全部）は受けず、作るときに投げる（fetch 0 回）", () => {
-    for (const key of RESPONSES_BODY_RESERVED_KEYS) {
+  it("予約名の集合が、試験側の独立した固定の 11 名と一致する（Issue #788 レビュー R4。実装から名前が抜けたら赤）", () => {
+    // 実装の定数を列挙しない（実装から名前が抜けると試験対象も抜けるため）。Issue の 11 名を固定で持つ
+    expect([...RESPONSES_BODY_RESERVED_KEYS].sort()).toEqual([...RESERVED_BODY_NAMES_FIXED].sort());
+    expect(RESERVED_BODY_NAMES_FIXED).toHaveLength(11);
+  });
+
+  it("予約名（独立の固定の 11 名。要求で省かれる欄の名前を含む全部）は受けず、作るときに投げる（fetch 0 回）", () => {
+    for (const key of RESERVED_BODY_NAMES_FIXED) {
       const recording = recordingFetch(() => jsonResponse(completed(outputText("{}"))));
       const fetch = vi.fn(recording.fetch);
       expect(() => responsesClient(fetch, { [key]: 1 }), key).toThrow();
@@ -1701,6 +1725,54 @@ describe("extraBody：body を組み終えた最後に固定の欄を足す（Is
       expect(() => responsesClient(fetch, { [key]: 1 }), key).toThrow();
       expect(fetch, key).not.toHaveBeenCalled();
     }
+  });
+
+  it("JSON の値でないもの（関数・undefined・NaN・Infinity・toJSON を持つ値）は受けず、作るときに投げる（fetch 0 回。Issue #788 レビュー R1）", () => {
+    const cases: readonly { readonly name: string; readonly value: Readonly<Record<string, unknown>> }[] = [
+      { name: "トップレベルの関数", value: { custom: () => 1 } },
+      { name: "トップレベルの undefined", value: { custom: undefined } },
+      { name: "NaN", value: { custom: Number.NaN } },
+      { name: "Infinity", value: { custom: Number.POSITIVE_INFINITY } },
+      { name: "入れ子の関数", value: { custom: { deep: () => 1 } } },
+      { name: "入れ子の undefined", value: { custom: [1, undefined] } },
+      { name: "bigint", value: { custom: 1n } },
+      // JSON.stringify が toJSON を呼び、鍵をすり替えて model を上書きし整数キーを先頭へ出せる（レビュー R1 の再現）
+      { name: "トップレベルの toJSON（鍵のすり替え）", value: { toJSON: () => ({ model: "overwritten", "0": "first" }) } },
+      { name: "入れ子の toJSON", value: { custom: { toJSON: () => ({ model: "overwritten" }) } } },
+    ];
+    for (const c of cases) {
+      const recording = recordingFetch(() => jsonResponse(completed(outputText("{}"))));
+      const fetch = vi.fn(recording.fetch);
+      expect(() => responsesClient(fetch, c.value), c.name).toThrow();
+      expect(fetch, c.name).not.toHaveBeenCalled();
+    }
+  });
+
+  it("JSON の値は再帰的にそのまま複製され、NaN を null に変えない（Issue #788 レビュー R1）", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
+    await responsesClient(fetch, { provider: { keep: [1, 2.5, true, null, "x"], nested: { deep: [3] } } }).callStructured(
+      SHARED_STRUCTURED_REQUEST,
+    );
+    expect(captured[0]!.body["provider"]).toEqual({ keep: [1, 2.5, true, null, "x"], nested: { deep: [3] } });
+  });
+
+  it("`__proto__` という正当な JSON の名前も、値と末尾の位置を保って足す（Issue #788 レビュー R2）", async () => {
+    // オブジェクトのリテラルの `__proto__` は prototype の指定になるので、必ず JSON.parse で作る
+    const extraBody = JSON.parse('{"custom":{"marker":1},"__proto__":{"marker":1}}') as Record<string, unknown>;
+    let sent = "";
+    const rawFetch: FetchLike = async (_url, init) => {
+      sent = String(init.body);
+      return jsonResponse(completed(outputText(JSON.stringify({ items: [] }))));
+    };
+    await responsesClient(rawFetch, extraBody).callStructured(SHARED_STRUCTURED_REQUEST);
+    // 送る本文の末尾に、`custom` の次（末尾）に `__proto__` の欄が現れる
+    expect(sent.endsWith('"custom":{"marker":1},"__proto__":{"marker":1}}')).toBe(true);
+    const body = JSON.parse(sent) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(body, "__proto__")).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(body, "__proto__")?.value).toEqual({ marker: 1 });
+    // body の prototype は変えていない（欄が消えて prototype が変わる、が再現しない）
+    expect(Object.getPrototypeOf(body)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(body, "__proto__")?.enumerable).toBe(true);
   });
 
   it("値は作るときに複製して固定する（あとで元を書き換えても送る body は変わらない）", async () => {

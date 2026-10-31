@@ -7894,3 +7894,168 @@ describe("OpenRouter の工場の入口の既定（鍵の名前・単価・段�
     expect(factory.costOfUsageUsd(usage, DEFAULT_RATES)).not.toBeCloseTo(expected, 15);
   });
 });
+
+// ── OpenRouter の client を作る 3 経路が、既定でない deps.rates を優先する（(3) の会計。Issue #788 レビュー R5）──
+
+describe("OpenRouter の client を作る 3 経路は、既定でない deps.rates を優先する（(3) の会計。Issue #788 レビュー R5）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** 既定（`OPENROUTER_RATES`）と 4 欄とも違う、注入する単価（優先が効けばこれが走りに載る） */
+  const INJECTED_RATES = {
+    inputPerToken: 11 / 1_000_000,
+    cachedInputPerToken: 12 / 1_000_000,
+    cacheWritePerToken: 13 / 1_000_000,
+    outputPerToken: 14 / 1_000_000,
+  };
+  const OR_KEY_ENV = { [OPENROUTER_API_KEY_ENV]: "or-FAKE" } as const;
+
+  /** 走りの入力へ渡った rates を捕まえる（3 経路のどれでも）。偽物の fetch は 400 を返し、走りはすぐ止まる */
+  async function capturedRun(input: {
+    readonly name: string;
+    readonly args: readonly string[];
+    readonly readFile: (path: string) => Promise<string>;
+    readonly documents: readonly { readonly name: string; readonly text: string }[];
+    readonly env?: Readonly<Record<string, string | undefined>>;
+    readonly rates?: typeof INJECTED_RATES;
+  }) {
+    const tap = wireTap();
+    const generation = vi.spyOn(runModule, "runGeneration");
+    const v11aGeneration = vi.spyOn(v11aRunModule, "runGenerationV11a");
+    const stageRun = vi.spyOn(v11aRunModule, "runStageRangeV11a");
+    const planRun = vi.spyOn(planRunModule, "runPlan");
+    const clients: LlmClient[] = [];
+    const llmJudges: { readonly client: LlmClient; readonly model: string; readonly judge: Judge }[] = [];
+    const jev = vi.fn((_options: { apiKey: string }) => fakeJudge("jev"));
+    const llmJudge = vi.fn((options: { client: LlmClient; model: string }) => {
+      const judge = fakeJudge("llm");
+      llmJudges.push({ ...options, judge });
+      return judge;
+    });
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", `${directory}/r5-${input.name}`, ...input.args],
+      env: { ...OR_KEY_ENV, ...input.env },
+      readFile: input.readFile,
+      writeFile: async () => {},
+      makeDirectory: async () => {},
+      loadDocuments: async () => input.documents,
+      makeClient: (options) => {
+        const client = createOpenRouterLlmClient({
+          apiKey: options.apiKey,
+          model: options.model,
+          effort: options.effort,
+          fetch: tap.fetch,
+          ...(options.envelope === undefined ? {} : { envelope: options.envelope }),
+        });
+        clients.push(client);
+        return client;
+      },
+      makeJevJudge: jev,
+      makeLlmJudge: llmJudge,
+      now: () => 0,
+      rates: input.rates ?? INJECTED_RATES,
+      log: () => {},
+      logError: () => {},
+    });
+    const rateOf = (spy: { readonly mock: { readonly calls: readonly unknown[][] } }) =>
+      spy.mock.calls.length === 0 ? undefined : (spy.mock.calls[0]![0] as { readonly rates: unknown }).rates;
+    return {
+      code,
+      tap,
+      clients,
+      jev,
+      llmJudges,
+      planRun,
+      generation: rateOf(generation),
+      v11aGeneration: rateOf(v11aGeneration),
+      stageRun: rateOf(stageRun),
+    };
+  }
+
+  it("通常の Build（runCli）は、--provider openrouter でも注入した deps.rates を使う（既定の OPENROUTER_RATES ではない）", async () => {
+    const r = await capturedRun({ name: "build", args: ["--provider", "openrouter"], readFile: async () => SOURCE_TEXT, documents: [] });
+    expect(r.generation, "通常の Build が走りを呼んでいない").toEqual(INJECTED_RATES);
+    expect(r.generation).not.toEqual(OPENROUTER_RATES);
+  });
+
+  it("--plan-file の v1 の Build も注入した deps.rates を使う", async () => {
+    const planPath = `${directory}/r5-plan-v1.json`;
+    const planText = JSON.stringify(await v11aEnvelope());
+    const r = await capturedRun({
+      name: "plan-file-v1",
+      args: ["--provider", "openrouter", "--pipeline", "v1", "--plan-file", planPath],
+      readFile: async (path) => (path === planPath ? planText : V11A_SOURCE),
+      documents: FIXTURE_DOCUMENTS,
+    });
+    expect(r.generation, "--plan-file の v1 の Build が走りを呼んでいない").toEqual(INJECTED_RATES);
+    expect(r.generation).not.toEqual(OPENROUTER_RATES);
+  });
+
+  it("--plan-file の v1.1a の Build も注入した deps.rates を使う", async () => {
+    const planPath = `${directory}/r5-plan-v11a.json`;
+    const planText = JSON.stringify(await v11aEnvelope());
+    const r = await capturedRun({
+      name: "plan-file-v11a",
+      args: ["--provider", "openrouter", "--pipeline", "v1.1a", "--plan-file", planPath],
+      readFile: async (path) => (path === planPath ? planText : V11A_SOURCE),
+      documents: FIXTURE_DOCUMENTS,
+    });
+    expect(r.v11aGeneration, "--plan-file の v1.1a の Build が走りを呼んでいない").toEqual(INJECTED_RATES);
+    expect(r.v11aGeneration).not.toEqual(OPENROUTER_RATES);
+  });
+
+  it("段の走りも注入した deps.rates を使う", async () => {
+    const planPath = `${directory}/r5-stage.json`;
+    const planText = JSON.stringify(await v11aEnvelope());
+    const r = await capturedRun({
+      name: "stage",
+      args: [
+        "--provider",
+        "openrouter",
+        "--pipeline",
+        "v1.1a",
+        "--plan-file",
+        planPath,
+        "--stage-start",
+        "name-table",
+        "--stage-end",
+        "semantic-check",
+      ],
+      readFile: async (path) => (path === planPath ? planText : V11A_SOURCE),
+      documents: FIXTURE_DOCUMENTS,
+    });
+    expect(r.stageRun, "段の走りが走りを呼んでいない").toEqual(INJECTED_RATES);
+    expect(r.stageRun).not.toEqual(OPENROUTER_RATES);
+  });
+
+  it("予約が上限を超える要求は、fetch を 1 回も送らない（注入した deps.rates で見積もる）", async () => {
+    const r = await capturedRun({ name: "tiny-budget", args: ["--provider", "openrouter", "--budget", "0.0000001"], readFile: async () => SOURCE_TEXT, documents: [] });
+    expect(r.generation, "通常の Build が走りを呼んでいない").toEqual(INJECTED_RATES);
+    expect(r.tap.hits, "予約が上限を超えたのに fetch を送った").toHaveLength(0);
+  });
+
+  it("Jev の鍵がある構成では、主は Jev・落とし先と再点検は同じ OpenRouter の client（注入した rates を載せる）", async () => {
+    const r = await capturedRun({
+      name: "jev",
+      args: ["--provider", "openrouter", "--plan-only", "--answers", "answers.json"],
+      readFile: async (path) => (path === "answers.json" ? "{}" : SOURCE_TEXT),
+      documents: [],
+      env: { [JEV_API_KEY_ENV]: "jev-FAKE" },
+    });
+    // 主は Jev（鍵は手元の入口だけが読み、adapter には渡らない）
+    expect(r.jev).toHaveBeenCalledTimes(1);
+    expect(r.jev.mock.calls[0]![0]).toEqual({ apiKey: "jev-FAKE" });
+    // 落とし先と再点検は、同じ OpenRouter の client とモデル（注入した deps.rates を載せた client）
+    expect(r.llmJudges).toHaveLength(1);
+    expect(r.clients).toHaveLength(1);
+    expect(r.llmJudges[0]!.client).toBe(r.clients[0]);
+    expect(r.llmJudges[0]!.model).toBe(DEFAULT_OPENROUTER_MODEL);
+    // Plan の再点検も同じ LLM の判定
+    expect(r.planRun).toHaveBeenCalledTimes(1);
+    expect(r.planRun.mock.calls[0]![0].recheckJudge).toBe(r.llmJudges[0]!.judge);
+    expect(r.planRun.mock.calls[0]![0].judge).toBeDefined();
+    // Jev の鍵は Jev の adapter にだけ渡る（Jev の会計は今のまま。LLM の会計は Plan にも注入した rates で数える）
+    expect(r.planRun.mock.calls[0]![0].rates).toEqual(INJECTED_RATES);
+  });
+});

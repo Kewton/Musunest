@@ -218,9 +218,10 @@ export interface ResponsesAdapterOptions extends OpenAiAdapterOptions {
   readonly finalAnswerWithoutTools?: boolean;
   /**
    * body を組み終えた**後（送る直前）に末尾へ足す固定の欄**（Issue #788）。渡さなければ body は今とバイト列で同じ。
-   * 値は JSON の値だけ（関数・`undefined` を含まない）で、client を作るときに複製して固定する。
-   * **予約名**（今の body が持ちうる欄の名前の全部＝`RESPONSES_BODY_RESERVED_KEYS`）と、JSON の列挙で先頭に
-   * 来る整数の形の名前は受けず、client を作るときに投げる（fetch は 0 回）。
+   * 値は **JSON の値だけ**（再帰的に検査する）で、client を作るときに複製して固定する。**関数・`undefined`・
+   * `bigint`・`symbol`・有限でない数・変換の口（`toJSON`）を持つ値**、**予約名**（今の body が持ちうる欄の
+   * 名前の全部＝`RESPONSES_BODY_RESERVED_KEYS`）、JSON の列挙で先頭に来る整数の形の名前は受けず、client を
+   * 作るときに投げる（fetch は 0 回）。`__proto__` は正当な JSON の名前として、値と末尾の位置を保って足す。
    * 構造化出力と道具付き（通常・`finalAnswerOnly`）のどちらの要求にも、同じ規則で足す。
    */
   readonly extraBody?: Readonly<Record<string, unknown>>;
@@ -283,12 +284,60 @@ export function createOpenAiLlmClient(options: OpenAiAdapterOptions): LlmClient 
 }
 
 /**
- * 整数の形の名前（JSON の列挙で先頭に来る＝`Object.assign` の末尾追加を破る）か（Issue #788）。
+ * 整数の形の名前（JSON の列挙で先頭に来る＝末尾追加を破る）か（Issue #788）。
  * `"0"`・`"12"` は真、`"01"`・`"-1"`・`"1.5"`・`"x"` は偽。
  */
 function isIntegerFormKey(key: string): boolean {
   const value = Number(key);
   return Number.isInteger(value) && value >= 0 && String(value) === key;
+}
+
+/**
+ * `extraBody` の値を、**JSON の値の範囲**で再帰的に検査しながら複製する（Issue #788 レビュー R1）。
+ * 関数・`undefined`・`bigint`・`symbol`・有限でない数（`NaN`・`Infinity`）・変換の口（`toJSON`）を持つ値は
+ * 受けず、client を作るときに投げる（fetch 0 回）。`JSON.stringify` で欄が黙って消える・数が `null` に
+ * 変わる・`toJSON` で鍵がすり替わる、という迂回を塞ぐ。
+ *
+ * `__proto__` は予約名でも整数の形の名前でもない**正当な JSON の名前**なので、代入（`clone[key] = ` は
+ * setter を通して欄が消える）ではなく **own の data property** として定義して保つ（レビュー R2）。
+ */
+function cloneJsonValue(value: unknown, path: string): unknown {
+  if (value === null) return null;
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return value;
+    case "number":
+      if (!Number.isFinite(value)) throw new Error(`extraBody の ${path} に有限でない数は渡せません`);
+      return value;
+    case "function":
+      throw new Error(`extraBody の ${path} に関数は渡せません`);
+    case "undefined":
+      throw new Error(`extraBody の ${path} に undefined は渡せません`);
+    case "bigint":
+      throw new Error(`extraBody の ${path} に bigint は渡せません`);
+    case "symbol":
+      throw new Error(`extraBody の ${path} に symbol は渡せません`);
+    default:
+      break;
+  }
+  const record = value as Record<string, unknown> & { readonly toJSON?: unknown };
+  if (typeof record.toJSON === "function") {
+    throw new Error(`extraBody の ${path} に変換の口（toJSON）を持つ値は渡せません`);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, index) => cloneJsonValue(item, `${path}[${index}]`));
+  }
+  const clone: Record<string, unknown> = {};
+  for (const key of Object.keys(record)) {
+    Object.defineProperty(clone, key, {
+      value: cloneJsonValue(record[key], `${path}.${key}`),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return clone;
 }
 
 /** 値を深く凍らせる（複製した固定の欄が、あとから書き換わらないようにする。Issue #788） */
@@ -301,32 +350,36 @@ function deepFreeze<T>(value: T): T {
 }
 
 /**
- * `extraBody` を検査し、複製して固定する（Issue #788）。**予約名**（`RESPONSES_BODY_RESERVED_KEYS`）と
- * **整数の形の名前**は受けず、client を作るときに投げる（fetch 0 回）。値は JSON の値だけ——JSON の往復で
- * 複製し、深く凍らせる（作るときの 1 回だけ。要求ごとには組み直さない）。
+ * `extraBody` を検査し、複製して固定する（Issue #788）。値は **JSON の値だけ**を再帰的に複製し
+ * （`cloneJsonValue`）、**複製した後に実際に持つ鍵**へ予約名（`RESPONSES_BODY_RESERVED_KEYS`）と整数の形の
+ * 名前の検査を当てる（変換の口は先に断るので、鍵は入力のまま。レビュー R1）。違反は client を作るときに
+ * 投げる（fetch 0 回）。渡した値の複製を深く凍らせる（作るときの 1 回だけ）。
  */
 function prepareExtraBody(
   extraBody: Readonly<Record<string, unknown>> | undefined,
 ): Readonly<Record<string, unknown>> | undefined {
   if (extraBody === undefined) return undefined;
+  const clone = cloneJsonValue(extraBody, "extraBody") as Record<string, unknown>;
   const reserved = new Set(RESPONSES_BODY_RESERVED_KEYS);
-  for (const key of Object.keys(extraBody)) {
+  for (const key of Object.keys(clone)) {
     if (reserved.has(key)) throw new Error(`extraBody に予約名は渡せません: ${key}`);
     if (isIntegerFormKey(key)) throw new Error(`extraBody に整数の形の名前は渡せません: ${key}`);
   }
-  return deepFreeze(JSON.parse(JSON.stringify(extraBody)) as Record<string, unknown>);
+  return deepFreeze(clone);
 }
 
 /**
  * 組み終えた body の**末尾**に固定の欄を足す（送る直前。Issue #788）。予約名と整数の形の名前は作るときに
- * 弾いてあるので、`Object.assign` で足すと必ず既存の欄の後ろに並ぶ。渡さなければ body をそのまま返す。
+ * 弾いてあるので末尾に並ぶ。**object spread は `__proto__` も own の data property として写す**ので、
+ * `Object.assign`（`__proto__` を prototype への代入として扱い欄が消える）と違って欄の名前・値・末尾の
+ * 位置を保つ（レビュー R2）。渡さなければ body をそのまま返す。
  */
 function applyExtraBody(
   body: Record<string, unknown>,
   extraBody: Readonly<Record<string, unknown>> | undefined,
 ): Record<string, unknown> {
   if (extraBody === undefined || Object.keys(extraBody).length === 0) return body;
-  return Object.assign(body, extraBody);
+  return { ...body, ...extraBody };
 }
 
 // ── 呼び出し（fetch と timeout。§1.5・§2.1）────────────────────────────────

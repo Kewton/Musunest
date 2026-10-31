@@ -151,44 +151,60 @@ describe("宛先・鍵・既定のモデル（Issue #788）", () => {
 
 // ── 2. body は OpenAI と同じで、最後に provider が 1 つ増えるだけ ──────
 
+/**
+ * OpenRouter の生の送信 body（偽物の fetch が受けた body）が、提供元の固定値 `provider` を**末尾に 1 つだけ**
+ * 持つことを確かめる（Issue #788 レビュー R3）。`withoutProvider()` した body だけを比べると、道具付きの要求で
+ * 追加欄が消えても気づけないため、全要求形態で存在・内容・末尾の位置を直接見る。
+ */
+function expectProviderRoutingAtEnd(body: Record<string, unknown>): void {
+  expect(Object.keys(body).filter((key) => key === "provider"), "provider がちょうど 1 つではない").toHaveLength(1);
+  expect(Object.keys(body).at(-1), "provider が末尾ではない").toBe("provider");
+  expect(body["provider"]).toEqual(OPENROUTER_PROVIDER_ROUTING);
+  // 固定の値（提供元を open-inference に限り、落とし先を許さない）
+  expect(body["provider"]).toEqual({ only: ["open-inference"], require_parameters: true, allow_fallbacks: false });
+}
+
 describe("body は OpenAI と同じで、最後に provider が 1 つ増えるだけ（Issue #788）", () => {
-  it("構造化出力：input ほかは OpenAI と同じで、最後の欄が provider", async () => {
+  it("構造化出力：provider を末尾に 1 つ持ち、input ほかは OpenAI と同じ（schema の塊を足さない）", async () => {
     const { openrouter, openai } = await bodiesOf((client) => client.callStructured(STRUCTURED_REQUEST));
-    expect(openrouter["provider"]).toEqual(OPENROUTER_PROVIDER_ROUTING);
-    expect(Object.keys(openrouter).at(-1)).toBe("provider");
+    expectProviderRoutingAtEnd(openrouter);
     expect(withoutProvider(openrouter)).toEqual(openai);
     // schema の塊は足さない（OpenAI と同じ）
     expect(JSON.stringify(openrouter["input"])).not.toContain("次の JSON Schema に合う JSON だけを返す。");
   });
 
-  it("schema 付きの道具（通常の往復）：provider を除けば OpenAI と同じ（tool_choice を送らない）", async () => {
+  it("schema 付きの道具（通常の往復）：provider を末尾に 1 つ持ち、除けば OpenAI と同じ（tool_choice を送らない）", async () => {
     const request: LlmToolRequest = { ...TOOL_REQUEST, schemaName: "answer", schema: SCHEMA };
     const { openrouter, openai } = await bodiesOf((client) => client.callWithTools(request));
+    expectProviderRoutingAtEnd(openrouter);
     expect(openrouter["tool_choice"]).toBeUndefined();
     expect(withoutProvider(openrouter)).toEqual(openai);
   });
 
-  it("schema 付きの道具（finalAnswerOnly）：provider を除けば OpenAI と同じ（道具の定義と tool_choice: none を送る）", async () => {
+  it("schema 付きの道具（finalAnswerOnly）：provider を末尾に 1 つ持ち、除けば OpenAI と同じ（道具の定義と tool_choice: none を送る）", async () => {
     const request: LlmToolRequest = { ...TOOL_REQUEST, schemaName: "answer", schema: SCHEMA, finalAnswerOnly: true };
     const { openrouter, openai } = await bodiesOf((client) => client.callWithTools(request));
+    expectProviderRoutingAtEnd(openrouter);
     expect(openrouter["tool_choice"]).toBe("none");
     expect(openrouter["tools"] as readonly unknown[]).toHaveLength(1);
     expect(withoutProvider(openrouter)).toEqual(openai);
   });
 
-  it("schema の無い道具だけの要求：provider を除けば OpenAI と同じ", async () => {
+  it("schema の無い道具だけの要求：provider を末尾に 1 つ持ち、除けば OpenAI と同じ", async () => {
     const { openrouter, openai } = await bodiesOf((client) => client.callWithTools(TOOL_REQUEST));
+    expectProviderRoutingAtEnd(openrouter);
     expect(openrouter["text"]).toBeUndefined();
     expect(withoutProvider(openrouter)).toEqual(openai);
   });
 
-  it("封筒の段の構造化出力でも、provider を除けば OpenAI と同じ", async () => {
+  it("封筒の段の構造化出力でも、provider を末尾に 1 つ持ち、除けば OpenAI と同じ", async () => {
     const request: LlmStructuredRequest = {
       ...STRUCTURED_REQUEST,
       schemaName: REVERSE_CHECK_SCHEMA_NAME,
       schema: REVERSE_CHECK_SCHEMA,
     };
     const { openrouter, openai } = await bodiesOf((client) => client.callStructured(request));
+    expectProviderRoutingAtEnd(openrouter);
     expect(withoutProvider(openrouter)).toEqual(openai);
   });
 });
@@ -196,12 +212,14 @@ describe("body は OpenAI と同じで、最後に provider が 1 つ増える�
 // ── 2'. 共有の body は比較元の固定値とバイト列で同じ ────────────────
 
 describe("共有の body は比較元の固定値とバイト列で同じ（provider を除いて。Issue #788）", () => {
-  it("構造化出力と道具付きの body が、比較元の固定値と一致する（欄の並び・text・tools まで）", async () => {
+  it("構造化出力と道具付きの body が、比較元の固定値と一致する（provider は末尾に 1 つ。欄の並び・text・tools まで）", async () => {
     const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
     const client = openrouterClient(fetch, { model: SHARED_BODY_MODEL });
     await client.callStructured(SHARED_STRUCTURED_REQUEST);
+    expectProviderRoutingAtEnd(captured[0]!.body);
     expect(JSON.stringify(withoutProvider(captured[0]!.body))).toBe(SHARED_STRUCTURED_BODY_JSON);
     await client.callWithTools(SHARED_TOOL_REQUEST);
+    expectProviderRoutingAtEnd(captured[1]!.body);
     expect(JSON.stringify(withoutProvider(captured[1]!.body))).toBe(SHARED_TOOL_BODY_JSON);
   });
 });
