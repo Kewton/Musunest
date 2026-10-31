@@ -1847,6 +1847,14 @@ describe("v1.2 の一気通貫の走りの checkpoint（`--pipeline v1.2 --plan-
   };
   const BUILD_RECORD_KEYS = ["schema_version", "conditions", "plan_sha256", "source_sha256", "return_to_plan"];
 
+  it("--pipeline v1.2 の走りだけ、形の誤りの種類を数える印を実行口へ渡す（v1.1a は渡さない。Issue #783）", async () => {
+    const genSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
+    await runV11aCli({ dir: `${directory}/v12-record-malformed`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    expect(genSpy.mock.calls[0]?.[0]?.recordMalformedKinds).toBe(true);
+    await runV11aCli({ dir: `${directory}/v11a-record-malformed`, calls: [...v11aHead(), structured(v11aJudgments())] });
+    expect(genSpy.mock.calls[1]?.[0]).not.toHaveProperty("recordMalformedKinds");
+  });
+
   it("ids off の v1.2 の走りは境界の材料を集めさせず、checkpoint を書かず、Build だけの記録に checkpoints が無い（直す前と同じ欄・同じファイル）", async () => {
     const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
     const run = await runV12IdsOff(`${directory}/v12-ids-off-no-checkpoints`);
@@ -1926,6 +1934,14 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     const mapping = outputs[3] as { readonly requirements: readonly unknown[] };
     return [...outputs.slice(0, 3).map((output) => structured(output)), structured({ requirements: mapping.requirements.slice(1) }), structured({ requirements: mapping.requirements.slice(0, -1) })];
   };
+
+  it("形の誤りの種類を数える印を実行口へ渡す（Issue #783。v1.2 の段の走りだけ）", async () => {
+    const stageSpy = vi.spyOn(v11aRunModule, "runStageRangeV11a");
+    await runStageCli({ dir: `${directory}/v12-stage-record-malformed`, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: segment0(), pipeline: "v1.2" });
+    expect(stageSpy.mock.calls[0]?.[0]?.recordMalformedKinds).toBe(true);
+    await runStageCli({ dir: `${directory}/v11a-stage-record-malformed`, args: ["--stage-end", "judge"], calls: [...v11aHead(), structured(v11aJudgments())] });
+    expect(stageSpy.mock.calls[1]?.[0]).not.toHaveProperty("recordMalformedKinds");
+  });
 
   it("区間 0：段の履歴が vocabulary・mapping・semantic-check だけで、checkpoint t1-t2 の版に ledger・flags・call_limits がある。記録の条件に pipeline・v12_flags・v12_call_limits、記録に v12_calls があり、範囲が T2 を含まないので test_spec は無い", async () => {
     const dir = `${directory}/v12-stage-segment0`;

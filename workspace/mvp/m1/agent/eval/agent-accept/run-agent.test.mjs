@@ -1300,6 +1300,39 @@ test("指摘 1：既知の版の要約と費用の行でも、列挙した欄と
   });
 });
 
+test("Issue #783：形の誤りの種類を、要約の段の試行の数と失敗の帰属に、名指しの鍵だけ写す（元の欄が無ければ作らない）", async () => {
+  await withRepo(async (base, repo) => {
+    const malformed = { "no-body": 0, "not-json": 0, envelope: 0, "wrong-stage": 0, schema: 1, other: 0 };
+    const attempts = { started: 1, responded: 0, errors: 1, cancelled_deadline: 0, cancelled_timeout: 0, not_started: { deadline: 0, budget: 0, limit: 0, timeout: 0 } };
+    const summaryLine = {
+      schema_version: "commandagent.headless-summary/v1", verdict: "none", exit_code: 1,
+      failure: { stage: "name-table", kind: "malformed", malformed_kind: "schema" },
+      stages: [{ stage: "name-table", status: "failed", duration_ms: 1, calls: 1, attempts: { ...attempts, malformed, extra: MARK }, retries: { communication: 0, shape: 0, content: 0 }, failure_kind: "malformed", extra: MARK }],
+    };
+    const out = join(base, "out-783-summary");
+    const r = runAgent(repo, out, ["--only", "P1", "--runs", "1"], { FAKE_LINES: JSON.stringify({ "P1-r1": [JSON.stringify(summaryLine)] }) });
+    assert.equal(r.status, 0, r.stderr);
+    const sl = readJson(join(out, "P1-r1", "summary.line.json"));
+    assert.deepEqual(sl.summary.stages[0].attempts.malformed, malformed);
+    assert.deepEqual(Object.keys(sl.summary.stages[0].attempts.malformed).sort(), Object.keys(malformed).sort(), "集計の鍵 6 つだけを名指しで写す");
+    assert.deepEqual(sl.summary.failure, { stage: "name-table", kind: "malformed", code: null, problems: 0, malformed_kind: "schema" });
+    assert.ok(!JSON.stringify(sl).includes(MARK), "余分な欄を写さない");
+
+    // 表に無い値は unknown
+    const out2 = join(base, "out-783-unknown");
+    runAgent(repo, out2, ["--only", "P1", "--runs", "1"], { FAKE_LINES: JSON.stringify({ "P1-r1": [JSON.stringify({ ...summaryLine, failure: { stage: "name-table", kind: "malformed", malformed_kind: "表に無い印" } })] }) });
+    assert.equal(readJson(join(out2, "P1-r1", "summary.line.json")).summary.failure.malformed_kind, "unknown");
+
+    // 元の欄が無い走りには、新しい欄を作らない（null・unknown の欄も足さない）
+    const plainLine = { schema_version: "commandagent.headless-summary/v1", verdict: "full", exit_code: 0, failure: { stage: "write", kind: "unmet" }, stages: [{ stage: "write", status: "ok", duration_ms: 1, calls: 1, attempts, retries: { communication: 0, shape: 0, content: 0 }, failure_kind: null }] };
+    const out3 = join(base, "out-783-plain");
+    runAgent(repo, out3, ["--only", "P1", "--runs", "1"], { FAKE_LINES: JSON.stringify({ "P1-r1": [JSON.stringify(plainLine)] }) });
+    const sl3 = readJson(join(out3, "P1-r1", "summary.line.json"));
+    assert.ok(!("malformed" in sl3.summary.stages[0].attempts));
+    assert.ok(!("malformed_kind" in sl3.summary.failure));
+  });
+});
+
 test("指摘 2：既存の断り（--only・定義ファイル）は、改行と目印を含む入力の文字列・パス・組の ID を通さず、標準エラー 1 行で断る", async () => {
   await withRepo(async (base, repo) => {
     const log = join(base, "spawn-s2.log");
@@ -1857,14 +1890,15 @@ if (isEntry()) {
     process.stdout.write(JSON.stringify({ schema_version: "commandagent.headless-summary/v1", verdict: "partial", provider_cost_usd: 0.01 }) + "\n");
   } else {
     const env = JSON.parse(readFileSync(val("--plan-file"), "utf8"));
-    const stop = map("FAKE_STAGE")[id] === "stop";
+    const stageStop = map("FAKE_STAGE")[id];
+    const stop = stageStop === "stop" || stageStop === "malformed";
     const rows = [{ id: "R1", name: "n-" + id.split("-")[0] }, { id: "R2", name: "m-" + id.split("-")[0] }];
     const table_sha256 = h(JSON.stringify(rows));
     const suite = { tests: [{ id: "T1", target: "R1" }] };
     const cpOf = (boundary) => ({ schema_version: "musunest.factory.v11a-stage-checkpoint/v1", boundary, versions: { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0" }, plan_sha256: env.plan_sha256, source_sha256: env.source_sha256, name_table: { table_sha256, rows }, semantic_check: { table_sha256, targets: ["R1"], judgments: [{ requirementId: "R1", verdict: "accept" }] }, ...(boundary === "t2-b1" ? { test_spec: { suite_sha256: h(JSON.stringify(suite)), suite } } : {}) });
     const crossed = stop ? [] : [...(start === "name-table" ? ["t1-t2"] : []), ...(start !== "write" && end !== "semantic-check" ? ["t2-b1"] : [])];
     const checkpoints = crossed.map((b) => { const cp = cpOf(b), path = "stage-checkpoint-" + b + ".json"; writeFileSync(join(outDir, path), JSON.stringify(cp, null, 2) + "\n"); return { boundary: b, path, output_digest: h(JSON.stringify(cp)) }; });
-    const record = { schema_version: "musunest.factory.v11a-stage-run/v1", range: { start, end }, input: null, plan_sha256: env.plan_sha256, source_sha256: env.source_sha256, checkpoints, reached_stage: stop ? start : end, budget_scope: "stage-run", provider_cost_usd: Number(process.env.FAKE_COST ?? "0.01"), duration_secs: 1, stages: [{ stage: start, status: stop ? "failed" : "ok", calls: 1, duration_ms: 1 }], stopped: stop ? { stage: start, kind: "unmet" } : null, stage_pass: !stop, return_to_plan: false, exit_code: stop ? 1 : 0 };
+    const record = { schema_version: "musunest.factory.v11a-stage-run/v1", range: { start, end }, input: null, plan_sha256: env.plan_sha256, source_sha256: env.source_sha256, checkpoints, reached_stage: stop ? start : end, budget_scope: "stage-run", provider_cost_usd: Number(process.env.FAKE_COST ?? "0.01"), duration_secs: 1, stages: [{ stage: start, status: stop ? "failed" : "ok", calls: 1, duration_ms: 1 }], stopped: stop ? { stage: start, kind: stageStop === "malformed" ? "malformed" : "unmet", ...(stageStop === "malformed" ? { malformed_kind: "schema" } : {}) } : null, stage_pass: !stop, return_to_plan: false, exit_code: stop ? 1 : 0 };
     writeFileSync(join(outDir, "stage-run.json"), JSON.stringify(record, null, 2) + "\n");
     process.stdout.write(JSON.stringify({ stage_pass: record.stage_pass, reached_stage: record.reached_stage, budget_scope: "stage-run", exit_code: record.exit_code }) + "\n");
     process.exitCode = record.exit_code;
@@ -2066,6 +2100,21 @@ test("#545 旗を省けば今と同じ：段の dist がある checkout でも�
     assert.ok(!("stage_run" in readJson(join(dir, "summary.line.json"))));
     assert.ok(!existsSync(join(dir, "stage-input")));
     assert.match(r.stdout, /P1-r1 effort=high build-from pipeline=v1\.1a exit=0 verdict=partial cost=/);
+  });
+});
+
+test("Issue #783：段の走りの stopped に malformed_kind を写す（元の欄が無ければ作らない）", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo(base), fz = frozen545(base, repo), log = join(base, "spawn-783.log");
+    const stopMap = (kind) => JSON.stringify(Object.fromEntries(STOPPED545.map((id) => [id, kind])));
+    const out = join(base, "out-783-stage-malformed");
+    const r = runAgent(repo, out, stageArgs(fz, ["--stage-start", "name-table", "--stage-end", "test-spec"]), { FAKE_SPAWN_LOG: log, FAKE_STAGE: stopMap("malformed") });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readJson(join(out, "P1-r1", "summary.line.json")).stage_run.stopped, { stage: "name-table", kind: "malformed", malformed_kind: "schema" });
+    // 印の無い停止（"stop"）の本は malformed_kind を持たない
+    const out2 = join(base, "out-783-stage-stop");
+    runAgent(repo, out2, stageArgs(fz, ["--stage-start", "name-table", "--stage-end", "test-spec"]), { FAKE_SPAWN_LOG: log, FAKE_STAGE: stopMap("stop") });
+    assert.deepEqual(readJson(join(out2, "P1-r1", "summary.line.json")).stage_run.stopped, { stage: "name-table", kind: "unmet" });
   });
 });
 

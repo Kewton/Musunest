@@ -34,7 +34,10 @@ import type {
   LlmToolRequest,
   LlmToolResponse,
   LlmUsage,
+  MalformedKind,
+  MalformedKindCounts,
 } from "./llm.js";
+import { MALFORMED_KIND_KEYS } from "./llm.js";
 
 /** 段の識別子（02 §1 の段。①〜⑧。v1.1α の段は末尾。07 §3） */
 export const STAGE_IDS = [
@@ -137,6 +140,12 @@ export interface FailureAttribution {
    * **値の中身は持たない**（宣言の原文・依頼文は記録に残さない。S-8）。
    */
   readonly problems?: readonly FailureProblem[];
+  /**
+   * adapter の構造化出力の本文を形の誤りとした**種類の印**（印 5 つのどれか。Issue #783）。
+   * `malformed` で、選ばれた試行が印を持つときだけ持つ（印の無い malformed・`other`・段の検査の
+   * malformed〔problems あり〕は持たない）。値の中身は持たない（印は共有の型の固定の値である）。
+   */
+  readonly malformed_kind?: MalformedKind;
   /**
    * 当たった呼び出しの数の上限（上限の名前・上限値・実際の値。Issue #665）。旗 `v12.ids` の走りの `call-limit` のときだけ持つ
    * （ほかの走り・ほかの種類では欄が無い＝形は今のまま）。数と名前だけで、値の中身は持たない（S-8）
@@ -326,7 +335,7 @@ function pickStageOperation(value: unknown): StageOperation | null {
  * 渡した `counts` の差は、その段の呼び出しの試行の終端である。
  */
 function pickAttempts(counts: AttemptCounts): AttemptCounts {
-  return {
+  const picked: AttemptCounts = {
     started: counts.started,
     responded: counts.responded,
     errors: counts.errors,
@@ -339,6 +348,13 @@ function pickAttempts(counts: AttemptCounts): AttemptCounts {
       timeout: counts.not_started.timeout,
     },
   };
+  // 形の誤りの種類ごとの数は、集計の鍵 6 つを名指しで写す（余分な鍵は写さない）。**0 でない鍵が無ければ欄を
+  // 持たない**——その段の差分（束の和）で数が 1 以上の鍵があるときだけ欄を持つ（Issue #783）
+  const malformed = counts.malformed;
+  if (malformed === undefined) return picked;
+  const named = Object.fromEntries(MALFORMED_KIND_KEYS.map((key) => [key, malformed[key]])) as MalformedKindCounts;
+  if (MALFORMED_KIND_KEYS.every((key) => named[key] === 0)) return picked;
+  return { ...picked, malformed: named };
 }
 
 /** 再試行の数から、**列挙した下位の欄だけ**を写す（余分な欄は写さない。Issue #446） */
@@ -521,6 +537,11 @@ export interface CallRequestRecord {
   readonly end_ms: number;
   readonly end: CallRequestEndKind;
   readonly error_kind: CallRequestErrorKind | null;
+  /**
+   * 形の誤り（`error_kind` が `malformed`）の種類の印（表の値のときだけ。Issue #783）。
+   * `error_kind` が malformed の行だけが持ち、印の無い malformed では持たない。
+   */
+  readonly malformed_kind?: MalformedKind;
   readonly usage: CallRequestUsage | null;
   readonly late: CallRequestLate;
 }
@@ -554,6 +575,8 @@ interface MutableCallRequestRow {
   endMs: number;
   end: CallRequestEndKind | null;
   errorKind: CallRequestErrorKind | null;
+  /** 形の誤り（`errorKind` が malformed）の種類の印（表の値のときだけ。Issue #783） */
+  malformedKind: MalformedKind | undefined;
   usage: CallRequestUsage | null;
   lateUsage: CallRequestUsage | null;
   /** 遅着の加算を含んだ段の行の単位（まだ行の位置が決まっていなければ null でない単位のまま） */
@@ -660,6 +683,8 @@ export class CallRequestLog {
       end_ms: row.endMs,
       end: row.end ?? "error",
       error_kind: row.errorKind,
+      // 形の誤りの印は、`error_kind` が malformed で印を持つ行だけが持つ（Issue #783）
+      ...(row.errorKind === "malformed" && row.malformedKind !== undefined ? { malformed_kind: row.malformedKind } : {}),
       usage: row.usage,
       late: {
         usage: row.lateUsage,
@@ -687,6 +712,7 @@ export class CallRequestLog {
       endMs: startMs,
       end: null,
       errorKind: null,
+      malformedKind: undefined,
       usage: null,
       lateUsage: null,
       lateUnit: null,
@@ -702,7 +728,10 @@ export class CallRequestLog {
         row.endMs = this.#now() - this.#startedAt();
         row.end = end.kind;
         if (end.kind === "response" || end.kind === "incomplete") row.usage = callRequestUsageOf(end.usage);
-        else if (end.kind === "error") row.errorKind = end.errorKind;
+        else if (end.kind === "error") {
+          row.errorKind = end.errorKind;
+          row.malformedKind = end.malformedKind;
+        }
       },
       note: (bound: boolean): void => {
         // 計量がこの試行の加算をした時点の所属を採る（観測の callback の時点ではない。Issue #748 のレビュー R1）。
@@ -734,19 +763,16 @@ export class CallRequestLog {
  * 欄の名前と問題の種類・上限の名前と数だけを残す（値の中身は残さない。`limit` は Issue #665）。
  */
 function pickFailure(failure: FailureAttribution): FailureAttribution {
-  const picked: FailureAttribution =
-    failure.code === undefined
-      ? { stage: failure.stage, kind: failure.kind }
-      : { stage: failure.stage, kind: failure.kind, code: failure.code };
-  const limited: FailureAttribution =
-    failure.limit === undefined
-      ? picked
-      : { ...picked, limit: { name: failure.limit.name, max: failure.limit.max, actual: failure.limit.actual } };
-  if (failure.problems === undefined || failure.problems.length === 0) return limited;
-  return {
-    ...limited,
-    problems: failure.problems.map((problem) => ({ field: problem.field, message: problem.message })),
-  };
+  let picked: FailureAttribution = { stage: failure.stage, kind: failure.kind };
+  if (failure.code !== undefined) picked = { ...picked, code: failure.code };
+  if (failure.malformed_kind !== undefined) picked = { ...picked, malformed_kind: failure.malformed_kind };
+  if (failure.limit !== undefined) {
+    picked = { ...picked, limit: { name: failure.limit.name, max: failure.limit.max, actual: failure.limit.actual } };
+  }
+  if (failure.problems !== undefined && failure.problems.length > 0) {
+    picked = { ...picked, problems: failure.problems.map((problem) => ({ field: problem.field, message: problem.message })) };
+  }
+  return picked;
 }
 
 /** 記録を組み立てる。**列挙した欄だけ**を写す（余分な欄は渡されても落ちる） */

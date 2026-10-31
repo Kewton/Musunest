@@ -18,7 +18,7 @@
 //      その位置の参照先が要るためである（値を文に埋めない決まりは保つ。#439・#445）。
 import type { CallErrorKind, CallGateway, CallResult } from "../call.js";
 import type { LimitName } from "../limits.js";
-import type { LlmStructuredRequest } from "../llm.js";
+import type { LlmStructuredRequest, MalformedKind } from "../llm.js";
 import type { RequirementList } from "../pipeline.js";
 
 /**
@@ -174,7 +174,17 @@ export type StageFailure =
   /** 残高切れ（`insufficient_quota`。**拒否とは分ける**。#302） */
   | { readonly kind: "balance" }
   /** 形が合わない応答が 2 回続いた、または adapter が形の誤りを返した */
-  | { readonly kind: "malformed"; readonly attempts: number; readonly problems: readonly Problem[] }
+  | {
+      readonly kind: "malformed";
+      readonly attempts: number;
+      readonly problems: readonly Problem[];
+      /**
+       * adapter の構造化出力の本文を形の誤りとした**種類の印**（印 5 つのどれか。Issue #783）。
+       * 共通の口の失敗の結果が印を持つときだけ写す（`other`・印の無い malformed・段の検査が落とした
+       * malformed は持たない）。並列の束では、**選ばれた失敗そのもの**が印を運ぶ（口の「最後に見た印」で代用しない）。
+       */
+      readonly malformedKind?: MalformedKind;
+    }
   /** モデルが拒否した（**拒否のときだけ**。#302） */
   | { readonly kind: "refused"; readonly attempts: number }
   /** 道具の引数が JSON として読めなかった（#302） */
@@ -197,7 +207,11 @@ export type StageOutcome<T> =
 type CallFailure = Exclude<CallResult<unknown>, { readonly kind: "ok" }>;
 
 /** 共通の口が分類した誤りの種類を、段の失敗に写す（§2.2・#302）。**拒否は拒否のときだけ**にする */
-export function mapCallErrorKind(errorKind: CallErrorKind, attempts: number): StageFailure {
+export function mapCallErrorKind(
+  errorKind: CallErrorKind,
+  attempts: number,
+  malformedKind?: MalformedKind,
+): StageFailure {
   switch (errorKind) {
     case "timeout":
       return { kind: "timeout" };
@@ -210,7 +224,10 @@ export function mapCallErrorKind(errorKind: CallErrorKind, attempts: number): St
     case "refusal":
       return { kind: "refused", attempts };
     case "malformed":
-      return { kind: "malformed", attempts, problems: [] };
+      // adapter の形の誤りの印は、共通の口の失敗の結果が持つときだけ写す（Issue #783）
+      return malformedKind === undefined
+        ? { kind: "malformed", attempts, problems: [] }
+        : { kind: "malformed", attempts, problems: [], malformedKind };
     case "toolArguments":
       return { kind: "toolArguments" };
     case "unknown":
@@ -232,7 +249,8 @@ function mapCallFailure(result: CallFailure): StageFailure {
     case "invalidRequest":
       return { kind: "invalidRequest", code: result.code };
     case "failed":
-      return mapCallErrorKind(result.errorKind, result.attempts);
+      // 失敗の結果が形の誤りの印を持つときは、それも写す（Issue #783）
+      return mapCallErrorKind(result.errorKind, result.attempts, result.malformedKind);
   }
 }
 

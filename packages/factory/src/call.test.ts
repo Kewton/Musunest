@@ -40,6 +40,7 @@ import {
   STAGE_MAX_OUTPUT_TOKENS,
   callTimeoutMsForEffort,
   maxOutputTokensForEffort,
+  type StageEfforts,
 } from "./limits.js";
 import { OpenAiIncompleteError } from "./openai.js";
 import type {
@@ -50,6 +51,7 @@ import type {
   LlmToolResponse,
   LlmUsage,
 } from "./llm.js";
+import { MALFORMED_KINDS } from "./llm.js";
 import { createFakeLlmClient } from "./llm-fake.js";
 import { CallRequestLog, UsageMeter } from "./record.js";
 
@@ -1415,6 +1417,256 @@ describe("試行の終端と再試行の数を、理由別に分けて数える�
       retries: { communication: 0, shape: 0, content: 0 },
     });
     expect(callCountsDelta(before, after).attempts.started).toBe(2);
+  });
+});
+
+// ── 形の誤りの種類を数える口（口の設定。Issue #783）─────────────────────────
+//
+// 口の設定（`recordMalformedKinds`）が on のときだけ、実試行の終端の誤りが malformed なら、例外の
+// `malformedKind`（表の値）を印、そうでなければ `other` として `AttemptCounts.malformed` に足す。失敗の
+// 結果は印を（表の値のときだけ）持ち、観測の行も同じ印を運ぶ。打ち切りのあとに遅れて返った malformed では足さない。
+
+describe("形の誤りの種類を数える（口の設定。Issue #783）", () => {
+  /** 印つきの malformed（adapter が投げる形をまねる） */
+  const malformedError = (malformedKind?: unknown): Error =>
+    malformedKind === undefined
+      ? errorWithKind("malformed")
+      : Object.assign(new Error("形の誤り"), { kind: "malformed", malformedKind });
+  const MALFORMED_ZERO = { "no-body": 0, "not-json": 0, envelope: 0, "wrong-stage": 0, schema: 0, other: 0 };
+  const counted = (malformedKind?: (typeof MALFORMED_KINDS)[number]) => ({
+    ...MALFORMED_ZERO,
+    ...(malformedKind === undefined ? { other: 1 } : { [malformedKind]: 1 }),
+  });
+
+  /** 1 回の構造化出力を、決まった誤りで失敗させる */
+  const runOne = async (
+    error: unknown,
+    recordMalformedKinds: boolean,
+    observer?: CallAttemptObserver,
+  ): Promise<{ readonly result: CallResult<LlmStructuredResponse<unknown>>; readonly gateway: CallGateway }> => {
+    const gateway = new CallGateway({
+      client: throwingClient(error),
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000_000,
+      ...(recordMalformedKinds ? { recordMalformedKinds: true } : {}),
+      ...(observer === undefined ? {} : { observer }),
+    });
+    return { result: await gateway.callStructured(STRUCTURED_REQUEST), gateway };
+  };
+
+  it("(1) 印 5 種類：それぞれの印が 1 つ数えられ、失敗の結果がその印を持つ（鍵の合計は errors を超えない）", async () => {
+    for (const mark of MALFORMED_KINDS) {
+      const { result, gateway } = await runOne(malformedError(mark), true);
+      expect(result).toEqual({ kind: "failed", errorKind: "malformed", attempts: 1, malformedKind: mark });
+      expect(gateway.attempts.malformed).toEqual(counted(mark));
+      const sum = Object.values(gateway.attempts.malformed!).reduce((a, b) => a + b, 0);
+      expect(sum).toBeLessThanOrEqual(gateway.attempts.errors);
+    }
+  });
+
+  it("(2) 表に無い印・印の無い malformed は other に数え、失敗の結果の印は持たない", async () => {
+    for (const error of [malformedError("表に無い印"), malformedError(undefined), errorWithKind("malformed")]) {
+      const { result, gateway } = await runOne(error, true);
+      expect(result.kind).toBe("failed");
+      expect(result).not.toHaveProperty("malformedKind");
+      expect(gateway.attempts.malformed).toEqual(counted(undefined));
+    }
+  });
+
+  it("(2) 道具の引数の誤り（toolArguments）はどの鍵にも数えない", async () => {
+    const { result, gateway } = await runOne(errorWithKind("toolArguments"), true);
+    expect(result.kind).toBe("failed");
+    expect(result).not.toHaveProperty("malformedKind");
+    expect(gateway.attempts.malformed).toEqual(MALFORMED_ZERO);
+  });
+
+  it("(1) 設定を外す変異：数えず、失敗の結果の印も持たない（今の走りと同じ）", async () => {
+    const { result, gateway } = await runOne(malformedError("schema"), false);
+    expect(result.kind).toBe("failed");
+    expect(result).not.toHaveProperty("malformedKind");
+    expect(gateway.attempts).not.toHaveProperty("malformed");
+  });
+
+  it("(2') 累計が 0 でない口の次の区間で差分 0 なら欄なし。前の snapshot は変わらない", async () => {
+    let calls = 0;
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        if (calls === 1) return Promise.reject(malformedError("schema"));
+        return Promise.resolve({ output: { ok: true } as T, usage: undefined });
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    const gateway = new CallGateway({
+      client,
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000_000,
+      recordMalformedKinds: true,
+    });
+    const before = gateway.counts;
+    await gateway.callStructured(STRUCTURED_REQUEST);
+    const mid = gateway.counts;
+    const midMalformed = { ...mid.attempts.malformed! };
+    await gateway.callStructured(STRUCTURED_REQUEST);
+    const after = gateway.counts;
+    // 最初の区間だけが schema 1。次の区間は差分 0 なので欄を持たない
+    expect(callCountsDelta(before, mid).attempts.malformed).toEqual(counted("schema"));
+    expect(callCountsDelta(mid, after).attempts).not.toHaveProperty("malformed");
+    expect(callCountsDelta(mid, after).attempts.started).toBe(1);
+    // 前の snapshot・累計は変わらない（2 回目は malformed ではないので累計も同じ）
+    expect(mid.attempts.malformed).toEqual(midMalformed);
+    expect(after.attempts.malformed).toEqual(midMalformed);
+  });
+
+  it("(2') 締切・timeout で打ち切ったあとに遅れて返った malformed では増えない", async () => {
+    vi.useFakeTimers();
+    try {
+      let nowMs = 0;
+      const client: LlmClient = {
+        callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+          return new Promise<never>((_resolve, reject) => {
+            request.signal?.addEventListener("abort", () => {
+              // 打ち切りのあとに、形の誤りで遅れて拒否する
+              setTimeout(() => reject(malformedError("schema")), 0);
+            });
+          });
+        },
+        callWithTools(): Promise<LlmToolResponse> {
+          return Promise.reject(new Error("使わない"));
+        },
+      };
+      const gateway = new CallGateway({
+        client,
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => nowMs,
+        deadline: 100_000,
+        maxAttempts: 1,
+        callTimeoutMs: 1_000,
+        recordMalformedKinds: true,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      nowMs = 1_000;
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+      expect(result).toEqual({ kind: "failed", errorKind: "timeout", attempts: 1 });
+      expect(gateway.attempts.malformed).toEqual(MALFORMED_ZERO);
+      // 遅着を進めても増えない
+      await vi.advanceTimersByTimeAsync(10);
+      await Promise.resolve();
+      expect(gateway.attempts.malformed).toEqual(MALFORMED_ZERO);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("(2') ジョブの締切で打ち切ったあとに遅れて返った malformed でも増えない（締切の分岐）", async () => {
+    vi.useFakeTimers();
+    try {
+      const client: LlmClient = {
+        callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+          return new Promise<never>((_resolve, reject) => {
+            request.signal?.addEventListener("abort", () => {
+              // 締切で打ち切ったあとに、形の誤りで遅れて拒否する
+              setTimeout(() => reject(malformedError("wrong-stage")), 0);
+            });
+          });
+        },
+        callWithTools(): Promise<LlmToolResponse> {
+          return Promise.reject(new Error("使わない"));
+        },
+      };
+      // 呼び出しごとの timeout が締切の残りに達しているので、打ち切りはジョブの締切（deadline）として扱う
+      const gateway = new CallGateway({
+        client,
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => 0,
+        deadline: 1_000,
+        maxAttempts: 1,
+        callTimeoutMs: 1_000,
+        recordMalformedKinds: true,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+      // 締切の打ち切り（timeout ではない）
+      expect(result).toEqual({ kind: "deadlineExceeded" });
+      expect(gateway.attempts.malformed).toEqual(MALFORMED_ZERO);
+      // 遅着を進めても増えない
+      await vi.advanceTimersByTimeAsync(10);
+      await Promise.resolve();
+      expect(gateway.attempts.malformed).toEqual(MALFORMED_ZERO);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("(1) 観測の行：malformed の行だけが malformed_kind を持つ。設定を外せば印も持たない", async () => {
+    const onEnds: CallAttemptEnd[] = [];
+    const observerOn: CallAttemptObserver = {
+      beginAttempt: () => ({ settle: (end) => onEnds.push(end), late: () => {} }),
+    };
+    await runOne(malformedError("wrong-stage"), true, observerOn);
+    expect(onEnds[0]).toEqual({ kind: "error", errorKind: "malformed", malformedKind: "wrong-stage" });
+
+    const offEnds: CallAttemptEnd[] = [];
+    const observerOff: CallAttemptObserver = {
+      beginAttempt: () => ({ settle: (end) => offEnds.push(end), late: () => {} }),
+    };
+    await runOne(malformedError("wrong-stage"), false, observerOff);
+    expect(offEnds[0]).toEqual({ kind: "error", errorKind: "malformed" });
+  });
+
+  it("(1)(6) 段の実試行の行（CallRequestLog）：malformed の行だけが malformed_kind を持つ", async () => {
+    const log = new CallRequestLog(0, () => 0);
+    const gateway = new CallGateway({
+      client: throwingClient(malformedError("envelope")),
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000_000,
+      recordMalformedKinds: true,
+      observer: log.observer(),
+    });
+    const unit = log.beginUnit();
+    await gateway.callStructured(STRUCTURED_REQUEST);
+    log.finishUnit(unit, 0);
+    expect(log.requests()[0]).toMatchObject({ error_kind: "malformed", malformed_kind: "envelope" });
+  });
+
+  it("(4) 引き継ぎ：forStage の effort あり・なしで、形の誤りの数が段の口に集まる", async () => {
+    const makeGateway = (stageEfforts?: StageEfforts) =>
+      new CallGateway({
+        client: throwingClient(malformedError("schema")),
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => 0,
+        deadline: 1_000_000,
+        recordMalformedKinds: true,
+        ...(stageEfforts === undefined ? {} : { stageEfforts }),
+      });
+
+    // effort あり：段の名前で引いた薄い見方でも、実試行の計は元の口と共有される
+    const withEffort = makeGateway({ write: "low" });
+    const view = withEffort.forStage("write");
+    const before = view.counts;
+    await view.callStructured(STRUCTURED_REQUEST);
+    expect(callCountsDelta(before, view.counts).attempts.malformed).toEqual(counted("schema"));
+    expect(withEffort.attempts.malformed).toEqual(counted("schema"));
+
+    // effort なし：forStage は元の口そのものを返し、同じく数える
+    const plain = makeGateway();
+    expect(plain.forStage("write")).toBe(plain);
+    const beforePlain = plain.counts;
+    await plain.forStage("write").callStructured(STRUCTURED_REQUEST);
+    expect(callCountsDelta(beforePlain, plain.counts).attempts.malformed).toEqual(counted("schema"));
   });
 });
 

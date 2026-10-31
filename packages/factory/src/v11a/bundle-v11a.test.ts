@@ -9,6 +9,7 @@ import { fixtureList, fixtureNonRequirementList, fixtureNonRequirementTable, fix
 import {
   buildSearchRepairArtifact,
   buildStageCheckpoint,
+  buildStageRunRecord,
   buildV11aArtifacts,
   stageJsonText,
   stageOutputDigest,
@@ -19,9 +20,12 @@ import {
   STAGE_RUN_RECORD_SCHEMA,
   V11A_ARTIFACT_NAMES,
   V12_SEARCH_REPAIR_ARTIFACT_NAME,
+  type StageRunConditions,
+  type StageRunOutcome,
   type StageV12Versions,
   type V11aRecordsInput,
 } from "./bundle-v11a.js";
+import type { FailureAttribution, StageRecord } from "../record.js";
 import { deriveCarryOver } from "./carry-over.js";
 import { countViolations, type SearchRepairRecord } from "../v12/search-repair.js";
 import { coverageUnitsOf } from "./coverage.js";
@@ -667,5 +671,103 @@ describe("段の走りの宣言のファイルの名前（計測の記録であ�
       expect(name).not.toBe(STAGE_DECLARATION_FILE);
       expect(name.endsWith(`/${STAGE_DECLARATION_FILE}`)).toBe(false);
     }
+  });
+});
+
+// ── 段の記録の形の誤りの種類（Issue #783）──────────────────────────────
+
+describe("段の走りの記録に、形の誤りの種類を写す（Issue #783）", () => {
+  const CONDITIONS: StageRunConditions = {
+    model: "gpt-test",
+    effort: "high",
+    documents: [],
+    judge: { primary: "llm", fallback: null },
+    prompt_version: "v1.2",
+    vocabulary_version: "v1",
+    contract_version: "v0.2",
+    factory_version: "0.0.0",
+    spec_engine_version: "0.0.0",
+    budget_usd: 1,
+    deadline_ms: 60_000,
+    timeout_ms: null,
+  };
+  const BASE_ATTEMPTS: StageRecord["attempts"] = {
+    started: 1,
+    responded: 0,
+    errors: 1,
+    cancelled_deadline: 0,
+    cancelled_timeout: 0,
+    not_started: { deadline: 0, budget: 0, limit: 0, timeout: 0 },
+  };
+  const MALFORMED = { "no-body": 0, "not-json": 0, envelope: 0, "wrong-stage": 0, schema: 1, other: 0 };
+  const stageRecord = (attempts: StageRecord["attempts"]): StageRecord => ({
+    stage: "write",
+    operation: null,
+    status: "failed",
+    duration_ms: 1,
+    calls: 1,
+    missing_usage_calls: 0,
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    cache_write_tokens: 0,
+    output_tokens: 0,
+    reasoning_tokens: 0,
+    attempts,
+    retries: { communication: 0, shape: 0, content: 0 },
+    failure_kind: "malformed",
+  });
+  const outcomeOf = (stopped: FailureAttribution | null, stages: readonly StageRecord[]): StageRunOutcome => ({
+    stages,
+    stopped,
+    boundaries: [],
+    judgeVerdict: null,
+    finalCarryOver: null,
+    returnToPlan: false,
+    costUsd: 0,
+    durationSecs: 0,
+  });
+  const buildRecord = (outcome: StageRunOutcome) =>
+    buildStageRunRecord({
+      range: { start: "write", end: "judge" },
+      input: null,
+      planSha256: "a".repeat(64),
+      sourceSha256: "b".repeat(64),
+      checkpoints: [],
+      conditions: CONDITIONS,
+      outcome,
+      exitCode: 1,
+      v12: { testSpecInRange: false },
+    });
+
+  it("印のある走りは値が残り、印の無い走りは欄が無い（stopped・attempts・requests の 3 か所）", () => {
+    const marked = buildRecord({
+      ...outcomeOf({ stage: "write", kind: "malformed", malformed_kind: "schema" }, [
+        stageRecord({ ...BASE_ATTEMPTS, malformed: MALFORMED }),
+      ]),
+      requests: [
+        {
+          stage_index: 0,
+          start_ms: 0,
+          end_ms: 1,
+          end: "error",
+          error_kind: "malformed",
+          malformed_kind: "schema",
+          usage: null,
+          late: { usage: null, metered_stage_index: null },
+        },
+        { stage_index: 0, start_ms: 1, end_ms: 2, end: "response", error_kind: null, usage: null, late: { usage: null, metered_stage_index: null } },
+      ],
+    });
+    expect(marked.stopped).toEqual({ stage: "write", kind: "malformed", malformed_kind: "schema" });
+    expect((marked.stages as readonly StageRecord[])[0]?.attempts.malformed).toEqual(MALFORMED);
+    const rows = marked.requests as readonly Record<string, unknown>[];
+    expect(rows[0]).toMatchObject({ error_kind: "malformed", malformed_kind: "schema" });
+    expect("malformed_kind" in rows[1]!).toBe(false);
+
+    const plain = buildRecord(outcomeOf({ stage: "write", kind: "malformed" }, [stageRecord(BASE_ATTEMPTS)]));
+    expect(Object.keys(plain.stopped ?? {})).not.toContain("malformed_kind");
+    const plainAttempts = (plain.stages as readonly StageRecord[])[0]?.attempts;
+    expect(Object.keys(plainAttempts ?? {})).not.toContain("malformed");
+    expect("requests" in plain).toBe(false);
   });
 });
