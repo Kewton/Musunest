@@ -1785,3 +1785,64 @@ describe("extraBody：body を組み終えた最後に固定の欄を足す（Is
     expect(captured[0]!.body["provider"]).toEqual({ only: ["x"], nested: [1, 2] });
   });
 });
+
+// ── 3.10. 配列の複製は入力の map／species を呼ばない（Issue #788 レビュー 79C R1）──────────────
+
+describe("extraBody：配列は入力の map／species を呼ばず、穴・JSON でない型・変換の口を断る（Issue #788 レビュー 79C R1）", () => {
+  it("toJSON に「map を差し替えた配列」を渡しても、モデルを上書きせず整数の鍵を先頭に出さない（未検査の map を使う実装へ戻すと赤）", async () => {
+    // 未検査の `value.map(...)` を使う実装では、この map の返り値（関数）が複製結果の toJSON になり、
+    // JSON.stringify(body) が body.toJSON() を呼んで body 全体を {"0":"first","model":"overwritten"} に差し替える
+    const overrides = () => ({ model: "overwritten", "0": "first" });
+    const a: unknown[] = [];
+    Object.defineProperty(a, "map", { value: () => overrides, enumerable: false, configurable: true });
+    const extraBody = { toJSON: a };
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
+    let client: ReturnType<typeof responsesClient>;
+    try {
+      client = responsesClient(fetch, extraBody);
+    } catch {
+      // 作るときに断る実装でもよい（そのときは fetch は 0 回）
+      expect(fetch).not.toHaveBeenCalled();
+      return;
+    }
+    await client.callStructured(SHARED_STRUCTURED_REQUEST);
+    const body = captured[0]!.body;
+    // モデルは上書きされない・整数の鍵は先頭に出ない・配列は空のまま（map の返り値は混ざらない）
+    expect(body["model"]).toBe(SHARED_BODY_MODEL);
+    expect(Object.keys(body)).not.toContain("0");
+    expect(Object.keys(body).at(-1)).toBe("toJSON");
+    expect(body["toJSON"]).toEqual([]);
+  });
+
+  it("穴（Array(1)）・Map・Set・Date・RegExp・数の包み・クラスの実体は受けず、作るときに投げる（fetch 0 回）", () => {
+    const values: readonly { readonly name: string; readonly value: unknown }[] = [
+      { name: "穴", value: Array(1) },
+      { name: "Map", value: new Map([["x", 1]]) },
+      { name: "Set", value: new Set([1]) },
+      { name: "Date", value: new Date(0) },
+      { name: "RegExp", value: /x/u },
+      { name: "数の包み", value: new Number(1) },
+      { name: "クラスの実体", value: new (class { readonly x = 1; })() },
+      { name: "own の valueOf（変換の口）", value: { valueOf: () => 1 } },
+    ];
+    for (const c of values) {
+      const recording = recordingFetch(() => jsonResponse(completed(outputText("{}"))));
+      const fetch = vi.fn(recording.fetch);
+      expect(() => responsesClient(fetch, { custom: c.value }), c.name).toThrow();
+      expect(fetch, c.name).not.toHaveBeenCalled();
+    }
+  });
+
+  it("入れ子の配列の map も呼ばず、実際の要素だけを複製する（map の返り値は混ざらない）", async () => {
+    const inner: unknown[] = [1, 2];
+    Object.defineProperty(inner, "map", {
+      value: () => () => ({ model: "overwritten", "0": "first" }),
+      enumerable: false,
+      configurable: true,
+    });
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
+    await responsesClient(fetch, { provider: { list: inner } }).callStructured(SHARED_STRUCTURED_REQUEST);
+    expect(captured[0]!.body["provider"]).toEqual({ list: [1, 2] });
+    expect(JSON.stringify(captured[0]!.body)).not.toContain("overwritten");
+  });
+});

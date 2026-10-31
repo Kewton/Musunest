@@ -306,13 +306,43 @@ function isIntegerFormKey(key: string): boolean {
 }
 
 /**
- * `extraBody` の値を、**JSON の値の範囲**で再帰的に検査しながら複製する（Issue #788 レビュー R1）。
- * 関数・`undefined`・`bigint`・`symbol`・有限でない数（`NaN`・`Infinity`）・変換の口（`toJSON`）を持つ値は
- * 受けず、client を作るときに投げる（fetch 0 回）。`JSON.stringify` で欄が黙って消える・数が `null` に
- * 変わる・`toJSON` で鍵がすり替わる、という迂回を塞ぐ。
+ * JSON の object として認めるもの（`null` の prototype か `Object.prototype` の **plain object だけ**）。
+ * `Map`・`Set`・`Date`・`RegExp`・数の包み・クラスの実体などは JSON の値ではないので断る（Issue #788 レビュー 79C R1）。
+ */
+function isPlainJsonObject(value: object): boolean {
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/** その object が、名前の**own の関数**（`valueOf` などの変換の口）を持つか（Issue #788 レビュー 79C R1） */
+function hasOwnFunctionHook(value: object, name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, name) && typeof (value as Record<string, unknown>)[name] === "function";
+}
+
+/**
+ * 配列を、**入力の `map` も `Symbol.species` も呼ばずに**、新しい通常の配列へ**添字ごとに検査して複製**する
+ * （Issue #788 レビュー 79C R1）。差し替えた `map` が関数を返して複製結果へ混ざる迂回を塞ぐ。
+ * **穴**（`!(index in value)`）は JSON の値ではないので断る（client を作るとき。fetch 0 回）。
+ */
+function cloneJsonArray(value: readonly unknown[], path: string): unknown[] {
+  const copy: unknown[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    if (!(index in value)) throw new Error(`extraBody の ${path}[${index}] に空きの添字があります`);
+    copy.push(cloneJsonValue(value[index], `${path}[${index}]`));
+  }
+  return copy;
+}
+
+/**
+ * `extraBody` の値を、**JSON の値の範囲**で再帰的に検査しながら複製する（Issue #788 レビュー R1・79C R1）。
+ * 関数・`undefined`・`bigint`・`symbol`・有限でない数（`NaN`・`Infinity`）・変換の口（`toJSON`・own の
+ * `valueOf`）を持つ値、JSON でない型（`Map`・`Set`・`Date`・`RegExp` など）は受けず、client を作るときに
+ * 投げる（fetch 0 回）。`JSON.stringify` で欄が黙って消える・数が `null` に変わる・変換の口で鍵がすり替わる、
+ * という迂回を塞ぐ。
  *
- * `__proto__` は予約名でも整数の形の名前でもない**正当な JSON の名前**なので、代入（`clone[key] = ` は
- * setter を通して欄が消える）ではなく **own の data property** として定義して保つ（レビュー R2）。
+ * 配列は入力の `map`／species を呼ばず添字ごとに複製する（79C R1）。`__proto__` は予約名でも整数の形の
+ * 名前でもない**正当な JSON の名前**なので、代入（setter を通して欄が消える）ではなく **own の data
+ * property** として定義して保つ（レビュー R2）。
  */
 function cloneJsonValue(value: unknown, path: string): unknown {
   if (value === null) return null;
@@ -335,11 +365,14 @@ function cloneJsonValue(value: unknown, path: string): unknown {
       break;
   }
   const record = value as Record<string, unknown> & { readonly toJSON?: unknown };
-  if (typeof record.toJSON === "function") {
-    throw new Error(`extraBody の ${path} に変換の口（toJSON）を持つ値は渡せません`);
+  if (typeof record.toJSON === "function" || hasOwnFunctionHook(value as object, "valueOf")) {
+    throw new Error(`extraBody の ${path} に変換の口（toJSON・valueOf）を持つ値は渡せません`);
   }
   if (Array.isArray(value)) {
-    return value.map((item, index) => cloneJsonValue(item, `${path}[${index}]`));
+    return cloneJsonArray(value, path);
+  }
+  if (!isPlainJsonObject(value as object)) {
+    throw new Error(`extraBody の ${path} に JSON でない型の値は渡せません`);
   }
   const clone: Record<string, unknown> = {};
   for (const key of Object.keys(record)) {
