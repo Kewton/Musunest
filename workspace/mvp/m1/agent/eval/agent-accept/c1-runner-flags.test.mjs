@@ -20,3 +20,12 @@ test("S-175ac native Build reports must match actual requested flags, including 
  for(const values of [{}, {c1_reference_enum:"off"},{c1_reference_enum:true},{c1_reference_enum:null}])assert.notEqual(c1BuildReport(f,{conditions:values}).status,"match");
  assert.equal(c1BuildReport({},null).status,"match");assert.equal(c1ConditionsMatch({},f),false);
 });
+
+test("S-175ad C2 is independent, off stays omitted and native C2 report must match",()=>{
+ assert.deepEqual(parse(["--c2-mapping-contract","off"]),{});
+ const f=parse(["--c2-mapping-contract","on"]);assert.deepEqual(f,{c2_mapping_contract:"on"});
+ assert.deepEqual(c1Argv(f),["--c2-mapping-contract","on"]);
+ assert.equal(c1BuildReport(f,{conditions:f}).status,"match");assert.equal(c1BuildReport(f,{conditions:{}}).status,"mismatch");
+ assert.equal(c1ConditionsMatch({},f),false);
+ for(const args of [["--c2-mapping-contract"],["--c2-mapping-contract","bad"],["--c2-mapping-contract","on","--c2-mapping-contract","off"],["--c2-other","on"]])assert.throws(()=>parse(args));
+});

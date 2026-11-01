@@ -104,6 +104,7 @@ import { planWithoutRequirementKinds, type SemanticRejection } from "../../v11a/
 import type { JudgeAdviceMarkEntry } from "../../v11a/stages/judge-advice.js";
 import { ReferenceTally, idKindOf, type ReferenceCounts } from "../ids.js";
 import type { UpstreamLedgerView } from "../ledger.js";
+import { c2MappingSchema } from "../c2-mapping-contract.js";
 import { V12_T2_BUNDLE } from "../limits.js";
 import { bundleRequirementIds } from "../test-cases.js";
 
@@ -414,6 +415,7 @@ export interface MappingPrevious {
 
 /** C2 が受け取るもの */
 export interface MappingInput {
+  readonly c2MappingContract?: boolean;
   readonly plan: ConfirmedPlan;
   readonly list: RequirementList;
   readonly documents: readonly PromptDocument[];
@@ -1001,16 +1003,27 @@ export function rejectedRequirementIds(list: RequirementList, rejections: readon
  * 作り直しの要求の頭（Issue #736）。`previous` は見ない（C3 の拒否のあとの 2 回目の要求は別に組む）
  */
 export function mappingWholeRequestOf(
-  input: Pick<MappingInput, "plan" | "list" | "documents" | "gateway" | "rows" | "ledger">,
+  input: Pick<MappingInput, "plan" | "list" | "documents" | "gateway" | "rows" | "ledger" | "c2MappingContract">,
 ): LlmStructuredRequest {
-  return buildStructuredRequest({
+  return withMappingContract(input, buildStructuredRequest({
     rules: ruleTexts(mappingRuleDefinitionsOf(input.ledger)),
     documents: input.documents,
     data: buildData({ plan: input.plan, list: input.list, documents: input.documents, gateway: input.gateway, rows: input.rows, ...(input.ledger === undefined ? {} : { ledger: input.ledger }) }),
     schemaName: MAPPING_SCHEMA_NAME,
     schema: mappingSchemaOf(input.ledger),
     maxOutputTokens: input.gateway.maxOutputTokens("name-table"),
-  });
+  }));
+}
+
+/** Generation-only schema; off returns the exact pre-contract request object. */
+function withMappingContract(
+  input: Pick<MappingInput, "list" | "rows" | "documents" | "ledger" | "c2MappingContract">,
+  request: LlmStructuredRequest,
+  requirementIds: readonly string[] = input.list.requirements.map((requirement) => requirement.id),
+): LlmStructuredRequest {
+  return input.c2MappingContract === true ? { ...request, generationSchema: c2MappingSchema(request.schema as Record<string, unknown>, {
+    requirementIds, rows: input.rows, documents: input.documents, ...(input.ledger === undefined ? {} : { ledger: input.ledger }),
+  }) } : request;
 }
 
 /** 初回の検査の結果：表、または落ちた要件だけを書き直す予定（Issue #660） */
@@ -1093,14 +1106,14 @@ async function rewriteFailedRequirements(
   reject(1, previous, first.problems);
   // 形が合わなかったので 1 回だけやり直す。この**やり直し**を共通の口へ告げる（窓口の形のやり直しと同じ数え方。Issue #446）
   input.gateway.noteRetry("shape");
-  const rewriteRequest = buildStructuredRequest({
+  const rewriteRequest = withMappingContract(input, buildStructuredRequest({
     rules: ruleTexts(mappingRewriteRuleDefinitionsOf(input.ledger)),
     documents: input.documents,
     data: buildRewriteData(input, previous, first.groups),
     schemaName: MAPPING_SCHEMA_NAME,
     schema: mappingSchemaOf(input.ledger),
     maxOutputTokens,
-  });
+  }), rewrite);
   const answer = await callStructuredChecked(input.gateway, { request: rewriteRequest, check: (output) => ({ ok: true, value: output }) });
   if (!answer.ok) return { ok: false, failure: answer.failure, references: tally.counts };
   const output = answer.output;
@@ -1228,14 +1241,14 @@ async function runBundledMapping(
   const callBundle = async (bundle: number): Promise<MappingBundleResult> => {
     const ids = new Set(bundles[bundle] ?? []);
     const list: RequirementList = { ...input.list, requirements: input.list.requirements.filter((requirement) => ids.has(requirement.id)) };
-    const request = buildStructuredRequest({
+    const request = withMappingContract(input, buildStructuredRequest({
       rules: bundleRules,
       documents: input.documents,
       data: buildData({ ...input, list }),
       schemaName: MAPPING_SCHEMA_NAME,
       schema,
       maxOutputTokens,
-    });
+    }), [...ids]);
     const answer = await callStructuredChecked(input.gateway, { request, check: (output) => ({ ok: true, value: output }) });
     return answer.ok ? { kind: "ok", output: answer.output } : { kind: "failed", failure: answer.failure };
   };
@@ -1337,14 +1350,14 @@ async function rewriteRejectedRequirements(
     input.onRejected?.({ kind: "shape", round: 2, attempt: 1, response, problems: withReference(problems, "response"), rewrite: counts });
     return { ok: false, failure: { kind: "unmet", attempts: 1, problems }, references: tally.counts };
   };
-  const request = buildStructuredRequest({
+  const request = withMappingContract(input, buildStructuredRequest({
     rules: ruleTexts(mappingRewriteRuleDefinitionsOf(input.ledger)),
     documents: input.documents,
     data: buildRejectedRewriteData(input, rewrite),
     schemaName: MAPPING_SCHEMA_NAME,
     schema: mappingSchemaOf(input.ledger),
     maxOutputTokens: input.gateway.maxOutputTokens("name-table"),
-  });
+  }), rewrite);
   const answer = await callStructuredChecked(input.gateway, { request, check: (output) => ({ ok: true, value: output }) });
   if (!answer.ok) return { ok: false, failure: answer.failure, references: tally.counts };
   const output = answer.output;

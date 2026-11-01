@@ -279,6 +279,7 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
    */
   readonly c1ReferenceEnum?: boolean;
   readonly c1ConditionalFields?: boolean;
+  readonly c2MappingContract?: boolean;
   readonly stageEfforts?: StageEfforts;
   /**
    * 段の出力の上限の上書きの表（段 → 値。Issue #776）。共通の口（`CallGateway`）と T2 の束ごとの口に渡し、
@@ -1519,6 +1520,7 @@ async function runV11a(
             documents: input.documents,
             gateway: gateway.forStage("mapping"),
             rows,
+            ...(input.c2MappingContract === true ? { c2MappingContract: true } : {}),
             ...(retry === undefined ? {} : { previous: retry }),
             onRejected: rejectionSink("mapping", round),
             ...withLedger,

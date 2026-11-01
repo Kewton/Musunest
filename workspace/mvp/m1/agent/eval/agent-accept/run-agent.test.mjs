@@ -3680,8 +3680,8 @@ test("#788 R6 base のバイト列：provider を省いた走りと ollama の�
 // S-175ac full runner integration; all repositories, plans and children are synthetic.
 function makeC1Repo(base) {
  const repo=makeV12Repo(base);
- const text=readFileSync(join(repo,"packages/factory/dist/cli.js"),"utf8").replace('  if (over.noRecord !== true)', `  for (const [arg,key] of [["--c1-reference-enum","c1_reference_enum"],["--c1-conditional-fields","c1_conditional_fields"]]) {
-    if (process.argv[process.argv.indexOf(arg)+1] === "on" && process.env.FAKE_C1_MISSING !== "1") conditions[key]="on";
+ const text=readFileSync(join(repo,"packages/factory/dist/cli.js"),"utf8").replace('  if (over.noRecord !== true)', `  for (const [arg,key] of [["--c1-reference-enum","c1_reference_enum"],["--c1-conditional-fields","c1_conditional_fields"],["--c2-mapping-contract","c2_mapping_contract"]]) {
+    if (process.argv[process.argv.indexOf(arg)+1] === "on" && process.env.FAKE_C1_MISSING !== "1" && !(key === "c2_mapping_contract" && process.env.FAKE_C2_MISSING === "1")) conditions[key]="on";
   }
   if (over.noRecord !== true)`);
  writeFileSync(join(repo,"packages/factory/dist/cli.js"),text);return repo;
@@ -3754,4 +3754,51 @@ test("S-175ac provider/model/token/metadata/budget failures abort before another
    assert.equal(r.status,3,bad+" "+r.stderr);assert.equal(spawnCount(log),1,bad);assert.equal(lastRunRecord(out).openrouter_arm_validation.identity_valid,false);
   }finally{rmSync(base,{recursive:true,force:true});}
  }
+});
+
+// S-175ad C2 uses the same optional-contract signing and native Build audit as C1.
+const c2On=["--c2-mapping-contract","on"];
+test("S-175ad three flags reach child Build, change signature, dry-run and resume fail closed",async()=>{
+ await withRepo(async(base)=>{
+  const repo=makeC1Repo(base),fz=frozen557(base,repo),out=join(base,"out"),log=join(base,"spawn.log");
+  const args=["--build-from",fz,"--pipeline","v1.2","--only","P1","--runs","1","--concurrency","1",...c1Both];
+  const run=runAgent(repo,out,[...args,...c2On],{FAKE_SPAWN_LOG:log});assert.equal(run.status,0,run.stderr);
+  const cond=readJson(join(out,"conditions.json")),line=readJson(join(out,"P1-r1/summary.line.json"));
+  assert.equal(cond.params.c2_mapping_contract,"on");assert.deepEqual(cond.child_args[0].argv.slice(-6),[...c1Both,...c2On]);
+  assert.equal(cond.signature,conditionsSignature(cond));assert.equal(line.c1_flags.observed.c2_mapping_contract,"on");
+  const noC2=runAgent(repo,out,[...args,"--resume"],{FAKE_SPAWN_LOG:log});assert.equal(noC2.status,3);assert.equal(spawnCount(log),1);
+  assert.equal(runAgent(repo,out,[...args,...c2On,"--resume"],{FAKE_SPAWN_LOG:log}).status,0);assert.equal(spawnCount(log),1);
+  const file=join(out,"P1-r1/bundle/build-record.json"),record=readJson(file);delete record.conditions.c2_mapping_contract;writeFileSync(file,JSON.stringify(record));
+  const bad=runAgent(repo,out,[...args,...c2On,"--resume"],{FAKE_SPAWN_LOG:log});assert.equal(bad.status,3);assert.match(bad.stderr,/resume-build-flags/);
+  const dry=runAgent(repo,join(base,"dry"),[...args.slice(0,-4),"--only","P1,P7,P9",...c1Both,...c2On,"--dry-run"]);assert.equal(dry.status,0,dry.stderr);
+  assert.ok(JSON.parse(dry.stdout).child_args.every(c=>JSON.stringify(c.argv.slice(-6))===JSON.stringify([...c1Both,...c2On])));
+  assert.equal(spawnCount(log),1);
+ });
+});
+test("S-175ad missing child C2 stops; invalid values/unknown flag never spawn",async()=>{
+ await withRepo(async(base)=>{
+  const repo=makeC1Repo(base),fz=frozen557(base,repo),log=join(base,"spawn.log");
+  const args=["--build-from",fz,"--pipeline","v1.2","--only","P1,P2","--runs","1","--concurrency","1",...c1Both];
+  for(const suffix of [["--c2-mapping-contract"],["--c2-mapping-contract","invalid"],[...c2On,...c2On],["--c2-unknown","on"]]){
+   const r=runAgent(repo,join(base,"bad"),[...args,...suffix],{FAKE_SPAWN_LOG:log});assert.equal(r.status,3);assert.equal(spawnCount(log),0);
+  }
+  const r=runAgent(repo,join(base,"missing"),[...args,...c2On],{FAKE_SPAWN_LOG:log,FAKE_C2_MISSING:"1"});assert.equal(r.status,3);assert.equal(spawnCount(log),1);
+  assert.equal(lastRunRecord(join(base,"missing")).stop_code,"c1:build-flags");
+ });
+});
+test("S-175ad default/explicit C2 off argv and signature match pinned 2b72c9d bytes with C1 off or both on",async()=>{
+ await withRepo(async(base)=>{
+  const repo=makeC1Repo(base),fz=frozen557(base,repo);
+  const original="/Volumes/SSD_NX/tmp/musubi-tooling/2b72c9daf9dd62ad802045ffb1a98cf7a0426057/workspace/mvp/m1/agent/eval/agent-accept/run-agent.mjs";
+  for(const [i,c1] of [[],c1Both].entries()){
+   const out=join(base,"same-out-"+i),args=["--build-from",fz,"--pipeline","v1.2","--only","P1","--runs","1",...c1];
+   const old=spawnSync(process.execPath,[original,repo,out,...args],{encoding:"utf8",env:{...process.env,JEV_API_KEY:""}});assert.equal(old.status,0,old.stderr);
+   const before=readJson(join(out,"conditions.json")),argv=readFileSync(join(out,"P1-r1/received-argv.json"),"utf8");renameSync(out,join(base,"old-"+i));
+   for(const [j,flags] of [[],["--c2-mapping-contract","off"]].entries()){
+    const r=runAgent(repo,out,[...args,...flags]);assert.equal(r.status,0,r.stderr);const after=readJson(join(out,"conditions.json"));
+    assert.equal(after.signature,before.signature);assert.equal(JSON.stringify(after.child_args),JSON.stringify(before.child_args));assert.equal(readFileSync(join(out,"P1-r1/received-argv.json"),"utf8"),argv);
+    assert.ok(!("c2_mapping_contract" in after.params));renameSync(out,join(base,"off-"+i+"-"+j));
+   }
+  }
+ });
 });
