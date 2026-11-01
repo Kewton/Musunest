@@ -14,9 +14,10 @@
 //   * 構造化出力・道具付きの往復・usage・未完了・拒否・HTTP の分類は OpenAI と同じ。OpenRouter 独自の usage の欄
 //     （`cost`・`is_byok`・`cost_details`）と返却 identity は request-bound ledger に保持する（S-175v）。native schema 検査は不変。
 //   * `fetch` だけを使う。環境変数を読まない。
+import { openRouterIdentity } from "./openrouter-identity.js";
 import type { LlmClient } from "./llm.js";
 import { DEFAULT_OPENROUTER_ARM, openRouterArmPin, type OpenRouterArm } from "./openrouter-arm.js";
-import { noteProviderBilling, providerBillingReceipt } from "./provider-billing.js";
+import { noteProviderBilling, noteProviderIdentity, providerBillingReceipt } from "./provider-billing.js";
 export { DEFAULT_OPENROUTER_ARM, OPENROUTER_ARMS, isOpenRouterArm, openRouterArmPin } from "./openrouter-arm.js";
 import { createResponsesLlmClient, type FetchLike } from "./openai.js";
 import type { EnvelopeId } from "./schema-envelope.js";
@@ -63,6 +64,7 @@ export interface OpenRouterAdapterOptions {
  */
 export function createOpenRouterLlmClient(options: OpenRouterAdapterOptions): LlmClient {
   const pin = openRouterArmPin(options.arm ?? DEFAULT_OPENROUTER_ARM, options.model ?? DEFAULT_OPENROUTER_MODEL);
+  const route = Object.freeze({ ...OPENROUTER_PROVIDER_ROUTING, only: Object.freeze([pin.arm]) });
   const client = createResponsesLlmClient({
     ...options,
     model: options.model ?? DEFAULT_OPENROUTER_MODEL,
@@ -71,8 +73,17 @@ export function createOpenRouterLlmClient(options: OpenRouterAdapterOptions): Ll
     // 強く効かせても、形の似た別の段の枝が選ばれないようにする）
     stageOnlyEnvelope: true,
     // 提供元を固定する（body の末尾に 1 つ足す。ほかの欄は OpenAI と同じ）
-    extraBody: { provider: { ...OPENROUTER_PROVIDER_ROUTING, only: [pin.arm] } },
-    observeWire: (wire, signal) => noteProviderBilling(signal, providerBillingReceipt(wire, pin)),
+    extraBody: { provider: route },
+    observeWire: async (wire, signal, requestSignal) => {
+      const receipt = providerBillingReceipt(wire, pin);
+      // Money is recorded before lookup/output validation, including paid failures.
+      noteProviderBilling(signal, receipt);
+      if (receipt.generation_id !== null && receipt.identity_reasons.some((r) => r === "provider-unconfirmed" || r === "quantization-unconfirmed")) {
+        const identity = await openRouterIdentity({ receipt, pin, route, fetch: options.fetch ?? globalThis.fetch,
+          apiKey: options.apiKey, signal: requestSignal });
+        noteProviderIdentity(signal, identity);
+      }
+    },
   });
   return { ...client, billingPin: pin };
 }

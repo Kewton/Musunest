@@ -11,9 +11,27 @@ export interface ProviderBillingPin {
   readonly rates: TokenRates;
   readonly pricing_source: string;
   readonly pricing_observed_at: string;
+  readonly identity_policy: string;
+}
+
+/** Metadata-only evidence; raw returned fields and money stay untouched. */
+export interface ProviderIdentityEvidence {
+  readonly policy: string;
+  readonly generation_id: string | null;
+  readonly lookup_generation_id: string | null;
+  readonly lookup_provider: string | null;
+  readonly lookup_model: string | null;
+  readonly lookup_quantization: string | null;
+  readonly quantization_basis: "response" | "generation" | "exclusive-endpoint" | null;
+  readonly lookup_status: "ok" | "http" | "invalid" | "network" | "timeout" | "aborted" | "not-requested";
+  readonly lookup_requests: number;
+  readonly lookup_http_status: number | null;
+  readonly lookup_elapsed_ms: number;
+  readonly reasons: readonly string[];
 }
 
 export interface ProviderBillingReceipt {
+  readonly identity_evidence?: ProviderIdentityEvidence;
   readonly generation_id: string | null;
   readonly returned_provider: string | null;
   readonly returned_model: string | null;
@@ -52,9 +70,15 @@ export interface ProviderBillingSummary {
   readonly actual_cost_complete: boolean;
   readonly token_estimate_usd: number;
   readonly unsettled_reservations_usd: number;
+  readonly reservation_roundoff_usd?: number;
   readonly guard_spent_usd: number;
   readonly unknown_attempts: number;
   readonly attempts: readonly ProviderBillingAttempt[];
+}
+
+const identityHooks = new WeakMap<AbortSignal, (evidence: ProviderIdentityEvidence) => void>();
+export function noteProviderIdentity(signal: AbortSignal | undefined, evidence: ProviderIdentityEvidence): void {
+  if (signal !== undefined) identityHooks.get(signal)?.(evidence);
 }
 
 const hooks = new WeakMap<AbortSignal, (receipt: ProviderBillingReceipt) => void>();
@@ -74,6 +98,8 @@ export function providerBillingReceipt(wire: unknown, pin: ProviderBillingPin): 
   const quantization = identifier(record?.quantization ?? record?.provider_quantization);
   const id = identifier(record?.id);
   const identity: string[] = [];
+  if (record?.provider != null && provider === null) identity.push("provider-invalid");
+  if ((record?.quantization ?? record?.provider_quantization) != null && quantization === null) identity.push("quantization-invalid");
   if (provider === null) identity.push("provider-unconfirmed");
   else if (!pin.provider_aliases.includes(provider)) identity.push("provider-mismatch");
   if (model === null) identity.push("model-unconfirmed");
@@ -180,7 +206,6 @@ export class ProviderBillingLedger {
       row.receipt = receipt;
       const late = closed || signal.aborted;
       row.state = late ? "late" : "returned";
-      for (const reason of receipt.identity_reasons) this.#reasons.add(reason);
       if (receipt.usage !== null) row.token_estimate_usd = input.estimate(receipt.usage);
       const id = receipt.generation_id, cost = receipt.cost_usd;
       if (id === null || cost === null) return;
@@ -197,7 +222,17 @@ export class ProviderBillingLedger {
       applyGuard();
     };
     return {
-      bind: (signal) => bindProviderBilling(signal, (receipt) => note(receipt, signal)),
+      bind: (signal) => {
+        bindProviderBilling(signal, (receipt) => note(receipt, signal));
+        identityHooks.set(signal, (evidence) => {
+          if (row.receipt === null || evidence.generation_id !== row.receipt.generation_id) {
+            this.#reasons.add("identity-evidence-id-mismatch");
+            return;
+          }
+          // Identity enrichment cannot rebook money, tokens or reservations.
+          row.receipt = { ...row.receipt, identity_evidence: evidence, identity_reasons: evidence.reasons };
+        });
+      },
       close: (allowed = false) => {
         if (closed) return;
         closed = true;
@@ -210,11 +245,16 @@ export class ProviderBillingLedger {
   snapshot(reservedUsd: number, spentUsd: number): ProviderBillingSummary {
     const unknown = this.#attempts.filter((a) => a.receipt?.cost_usd == null || a.receipt.generation_id === null).length;
     const reasons = new Set(this.#reasons);
+    for (const a of this.#attempts) for (const reason of a.receipt?.identity_reasons ?? []) reasons.add(reason);
     if (this.#attempts.length === 0) reasons.add("no-confirmed-attempts");
     if (unknown > 0) reasons.add("billing-unconfirmed");
     if (this.#attempts.some((a) => a.receipt !== null && a.receipt.usage === null)) reasons.add("token-usage-unconfirmed");
     if (this.#pins.size !== 1) reasons.add("mixed-arm-pins");
     const complete = this.#attempts.length > 0 && !this.#attempts.some(incompleteBillingAttempt);
+    // Outward rounding only: never emit a tiny negative reservation as budget
+    // credit. Keep the raw error for audit; larger negatives still fail the reader.
+    const roundoffBound = Math.min(1e-12, Number.EPSILON * Math.max(1, this.#attempts.reduce((sum, a) => sum + a.reserved_usd, 0)));
+    const roundoff = reservedUsd < 0 && reservedUsd >= -roundoffBound;
     const invalidReasons = [...reasons];
     // oxlint-disable-next-line unicorn/no-array-sort -- ES2022, sorting a fresh copy only.
     invalidReasons.sort();
@@ -229,7 +269,8 @@ export class ProviderBillingLedger {
       actual_judge_cost_usd: this.#attempts.some((a) => a.purpose === "judge" && incompleteBillingAttempt(a)) ? null : this.#judgeCost,
       actual_cost_complete: complete,
       token_estimate_usd: this.#attempts.reduce((sum, a) => sum + (a.token_estimate_usd ?? 0), 0),
-      unsettled_reservations_usd: reservedUsd, guard_spent_usd: spentUsd, unknown_attempts: unknown,
+      unsettled_reservations_usd: roundoff ? 0 : reservedUsd,
+      ...(roundoff ? { reservation_roundoff_usd: reservedUsd } : {}), guard_spent_usd: spentUsd, unknown_attempts: unknown,
       attempts: this.#attempts.map((a) => ({ ...a })),
     };
   }

@@ -196,7 +196,7 @@ export interface OpenAiAdapterOptions {
  */
 export interface ResponsesAdapterOptions extends OpenAiAdapterOptions {
   /** Metadata-only accounting before HTTP/output validation. Must not change native decisions. */
-  readonly observeWire?: (wire: unknown, signal: AbortSignal | undefined) => void;
+  readonly observeWire?: (wire: unknown, signal: AbortSignal | undefined, requestSignal: AbortSignal) => void | Promise<void>;
   /** 固定の宛先（環境変数からは読まない） */
   readonly url: string;
   /**
@@ -457,7 +457,7 @@ async function requestWire(
     }
     if (config.observeWire !== undefined) {
       const observed = tryParseJson(text);
-      config.observeWire(observed.ok ? observed.value : undefined, signal);
+      await config.observeWire(observed.ok ? observed.value : undefined, signal, controller.signal);
     }
     if (!response.ok) throw httpError(response.status, text);
     const parsed = tryParseJson(text);
