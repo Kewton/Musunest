@@ -1,3 +1,4 @@
+import { modelIdentityPin } from "./provider-model.js";
 // Arm-specific routing and dated public prices (S-175v); no model-name branching.
 import { OPENROUTER_IDENTITY_POLICY } from "./openrouter-identity.js";
 import type { ProviderBillingPin } from "./provider-billing.js";
@@ -16,6 +17,7 @@ export function openRouterArmPin(arm: string, model: string): ProviderBillingPin
   const oi = arm === "open-inference/fp4";
   return Object.freeze({
     identity_policy: OPENROUTER_IDENTITY_POLICY,
+    model_identity: modelIdentityPin(model),
     arm, model, quantization: oi ? "fp4" : "fp8",
     provider_aliases: Object.freeze(oi ? ["OpenInference", "open-inference", arm] : ["Morph", "morph", arm]),
     rates: Object.freeze({ inputPerToken: (oi ? .0098 : .042) / 1e6,

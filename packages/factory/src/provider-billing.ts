@@ -1,3 +1,4 @@
+import { pinnedModelMatches, type ProviderModelIdentity } from "./provider-model.js";
 // Request-bound accounting, independent of native output validation (S-175v).
 // Unknown/late/duplicate receipts never release a reservation. No response body is retained.
 import type { TokenRates } from "./budget.js";
@@ -8,6 +9,7 @@ export interface ProviderBillingPin {
   readonly provider_aliases: readonly string[];
   readonly quantization: string;
   readonly model: string;
+  readonly model_identity?: ProviderModelIdentity;
   readonly rates: TokenRates;
   readonly pricing_source: string;
   readonly pricing_observed_at: string;
@@ -17,6 +19,7 @@ export interface ProviderBillingPin {
 /** Metadata-only evidence; raw returned fields and money stay untouched. */
 export interface ProviderIdentityEvidence {
   readonly policy: string;
+  readonly model_match_basis?: "requested-id" | "catalog-canonical" | "unconfirmed" | "mismatch";
   readonly confirmation_state?: "pending" | "confirmed" | "invalid" | "exhausted";
   readonly source?: "response" | "router-metadata" | "generation";
   readonly router_provider?: string | null;
@@ -120,7 +123,7 @@ export function providerBillingReceipt(wire: unknown, pin: ProviderBillingPin): 
   if (provider === null) identity.push("provider-unconfirmed");
   else if (!pin.provider_aliases.includes(provider)) identity.push("provider-mismatch");
   if (model === null) identity.push("model-unconfirmed");
-  else if (model !== pin.model) identity.push("model-mismatch");
+  else if (!pinnedModelMatches(pin, model)) identity.push("model-mismatch");
   if (quantization === null) identity.push("quantization-unconfirmed");
   else if (quantization !== pin.quantization) identity.push("quantization-mismatch");
   if (id === null) identity.push("generation-id-unconfirmed");

@@ -1,8 +1,9 @@
+import { pinnedModelMatches } from "./provider-model.js";
 // S-175x: response router metadata is primary. Cache omissions are deferred;
 // request pins never masquerade as returned provider or observed precision.
 import type { ProviderBillingPin, ProviderBillingReceipt, ProviderIdentityEvidence } from "./provider-billing.js";
 
-export const OPENROUTER_IDENTITY_POLICY = "router-metadata+deferred-generation/v2";
+export const OPENROUTER_IDENTITY_POLICY = "router-metadata+catalog-model+deferred-generation/v3";
 export const OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation";
 export const GENERATION_CONFIRMATION_MS = 90000;
 export const GENERATION_LOOKUP_TIMEOUT_MS = 3000;
@@ -39,7 +40,7 @@ export function identityEvidence(input: {
   if (lookup.id === null) reasons.push("generation-metadata-id-unconfirmed");
   else if (lookup.id !== receipt.generation_id) reasons.push("generation-metadata-id-mismatch");
   if (lookup.model === null) reasons.push("generation-model-unconfirmed");
-  else if (lookup.model !== pin.model || lookup.model !== receipt.returned_model) reasons.push("generation-model-mismatch");
+  else if (!pinnedModelMatches(pin, lookup.model) || !pinnedModelMatches(pin, receipt.returned_model)) reasons.push("generation-model-mismatch");
   if (lookup.provider === null) reasons.push("provider-unconfirmed");
   else if (!pin.provider_aliases.includes(lookup.provider)) reasons.push("provider-mismatch");
   if (lookup.quantization !== null && lookup.quantization !== pin.quantization) reasons.push("quantization-mismatch");
@@ -54,6 +55,8 @@ export function identityEvidence(input: {
   const confirmed = reasons.length === 0 && (lookup.status === "ok" || lookup.status === "router-metadata");
   const state = confirmed ? "confirmed" : mismatch ? "invalid" : input.terminal === true ? "exhausted" : "pending";
   return { policy: OPENROUTER_IDENTITY_POLICY, source, confirmation_state: state,
+    model_match_basis: lookup.model === null ? "unconfirmed" : !pinnedModelMatches(pin, lookup.model) ? "mismatch"
+      : lookup.model === pin.model ? "requested-id" : "catalog-canonical",
     generation_id: receipt.generation_id,
     lookup_generation_id: source === "generation" ? lookup.id : null,
     lookup_provider: source === "generation" ? lookup.provider : null,
@@ -81,7 +84,7 @@ export function responseIdentity(wire: unknown, receipt: ProviderBillingReceipt,
     else for (const a of metadata.attempts.map(object)) {
       const provider = identifier(a?.provider), model = identifier(a?.model);
       if (provider === null || model === null) extra.push("router-attempt-invalid");
-      else if (!pin.provider_aliases.includes(provider) || model !== pin.model) extra.push("router-attempt-mismatch");
+      else if (!pin.provider_aliases.includes(provider) || !pinnedModelMatches(pin, model)) extra.push("router-attempt-mismatch");
     }
   }
   if (selected.length === 1) {
