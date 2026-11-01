@@ -554,6 +554,9 @@ function buildStructuredBody(
   request: LlmStructuredRequest,
   envelope: ResolvedStageEnvelope | undefined,
 ): Record<string, unknown> {
+  // Wire-only refinement: validation still uses the original envelope/request schema.
+  const schema = request.generationSchema ?? request.schema;
+  if (request.generationSchema !== undefined) envelope = resolveStageEnvelope(request.schemaName, schema, config.envelope);
   const entry = envelope?.entry;
   const body = baseBody(
     config,
@@ -564,7 +567,7 @@ function buildStructuredBody(
       request.input,
       entry === undefined ? undefined : stageInstruction(entry.stage),
       // schema を文で示す adapter（Ollama）だけ、段の指示の最後に schema の塊を足す（Issue #771）
-      config.presentSchema ? schemaInstructionText(presentedStructuredSchema(envelope, request.schema)) : undefined,
+      config.presentSchema ? schemaInstructionText(presentedStructuredSchema(envelope, schema)) : undefined,
     ),
     request.maxOutputTokens,
     request.effort,
@@ -577,7 +580,7 @@ function buildStructuredBody(
       // その段の枝 1 つだけの封筒にする（Issue #790）。封筒の無い段はその要求の schema のまま。
       schema:
         envelope === undefined
-          ? request.schema
+          ? schema
           : config.stageOnlyEnvelope
             ? buildStageOnlyEnvelopeSchema(envelope.entry)
             : envelope.schema,

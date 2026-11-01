@@ -94,7 +94,8 @@ export function structuredInputParts(request: LlmStructuredRequest): LlmInputPar
     instructions: request.instructions,
     documents: request.documents,
     rules: request.rules ?? [],
-    schema: { name: request.schemaName, schema: request.schema },
+    schema: { name: request.schemaName, schema: request.generationSchema !== undefined && jsonChars(request.generationSchema) > jsonChars(request.schema)
+      ? request.generationSchema : request.schema },
     tools: [],
     turns: [],
     data: request.input,

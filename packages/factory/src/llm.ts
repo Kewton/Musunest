@@ -107,6 +107,8 @@ export interface LlmStructuredRequest {
   readonly schemaName: string;
   /** JSON Schema（構造化出力） */
   readonly schema: unknown;
+  /** Optional stricter generation schema. Native schema and stage checks remain unchanged. */
+  readonly generationSchema?: unknown;
   /** 出力トークンの上限。推論のトークンも含めて上限に入れる（§1.5） */
   readonly maxOutputTokens: number;
   /**

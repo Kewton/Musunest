@@ -1,3 +1,4 @@
+import { assessProviderComparison } from "./provider-comparison.js";
 // 費用の予約（02-architecture.md §1.5）。
 //
 // 呼ぶ前に、その呼び出しの最大費用（入力の長さ × 単価 ＋ `max_output_tokens` × 単価）を予約し、
@@ -93,6 +94,7 @@ export function jevCostUsd(inputTokens: number): number {
 
 /** ジョブ全体の費用の予算。呼ぶ前に予約し、usage が返ったら精算する（§1.5） */
 export class JobBudget {
+  #budgetRefused = false;
   readonly #limitUsd: number;
   #reservedUsd = 0;
   #spentUsd = 0;
@@ -111,7 +113,12 @@ export class JobBudget {
   }
 
   get providerBilling(): ProviderBillingSummary | undefined {
-    return this.#providerBilling?.snapshot(this.#reservedUsd, this.#spentUsd);
+    const snapshot = this.#providerBilling?.snapshot(this.#reservedUsd, this.#spentUsd);
+    if (snapshot === undefined) return undefined;
+    const reached = this.#budgetRefused || this.remainingUsd <= 0;
+    return assessProviderComparison({ ...snapshot, budget_limit_usd: this.#limitUsd, budget_reached: reached,
+      comparison_valid: snapshot.comparison_valid && !reached,
+      invalid_reasons: reached ? [...snapshot.invalid_reasons, "budget-reached"] : snapshot.invalid_reasons });
   }
 
   providerAttempt(pin: ProviderBillingPin, reservation: Reservation, rates: TokenRates, purpose: "generation" | "judge") {
@@ -153,6 +160,7 @@ export class JobBudget {
       throw new RangeError("予約する最大費用は 0 以上の有限の数であること");
     }
     if (maxCostUsd > this.remainingUsd) {
+      this.#budgetRefused = true;
       return { reserved: false, maxCostUsd, remainingUsd: this.remainingUsd };
     }
     const reservation: Reservation = { maxCostUsd, id: this.#nextId };

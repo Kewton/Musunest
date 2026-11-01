@@ -76,6 +76,11 @@ export type ProviderBillingFinalizer = (
 ) => Promise<readonly ProviderBillingSummary[]>;
 
 export interface ProviderBillingSummary {
+  readonly identity_valid?: boolean;
+  readonly comparison_policy?: string;
+  readonly cost_range_usd?: { readonly lower: number; readonly upper: number | null; readonly basis: "observed-plus-timeout-reservations" };
+  readonly budget_limit_usd?: number;
+  readonly budget_reached?: boolean;
   readonly identity_confirmation?: { readonly state: ProviderConfirmationTransition["state"]; readonly transitions: readonly ProviderConfirmationTransition[] };
   readonly schema: "factory/provider-billing/v1";
   readonly pins: readonly ProviderBillingPin[];

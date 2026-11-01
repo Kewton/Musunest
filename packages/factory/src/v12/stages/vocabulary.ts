@@ -13,8 +13,7 @@
 // （`callStructuredChecked`）の形のやり直しで 1 回作り直す（前回の応答と問題をデータで）。2 回落ちれば `unmet`（骨組みの形の
 // 落ちが続いたときは今の窓口と同じ `malformed`）。
 //
-// schema は静的（走りごとに変わらない。台帳が集計の種類を持つ走りだけ、計算に `aggregate` を足す）で、v1.2 の封筒に載せる。
-// 参照を ID の enum で閉じる形は最初の版から外す（窓口の判断 2026-10-18。enum の受理と費用が未確認）。行の出典は持たない
+// schema は既定で静的。F-1 opt-in だけ生成 schema の参照を前段の kind 別 enum に閉じる。native 検査と retry は同じ。行の出典は持たない
 // （`IDS_NO_SOURCE`。写し・引用・位置の対応は無い。08 §6）。
 import { ACTION_KINDS, VIEW_TYPES, type ConfirmedPlan } from "@musunest/appspec-schema";
 import type { CallGateway } from "../../call.js";
@@ -60,6 +59,7 @@ import {
   type VocabularyBundle,
 } from "../ids.js";
 import type { UpstreamLedgerView } from "../ledger.js";
+import { c1ReferenceSchema, INVALID_REFERENCE_ROWS } from "../c1-reference-enum.js";
 
 /** 束ごとの JSON Schema の名前（v1.2 の封筒の枝の判別子） */
 export const VOCABULARY_SCHEMA_NAMES: Readonly<Record<VocabularyBundle, string>> = {
@@ -238,6 +238,7 @@ export function vocabularySchemaOf(bundle: VocabularyBundle, ledger?: UpstreamLe
 /** C1 の 1 束が受け取るもの */
 export interface VocabularyBundleInput {
   readonly bundle: VocabularyBundle;
+  readonly c1ReferenceEnum?: boolean;
   readonly plan: ConfirmedPlan;
   readonly list: RequirementList;
   readonly documents: readonly PromptDocument[];
@@ -523,7 +524,7 @@ export async function runVocabularyBundle(input: VocabularyBundleInput): Promise
     const problems = [...assembled.problems, ...tableProblems];
     return problems.length > 0 ? { ok: false, problems } : { ok: true, value: rows };
   };
-  const request = buildStructuredRequest({
+  const baseRequest = buildStructuredRequest({
     rules: ruleTexts(vocabularyRuleDefinitionsOf(bundle, ledger)),
     documents: input.documents,
     data: buildData(input),
@@ -531,6 +532,10 @@ export async function runVocabularyBundle(input: VocabularyBundleInput): Promise
     schema: vocabularySchemaOf(bundle, ledger),
     maxOutputTokens: input.gateway.maxOutputTokens("name-table"),
   });
+  const refined = input.c1ReferenceEnum === true ? c1ReferenceSchema(vocabularySchemaOf(bundle, ledger), bundle, input.rows) : undefined;
+  if (refined?.ok === false) return { ok: false, failure: { kind: "unmet", attempts: 0,
+    problems: [{ field: "rows", message: INVALID_REFERENCE_ROWS }] }, references: tally.counts };
+  const request = refined?.ok === true ? { ...baseRequest, generationSchema: refined.schema } : baseRequest;
   const onRejected = input.onRejected;
   const answer = await callStructuredChecked(input.gateway, {
     request,

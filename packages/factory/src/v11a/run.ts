@@ -277,6 +277,7 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
    * 段ごとの effort（`--pipeline v1.2` の `--stage-effort`。Issue #664）。共通の口に渡し、C1・C2・C3・T2（束の口を含む）・B1・B3' の
    * 要求をその段の名前で引いた口で呼ぶ。省けば、どの段の口も今の口と同じ（要求・記録・要約は今と同じ）。
    */
+  readonly c1ReferenceEnum?: boolean;
   readonly stageEfforts?: StageEfforts;
   /**
    * 段の出力の上限の上書きの表（段 → 値。Issue #776）。共通の口（`CallGateway`）と T2 の束ごとの口に渡し、
@@ -1460,6 +1461,7 @@ async function runV11a(
             gateway: gateway.forStage("vocabulary"),
             rows,
             onRejected: rejectionSink("vocabulary", index + 1),
+            ...(input.c1ReferenceEnum === true ? { c1ReferenceEnum: true } : {}),
             ...withLedger,
           });
         } catch (error) {

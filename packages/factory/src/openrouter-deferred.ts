@@ -1,5 +1,6 @@
 // Confirmation is outside generation deadlines. Missing facts never become a valid arm.
 import type { FetchLike } from "./openai.js";
+import { assessProviderComparison } from "./provider-comparison.js";
 import type { ProviderBillingFinalizer, ProviderBillingPin, ProviderBillingReceipt, ProviderBillingSummary,
   ProviderConfirmationTransition, ProviderIdentityEvidence } from "./provider-billing.js";
 import { emptyLookup, GENERATION_CONFIRMATION_MS, GENERATION_LOOKUP_TIMEOUT_MS, identifier,
@@ -59,9 +60,10 @@ export function projectConfirmation(snapshot: ProviderBillingSummary, evidence: 
   const confirmed = attempts.filter((a) => a.receipt?.identity_evidence?.confirmation_state === "confirmed").length;
   const invalid = attempts.some((a) => a.receipt?.identity_evidence?.confirmation_state === "invalid");
   const valid = reasons.size === 0 && snapshot.actual_cost_complete && pending === 0;
-  const state: ProviderConfirmationTransition["state"] = invalid ? "invalid" : valid ? "confirmed" : pending > 0 && !terminal ? "pending" : "unconfirmed";
+  const assessment = assessProviderComparison({ ...snapshot, attempts, comparison_valid: valid, invalid_reasons: [...reasons] });
+  const state: ProviderConfirmationTransition["state"] = invalid ? "invalid" : assessment.identity_valid ? "confirmed" : pending > 0 && !terminal ? "pending" : "unconfirmed";
   const transitions = [...(snapshot.identity_confirmation?.transitions ?? []), { at_ms: Date.now(), state, pending, confirmed }];
-  return { ...snapshot, attempts, comparison_valid: valid, invalid_reasons: [...reasons], identity_confirmation: { state, transitions } };
+  return { ...assessment, identity_confirmation: { state, transitions } };
 }
 
 export function createDeferredConfirmation(input: {
