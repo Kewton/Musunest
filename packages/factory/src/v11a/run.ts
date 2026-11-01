@@ -278,6 +278,7 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
    * 要求をその段の名前で引いた口で呼ぶ。省けば、どの段の口も今の口と同じ（要求・記録・要約は今と同じ）。
    */
   readonly c1ReferenceEnum?: boolean;
+  readonly c1ConditionalFields?: boolean;
   readonly stageEfforts?: StageEfforts;
   /**
    * 段の出力の上限の上書きの表（段 → 値。Issue #776）。共通の口（`CallGateway`）と T2 の束ごとの口に渡し、
@@ -1462,6 +1463,7 @@ async function runV11a(
             rows,
             onRejected: rejectionSink("vocabulary", index + 1),
             ...(input.c1ReferenceEnum === true ? { c1ReferenceEnum: true } : {}),
+            ...(input.c1ConditionalFields === true ? { c1ConditionalFields: true } : {}),
             ...withLedger,
           });
         } catch (error) {

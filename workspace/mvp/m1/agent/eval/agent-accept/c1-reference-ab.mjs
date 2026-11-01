@@ -5,6 +5,12 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { checkEnvelope, loadFrozenSet, loadPlanFileChecks } from "./freeze-plan-set.mjs";
 export const AB_POLICY = "native-c1-reference-ab/v1";
+export const CONDITIONAL_AB_POLICY = "native-c1-conditional-ab/v1";
+export function experimentFlags(experiment, mode) {
+  if (!["references", "conditional-fields"].includes(experiment) || !["off", "on"].includes(mode)) throw new Error("ab:experiment");
+  return { c1ReferenceEnum: experiment === "conditional-fields" || mode === "on",
+    c1ConditionalFields: experiment === "conditional-fields" && mode === "on" };
+}
 const sha = (v) => createHash("sha256").update(typeof v === "string" || Buffer.isBuffer(v) ? v : JSON.stringify(v)).digest("hex");
 const json = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + "\n", { flag: "wx" });
 export function plannedJobs(patterns) {
@@ -13,14 +19,14 @@ export function plannedJobs(patterns) {
 }
 export async function loadNative(repo) {
   const load = (p) => import(pathToFileURL(join(repo, "packages/factory/dist", p)).href);
-  const [vocabulary, call, budget, pipeline, ledger, limits, cli, router, comparison, ids] = await Promise.all([
-    "v12/stages/vocabulary.js", "call.js", "budget.js", "pipeline.js", "v12/ledger.js", "v12/limits.js", "cli.js", "openrouter.js", "provider-comparison.js", "v12/ids.js",
+  const [vocabulary, call, budget, pipeline, ledger, limits, cli, router, comparison, ids, conditional] = await Promise.all([
+    "v12/stages/vocabulary.js", "call.js", "budget.js", "pipeline.js", "v12/ledger.js", "v12/limits.js", "cli.js", "openrouter.js", "provider-comparison.js", "v12/ids.js", "v12/c1-conditional-fields.js",
   ].map(load));
-  return { ...vocabulary, ...call, ...budget, ...pipeline, ...ledger, ...limits, ...cli, ...router, ...comparison, ...ids };
+  return { ...vocabulary, ...call, ...budget, ...pipeline, ...ledger, ...limits, ...cli, ...router, ...comparison, ...ids, ...conditional };
 }
 /** Dependency injection is fake-only; execution supplies the archive's native modules. */
-export async function runC1({ native: n, plan, documents, mode, client, now = Date.now, budgetUsd = .30, deadlineMs = 1200000, callTimeoutMs, onProgress = async () => {} }) {
-  if (!["off", "on"].includes(mode)) throw new Error("ab:mode");
+export async function runC1({ native: n, plan, documents, mode, client, experiment = "references", now = Date.now, budgetUsd = .30, deadlineMs = 1200000, callTimeoutMs, onProgress = async () => {} }) {
+  const flags = experimentFlags(experiment, mode);
   const budget = new n.JobBudget(budgetUsd), deadline = now() + deadlineMs;
   const gate = n.createCallGate({ now, deadline, limit: n.V12_CALL_LIMITS.realAttempts });
   const gateway = new n.CallGateway({ client, budget, rates: client.billingPin.rates, now, deadline, effort: "low", gate,
@@ -28,11 +34,15 @@ export async function runC1({ native: n, plan, documents, mode, client, now = Da
   const list = n.requirementsFromPlan(plan), ledger = n.ledgerViewOf(n.fromPublicV12Flags(n.V12_PIPELINE_FLAGS));
   const bundles = []; let rows = [];
   for (const bundle of n.VOCABULARY_BUNDLES) {
-    const rejections = [];
+    const rejections = [], candidates = [];
     const attemptsBefore = budget.providerBilling?.attempts.length ?? 0;
     const start = now();
     const result = await n.runVocabularyBundle({ bundle, plan, list, documents, gateway: gateway.forStage("vocabulary"), rows, ledger,
-      ...(mode === "on" ? { c1ReferenceEnum: true } : {}),
+      ...(flags.c1ReferenceEnum ? { c1ReferenceEnum: true } : {}),
+      ...(flags.c1ConditionalFields ? { c1ConditionalFields: true } : {}),
+      ...(experiment === "conditional-fields" ? { onCandidate: (output, attempt) => {
+        candidates.push({ attempt, problems: n.conditionalFieldProblems(bundle, output) });
+      } } : {}),
       onRejected: (r) => rejections.push({ attempt: r.attempt, problems: r.problems }) });
     const classify = (problems) => {
       const counts = { unknown: 0, wrong_kind: 0, cross_bundle: 0, other: 0 };
@@ -44,9 +54,12 @@ export async function runC1({ native: n, plan, documents, mode, client, now = Da
       }
       return counts;
     };
+    const conditionalObservations = candidates.map((c) => ({ ...c, counts: Object.fromEntries(
+      ["options", "refEntity", "entity", "aggregate", "groupBy"].map((key) => [key, c.problems.filter((p) => p.category === key).length])) }));
     const rejectionsWithClass = rejections.map((r) => ({ ...r, classes: classify(r.problems) }));
     bundles.push({ bundle, pass: result.ok, duration_ms: now() - start, references: result.references,
       rejections: rejectionsWithClass, failure: result.ok ? null : result.failure,
+      ...(experiment === "conditional-fields" ? { conditional_observations: conditionalObservations } : {}),
       unknown_initial_occurrence: rejectionsWithClass.some((r) => r.attempt === 1 && r.classes.unknown > 0),
       unknown_retry_occurrence: rejectionsWithClass.some((r) => r.attempt === 2 && r.classes.unknown > 0),
       reference_observation_complete: (budget.providerBilling?.attempts.slice(attemptsBefore) ?? []).every((a) => a.state === "returned" && a.receipt !== null)
@@ -65,9 +78,10 @@ export async function runC1({ native: n, plan, documents, mode, client, now = Da
   return { c1_pass: bundles.length === 3 && bundles.every((b) => b.pass), bundles, billing,
     identity_valid: billing.identity_valid === true, actual_cost_complete: billing.actual_cost_complete,
     cost_range_usd: billing.cost_range_usd, counts: gateway.counts, real_attempts: gate.attempts(),
-    logical_calls: bundles.length + gateway.retryCounts.shape, judge_calls: 0, stop: "C1" };
+    logical_calls: bundles.length + gateway.retryCounts.shape, judge_calls: 0, stop: "C1",
+    ...(experiment === "conditional-fields" ? { experiment, c1_reference_enum: "on", c1_conditional_fields: mode } : {}) };
 }
-export async function runSchedule(jobs, run, persist = async () => {}) {
+export async function runSchedule(jobs, run, persist = async () => {}, experiment = "references") {
   const rows = []; let held = 0, abort = null;
   for (const job of jobs) {
     if (held + .30 > 1.80 + 1e-12) { abort = "batch-budget"; break; }
@@ -78,7 +92,7 @@ export async function runSchedule(jobs, run, persist = async () => {}) {
       abort = "identity-or-budget"; break;
     }
   }
-  return { policy: AB_POLICY, planned: jobs, rows, not_run: jobs.slice(rows.length), abort, guard_held_usd: held,
+  return { policy: experiment === "conditional-fields" ? CONDITIONAL_AB_POLICY : AB_POLICY, planned: jobs, rows, not_run: jobs.slice(rows.length), abort, guard_held_usd: held,
     summary: summarize(jobs, rows) };
 }
 export function summarize(jobs, rows) {
@@ -88,11 +102,17 @@ export function summarize(jobs, rows) {
     const off = byId.get(jobs[i].id), on = byId.get(jobs[i + 1].id);
     if (off?.identity_valid === true && on?.identity_valid === true) validPairs.push([off, on]);
   }
+  const conditionalCounts = (row, attempt) => row.bundles.some((b) => !b.reference_observation_complete) ? null
+    : Object.fromEntries(["options", "refEntity", "entity", "aggregate", "groupBy"].map((key) => [key,
+      row.bundles.reduce((sum, b) => sum + (b.conditional_observations ?? []).filter((c) => c.attempt === attempt).reduce((s, c) => s + c.counts[key], 0), 0)]));
   const metric = (row) => ({ c1_pass: row.c1_pass, bundle_passes: row.bundles.filter((b) => b.pass).map((b) => b.bundle),
     unknown_initial_occurrences: row.bundles.some((b) => !b.reference_observation_complete) ? null : row.bundles.filter((b) => b.unknown_initial_occurrence).length,
     unknown_retry_occurrences: row.bundles.some((b) => !b.reference_observation_complete) ? null : row.bundles.filter((b) => b.unknown_retry_occurrence).length,
     failure_class_transitions: row.bundles.map((b) => ({ bundle: b.bundle, initial: b.rejections.find((r) => r.attempt === 1)?.classes ?? null,
       retry: b.rejections.find((r) => r.attempt === 2)?.classes ?? null, terminal: b.failure?.kind ?? "pass" })),
+    ...(row.experiment === "conditional-fields" ? {
+      conditional_initial_counts: conditionalCounts(row, 1), conditional_retry_counts: conditionalCounts(row, 2),
+      conditional_transitions: row.bundles.map((b) => ({ bundle: b.bundle, observations: b.conditional_observations, terminal: b.failure?.kind ?? "pass" })) } : {}),
     actual_cost_complete: row.actual_cost_complete, cost_range_usd: row.cost_range_usd });
   const upperComplete = rows.length === jobs.length && rows.every((r) => Number.isFinite(r.cost_range_usd?.upper));
   return { planned: jobs.length, executed: rows.length, valid_stage_pairs: validPairs.length,
@@ -105,7 +125,7 @@ export function summarize(jobs, rows) {
 }
 export function parseArgs(args) {
   const flags = new Set(["--dry-run", "--execute"]);
-  const keys = new Set(["--repo", "--out", "--build-from", "--frozen-sha256", "--set", "--set-sha256", "--only", "--source-pin"]);
+  const keys = new Set(["--repo", "--out", "--build-from", "--frozen-sha256", "--set", "--set-sha256", "--only", "--source-pin", "--experiment"]);
   const opts = {}; let execute = false;
   for (let i = 0; i < args.length; i++) {
     const flag = args[i];
@@ -114,13 +134,16 @@ export function parseArgs(args) {
     else throw new Error("ab:arguments");
   }
   if (execute && opts["--dry-run"]) throw new Error("ab:mode-conflict");
-  for (const key of keys) if (!opts[key]) throw new Error("ab:missing-argument");
+  for (const key of keys) if (key !== "--experiment" && !opts[key]) throw new Error("ab:missing-argument");
   for (const key of ["--frozen-sha256", "--set-sha256"]) if (!/^[a-f0-9]{64}$/.test(opts[key])) throw new Error("ab:hash");
-  return { opts, execute, jobs: plannedJobs(opts["--only"].split(",")) };
+  const experiment = opts["--experiment"] ?? "references";
+  experimentFlags(experiment, "off");
+  return { opts, execute, experiment, jobs: plannedJobs(opts["--only"].split(",")) };
 }
 export async function main(args) {
-  const { opts: o, execute, jobs } = parseArgs(args);
-  const preview = { policy: AB_POLICY, execute, jobs, stop: "C1", provider: "openrouter", arm: "open-inference/fp4",
+  const { opts: o, execute, jobs, experiment } = parseArgs(args);
+  const preview = { policy: experiment === "conditional-fields" ? CONDITIONAL_AB_POLICY : AB_POLICY, execute, jobs,
+    ...(experiment === "conditional-fields" ? { experiment, c1_reference_enum: "on", c1_conditional_fields: "off/on", schema_form: "union" } : {}), stop: "C1", provider: "openrouter", arm: "open-inference/fp4",
     model: "z-ai/glm-5.3-flash", effort: "low", budget_usd: 1.80, per_run_budget_usd: .30, deadline_ms: 1200000,
     call_limits: { logical_calls: 80, real_attempts: 144, judge_branch: 80 }, schema_only_difference: true };
   if (!execute) { console.log(JSON.stringify(preview, null, 2)); return; } // no data, env or output read in dry-run.
@@ -156,7 +179,9 @@ export async function main(args) {
   mkdirSync(out, { recursive: false });
   json(join(out, "conditions.json"), { ...preview, archive: repo, commit: pin.commit, tree: pin.tree, inputs,
     frozen_sha256: frozen.sha256, set_sha256: o["--set-sha256"], document_hashes: documents.map((d) => ({ name: d.name, sha256: sha(d.text) })),
-    billing_pin: n.openRouterArmPin("open-inference/fp4", preview.model), enum_policy: "c1-kind-reference-enum/v1", identity_policy: n.IDENTITY_COMPARISON_POLICY });
+    billing_pin: n.openRouterArmPin("open-inference/fp4", preview.model), enum_policy: "c1-kind-reference-enum/v1", identity_policy: n.IDENTITY_COMPARISON_POLICY,
+    ...(experiment === "conditional-fields" ? { conditional_policy: n.C1_CONDITIONAL_FIELDS_POLICY,
+      schema_support: "official-format+offline-fake; OI-keyword-enforcement-unprobed" } : {}) });
   const result = await runSchedule(jobs, async (job) => {
     const requestHashes = [];
     const client = n.createOpenRouterLlmClient({ apiKey: key, arm: preview.arm, model: preview.model, effort: preview.effort, envelope: "v1.2",
@@ -168,10 +193,10 @@ export async function main(args) {
         }
         return globalThis.fetch(url, init);
       } });
-    const row = await runC1({ native: n, plan: plans.get(job.pattern), documents, mode: job.mode, client,
+    const row = await runC1({ native: n, plan: plans.get(job.pattern), documents, mode: job.mode, client, experiment,
       onProgress: async (value) => { writeFileSync(join(out, `${job.id}.pending.json`), JSON.stringify(value, null, 2) + "\n"); } });
     return { ...row, request_hashes: requestHashes, plan_pin: inputs.find((i) => i.pattern === job.pattern) };
-  }, async (row) => json(join(out, `${row.id}.json`), row));
+  }, async (row) => json(join(out, `${row.id}.json`), row), experiment);
   json(join(out, "ab-summary.json"), { ...result, commit: pin.commit });
   console.log(JSON.stringify({ executed: result.rows.length, abort: result.abort, summary: result.summary }));
 }

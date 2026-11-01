@@ -60,6 +60,7 @@ import {
 } from "../ids.js";
 import type { UpstreamLedgerView } from "../ledger.js";
 import { c1ReferenceSchema, INVALID_REFERENCE_ROWS } from "../c1-reference-enum.js";
+import { c1ConditionalSchema } from "../c1-conditional-fields.js";
 
 /** 束ごとの JSON Schema の名前（v1.2 の封筒の枝の判別子） */
 export const VOCABULARY_SCHEMA_NAMES: Readonly<Record<VocabularyBundle, string>> = {
@@ -239,6 +240,9 @@ export function vocabularySchemaOf(bundle: VocabularyBundle, ledger?: UpstreamLe
 export interface VocabularyBundleInput {
   readonly bundle: VocabularyBundle;
   readonly c1ReferenceEnum?: boolean;
+  readonly c1ConditionalFields?: boolean;
+  /** Observation only, including accepted raw candidates. Never affects native checks or retries. */
+  readonly onCandidate?: (output: unknown, attempt: number) => void;
   readonly plan: ConfirmedPlan;
   readonly list: RequirementList;
   readonly documents: readonly PromptDocument[];
@@ -511,7 +515,9 @@ export async function runVocabularyBundle(input: VocabularyBundleInput): Promise
   const tally = new ReferenceTally();
   const previousLabels = input.rows.map((row, index) => `${row.kind}s[${String(index)}]`);
   let lastWasSkeleton = false;
+  let observedAttempt = 0;
   const check = (output: unknown): ShapeCheck<readonly NameTableRow[]> => {
+    input.onCandidate?.(structuredClone(output), ++observedAttempt);
     const skeleton = skeletonProblems(bundle, output);
     lastWasSkeleton = skeleton.length > 0;
     if (skeleton.length > 0) return { ok: false, problems: skeleton };
@@ -535,7 +541,9 @@ export async function runVocabularyBundle(input: VocabularyBundleInput): Promise
   const refined = input.c1ReferenceEnum === true ? c1ReferenceSchema(vocabularySchemaOf(bundle, ledger), bundle, input.rows) : undefined;
   if (refined?.ok === false) return { ok: false, failure: { kind: "unmet", attempts: 0,
     problems: [{ field: "rows", message: INVALID_REFERENCE_ROWS }] }, references: tally.counts };
-  const request = refined?.ok === true ? { ...baseRequest, generationSchema: refined.schema } : baseRequest;
+  const referenceRequest = refined?.ok === true ? { ...baseRequest, generationSchema: refined.schema } : baseRequest;
+  const request = input.c1ConditionalFields === true ? { ...referenceRequest,
+    generationSchema: c1ConditionalSchema((referenceRequest.generationSchema ?? referenceRequest.schema) as Record<string, unknown>, bundle) } : referenceRequest;
   const onRejected = input.onRejected;
   const answer = await callStructuredChecked(input.gateway, {
     request,
