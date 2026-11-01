@@ -1,3 +1,4 @@
+import { runWithDeferredBilling } from "./cli-provider-billing.js";
 // 手元の入口（02-architecture.md §3.2）。
 //
 // `factory:run -- <依頼文のファイル> --out <ディレクトリ>` で、手元から 1 回の生成を流す。出力は納品物の
@@ -1488,6 +1489,10 @@ async function runStageFromPlanFile(
  * （Issue #495）。鍵が無ければ **`makeClient` を呼ばずに**使い方の誤りで終わる（API を呼ばない）。
  */
 export async function runCli(deps: CliDeps): Promise<number> {
+  return runWithDeferredBilling(deps, runCliOnce);
+}
+
+async function runCliOnce(deps: CliDeps): Promise<number> {
   const log = deps.log ?? ((): void => {});
   const logError = deps.logError ?? ((): void => {});
   const parsed = parseCliArguments(deps.argv);

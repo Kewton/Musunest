@@ -17,13 +17,17 @@ export interface ProviderBillingPin {
 /** Metadata-only evidence; raw returned fields and money stay untouched. */
 export interface ProviderIdentityEvidence {
   readonly policy: string;
+  readonly confirmation_state?: "pending" | "confirmed" | "invalid" | "exhausted";
+  readonly source?: "response" | "router-metadata" | "generation";
+  readonly router_provider?: string | null;
+  readonly router_model?: string | null;
   readonly generation_id: string | null;
   readonly lookup_generation_id: string | null;
   readonly lookup_provider: string | null;
   readonly lookup_model: string | null;
   readonly lookup_quantization: string | null;
   readonly quantization_basis: "response" | "generation" | "exclusive-endpoint" | null;
-  readonly lookup_status: "ok" | "http" | "invalid" | "network" | "timeout" | "aborted" | "not-requested";
+  readonly lookup_status: "ok" | "http" | "invalid" | "network" | "timeout" | "aborted" | "not-requested" | "pending" | "router-metadata";
   readonly lookup_requests: number;
   readonly lookup_http_status: number | null;
   readonly lookup_elapsed_ms: number;
@@ -49,14 +53,27 @@ export interface ProviderBillingAttempt {
   readonly purpose: "generation" | "judge";
   readonly pin: ProviderBillingPin;
   readonly reserved_usd: number;
-  state: "pending" | "returned" | "late";
+  state: "pending" | "returned" | "late" | "closed-unknown";
+  failure_kind?: string;
   duplicate: boolean;
   receipt: ProviderBillingReceipt | null;
   token_estimate_usd: number | null;
   guard_settled: boolean;
 }
 
+export interface ProviderConfirmationTransition {
+  readonly at_ms: number;
+  readonly state: "pending" | "confirmed" | "invalid" | "unconfirmed";
+  readonly pending: number;
+  readonly confirmed: number;
+}
+export type ProviderBillingFinalizer = (
+  snapshots: readonly ProviderBillingSummary[],
+  options: { readonly deadline: number; readonly onProgress: (snapshots: readonly ProviderBillingSummary[]) => Promise<void> },
+) => Promise<readonly ProviderBillingSummary[]>;
+
 export interface ProviderBillingSummary {
+  readonly identity_confirmation?: { readonly state: ProviderConfirmationTransition["state"]; readonly transitions: readonly ProviderConfirmationTransition[] };
   readonly schema: "factory/provider-billing/v1";
   readonly pins: readonly ProviderBillingPin[];
   readonly comparison_valid: boolean;
@@ -178,7 +195,7 @@ export class ProviderBillingLedger {
     estimate: (usage: LlmUsage) => number;
     settle: (guardUsd: number) => void;
     holdExcess: (excessUsd: number) => void;
-  }): { bind(signal: AbortSignal): void; close(allowSettlement?: boolean): void } {
+  }): { bind(signal: AbortSignal): void; close(allowSettlement?: boolean, failureKind?: string): void } {
     this.register(input.pin);
     const row: ProviderBillingAttempt = {
       attempt: this.#attempts.length + 1, purpose: input.purpose, pin: input.pin,
@@ -233,10 +250,15 @@ export class ProviderBillingLedger {
           row.receipt = { ...row.receipt, identity_evidence: evidence, identity_reasons: evidence.reasons };
         });
       },
-      close: (allowed = false) => {
+      close: (allowed = false, failureKind) => {
         if (closed) return;
         closed = true;
         allowSettlement = allowed;
+        if (row.receipt === null) {
+          row.state = "closed-unknown";
+          row.failure_kind = failureKind !== undefined && ["network", "timeout", "deadline", "http", "balance", "malformed", "refused", "invalid-request"].includes(failureKind)
+            ? failureKind : "missing-receipt";
+        }
         applyGuard();
       },
     };

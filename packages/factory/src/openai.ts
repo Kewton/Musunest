@@ -195,6 +195,8 @@ export interface OpenAiAdapterOptions {
  * 宛先と「schema を文で示すか」だけを差し替え、要求の組み立て・応答の解釈・誤りの分類は同じ実装を使う。
  */
 export interface ResponsesAdapterOptions extends OpenAiAdapterOptions {
+  /** Opt in to safe router metadata without altering the generation body. */
+  readonly routerMetadata?: boolean;
   /** Metadata-only accounting before HTTP/output validation. Must not change native decisions. */
   readonly observeWire?: (wire: unknown, signal: AbortSignal | undefined, requestSignal: AbortSignal) => void | Promise<void>;
   /** 固定の宛先（環境変数からは読まない） */
@@ -239,6 +241,7 @@ export interface ResponsesAdapterOptions extends OpenAiAdapterOptions {
 }
 
 interface WireConfig {
+  readonly routerMetadata: boolean;
   readonly observeWire: ResponsesAdapterOptions["observeWire"];
   readonly apiKey: string;
   readonly model: string;
@@ -267,6 +270,7 @@ export function createResponsesLlmClient(options: ResponsesAdapterOptions): LlmC
     throw new Error("fetch がありません。options.fetch で渡してください");
   }
   const config: WireConfig = {
+    routerMetadata: options.routerMetadata === true,
     observeWire: options.observeWire,
     apiKey: options.apiKey,
     model: options.model ?? DEFAULT_OPENAI_MODEL,
@@ -434,6 +438,7 @@ async function requestWire(
       response = await config.fetch(config.url, {
         method: "POST",
         headers: {
+          ...(config.routerMetadata ? { "X-OpenRouter-Metadata": "enabled" } : {}),
           "content-type": "application/json",
           authorization: `Bearer ${config.apiKey}`,
         },

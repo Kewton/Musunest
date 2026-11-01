@@ -197,6 +197,7 @@ export type LlmToolResponse =
  */
 export interface LlmClient {
   /** Opt-in billed accounting; non-billed clients retain the existing contract. */
+  readonly finalizeProviderBilling?: import("./provider-billing.js").ProviderBillingFinalizer;
   readonly billingPin?: import("./provider-billing.js").ProviderBillingPin;
   /** 構造化出力（JSON Schema）で 1 つ呼ぶ */
   callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>>;

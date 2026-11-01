@@ -464,6 +464,7 @@ export class UsageMeter {
   /** 呼び出しの数を数えるように包む（この包みを通してだけ LLM を呼ぶ） */
   wrap(client: LlmClient): LlmClient {
     return {
+      ...(client.finalizeProviderBilling === undefined ? {} : { finalizeProviderBilling: client.finalizeProviderBilling }),
       ...(client.billingPin === undefined ? {} : { billingPin: client.billingPin }),
       callStructured: async <T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> => {
         try {

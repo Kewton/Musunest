@@ -920,8 +920,8 @@ export class CallGateway {
           return invoke(signal);
         };
         const outcome = await this.#attempt(billedInvoke, timeoutMs, remaining, observation).then(
-          (value) => { accounting?.close(value.kind === "ok"); return value; },
-          (error) => { accounting?.close(isIncompleteResponseError(error)); throw error; },
+          (value) => { accounting?.close(value.kind === "ok", value.kind === "ok" ? undefined : value.kind); return value; },
+          (error) => { accounting?.close(isIncompleteResponseError(error), categorizeCallError(error).kind); throw error; },
         );
         if (outcome.kind === "deadline") {
           this.#counts.attemptsCancelledDeadline += 1;
