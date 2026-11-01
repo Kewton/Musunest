@@ -294,6 +294,8 @@ export interface RunRecord {
   readonly budget_reserved_usd?: number;
   readonly missing_usage_calls: number;
   readonly failure: FailureAttribution | null;
+  /** Additive billed-accounting extension; legacy clients omit it. */
+  readonly provider_billing?: import("./provider-billing.js").ProviderBillingSummary;
 }
 
 /** 要約の欄（列挙した欄だけ。appspec-schema の wire の必須の欄＋記録の欄） */
@@ -462,6 +464,7 @@ export class UsageMeter {
   /** 呼び出しの数を数えるように包む（この包みを通してだけ LLM を呼ぶ） */
   wrap(client: LlmClient): LlmClient {
     return {
+      ...(client.billingPin === undefined ? {} : { billingPin: client.billingPin }),
       callStructured: async <T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> => {
         try {
           const response = await client.callStructured<T>(request);
@@ -807,6 +810,7 @@ export function buildRunRecord(input: RunRecord): RunRecord {
     budget_reserved_usd: input.budget_reserved_usd ?? 0,
     missing_usage_calls: input.missing_usage_calls,
     failure: failure === null ? null : pickFailure(failure),
+    ...(input.provider_billing === undefined ? {} : { provider_billing: input.provider_billing }),
   };
 }
 
@@ -850,5 +854,6 @@ export function buildSummary(record: RunRecord, base: SummaryBase): Summary {
     budget_reserved_usd: picked.budget_reserved_usd ?? 0,
     missing_usage_calls: picked.missing_usage_calls,
     failure: picked.failure,
+    ...(picked.provider_billing === undefined ? {} : { provider_billing: picked.provider_billing }),
   };
 }

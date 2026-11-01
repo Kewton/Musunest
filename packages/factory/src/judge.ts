@@ -167,6 +167,7 @@ export interface JudgeResponse {
  * 判定の口（port。§4）。Jev・LLM・偽物がこの型を実装する
  */
 export interface Judge {
+  readonly billingPin?: import("./provider-billing.js").ProviderBillingPin;
   /** 1 つの state と問いの map を渡し、問いごとの答えを返す（§1） */
   judge(request: JudgeRequest): Promise<JudgeResponse>;
   /**

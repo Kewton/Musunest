@@ -195,6 +195,8 @@ export interface OpenAiAdapterOptions {
  * 宛先と「schema を文で示すか」だけを差し替え、要求の組み立て・応答の解釈・誤りの分類は同じ実装を使う。
  */
 export interface ResponsesAdapterOptions extends OpenAiAdapterOptions {
+  /** Metadata-only accounting before HTTP/output validation. Must not change native decisions. */
+  readonly observeWire?: (wire: unknown, signal: AbortSignal | undefined) => void;
   /** 固定の宛先（環境変数からは読まない） */
   readonly url: string;
   /**
@@ -237,6 +239,7 @@ export interface ResponsesAdapterOptions extends OpenAiAdapterOptions {
 }
 
 interface WireConfig {
+  readonly observeWire: ResponsesAdapterOptions["observeWire"];
   readonly apiKey: string;
   readonly model: string;
   readonly effort: string | undefined;
@@ -264,6 +267,7 @@ export function createResponsesLlmClient(options: ResponsesAdapterOptions): LlmC
     throw new Error("fetch がありません。options.fetch で渡してください");
   }
   const config: WireConfig = {
+    observeWire: options.observeWire,
     apiKey: options.apiKey,
     model: options.model ?? DEFAULT_OPENAI_MODEL,
     effort: options.effort,
@@ -450,6 +454,10 @@ async function requestWire(
         throw new OpenAiAdapterError("timeout", "呼び出しごとの timeout で打ち切りました");
       }
       throw new OpenAiAdapterError("network", `応答の本文を読めませんでした: ${messageOf(error)}`);
+    }
+    if (config.observeWire !== undefined) {
+      const observed = tryParseJson(text);
+      config.observeWire(observed.ok ? observed.value : undefined, signal);
     }
     if (!response.ok) throw httpError(response.status, text);
     const parsed = tryParseJson(text);

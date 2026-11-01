@@ -26,7 +26,7 @@
 //
 // **実 API は呼ばない。** ここは差し込まれた `Judge` を受け取るだけで、`fetch` も鍵も環境変数も
 // 扱わない（CLAUDE.md の不変条件）。単価は引数で受け取る（コードに埋め込まない）。
-import { JEV_RATES, estimateMaxCostUsd, type JobBudget, type Reservation, type TokenRates } from "./budget.js";
+import { JEV_RATES, costOfUsageUsd, estimateMaxCostUsd, type JobBudget, type Reservation, type TokenRates } from "./budget.js";
 import { MAX_TOKENS_PER_CHAR, type CallGate } from "./call.js";
 import { DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS } from "./judge-llm.js";
 import {
@@ -266,6 +266,7 @@ function wrapBudgetedJudge(
   const gate = options.gate;
   // 包む口の名乗り（無ければ `unknown`。Issue #473）。**成功応答の `answeredBy` からは補わない。**
   const source: JudgeAttemptSource = judge.source ?? "unknown";
+  if (judge.billingPin !== undefined) options.budget.registerProviderBilling(judge.billingPin);
   return {
     get spentUsd(): number {
       return account.spentUsd;
@@ -320,7 +321,10 @@ function wrapBudgetedJudge(
       account.attemptsByAdapter[source] += 1;
       // 締切の残りで実呼び出しを打ち切る（Issue #432）。合図は要求に載せ、adapter（LLM）が実呼び出しへ渡す。
       // **共有の門も要求に載せる**（Issue #469）——Jev の adapter は、内部の再送の各回をこの門に通す。
-      const controller = gate === undefined ? undefined : new AbortController();
+      const controller = gate === undefined && judge.billingPin === undefined ? undefined : new AbortController();
+      const accounting = judge.billingPin === undefined ? undefined
+        : options.budget.providerAttempt(judge.billingPin, reserved.reservation, rates, "judge");
+      if (controller !== undefined) accounting?.bind(controller.signal);
       const timer =
         controller === undefined || gate === undefined
           ? undefined
@@ -331,13 +335,15 @@ function wrapBudgetedJudge(
         // 再送を始める時点で呼び、この呼び出しの内訳へ 1 足す（Issue #473）。
         response = await judge.judge({
           ...request,
-          ...(controller === undefined || gate === undefined ? {} : { signal: controller.signal, gate }),
+          ...(controller === undefined ? {} : { signal: controller.signal }),
+          ...(gate === undefined ? {} : { gate }),
           onRetryStarted,
         });
+        accounting?.close(true);
       } catch (error) {
         // 呼び出しが失敗しても、予約は精算する（残高へ戻す。Issue #359）。**失敗しても、始めた実試行と
         // 許された再送は内訳に残る**（成功を待たない。Issue #473）
-        options.budget.release(reserved.reservation);
+        if (accounting === undefined) options.budget.release(reserved.reservation);
         recordAttempts();
         if (controller?.signal.aborted === true) throw new JudgeDeadlineExceededError();
         // 要求の門が内部の再送を断ったときは、既存の門の停止へ写す（Issue #469）。**落とし先へ切り替えない**
@@ -351,11 +357,14 @@ function wrapBudgetedJudge(
         }
         throw error;
       } finally {
+        accounting?.close();
         if (timer !== undefined) clearTimeout(timer);
       }
       // **遅い応答を成功にしない**——締切を越えて返ったら、費用は精算しつつ、締切の停止にする（Issue #432）。
       // その応答の実試行は、開始の時点で既に内訳へ入っている（Issue #473）
-      account.spentUsd += settleResponse(options.budget, reserved.reservation, response, rates, jevRates);
+      account.spentUsd += accounting === undefined
+        ? settleResponse(options.budget, reserved.reservation, response, rates, jevRates)
+        : response.usage === undefined ? 0 : costOfUsageUsd(response.usage, rates);
       recordAttempts();
       if (gate !== undefined && gate.now() >= gate.deadline) throw new JudgeDeadlineExceededError();
       account.callsByAdapter[response.answeredBy] += 1;

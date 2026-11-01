@@ -91,6 +91,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFi
 import { execFileSync, spawn } from "node:child_process";
 import { basename, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { billingRecordOf, sameArmPin } from "./openrouter-measurement.mjs";
 import { BUILD_RECORD_PATH, CONDITIONS_V7, V12_PIPELINE, comparableParams, comparePipelinesOf, compareProfileOf, compareRolesOf, groupConditionsProblem, isFlagMap, v12FlagsStatus, v12ReportOf, v12RunStatusOf, V12_FLAG_STATUSES } from "./score-agent.mjs";
 import { DEFAULT_SET_PATH, FACTORY_VERDICTS, SCRIPT_MODE, fingerprintDir, loadEvalSet, scoringFingerprint, scriptsFingerprint, sha256 } from "./score-agent.mjs";
 import { BUILD_STAGE_IDS, COMPARE_GROUPS, COMPARE_PAIRS_COPY, COMPARE_RUN_PREFIX, COMPARE_RUN_SCHEMA, COMPARISON_FILE, COMPARISON_SCHEMA, PIPELINES, SCORING_COST_USD, launchAllowed, limitsApproved, makePairs, outputLimitsOf, pairsProblem } from "./score-agent.mjs";
@@ -110,7 +111,7 @@ const refuseStage = (code, opts) => { console.error(refusalLine(code, opts)); pr
 
 // 評価セットの定義ファイル（#427）。欠けた欄があれば 1 本も起こさずに断る
 const setPath = resolve(opt("--set", join(repo, DEFAULT_SET_PATH)));
-const evalSet = loadEvalSet(setPath);
+const evalSet = args.includes("--dry-run") ? { status: "ok" } : loadEvalSet(setPath);
 // 断りの文に入力の文字列（パス・任意の ID）を通さない（#497 の独立レビューの指摘 2）。理由は loadEvalSet の固定の文（値を含まない）
 if (evalSet.status !== "ok") refuse(`定義ファイルを読めません: ${evalSet.reasons.join("、")}`, "set:invalid");
 
@@ -143,6 +144,8 @@ const valueOf = (flag) => { const i = args.indexOf(flag); if (i < 0) return null
 const pipelineArg = valueOf("--pipeline"), pipeline = pipelineArg ?? "v1";
 // #771：LLM の adapter（--provider openai|ollama|openrouter。#788 で openrouter を足した）。省けば今までどおり openai で、子の argv も条件の記録も署名も変えない
 const providerArg = valueOf("--provider"), provider = providerArg ?? "openai";
+const openrouterArm = valueOf("--openrouter-arm");
+if (openrouterArm !== null && (provider !== "openrouter" || !["open-inference/fp4", "morph/fp8"].includes(openrouterArm))) refuseCode("openrouter:unknown-arm");
 if (providerArg === "" || (providerArg !== null && provider !== "openai" && provider !== "ollama" && provider !== "openrouter")) refuseCode("provider:unknown");
 // #771 再レビュー：provider の欄を足すのは既定（openai）でないときだけ。--provider openai の明示は省略と同じ argv・条件・署名にする
 const providerExplicit = provider !== "openai";
@@ -193,7 +196,7 @@ async function loadOpenRouter(ctx) {
   try { mod = await import(pathToFileURL(join(ctx.distDir, "openrouter.js")).href); } catch { return null; }
   const keyEnv = ctx.factory?.OPENROUTER_API_KEY_ENV;
   if (typeof mod.DEFAULT_OPENROUTER_MODEL !== "string" || mod.DEFAULT_OPENROUTER_MODEL === "" || typeof keyEnv !== "string" || keyEnv === "") return null;
-  return { model: mod.DEFAULT_OPENROUTER_MODEL, keyEnv };
+  return { model: mod.DEFAULT_OPENROUTER_MODEL, keyEnv, pin: mod.openRouterArmPin, defaultArm: mod.DEFAULT_OPENROUTER_ARM };
 }
 /**
  * #776：上書きする段の名前（**キーの集合をこれに固定する**。Issue #776 レビュー R2）。並びはキー昇順
@@ -233,6 +236,24 @@ main.openrouter = provider === "openrouter" ? await loadOpenRouter(main) : null;
 if (provider === "openrouter" && main.openrouter === null) refuseCode("provider:openrouter-unavailable");
 const model = opt("--model", provider === "ollama" ? main.ollama.model : provider === "openrouter" ? main.openrouter.model : openai.DEFAULT_OPENAI_MODEL);
 /** #771・#788：条件の記録に残す、その checkout の鍵の環境変数の名前（値は読まない・残さない） */
+const openrouterPinOf = (ctx) => {
+  if (provider !== "openrouter") return null;
+  if (typeof ctx.openrouter?.pin !== "function") {
+    if (openrouterArm !== null) refuseCode("openrouter:arm-unavailable");
+    return null;
+  }
+  return ctx.openrouter.pin(openrouterArm ?? ctx.openrouter.defaultArm, model);
+};
+if (args.includes("--dry-run")) {
+  if (resume && provider === "openrouter") {
+    let saved;
+    try { saved = JSON.parse(readFileSync(join(outRoot, "conditions.json"), "utf8")); } catch { refuseCode("resume:unreadable"); }
+    if (!sameArmPin(saved?.params?.openrouter_arm, openrouterPinOf(main))) refuseCode("openrouter:resume-arm");
+  }
+  console.log(JSON.stringify({ schema: "factory/openrouter-dry-run/v1", generation: false, provider,
+    arm: openrouterPinOf(main), effort, pipeline, runs: RUNS, concurrency: CONC }));
+  process.exit(0);
+}
 const apiKeyEnvOf = (ctx) => (provider === "ollama" ? ctx.ollama.keyEnv : provider === "openrouter" ? ctx.openrouter.keyEnv : ctx.factory.API_KEY_ENV);
 const perRunBudget = Number(opt("--factory-budget-usd", String(factory.DEFAULT_BUDGET_USD)));
 const deadlineMin = Number(opt("--deadline-min", String(factory.DEFAULT_DEADLINE_MS / 60000)));
@@ -597,6 +618,7 @@ const argvFor = (cli, dir, pl, withEfforts = false) => {
   const argv = [cli, join(dir, "request.md"), "--out", join(dir, "bundle"), "--effort", effort, "--model", model, "--budget", String(perRunBudget), "--deadline", String(deadlineMin)];
   // #771：既定でない --provider を指定したときだけ、子にも同じ provider を渡す（省略と openai の明示は今までどおり何も足さない。モデルは上の --model）
   if (providerExplicit) argv.push("--provider", provider);
+  if (openrouterArm !== null) argv.push("--openrouter-arm", openrouterArm);
   if (plan || planOnly) argv.push(plan ? "--plan" : "--plan-only", ...(script ? ["--script", join(dir, "script.json")] : ["--answers", join(dir, "answers.json")]));
   if (buildFrom !== null) argv.push("--plan-file", join(dir, "plan-file.json"));
   if (pl === "v1.1a" || pl === V12_PIPELINE) argv.push("--pipeline", pl);
@@ -671,6 +693,7 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId, e
       pipeline: pl, stage_output_limits_v11a: outputLimits.v11a,
       // #771：既定でない --provider を指定したときだけ。LLM の adapter と、鍵を読む環境変数の名前（値は残さない。署名に入る）
       ...(!providerExplicit ? {} : { provider, provider_api_key_env: apiKeyEnvOf(ctx) }),
+      ...(openrouterPinOf(ctx) === null ? {} : { openrouter_arm: openrouterPinOf(ctx) }),
       // #776：--provider ollama の v1.2 の走りだけ。上書きした段と値の表（対象の checkout の dist から読む。署名に入る。比較の群の照合からは外さない）
       ...(ollamaLimits === null ? {} : { ollama_stage_output_limits: ollamaLimits }),
       // #557：経路 v1.2 のときだけ。工場の dist の V12_PIPELINE_FLAGS の写し（署名に入る。旗の組が変われば再開を断る）
@@ -710,7 +733,26 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId, e
   return { measured, signature, signatureLegacy };
 }
 
-const costOfDir = (dir) => { try { const sl = JSON.parse(readFileSync(join(dir, "summary.line.json"), "utf8")); return sl.plan_cost?.total_usd ?? sl.summary?.provider_cost_usd ?? sl.stage_run?.provider_cost_usd ?? 0; } catch { return 0; } };
+const costOfDir = (dir) => { try {
+  const sl = JSON.parse(readFileSync(join(dir, "summary.line.json"), "utf8"));
+  const legacy = sl.plan_cost?.total_usd ?? sl.summary?.provider_cost_usd ?? sl.stage_run?.provider_cost_usd ?? 0;
+  const billed = sl.openrouter_billing;
+  return billed == null ? legacy : Math.max(legacy, billed.guard_spent_usd === null ? perRunBudget : billed.guard_spent_usd + billed.unsettled_reservations_usd);
+} catch { return 0; } };
+
+const armValidationOf = (root, ids, pin) => {
+  if (pin === null) return {};
+  const records = ids.map((id) => { try { return JSON.parse(readFileSync(join(root, id, "summary.line.json"), "utf8")).openrouter_billing; } catch { return null; } });
+  const complete = records.length > 0 && records.every((r) => r?.actual_cost_complete === true);
+  const observedCost = records.reduce((sum, r) => sum + (r?.observed_cost_subtotal_usd ?? 0), 0);
+  const record = { schema: "factory/openrouter-arm-validation/v1", pin, planned: ids.length,
+    recorded: records.filter((r) => r != null).length,
+    comparison_valid: records.length > 0 && records.every((r) => r?.comparison_valid === true),
+    actual_cost_complete: complete, observed_cost_subtotal_usd: observedCost,
+    actual_cost_usd: complete ? observedCost : null };
+  writeFileSync(join(root, "openrouter-arm-validation.json"), JSON.stringify(record, null, 1));
+  return { openrouter_arm_validation: record };
+};
 
 let spent = 0, stop = null, stopCode = null, skipped = [], reopened = [], executed = [], runQueue = [];
 // この起動で有効な計測全体の目安の額（budget）と、初回の条件のファイルに記録した額。再開で変えたかどうかを起動の記録に残す
@@ -812,16 +854,29 @@ const runOne = (job) => new Promise((resolve) => {
     const planCost = lines.filter((x) => x.schema_version === "musunest-factory/plan-build-cost/v1").at(-1) ?? null;
     // 段単位の走り（#545）：要約の行は無いので、費用は工場の段の走りの記録から読む
     const stageRun = stageMode ? stageRunOf((() => { try { return JSON.parse(readFileSync(join(dir, "bundle", stageLib.STAGE_RUN_RECORD_FILE), "utf8")); } catch { return null; } })()) : null;
-    const cost = numOf(planCost?.total_usd) ?? numOf(s?.provider_cost_usd) ?? stageRun?.provider_cost_usd ?? 0;
+    let cost = numOf(planCost?.total_usd) ?? numOf(s?.provider_cost_usd) ?? stageRun?.provider_cost_usd ?? 0;
     const exitClass = exitClassOf(code, lines);
     (group === null ? exitClasses : group.exitClasses)[exitClass] += 1;
     // 記録は無害化する（#497）：子の出力の写しはバイト数と既知の版の行の数だけ、要約の verdict は既知の値か unknown。生の中身は stdout.log・stderr.log を開く
     // 要約と費用の行は列挙した欄と型だけ（summaryOf・planCostOf）
     const summary = s === null ? null : summaryOf(s);
+    let billing = null;
+    if (provider === "openrouter" && openrouterPinOf(group === null ? main : group.ctx) !== null) {
+      let ledger;
+      try { ledger = JSON.parse(readFileSync(join(dir, "bundle", "provider-billing.json"), "utf8")); } catch { ledger = null; }
+      billing = billingRecordOf(openrouterPinOf(group === null ? main : group.ctx), ledger);
+      // Unknown billed cost/reservations may not disappear from the batch budget.
+      cost = Math.max(cost, billing.guard_spent_usd === null ? perRunBudget : billing.guard_spent_usd + billing.unsettled_reservations_usd);
+      if (!billing.comparison_valid) {
+        stop = "OpenRouter arm or billing is unconfirmed";
+        stopCode = "openrouter:accounting";
+        process.exitCode = 3;
+      }
+    }
     // 経路 v1.2（#557）：要約と条件の記録が報告した旗の組を読み（推定しない）、条件の組と照らした結果と一緒に本ごとの記録に残す
     // 段の走り（#638）は要約の行と条件の記録を書かないので報告を写さない（旗の組は採点が段の走りの記録から照らす）
     const v12 = runPipeline === V12_PIPELINE && !stageMode ? v12ReportsOf(s, join(dir, BUILD_RECORD_PATH)) : null;
-    writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: code, wall_s: (Date.now() - t0) / 1000, started_at: startedAt, exit_class: exitClass, summary, plan_cost: planCostOf(planCost), stderr_tail: tailOf(errBuf), stdout_tail: s === null ? tailOf(outBuf) : undefined, resumed: job.resumed === true, ...(stageMode ? { stage_run: stageRun } : {}), ...(v12 === null ? {} : { v12_flags: v12 }) }, null, 1));
+    writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: code, wall_s: (Date.now() - t0) / 1000, started_at: startedAt, exit_class: exitClass, summary, ...(billing === null ? {} : { openrouter_billing: billing }), plan_cost: planCostOf(planCost), stderr_tail: tailOf(errBuf), stdout_tail: s === null ? tailOf(outBuf) : undefined, resumed: job.resumed === true, ...(stageMode ? { stage_run: stageRun } : {}), ...(v12 === null ? {} : { v12_flags: v12 }) }, null, 1));
     spent += cost;
     if (group !== null) group.spent += cost;
     console.log(`${group === null ? "" : `${job.group}/`}${idOf(job)} effort=${effort}${plan ? " plan" : ""}${planOnly ? " plan-only" : ""}${buildFrom !== null ? " build-from" : ""}${runPipeline === "v1.1a" || runPipeline === V12_PIPELINE ? ` pipeline=${runPipeline}` : ""}${stageMode ? ` stage=${stageRange.start}..${stageRange.end}` : ""}${job.resumed ? " resume" : ""} exit=${code} ${stageMode ? `stage_pass=${stageRun?.stage_pass ?? "none"}` : `verdict=${s === null ? "none" : verdictOf(s.verdict) ?? "none"}`} cost=${Number(cost).toFixed(4)} ${Math.round((Date.now() - t0) / 1000)}s total=${spent.toFixed(3)}`);
@@ -873,6 +928,7 @@ async function runSingle() {
     if (!existsSync(conditionsPath)) refuse("条件のファイルの無い出力先です（新しい出力先を使ってください）", "resume:no-conditions");
     let saved = null; try { saved = JSON.parse(readFileSync(conditionsPath, "utf8")); } catch { refuse("条件のファイルを読めません", "resume:unreadable"); }
     // 上限の欄の無い前の版の条件（params に v12_call_limits が無い）は、その欄を除いた署名で今までどおり照らす（#618）。欄があれば上限も署名で照らす
+    if (provider === "openrouter" && !sameArmPin(saved?.params?.openrouter_arm, openrouterPinOf(main))) refuseCode("openrouter:resume-arm");
     const savedLegacy = pipeline === V12_PIPELINE && saved?.params && typeof saved.params === "object" && !("v12_call_limits" in saved.params);
     if (saved?.signature !== (savedLegacy ? signatureLegacy : signature)) refuse("保存した条件と今の条件が一致しません", "resume:signature");
     // 経路 v1.2（#557）：保存した条件を既知の版（v7）として検証し、署名を中身から計算し直して照らす（知らない版・書き換えた条件では再開しない）
@@ -888,7 +944,13 @@ async function runSingle() {
     const remaining = [];
     for (const job of launchJobs) {
       const dir = dirOf(job);
-      if (existsSync(join(dir, "summary.line.json"))) { skipped.push(idOf(job)); spent += costOfDir(dir); }
+      if (existsSync(join(dir, "summary.line.json"))) {
+        if (openrouterPinOf(main) !== null) {
+          let prior; try { prior = JSON.parse(readFileSync(join(dir, "summary.line.json"), "utf8")).openrouter_billing; } catch { prior = null; }
+          if (prior?.comparison_valid !== true) refuseCode("openrouter:resume-unconfirmed");
+        }
+        skipped.push(idOf(job)); spent += costOfDir(dir);
+      }
       else remaining.push(job);
     }
     console.log(`再開: 飛ばす ${skipped.length} 本、流す ${remaining.length} 本、済みの額 ${spent.toFixed(4)} USD を足した`);
@@ -916,7 +978,7 @@ async function runSingle() {
   // 1 回の起動の記録：流した本・残りの本・止まった理由（文とコード。予算で止まった計測を採点の道具が「未完了」と照合するための根拠。#425）と、
   // この起動で有効だった計測全体の目安の額（budget_usd）・初回の条件の額（initial_budget_usd。条件のファイルは初回の値のまま上書きしない）・
   // 変えたかどうか（budget_changed）・済みの額（spent_usd）・この起動で流した本の終了の分類ごとの件数（exit_classes。#497）。完走した再開でも残すので、署名が同じでも管理の条件の変更履歴を読める
-  writeFileSync(join(outRoot, `run-${Date.now()}.json`), JSON.stringify({ finished_at: new Date().toISOString(), mode: resume ? "resume" : "fresh", executed, pending, stop, stop_code: stopCode, budget_usd: budget, initial_budget_usd: initialBudget, budget_changed: initialBudget === null ? null : initialBudget !== budget, spent_usd: spent, exit_classes: exitClasses, ...(pipeline === V12_PIPELINE && !stageMode ? { v12_flags: v12Tally(outRoot, launchJobs.map(idOf)) } : {}) }, null, 1));
+  writeFileSync(join(outRoot, `run-${Date.now()}.json`), JSON.stringify({ finished_at: new Date().toISOString(), mode: resume ? "resume" : "fresh", executed, pending, stop, stop_code: stopCode, budget_usd: budget, initial_budget_usd: initialBudget, budget_changed: initialBudget === null ? null : initialBudget !== budget, spent_usd: spent, exit_classes: exitClasses, ...armValidationOf(outRoot, launchJobs.map(idOf), openrouterPinOf(main)), ...(pipeline === V12_PIPELINE && !stageMode ? { v12_flags: v12Tally(outRoot, launchJobs.map(idOf)) } : {}) }, null, 1));
   console.log("done", stop ?? "", "spent", spent.toFixed(4));
 }
 
@@ -1032,7 +1094,7 @@ async function runCompare() {
   const queue = pairsValue.pairs.flatMap((p) => [p.first, GROUPS.find((g) => g !== p.first)].map((g) => ({ pid: p.pid, r: p.r, group: g })));
   const launched = new Set(), inflight = new Set();
   let runningAtStop = null;
-  while (queue.length > 0) {
+  while (queue.length > 0 && !stop) {
     if (inflight.size >= CONC) { await Promise.race(inflight); continue; }
     if (!launchAllowed({ spentUsd: spent, runningCount: inflight.size, reserveUsd: perRunBudget, budgetUsd: budget })) {
       stop = "全体の予算の上限に届くので、それ以降の本を起こさない"; stopCode = "budget"; runningAtStop = inflight.size; break;
@@ -1049,7 +1111,7 @@ async function runCompare() {
   for (const g of GROUPS) {
     const gc = groupCtx[g];
     const pending = launchJobs.map(idOf).filter((id) => !gc.executed.includes(id));
-    writeFileSync(join(gc.dir, `run-${now}.json`), JSON.stringify({ finished_at: new Date().toISOString(), mode: "fresh", executed: gc.executed, pending, stop, stop_code: stopCode, budget_usd: budget, initial_budget_usd: budget, budget_changed: false, spent_usd: gc.spent, exit_classes: gc.exitClasses, ...(gc.pipeline === V12_PIPELINE && !stageMode ? { v12_flags: v12Tally(gc.dir, launchJobs.map(idOf)) } : {}) }, null, 1));
+    writeFileSync(join(gc.dir, `run-${now}.json`), JSON.stringify({ finished_at: new Date().toISOString(), mode: "fresh", executed: gc.executed, pending, stop, stop_code: stopCode, budget_usd: budget, initial_budget_usd: budget, budget_changed: false, spent_usd: gc.spent, exit_classes: gc.exitClasses, ...armValidationOf(gc.dir, launchJobs.map(idOf), openrouterPinOf(ctxOf[g])), ...(gc.pipeline === V12_PIPELINE && !stageMode ? { v12_flags: v12Tally(gc.dir, launchJobs.map(idOf)) } : {}) }, null, 1));
   }
   // 比較の起動の記録：対ごとの状態（両方・先行だけ・未起動）・起こさなかった本・止まった理由と符号・済みの額・止めたときに走っていた本の数
   const pairStates = pairsValue.pairs.map((p) => {

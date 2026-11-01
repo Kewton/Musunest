@@ -98,6 +98,7 @@ import type { LlmClient } from "./llm.js";
 import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL, OLLAMA_STAGE_OUTPUT_LIMITS } from "./ollama.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL } from "./openai.js";
 import { createOpenRouterLlmClient, DEFAULT_OPENROUTER_MODEL } from "./openrouter.js";
+import { DEFAULT_OPENROUTER_ARM, isOpenRouterArm, openRouterArmPin, type OpenRouterArm } from "./openrouter-arm.js";
 import type { EnvelopeId } from "./schema-envelope.js";
 import { runPlan, type PlanResponder, type PlanResult } from "./plan/run-plan.js";
 import {
@@ -233,9 +234,9 @@ export function apiKeyEnvOf(provider: Provider): string {
 }
 
 /** その provider の既定の単価（試験用の `deps.rates` が優先する） */
-export function ratesOf(provider: Provider): TokenRates {
+export function ratesOf(provider: Provider, arm: OpenRouterArm = DEFAULT_OPENROUTER_ARM): TokenRates {
   if (provider === "ollama") return OLLAMA_RATES;
-  if (provider === "openrouter") return OPENROUTER_RATES;
+  if (provider === "openrouter") return arm === DEFAULT_OPENROUTER_ARM ? OPENROUTER_RATES : openRouterArmPin(arm, DEFAULT_OPENROUTER_MODEL).rates;
   return DEFAULT_RATES;
 }
 
@@ -267,7 +268,7 @@ export const EXIT_STAGE_INPUT = 4;
 
 /** 使い方の文（誤りを人に見せる） */
 export const USAGE =
-  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--provider openai|ollama|openrouter] [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル> [--pipeline v1|v1.1a|v1.2]]";
+  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--provider openai|ollama|openrouter] [--openrouter-arm open-inference/fp4|morph/fp8] [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル> [--pipeline v1|v1.1a|v1.2]]";
 
 /** 段単位の実行口の使い方（段の旗の誤りのときだけ、`USAGE` のあとに出す。Issue #544） */
 export const STAGE_USAGE =
@@ -287,6 +288,7 @@ export interface CliArguments {
    * 鍵の環境変数・既定のモデル・単価・`makeClient` の引数は今までと同じである。
    */
   readonly provider?: Provider;
+  readonly openrouterArm?: OpenRouterArm;
   /** 費用の上限（USD）。指定しなければ既定（`DEFAULT_BUDGET_USD`）を使う */
   readonly budgetUsd?: number;
   /** 締切（ミリ秒）。指定しなければ既定（`DEFAULT_DEADLINE_MS`）を使う */
@@ -419,6 +421,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   // `--model` の明示の値（省けば provider の既定。`--model` は `--provider` の前後どちらでも勝つ。Issue #771）
   let explicitModel: string | undefined;
   let provider: Provider | undefined;
+  let openrouterArm: OpenRouterArm | undefined;
   let effort: string = DEFAULT_EFFORT;
   let budgetUsd: number | undefined;
   let deadlineMs: number | undefined;
@@ -506,6 +509,14 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
         return { error: `--provider には ${PROVIDERS.join(" か ")} を指定してください` };
       }
       provider = raw;
+      continue;
+    }
+    if (arg === "--openrouter-arm") {
+      const value = args[index + 1];
+      if (value === undefined || !isOpenRouterArm(value)) return { error: "openrouter:unknown-arm" };
+      if (openrouterArm !== undefined) return { error: "openrouter:duplicate-arm" };
+      openrouterArm = value;
+      index += 1;
       continue;
     }
     if (arg === "--model") {
@@ -615,6 +626,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     if ("code" in read) return { error: `${read.code}（${STAGE_EFFORT_USAGE_MESSAGES[read.code]}）` };
     stageEfforts = read.stageEfforts;
   }
+  if (openrouterArm !== undefined && provider !== "openrouter") return { error: "openrouter:arm-without-provider" };
   return {
     requestFile,
     outDir,
@@ -627,6 +639,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
           : DEFAULT_OPENAI_MODEL),
     effort,
     ...(provider === undefined ? {} : { provider }),
+    ...(openrouterArm === undefined ? {} : { openrouterArm }),
     ...(budgetUsd === undefined ? {} : { budgetUsd }),
     ...(deadlineMs === undefined ? {} : { deadlineMs }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
@@ -671,6 +684,7 @@ export interface CliDeps {
     effort: string;
     envelope?: EnvelopeId;
     provider?: Provider;
+    openrouterArm?: OpenRouterArm;
   }) => LlmClient;
   /**
    * Jev の判定の adapter を作る（05 §4）。**鍵を読むのは手元の入口だけ**——`JEV_API_KEY` を環境変数
@@ -854,6 +868,10 @@ async function writeBuildRun(
       await deps.writeFile(joinPath(job.outDir, file.path), file.text);
     }
   }
+  if (run.summary.provider_billing !== undefined) {
+    await deps.makeDirectory(job.outDir);
+    await deps.writeFile(joinPath(job.outDir, "provider-billing.json"), JSON.stringify(run.summary.provider_billing));
+  }
   log(JSON.stringify(run.summary));
   return {
     code: run.bundle === null ? EXIT_RUN_FAILED : EXIT_OK,
@@ -939,6 +957,9 @@ async function writePlanRecords(
       }),
     ),
   );
+  if (input.result.providerBilling !== undefined) {
+    await deps.writeFile(joinPath(outDir, "plan-provider-billing.json"), JSON.stringify(input.result.providerBilling));
+  }
   // P3 の申告 1 件ずつの診断を、**別のファイル**に置く（受理・落とした・途中停止のどれも。Issue #432）。
   // `plan-record.json` は今の要約のままにする。
   await deps.writeFile(
@@ -1114,6 +1135,7 @@ async function runBuildFromPlanFile(
     effort: parsed.effort,
     ...(envelope === undefined ? {} : { envelope }),
     ...(parsed.provider === undefined ? {} : { provider: parsed.provider }),
+    ...(parsed.openrouterArm === undefined ? {} : { openrouterArm: parsed.openrouterArm }),
   });
   const { judge, recheckJudge } = assembleJudge({
     env: deps.env,
@@ -1132,7 +1154,7 @@ async function runBuildFromPlanFile(
     outDir: parsed.outDir,
     model: parsed.model,
     effort: parsed.effort,
-    rates: deps.rates ?? ratesOf(provider),
+    rates: deps.rates ?? ratesOf(provider, parsed.openrouterArm),
     budgetUsd: ctx.budgetUsd,
     deadline: ctx.now() + ctx.deadlineMs,
     now: ctx.now,
@@ -1329,6 +1351,7 @@ async function runStageFromPlanFile(
     effort: parsed.effort,
     envelope: envelopeIdOf(pipeline) ?? "v1.1a",
     ...(parsed.provider === undefined ? {} : { provider: parsed.provider }),
+    ...(parsed.openrouterArm === undefined ? {} : { openrouterArm: parsed.openrouterArm }),
   });
   const { judge, recheckJudge } = assembleJudge({
     env: deps.env,
@@ -1347,7 +1370,7 @@ async function runStageFromPlanFile(
     outDir: parsed.outDir,
     model: parsed.model,
     effort: parsed.effort,
-    rates: deps.rates ?? ratesOf(provider),
+    rates: deps.rates ?? ratesOf(provider, parsed.openrouterArm),
     budgetUsd: ctx.budgetUsd,
     deadline: ctx.now() + ctx.deadlineMs,
     now: ctx.now,
@@ -1384,6 +1407,7 @@ async function runStageFromPlanFile(
           : EXIT_RUN_FAILED;
   const jevApiKey = deps.env[JEV_API_KEY_ENV];
   const conditions: StageRunConditions = {
+    ...(parsed.provider === "openrouter" ? { openrouter_arm: openRouterArmPin(parsed.openrouterArm ?? DEFAULT_OPENROUTER_ARM, parsed.model) } : {}),
     model: parsed.model,
     effort: parsed.effort,
     documents: await Promise.all(
@@ -1426,6 +1450,9 @@ async function runStageFromPlanFile(
     await deps.writeFile(joinPath(job.outDir, STAGE_DECLARATION_FILE), outcome.declaration.source);
   }
   await deps.writeFile(joinPath(job.outDir, STAGE_RUN_RECORD_FILE), stageJsonText(record));
+  if (outcome.providerBilling !== undefined) {
+    await deps.writeFile(joinPath(job.outDir, "provider-billing.json"), JSON.stringify(outcome.providerBilling));
+  }
   // `--pipeline v1.2` の段の走りだけ、断った候補を一気通貫と同じ関数・同じ名前で `--out` の下の診断の置き場所に書く
   // （候補が無ければ何も書かず、置き場所も作らない。記録・checkpoint・要約・終了コードは変えない。Issue #683）
   if (pipeline === "v1.2" && outcome.rejected !== undefined && outcome.rejected.length > 0) {
@@ -1475,6 +1502,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
   const budgetUsd = parsed.budgetUsd ?? deps.budgetUsd ?? DEFAULT_BUDGET_USD;
   const deadlineMs = parsed.deadlineMs ?? deps.deadlineMs ?? DEFAULT_DEADLINE_MS;
   const conditions: PlanCliConditions = {
+    ...(parsed.provider === "openrouter" ? { openrouter_arm: openRouterArmPin(parsed.openrouterArm ?? DEFAULT_OPENROUTER_ARM, parsed.model) } : {}),
     model: parsed.model,
     effort: parsed.effort,
     budget_usd: budgetUsd,
@@ -1535,6 +1563,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
     model: parsed.model,
     effort: parsed.effort,
     ...(parsed.provider === undefined ? {} : { provider: parsed.provider }),
+    ...(parsed.openrouterArm === undefined ? {} : { openrouterArm: parsed.openrouterArm }),
   });
   const { judge, recheckJudge } = assembleJudge({
     env: deps.env,
@@ -1555,7 +1584,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
     outDir: parsed.outDir,
     model: parsed.model,
     effort: parsed.effort,
-    rates: deps.rates ?? ratesOf(provider),
+    rates: deps.rates ?? ratesOf(provider, parsed.openrouterArm),
     budgetUsd,
     deadline,
     now,
@@ -1665,10 +1694,10 @@ export async function main(): Promise<void> {
       await fs.mkdir(path, { recursive: true });
     },
     loadDocuments: loadDocumentsFromFiles,
-    makeClient: ({ apiKey, model, effort, envelope, provider }) => {
+    makeClient: ({ apiKey, model, effort, envelope, provider, openrouterArm }) => {
       const options = { apiKey, model, effort, ...(envelope === undefined ? {} : { envelope }) };
       if (provider === "ollama") return createOllamaLlmClient(options);
-      if (provider === "openrouter") return createOpenRouterLlmClient(options);
+      if (provider === "openrouter") return createOpenRouterLlmClient({ ...options, ...(openrouterArm === undefined ? {} : { arm: openrouterArm }) });
       return createOpenAiLlmClient(options);
     },
     terminal: createNodeTerminal(proc),

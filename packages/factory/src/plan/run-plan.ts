@@ -760,6 +760,7 @@ export interface PlanResultBase {
   readonly stages: readonly PlanStageRecord[];
   /** 使った額（USD。LLM と判定の費用を合わせたもの） */
   readonly spentUsd: number;
+  readonly providerBilling?: import("../provider-billing.js").ProviderBillingSummary;
   /** 残りの予算（USD。呼ぶ側が Build に渡す） */
   readonly remainingUsd: number;
   /** 判定の呼び出しの数（答えた adapter ごと）と費用（USD） */
@@ -1943,6 +1944,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     return {
       stages: stages.slice(),
       spentUsd: budget.spentUsd,
+      ...(budget.providerBilling === undefined ? {} : { providerBilling: budget.providerBilling }),
       remainingUsd: budget.remainingUsd,
       judge: { calls_by_adapter: judgeBudget.callsByAdapter, cost_usd: judgeBudget.spentUsd },
       closedBySource: closedBySource.slice(),

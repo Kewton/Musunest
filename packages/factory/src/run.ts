@@ -692,6 +692,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       arbitration: { upheld: upheld.length, overturned: overturned.length, undecidable: unresolved.length },
       budget_remaining_usd: budget.remainingUsd,
       budget_reserved_usd: budget.reservedUsd,
+      ...(budget.providerBilling === undefined ? {} : { provider_billing: budget.providerBilling }),
       missing_usage_calls: meter.snapshot.missing_usage_calls,
       failure,
     });

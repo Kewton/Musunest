@@ -711,6 +711,7 @@ export class CallGateway {
       throw new RangeError("呼び出しごとの timeout は 0 より大きい有限の数であること");
     }
     this.#client = options.client;
+    if (options.client.billingPin !== undefined) options.budget.registerProviderBilling(options.client.billingPin);
     this.#budget = options.budget;
     this.#rates = options.rates;
     this.#now = options.now;
@@ -912,7 +913,16 @@ export class CallGateway {
       // 実試行の観測（Issue #748）。**始めた試行**だけ行を作る（未着手では呼ばない）。
       const observation = this.#observer?.beginAttempt();
       try {
-        const outcome = await this.#attempt(invoke, timeoutMs, remaining, observation);
+        const accounting = this.#client.billingPin === undefined ? undefined
+          : this.#budget.providerAttempt(this.#client.billingPin, reserved.reservation, this.#rates, "generation");
+        const billedInvoke = accounting === undefined ? invoke : (signal: AbortSignal) => {
+          accounting.bind(signal);
+          return invoke(signal);
+        };
+        const outcome = await this.#attempt(billedInvoke, timeoutMs, remaining, observation).then(
+          (value) => { accounting?.close(value.kind === "ok"); return value; },
+          (error) => { accounting?.close(isIncompleteResponseError(error)); throw error; },
+        );
         if (outcome.kind === "deadline") {
           this.#counts.attemptsCancelledDeadline += 1;
           return { kind: "deadlineExceeded" };
@@ -926,7 +936,7 @@ export class CallGateway {
           previousTimeoutMs = timeoutMs;
           continue;
         }
-        if (outcome.result.usage !== undefined) {
+        if (this.#client.billingPin === undefined && outcome.result.usage !== undefined) {
           this.#budget.settle(reserved.reservation, outcome.result.usage, this.#rates);
         }
         this.#counts.attemptsResponded += 1;
@@ -935,7 +945,7 @@ export class CallGateway {
         // 未完了の応答は拒否と分け、**同じ要求のままやり直さない**（同じ上限ではまた切れる。§2.2）。
         // usage が分かる未完了は、成功と同じく実際の費用で精算する（§1.5）。分からなければ予約を残す。
         if (isIncompleteResponseError(error)) {
-          if (error.usage !== undefined) {
+          if (this.#client.billingPin === undefined && error.usage !== undefined) {
             this.#budget.settle(reserved.reservation, error.usage, this.#rates);
           }
           // 未完了は usage の有無によらず**応答**として数える（誤りではない。Issue #446）

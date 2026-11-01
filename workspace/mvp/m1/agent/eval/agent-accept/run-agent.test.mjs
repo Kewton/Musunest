@@ -194,6 +194,78 @@ function runAgent(repo, out, extra, env = {}) {
 }
 const spawnCount = (log) => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).length : 0);
 const spawnLines = (log) => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean) : []);
+
+// S-175v: fake child processes with the production pin registry; no actual subjects or API.
+function makeBillingRepo(base) {
+  const repo = makeRepo(base, { openrouter: true });
+  const registry = pathToFileURL(join(realRepo, "packages/factory/dist/openrouter-arm.js")).href;
+  writeFileSync(join(repo, "packages/factory/dist/openrouter.js"), `${fakeOpenRouter}\nexport { openRouterArmPin, DEFAULT_OPENROUTER_ARM } from ${JSON.stringify(registry)};\n`);
+  appendFileSync(join(repo, "packages/factory/dist/cli.js"), `
+if (isEntry()) {
+  const { openRouterArmPin, DEFAULT_OPENROUTER_ARM } = await import(${JSON.stringify(registry)});
+  const arg = (name, fallback) => { const i = process.argv.indexOf(name); return i < 0 ? fallback : process.argv[i + 1]; };
+  const out = arg("--out", "");
+  const pin = openRouterArmPin(arg("--openrouter-arm", DEFAULT_OPENROUTER_ARM), arg("--model", ""));
+  const known = process.env.FAKE_BILLING_UNKNOWN !== "1";
+  mkdirSync(out, { recursive: true });
+  writeFileSync(join(out, "provider-billing.json"), JSON.stringify({
+    schema: "factory/provider-billing/v1", pins: [pin], comparison_valid: known, actual_cost_complete: known,
+    actual_cost_usd: known ? .01 : null, observed_cost_subtotal_usd: known ? .01 : 0, actual_generation_cost_usd: known ? .01 : null, actual_judge_cost_usd: 0,
+    token_estimate_usd: known ? .02 : 0, guard_spent_usd: known ? .2 : 0,
+    unsettled_reservations_usd: known ? .1 : .3, unknown_attempts: known ? 0 : 1,
+    attempts: [{ attempt: 1, purpose: "generation", receipt: known ? { generation_id: "gen-fake" } : null }]
+  }));
+}
+`);
+  return repo;
+}
+
+test("S-175v pinned billing survives child collection and retains batch reservations", () => {
+  const base = mkdtempSync(join(tmpdir(), "s175v-billing-"));
+  try {
+    const repo = makeBillingRepo(base), out = join(base, "out");
+    const r = runAgent(repo, out, ["--provider", "openrouter", "--openrouter-arm", "morph/fp8", "--only", "P1", "--runs", "1", "--concurrency", "1", "--budget-usd", "1"], { FAKE_COST: "0" });
+    assert.equal(r.status, 0, r.stderr);
+    const conditions = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    assert.equal(conditions.params.openrouter_arm.arm, "morph/fp8");
+    const sl = JSON.parse(readFileSync(join(out, "P1-r1/summary.line.json"), "utf8"));
+    assert.equal(sl.openrouter_billing.actual_cost_usd, .01);
+    assert.equal(sl.openrouter_billing.comparison_valid, true);
+    const run = JSON.parse(readFileSync(join(out, readdirSync(out).find((n) => n.startsWith("run-"))), "utf8"));
+    assert.ok(Math.abs(run.spent_usd - .3) < 1e-12);
+    assert.equal(run.openrouter_arm_validation.comparison_valid, true);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("S-175v unconfirmed billed arm stops before another child and remains invalid", () => {
+  const base = mkdtempSync(join(tmpdir(), "s175v-unknown-"));
+  try {
+    const repo = makeBillingRepo(base), out = join(base, "out"), log = join(base, "spawn.log");
+    const r = runAgent(repo, out, ["--provider", "openrouter", "--openrouter-arm", "morph/fp8", "--only", "P1,P2", "--runs", "1", "--concurrency", "1", "--budget-usd", "1"], { FAKE_COST: "0", FAKE_BILLING_UNKNOWN: "1", FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 3, r.stderr);
+    assert.equal(spawnCount(log), 1);
+    const run = JSON.parse(readFileSync(join(out, readdirSync(out).find((n) => n.startsWith("run-"))), "utf8"));
+    assert.equal(run.stop_code, "openrouter:accounting");
+    assert.equal(run.spent_usd, .3);
+    assert.equal(run.openrouter_arm_validation.comparison_valid, false);
+    assert.equal(run.openrouter_arm_validation.actual_cost_complete, false);
+    assert.equal(run.openrouter_arm_validation.actual_cost_usd, null);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("S-175v real resume path rejects another arm with no new child", () => {
+  const base = mkdtempSync(join(tmpdir(), "s175v-resume-"));
+  try {
+    const repo = makeBillingRepo(base), out = join(base, "out"), log = join(base, "spawn.log");
+    const flags = ["--provider", "openrouter", "--openrouter-arm", "morph/fp8", "--only", "P1", "--runs", "1", "--concurrency", "1", "--budget-usd", "1"];
+    assert.equal(runAgent(repo, out, flags, { FAKE_COST: "0", FAKE_SPAWN_LOG: log }).status, 0);
+    const changed = flags.map((v) => v === "morph/fp8" ? "open-inference/fp4" : v);
+    const r = runAgent(repo, out, [...changed, "--resume"], { FAKE_COST: "0", FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 3);
+    assert.match(r.stderr, /openrouter:resume-arm/);
+    assert.equal(spawnCount(log), 1);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
 const sha256 = (data) => createHash("sha256").update(data).digest("hex");
 const HEX64 = /^[0-9a-f]{64}$/;
 

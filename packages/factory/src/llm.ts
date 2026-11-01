@@ -196,6 +196,8 @@ export type LlmToolResponse =
  * **予約と締切は、共通の口（call.ts）が引き受ける**——ここは adapter の素の呼び出しである（§1.5）。
  */
 export interface LlmClient {
+  /** Opt-in billed accounting; non-billed clients retain the existing contract. */
+  readonly billingPin?: import("./provider-billing.js").ProviderBillingPin;
   /** 構造化出力（JSON Schema）で 1 つ呼ぶ */
   callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>>;
   /** 道具付きで 1 つ呼ぶ。往復は `turns` で送り、応答は `kind` で判別する（R-2） */

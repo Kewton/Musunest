@@ -1192,6 +1192,7 @@ async function runV11a(
       arbitration: { upheld: upheld.length, overturned: overturned.length, undecidable: unresolved.length },
       budget_remaining_usd: budget.remainingUsd,
       budget_reserved_usd: budget.reservedUsd,
+      ...(budget.providerBilling === undefined ? {} : { provider_billing: budget.providerBilling }),
       missing_usage_calls: meter.snapshot.missing_usage_calls,
       failure,
     });
@@ -1322,6 +1323,7 @@ async function runV11a(
         finalCarryOver: extra.finalCarryOver ?? null,
         returnToPlan,
         costUsd: budget.spentUsd,
+      ...(budget.providerBilling === undefined ? {} : { providerBilling: budget.providerBilling }),
         durationSecs: (input.now() - startedAt) / 1000,
         // 旗 `v12.ids` の走りの門と枝の数（要約と同じ形）と T2' を通った組の数（記録に載せるかは呼ぶ側が決める。Issue #637）
         ...(() => {

@@ -6,6 +6,7 @@
 //
 // 単価は引数で受け取る（コードに埋め込まない。Issue #278）。
 import type { LlmUsage } from "./llm.js";
+import { ProviderBillingLedger, type ProviderBillingPin, type ProviderBillingSummary } from "./provider-billing.js";
 
 /**
  * トークンの単価（USD / 1 トークン）。入力・キャッシュに当たった入力（読み取り）・キャッシュへ書き込む
@@ -96,12 +97,34 @@ export class JobBudget {
   #reservedUsd = 0;
   #spentUsd = 0;
   #nextId = 1;
+  #providerBilling: ProviderBillingLedger | undefined;
 
   constructor(limitUsd: number) {
     if (!Number.isFinite(limitUsd) || limitUsd < 0) {
       throw new RangeError("予算の上限は 0 以上の有限の数であること");
     }
     this.#limitUsd = limitUsd;
+  }
+
+  registerProviderBilling(pin: ProviderBillingPin): void {
+    (this.#providerBilling ??= new ProviderBillingLedger()).register(pin);
+  }
+
+  get providerBilling(): ProviderBillingSummary | undefined {
+    return this.#providerBilling?.snapshot(this.#reservedUsd, this.#spentUsd);
+  }
+
+  providerAttempt(pin: ProviderBillingPin, reservation: Reservation, rates: TokenRates, purpose: "generation" | "judge") {
+    this.registerProviderBilling(pin);
+    return this.#providerBilling!.begin({
+      pin, reservedUsd: reservation.maxCostUsd, purpose,
+      estimate: (usage) => costOfUsageUsd(usage, rates),
+      settle: (guardUsd) => {
+        this.#reservedUsd -= reservation.maxCostUsd;
+        this.#spentUsd += guardUsd;
+      },
+      holdExcess: (excessUsd) => { this.#spentUsd += excessUsd; },
+    });
   }
 
   /** ジョブ全体の上限（USD） */

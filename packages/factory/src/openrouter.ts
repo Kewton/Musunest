@@ -12,9 +12,12 @@
 //     1 つだけの封筒にする。提供元が strict の schema を強く効かせると、全段の枝の `anyOf` では形の似た別の段の枝が
 //     選ばれ、`wrong-stage` で止まった（#788 の観測）。OpenAI・Ollama はこの設定を渡さないので body は今のまま。
 //   * 構造化出力・道具付きの往復・usage・未完了・拒否・HTTP の分類は OpenAI と同じ。OpenRouter 独自の usage の欄
-//     （`cost`・`is_byok`・`cost_details`）は読まずに捨てる。schema の検査は手元の `validateSchema` のまま。
+//     （`cost`・`is_byok`・`cost_details`）と返却 identity は request-bound ledger に保持する（S-175v）。native schema 検査は不変。
 //   * `fetch` だけを使う。環境変数を読まない。
 import type { LlmClient } from "./llm.js";
+import { DEFAULT_OPENROUTER_ARM, openRouterArmPin, type OpenRouterArm } from "./openrouter-arm.js";
+import { noteProviderBilling, providerBillingReceipt } from "./provider-billing.js";
+export { DEFAULT_OPENROUTER_ARM, OPENROUTER_ARMS, isOpenRouterArm, openRouterArmPin } from "./openrouter-arm.js";
 import { createResponsesLlmClient, type FetchLike } from "./openai.js";
 import type { EnvelopeId } from "./schema-envelope.js";
 
@@ -38,6 +41,8 @@ export const OPENROUTER_PROVIDER_ROUTING: Readonly<Record<string, unknown>> = {
 
 /** OpenRouter の adapter を作る関数の引数（`openai.ts` の `OpenAiAdapterOptions` と同じ形） */
 export interface OpenRouterAdapterOptions {
+  /** Explicit provider/quantization pin; default remains Morph fp8. */
+  readonly arm?: OpenRouterArm;
   /** API キー。**環境変数からは読まない**。呼ぶ側（手元の入口）が渡す */
   readonly apiKey: string;
   /** モデル（既定 `z-ai/glm-5.3-flash`） */
@@ -57,7 +62,8 @@ export interface OpenRouterAdapterOptions {
  * 宛先を OpenRouter に固定し、提供元の指定を body の末尾に足す。ほかは OpenAI の Responses API と同じ実装である。
  */
 export function createOpenRouterLlmClient(options: OpenRouterAdapterOptions): LlmClient {
-  return createResponsesLlmClient({
+  const pin = openRouterArmPin(options.arm ?? DEFAULT_OPENROUTER_ARM, options.model ?? DEFAULT_OPENROUTER_MODEL);
+  const client = createResponsesLlmClient({
     ...options,
     model: options.model ?? DEFAULT_OPENROUTER_MODEL,
     url: OPENROUTER_RESPONSES_URL,
@@ -65,6 +71,8 @@ export function createOpenRouterLlmClient(options: OpenRouterAdapterOptions): Ll
     // 強く効かせても、形の似た別の段の枝が選ばれないようにする）
     stageOnlyEnvelope: true,
     // 提供元を固定する（body の末尾に 1 つ足す。ほかの欄は OpenAI と同じ）
-    extraBody: { provider: OPENROUTER_PROVIDER_ROUTING },
+    extraBody: { provider: { ...OPENROUTER_PROVIDER_ROUTING, only: [pin.arm] } },
+    observeWire: (wire, signal) => noteProviderBilling(signal, providerBillingReceipt(wire, pin)),
   });
+  return { ...client, billingPin: pin };
 }
