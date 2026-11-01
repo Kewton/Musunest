@@ -1,3 +1,4 @@
+import { parseC1Flags, c1Argv, c1BuildReport, c1ConditionsMatch } from "./c1-runner-flags.mjs";
 // 受入の試験：評価セットの定義ファイルの本 × 回数 を、プロダクト内の工場（factory:run）で流す。API を呼ぶ（窓口の手元だけで使う）。
 // 使い方: OPENAI_API_KEY=... node run-agent.mjs <repo> <out> --effort low|medium|high [--runs 5] [--concurrency 3] [--only P1,P3] [--budget-usd 15]
 //          [--plan [--script] | --plan-only [--script] | --build-from <凍結した組のファイル>] [--resume] [--set <定義ファイル>]
@@ -172,6 +173,9 @@ const stageEffortArgs = args.flatMap((a, i) => (a === "--stage-effort" ? [args[i
 if (stageEffortArgs.some((v) => v === "" || v.startsWith("--"))) refuseCode("flags:conflict");
 const stageEffortTarget = pipeline === V12_PIPELINE || ((compare || makePairsOut !== null) && !stageMode && compareGroups[1] === V12_PIPELINE);
 if (stageEffortArgs.length > 0 && !stageEffortTarget) refuseCode("flags:conflict");
+let c1Flags;
+try { c1Flags = parseC1Flags(args, { pipeline, buildFrom, plan, planOnly, compare, makePairs: makePairsOut !== null, stageMode }); }
+catch (error) { refuseCode(error.message); }
 if (compare && !args.includes("--budget-usd")) refuseCode("compare:budget-required");
 if (compare && !(Number.isFinite(budget) && budget >= 0 && Number.isInteger(CONC) && CONC >= 1)) refuseCode("flags:conflict");
 /** 条件の params.mode：build（指定なし）・e2e（--plan）・plan-only・build-from・stage-run（段の旗。#545） */
@@ -244,19 +248,40 @@ const openrouterPinOf = (ctx) => {
   }
   return ctx.openrouter.pin(openrouterArm ?? ctx.openrouter.defaultArm, model);
 };
+const perRunBudget = Number(opt("--factory-budget-usd", String(factory.DEFAULT_BUDGET_USD)));
+const deadlineMin = Number(opt("--deadline-min", String(factory.DEFAULT_DEADLINE_MS / 60000)));
+const argvFor = (cli, dir, pl, withEfforts = false) => {
+  const argv = [cli, join(dir, "request.md"), "--out", join(dir, "bundle"), "--effort", effort, "--model", model, "--budget", String(perRunBudget), "--deadline", String(deadlineMin)];
+  // #771：既定でない --provider を指定したときだけ、子にも同じ provider を渡す（省略と openai の明示は今までどおり何も足さない。モデルは上の --model）
+  if (providerExplicit) argv.push("--provider", provider);
+  if (openrouterArm !== null) argv.push("--openrouter-arm", openrouterArm);
+  if (plan || planOnly) argv.push(plan ? "--plan" : "--plan-only", ...(script ? ["--script", join(dir, "script.json")] : ["--answers", join(dir, "answers.json")]));
+  if (buildFrom !== null) argv.push("--plan-file", join(dir, "plan-file.json"));
+  if (pl === "v1.1a" || pl === V12_PIPELINE) argv.push("--pipeline", pl);
+  // 段単位の走り（#545）：工場の開始・終了の段と、開始の段の直前の境界があれば本のディレクトリに写した上流の checkpoint
+  if (stageMode) argv.push("--stage-start", stageRange.start, "--stage-end", stageRange.end, ...(stageBoundary === null ? [] : ["--stage-input", join(dir, STAGE_INPUT_DIR, stageLib.stageCheckpointFile(stageBoundary))]));
+  // 段ごとの effort（#664）：付けた順のまま末尾に足す（比較では候補の群の子だけ）
+  if (withEfforts) for (const v of stageEffortArgs) argv.push("--stage-effort", v);
+  argv.push(...c1Argv(c1Flags));
+  return argv;
+};
 if (args.includes("--dry-run")) {
   if (resume && provider === "openrouter") {
     let saved;
     try { saved = JSON.parse(readFileSync(join(outRoot, "conditions.json"), "utf8")); } catch { refuseCode("resume:unreadable"); }
     if (!sameArmPin(saved?.params?.openrouter_arm, openrouterPinOf(main))) refuseCode("openrouter:resume-arm");
   }
+  if (resume) {
+    let saved; try { saved = JSON.parse(readFileSync(join(outRoot, "conditions.json"), "utf8")); } catch { refuseCode("resume:unreadable"); }
+    if (!c1ConditionsMatch(c1Flags, saved?.params)) refuseCode("c1:resume-flags");
+  }
   console.log(JSON.stringify({ schema: "factory/openrouter-dry-run/v1", generation: false, provider,
-    arm: openrouterPinOf(main), effort, pipeline, runs: RUNS, concurrency: CONC }));
+    arm: openrouterPinOf(main), effort, pipeline, runs: RUNS, concurrency: CONC,
+    ...(Object.keys(c1Flags).length === 0 ? {} : { c1_flags: c1Flags,
+      child_args: (only ?? ["<selection>"]).flatMap((pid) => Array.from({ length: RUNS }, (_, i) => ({ id: `${pid}-r${i+1}`, argv: argvFor(cliFile, join(outRoot, `${pid}-r${i+1}`), pipeline, stageEffortArgs.length > 0) }))) }) }));
   process.exit(0);
 }
 const apiKeyEnvOf = (ctx) => (provider === "ollama" ? ctx.ollama.keyEnv : provider === "openrouter" ? ctx.openrouter.keyEnv : ctx.factory.API_KEY_ENV);
-const perRunBudget = Number(opt("--factory-budget-usd", String(factory.DEFAULT_BUDGET_USD)));
-const deadlineMin = Number(opt("--deadline-min", String(factory.DEFAULT_DEADLINE_MS / 60000)));
 
 // #545：段の表と照合の関数を工場の dist から読む（v11a/bundle-v11a.js。段単位の走りのときだけ読むので、旗を省いた計測は今と同じ）
 const STAGE_LIB_VALUES = ["STAGE_STARTS", "STAGE_ENDS", "STAGE_BOUNDARIES", "STAGE_INPUT_CODES", "STAGE_RUN_RECORD_FILE", "STAGE_RUN_RECORD_SCHEMA", "STAGE_BUDGET_SCOPE"];
@@ -614,20 +639,6 @@ if (script) {
 }
 
 // 子プロセスへ渡す引数を 1 か所で組み立て、条件のファイルもここから作る（既定値を別に手書きしない）。v1.1a・v1.2 の経路だけ末尾に --pipeline <経路> を足す（#513・#557）
-const argvFor = (cli, dir, pl, withEfforts = false) => {
-  const argv = [cli, join(dir, "request.md"), "--out", join(dir, "bundle"), "--effort", effort, "--model", model, "--budget", String(perRunBudget), "--deadline", String(deadlineMin)];
-  // #771：既定でない --provider を指定したときだけ、子にも同じ provider を渡す（省略と openai の明示は今までどおり何も足さない。モデルは上の --model）
-  if (providerExplicit) argv.push("--provider", provider);
-  if (openrouterArm !== null) argv.push("--openrouter-arm", openrouterArm);
-  if (plan || planOnly) argv.push(plan ? "--plan" : "--plan-only", ...(script ? ["--script", join(dir, "script.json")] : ["--answers", join(dir, "answers.json")]));
-  if (buildFrom !== null) argv.push("--plan-file", join(dir, "plan-file.json"));
-  if (pl === "v1.1a" || pl === V12_PIPELINE) argv.push("--pipeline", pl);
-  // 段単位の走り（#545）：工場の開始・終了の段と、開始の段の直前の境界があれば本のディレクトリに写した上流の checkpoint
-  if (stageMode) argv.push("--stage-start", stageRange.start, "--stage-end", stageRange.end, ...(stageBoundary === null ? [] : ["--stage-input", join(dir, STAGE_INPUT_DIR, stageLib.stageCheckpointFile(stageBoundary))]));
-  // 段ごとの effort（#664）：付けた順のまま末尾に足す（比較では候補の群の子だけ）
-  if (withEfforts) for (const v of stageEffortArgs) argv.push("--stage-effort", v);
-  return argv;
-};
 const childArgsFor = (job) => argvFor(cliFile, dirOf(job), pipeline, stageEfforts !== null);
 
 const gitOut = (checkout, gitArgs) => { try { return execFileSync("git", ["-C", checkout, ...gitArgs], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); } catch { return null; } };
@@ -691,6 +702,7 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId, e
       stage_output_limits: outputLimits.v1,
       // #513：経路（v1 か v1.1a。省略は v1）と v1.1α の 4 段の上限（dist に無ければ null）
       pipeline: pl, stage_output_limits_v11a: outputLimits.v11a,
+      ...c1Flags,
       // #771：既定でない --provider を指定したときだけ。LLM の adapter と、鍵を読む環境変数の名前（値は残さない。署名に入る）
       ...(!providerExplicit ? {} : { provider, provider_api_key_env: apiKeyEnvOf(ctx) }),
       ...(openrouterPinOf(ctx) === null ? {} : { openrouter_arm: openrouterPinOf(ctx) }),
@@ -749,7 +761,10 @@ const armValidationOf = (root, ids, pin) => {
     recorded: records.filter((r) => r != null).length,
     comparison_valid: records.length > 0 && records.every((r) => r?.comparison_valid === true),
     actual_cost_complete: complete, observed_cost_subtotal_usd: observedCost,
-    actual_cost_usd: complete ? observedCost : null };
+    actual_cost_usd: complete ? observedCost : null,
+    identity_valid: records.length === ids.length && records.length > 0 && records.every((r) => r?.identity_valid === true),
+    cost_range_usd: { lower: observedCost, upper: records.length === ids.length && records.every((r) => typeof r?.cost_range_usd?.upper === "number") ? records.reduce((sum, r) => sum + r.cost_range_usd.upper, 0) : null },
+    identity_policy: "returned-confirmed+timeout-only/v1" };
   writeFileSync(join(root, "openrouter-arm-validation.json"), JSON.stringify(record, null, 1));
   return { openrouter_arm_validation: record };
 };
@@ -867,16 +882,24 @@ const runOne = (job) => new Promise((resolve) => {
       billing = billingRecordOf(openrouterPinOf(group === null ? main : group.ctx), ledger);
       // Unknown billed cost/reservations may not disappear from the batch budget.
       cost = Math.max(cost, billing.guard_spent_usd === null ? perRunBudget : billing.guard_spent_usd + billing.unsettled_reservations_usd);
-      if (!billing.comparison_valid) {
+      if (!billing.identity_valid) {
         stop = "OpenRouter arm or billing is unconfirmed";
         stopCode = "openrouter:accounting";
         process.exitCode = 3;
       }
     }
+    let c1Report = null;
+    if (runPipeline === V12_PIPELINE && !stageMode) {
+      let record; try { record = JSON.parse(readFileSync(join(dir, BUILD_RECORD_PATH), "utf8")); } catch { record = null; }
+      if (Object.keys(c1Flags).length > 0 || record?.conditions && typeof record.conditions === "object" && ["c1_reference_enum", "c1_conditional_fields"].some((k) => k in record.conditions)) {
+        c1Report = c1BuildReport(c1Flags, record);
+        if (c1Report.status !== "match") { stop = "C1 flags differ from native Build record"; stopCode = "c1:build-flags"; process.exitCode = 3; }
+      }
+    }
     // 経路 v1.2（#557）：要約と条件の記録が報告した旗の組を読み（推定しない）、条件の組と照らした結果と一緒に本ごとの記録に残す
     // 段の走り（#638）は要約の行と条件の記録を書かないので報告を写さない（旗の組は採点が段の走りの記録から照らす）
     const v12 = runPipeline === V12_PIPELINE && !stageMode ? v12ReportsOf(s, join(dir, BUILD_RECORD_PATH)) : null;
-    writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: code, wall_s: (Date.now() - t0) / 1000, started_at: startedAt, exit_class: exitClass, summary, ...(billing === null ? {} : { openrouter_billing: billing }), plan_cost: planCostOf(planCost), stderr_tail: tailOf(errBuf), stdout_tail: s === null ? tailOf(outBuf) : undefined, resumed: job.resumed === true, ...(stageMode ? { stage_run: stageRun } : {}), ...(v12 === null ? {} : { v12_flags: v12 }) }, null, 1));
+    writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: code, wall_s: (Date.now() - t0) / 1000, started_at: startedAt, exit_class: exitClass, summary, ...(billing === null ? {} : { openrouter_billing: billing }), ...(c1Report === null ? {} : { c1_flags: c1Report }), plan_cost: planCostOf(planCost), stderr_tail: tailOf(errBuf), stdout_tail: s === null ? tailOf(outBuf) : undefined, resumed: job.resumed === true, ...(stageMode ? { stage_run: stageRun } : {}), ...(v12 === null ? {} : { v12_flags: v12 }) }, null, 1));
     spent += cost;
     if (group !== null) group.spent += cost;
     console.log(`${group === null ? "" : `${job.group}/`}${idOf(job)} effort=${effort}${plan ? " plan" : ""}${planOnly ? " plan-only" : ""}${buildFrom !== null ? " build-from" : ""}${runPipeline === "v1.1a" || runPipeline === V12_PIPELINE ? ` pipeline=${runPipeline}` : ""}${stageMode ? ` stage=${stageRange.start}..${stageRange.end}` : ""}${job.resumed ? " resume" : ""} exit=${code} ${stageMode ? `stage_pass=${stageRun?.stage_pass ?? "none"}` : `verdict=${s === null ? "none" : verdictOf(s.verdict) ?? "none"}`} cost=${Number(cost).toFixed(4)} ${Math.round((Date.now() - t0) / 1000)}s total=${spent.toFixed(3)}`);
@@ -929,6 +952,7 @@ async function runSingle() {
     let saved = null; try { saved = JSON.parse(readFileSync(conditionsPath, "utf8")); } catch { refuse("条件のファイルを読めません", "resume:unreadable"); }
     // 上限の欄の無い前の版の条件（params に v12_call_limits が無い）は、その欄を除いた署名で今までどおり照らす（#618）。欄があれば上限も署名で照らす
     if (provider === "openrouter" && !sameArmPin(saved?.params?.openrouter_arm, openrouterPinOf(main))) refuseCode("openrouter:resume-arm");
+    if (!c1ConditionsMatch(c1Flags, saved?.params)) refuseCode("c1:resume-flags");
     const savedLegacy = pipeline === V12_PIPELINE && saved?.params && typeof saved.params === "object" && !("v12_call_limits" in saved.params);
     if (saved?.signature !== (savedLegacy ? signatureLegacy : signature)) refuse("保存した条件と今の条件が一致しません", "resume:signature");
     // 経路 v1.2（#557）：保存した条件を既知の版（v7）として検証し、署名を中身から計算し直して照らす（知らない版・書き換えた条件では再開しない）
@@ -947,8 +971,12 @@ async function runSingle() {
       if (existsSync(join(dir, "summary.line.json"))) {
         if (openrouterPinOf(main) !== null) {
           let prior; try { prior = JSON.parse(readFileSync(join(dir, "summary.line.json"), "utf8")).openrouter_billing; } catch { prior = null; }
-          if (prior?.comparison_valid !== true) refuseCode("openrouter:resume-unconfirmed");
+          let ledger; try { ledger = JSON.parse(readFileSync(join(dir, "bundle/provider-billing.json"), "utf8")); } catch { ledger = null; }
+          const verified = billingRecordOf(openrouterPinOf(main), ledger);
+          if (!verified.identity_valid || !prior || !sameArmPin(verified, prior)) refuseCode("openrouter:resume-unconfirmed");
         }
+        let record; try { record = JSON.parse(readFileSync(join(dir, BUILD_RECORD_PATH), "utf8")); } catch { record = null; }
+        if (c1BuildReport(c1Flags, record).status !== "match") refuseCode("c1:resume-build-flags");
         skipped.push(idOf(job)); spent += costOfDir(dir);
       }
       else remaining.push(job);

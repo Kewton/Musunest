@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -207,13 +207,25 @@ if (isEntry()) {
   const out = arg("--out", "");
   const pin = openRouterArmPin(arg("--openrouter-arm", DEFAULT_OPENROUTER_ARM), arg("--model", ""));
   const known = process.env.FAKE_BILLING_UNKNOWN !== "1";
+  const timeout = process.env.FAKE_BILLING_TIMEOUT === "1";
+  const bad = process.env.FAKE_BILLING_BAD;
+  const receipt = { generation_id: "gen-fake", returned_provider: null, returned_model: pin.model, returned_quantization: null,
+    cost_status: "known", cost_usd: .01, usage: { inputTokens: 10, cachedInputTokens: 0, outputTokens: 10, reasoningTokens: 0 }, identity_reasons: [],
+    identity_evidence: { policy: pin.identity_policy, generation_id: "gen-fake", confirmation_state: "confirmed", reasons: [], source: "router-metadata",
+      router_provider: pin.provider_aliases[0], router_model: pin.model, quantization_basis: "exclusive-endpoint", lookup_quantization: null } };
+  if (bad === "provider") receipt.identity_evidence.router_provider = "Other";
+  if (bad === "model") receipt.returned_model = "Other";
+  if (bad === "tokens") receipt.usage = null;
+  if (bad === "metadata") delete receipt.identity_evidence;
   mkdirSync(out, { recursive: true });
   writeFileSync(join(out, "provider-billing.json"), JSON.stringify({
-    schema: "factory/provider-billing/v1", pins: [pin], comparison_valid: known, actual_cost_complete: known,
-    actual_cost_usd: known ? .01 : null, observed_cost_subtotal_usd: known ? .01 : 0, actual_generation_cost_usd: known ? .01 : null, actual_judge_cost_usd: 0,
+    schema: "factory/provider-billing/v1", pins: [pin], comparison_valid: known && !timeout, actual_cost_complete: known && !timeout,
+    invalid_reasons: known ? (timeout ? ["billing-unconfirmed"] : []) : ["billing-unconfirmed"], budget_limit_usd: 1, budget_reached: bad === "budget",
+    actual_cost_usd: known && !timeout ? .01 : null, observed_cost_subtotal_usd: known ? .01 : 0, actual_generation_cost_usd: known && !timeout ? .01 : null, actual_judge_cost_usd: 0,
     token_estimate_usd: known ? .02 : 0, guard_spent_usd: known ? .2 : 0,
-    unsettled_reservations_usd: known ? .1 : .3, unknown_attempts: known ? 0 : 1,
-    attempts: [{ attempt: 1, purpose: "generation", receipt: known ? { generation_id: "gen-fake" } : null }]
+    unsettled_reservations_usd: known ? .1 : .3, unknown_attempts: known && !timeout ? 0 : 1,
+    attempts: [{ attempt: 1, purpose: "generation", pin, reserved_usd: known ? .1 : .3, state: known ? "returned" : "closed-unknown", failure_kind: "missing-receipt", duplicate: false, receipt: known ? receipt : null },
+      ...(timeout ? [{ attempt: 2, purpose: "generation", pin, reserved_usd: .1, state: "closed-unknown", failure_kind: "timeout", duplicate: false, receipt: null }] : [])]
   }));
 }
 `);
@@ -3663,4 +3675,83 @@ test("#788 R6 base のバイト列：provider を省いた走りと ollama の�
       assert.equal(conditionsSignature(JSON.parse(normalizedConditionsText(cond, base))), R6_BASE_SIGNATURE[label], `${label}: 署名の固定値`);
     }, { ollama: true });
   }
+});
+
+// S-175ac full runner integration; all repositories, plans and children are synthetic.
+function makeC1Repo(base) {
+ const repo=makeV12Repo(base);
+ const text=readFileSync(join(repo,"packages/factory/dist/cli.js"),"utf8").replace('  if (over.noRecord !== true)', `  for (const [arg,key] of [["--c1-reference-enum","c1_reference_enum"],["--c1-conditional-fields","c1_conditional_fields"]]) {
+    if (process.argv[process.argv.indexOf(arg)+1] === "on" && process.env.FAKE_C1_MISSING !== "1") conditions[key]="on";
+  }
+  if (over.noRecord !== true)`);
+ writeFileSync(join(repo,"packages/factory/dist/cli.js"),text);return repo;
+}
+const c1Both=["--c1-reference-enum","on","--c1-conditional-fields","on"];
+test("S-175ac full Build forwards both flags, signs them, records match and rejects resume mixture/tampering",async()=>{
+ await withRepo(async(base)=>{
+  const repo=makeC1Repo(base),fz=frozen557(base,repo),out=join(base,"out"),log=join(base,"spawn.log");
+  const args=["--build-from",fz,"--pipeline","v1.2","--only","P1","--runs","1","--concurrency","1",...c1Both];
+  const r=runAgent(repo,out,args,{FAKE_SPAWN_LOG:log});assert.equal(r.status,0,r.stderr);
+  const cond=readJson(join(out,"conditions.json")),sl=readJson(join(out,"P1-r1/summary.line.json"));
+  assert.equal(cond.params.c1_reference_enum,"on");assert.equal(cond.params.c1_conditional_fields,"on");assert.equal(cond.signature,conditionsSignature(cond));
+  assert.deepEqual(cond.child_args[0].argv.slice(-4),c1Both);assert.equal(sl.c1_flags.status,"match");
+  assert.equal(runAgent(repo,out,[...args.slice(0,-4),"--resume"],{FAKE_SPAWN_LOG:log}).status,3);assert.equal(spawnCount(log),1);
+  assert.equal(runAgent(repo,out,[...args,"--resume"],{FAKE_SPAWN_LOG:log}).status,0);assert.equal(spawnCount(log),1);
+  const file=join(out,"P1-r1/bundle/build-record.json"),record=readJson(file);delete record.conditions.c1_reference_enum;writeFileSync(file,JSON.stringify(record));
+  const bad=runAgent(repo,out,[...args,"--resume"],{FAKE_SPAWN_LOG:log});assert.equal(bad.status,3);assert.match(bad.stderr,/c1:resume-build-flags/);assert.equal(spawnCount(log),1);
+ });
+});
+test("S-175ac child Build missing flags aborts before another child",async()=>{
+ await withRepo(async(base)=>{
+  const repo=makeC1Repo(base),fz=frozen557(base,repo),out=join(base,"out"),log=join(base,"spawn.log");
+  const r=runAgent(repo,out,["--build-from",fz,"--pipeline","v1.2","--only","P1,P2","--runs","1","--concurrency","1",...c1Both],{FAKE_C1_MISSING:"1",FAKE_SPAWN_LOG:log});
+  assert.equal(r.status,3);assert.equal(spawnCount(log),1);assert.equal(lastRunRecord(out).stop_code,"c1:build-flags");
+ });
+});
+test("S-175ac invalid values spawn no child; dry-run shows exact child args with no input read",async()=>{
+ await withRepo(async(base)=>{
+  const repo=makeC1Repo(base),fz=frozen557(base,repo),log=join(base,"spawn.log");
+  const args=["--build-from",fz,"--pipeline","v1.2","--only","P1,P7,P9","--runs","1"];
+  for(const flags of [["--c1-reference-enum"],["--c1-reference-enum","bad"],["--c1-conditional-fields","on","--c1-conditional-fields","off"]]){
+   const r=runAgent(repo,join(base,"bad"),[...args,...flags],{FAKE_SPAWN_LOG:log});assert.equal(r.status,3);assert.equal(spawnCount(log),0);
+  }
+  const dry=runAgent(repo,join(base,"dry"),[...args,...c1Both,"--dry-run"],{FAKE_SPAWN_LOG:log});assert.equal(dry.status,0,dry.stderr);
+  const preview=JSON.parse(dry.stdout);assert.equal(preview.child_args.length,3);assert.ok(preview.child_args.every((c)=>JSON.stringify(c.argv.slice(-4))===JSON.stringify(c1Both)));assert.equal(spawnCount(log),0);
+ });
+});
+test("S-175ac default/explicit off argv and signature stay byte-identical to frozen 0ab0c5c runner",async()=>{
+ await withRepo(async(base)=>{
+  const repo=makeC1Repo(base),fz=frozen557(base,repo),out=join(base,"same-out");
+  const args=["--build-from",fz,"--pipeline","v1.2","--only","P1","--runs","1"];
+  const original="/Volumes/SSD_NX/tmp/musubi-tooling/0ab0c5c62f1d494412ee560bb25178ce5ad08096/workspace/mvp/m1/agent/eval/agent-accept/run-agent.mjs";
+  const old=spawnSync(process.execPath,[original,repo,out,...args],{encoding:"utf8",env:{...process.env,JEV_API_KEY:""}});assert.equal(old.status,0,old.stderr);
+  const before=readJson(join(out,"conditions.json")),argv=readFileSync(join(out,"P1-r1/received-argv.json"),"utf8");renameSync(out,join(base,"old"));
+  for(const flags of [[],["--c1-reference-enum","off","--c1-conditional-fields","off"]]){
+   const r=runAgent(repo,out,[...args,...flags]);assert.equal(r.status,0,r.stderr);const after=readJson(join(out,"conditions.json"));
+   assert.equal(after.signature,before.signature);assert.deepEqual(after.child_args,before.child_args);assert.equal(readFileSync(join(out,"P1-r1/received-argv.json"),"utf8"),argv);
+   renameSync(out,join(base,flags.length?"explicit-off":"default-off"));
+  }
+ });
+});
+test("S-175ac timeout-only proceeds with ranges, retains reservations and resumes; raw ledger tampering is rejected",()=>{
+ const base=mkdtempSync(join(tmpdir(),"s175ac-timeout-"));try{
+  const repo=makeBillingRepo(base),out=join(base,"out"),log=join(base,"spawn.log");
+  const args=["--provider","openrouter","--openrouter-arm","open-inference/fp4","--only","P1,P2","--runs","1","--concurrency","1","--budget-usd","1"];
+  const env={FAKE_BILLING_TIMEOUT:"1",FAKE_COST:"0",FAKE_SPAWN_LOG:log};
+  const r=runAgent(repo,out,args,env);assert.equal(r.status,0,r.stderr);assert.equal(spawnCount(log),2);
+  const run=lastRunRecord(out);assert.equal(run.openrouter_arm_validation.identity_valid,true);assert.equal(run.openrouter_arm_validation.comparison_valid,false);assert.equal(run.openrouter_arm_validation.actual_cost_usd,null);assert.ok(Math.abs(run.spent_usd-.6)<1e-12);
+  assert.ok(Math.abs(run.openrouter_arm_validation.cost_range_usd.upper-.22)<1e-12);
+  assert.equal(runAgent(repo,out,[...args,"--resume"],env).status,0);assert.equal(spawnCount(log),2);
+  const f=join(out,"P1-r1/bundle/provider-billing.json"),raw=readJson(f);delete raw.attempts[0].receipt.identity_evidence;writeFileSync(f,JSON.stringify(raw));
+  const bad=runAgent(repo,out,[...args,"--resume"],env);assert.equal(bad.status,3);assert.match(bad.stderr,/openrouter:resume-unconfirmed/);assert.equal(spawnCount(log),2);
+ }finally{rmSync(base,{recursive:true,force:true});}
+});
+test("S-175ac provider/model/token/metadata/budget failures abort before another child",()=>{
+ for(const bad of ["provider","model","tokens","metadata","budget"]){
+  const base=mkdtempSync(join(tmpdir(),"s175ac-invalid-"));try{
+   const repo=makeBillingRepo(base),out=join(base,"out"),log=join(base,"spawn.log");
+   const r=runAgent(repo,out,["--provider","openrouter","--openrouter-arm","open-inference/fp4","--only","P1,P2","--runs","1","--concurrency","1","--budget-usd","1"],{FAKE_BILLING_BAD:bad,FAKE_COST:"0",FAKE_SPAWN_LOG:log});
+   assert.equal(r.status,3,bad+" "+r.stderr);assert.equal(spawnCount(log),1,bad);assert.equal(lastRunRecord(out).openrouter_arm_validation.identity_valid,false);
+  }finally{rmSync(base,{recursive:true,force:true});}
+ }
 });
