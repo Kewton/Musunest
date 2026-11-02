@@ -269,7 +269,7 @@ export const EXIT_STAGE_INPUT = 4;
 
 /** 使い方の文（誤りを人に見せる） */
 export const USAGE =
-  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--provider openai|ollama|openrouter] [--openrouter-arm open-inference/fp4|morph/fp8] [--c1-reference-enum on|off] [--c1-conditional-fields on|off] [--c2-mapping-contract on|off] [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル> [--pipeline v1|v1.1a|v1.2]]";
+  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--provider openai|ollama|openrouter] [--openrouter-arm open-inference/fp4|morph/fp8] [--c1-reference-enum on|off] [--c1-conditional-fields on|off] [--c2-mapping-contract on|off] [--c2-requirement-coverage on|off] [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル> [--pipeline v1|v1.1a|v1.2]]";
 
 /** 段単位の実行口の使い方（段の旗の誤りのときだけ、`USAGE` のあとに出す。Issue #544） */
 export const STAGE_USAGE =
@@ -338,6 +338,7 @@ export interface CliArguments {
   readonly c1ReferenceEnum?: boolean;
   readonly c1ConditionalFields?: boolean;
   readonly c2MappingContract?: boolean;
+  readonly c2RequirementCoverage?: boolean;
   readonly stageEfforts?: StageEfforts;
 }
 
@@ -429,6 +430,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   let c1ReferenceEnum: boolean | undefined;
   let c1ConditionalFields: boolean | undefined;
   let c2MappingContract: boolean | undefined;
+  let c2RequirementCoverage: boolean | undefined;
   let effort: string = DEFAULT_EFFORT;
   let budgetUsd: number | undefined;
   let deadlineMs: number | undefined;
@@ -481,6 +483,13 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
       if (arg === "--stage-start") stageStart = raw;
       else if (arg === "--stage-end") stageEnd = raw;
       else stageInput = raw;
+      continue;
+    }
+    if (arg === "--c2-requirement-coverage") {
+      const value = args[++index];
+      if (value !== "on" && value !== "off") return { error: "c2-requirement-coverage:value" };
+      if (c2RequirementCoverage !== undefined) return { error: "c2-requirement-coverage:duplicate" };
+      c2RequirementCoverage = value === "on";
       continue;
     }
     if (arg === "--c2-mapping-contract") {
@@ -654,6 +663,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     if ("code" in read) return { error: `${read.code}（${STAGE_EFFORT_USAGE_MESSAGES[read.code]}）` };
     stageEfforts = read.stageEfforts;
   }
+  if (c2RequirementCoverage === true && (pipeline !== "v1.2" || planOnly)) return { error: "c2-requirement-coverage:pipeline" };
   if (c2MappingContract === true && (pipeline !== "v1.2" || planOnly)) return { error: "c2-mapping-contract:pipeline" };
   if (c1ConditionalFields === true && (pipeline !== "v1.2" || planOnly)) return { error: "c1-conditional-fields:pipeline" };
   if (c1ReferenceEnum === true && (pipeline !== "v1.2" || planOnly)) return { error: "c1-reference-enum:pipeline" };
@@ -686,6 +696,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     ...(c1ReferenceEnum === true ? { c1ReferenceEnum: true } : {}),
     ...(c1ConditionalFields === true ? { c1ConditionalFields: true } : {}),
     ...(c2MappingContract === true ? { c2MappingContract: true } : {}),
+    ...(c2RequirementCoverage === true ? { c2RequirementCoverage: true } : {}),
   };
 }
 
@@ -809,6 +820,7 @@ interface BuildJob {
   readonly c1ReferenceEnum?: boolean;
   readonly c1ConditionalFields?: boolean;
   readonly c2MappingContract?: boolean;
+  readonly c2RequirementCoverage?: boolean;
   readonly stageEfforts?: StageEfforts;
   /** 段の出力の上限の上書きの表（`--provider ollama` の `--pipeline v1.2` の走りだけ。Issue #776） */
   readonly stageOutputLimits?: StageOutputLimits;
@@ -849,6 +861,7 @@ async function runBuild(
           ...(job.c1ReferenceEnum === true ? { c1ReferenceEnum: true } : {}),
           ...(job.c1ConditionalFields === true ? { c1ConditionalFields: true } : {}),
           ...(job.c2MappingContract === true ? { c2MappingContract: true } : {}),
+          ...(job.c2RequirementCoverage === true ? { c2RequirementCoverage: true } : {}),
           ...(job.stageOutputLimits === undefined ? {} : { stageOutputLimits: job.stageOutputLimits }),
           // `--pipeline v1.2` の走りだけ、形の誤りの種類を段の記録と要約に残す（Issue #783。v1・v1.1α は欄を足さない）
           ...(job.pipeline === "v1.2" ? { recordMalformedKinds: true } : {}),
@@ -1204,6 +1217,7 @@ async function runBuildFromPlanFile(
     ...(parsed.c1ReferenceEnum === true ? { c1ReferenceEnum: true } : {}),
     ...(parsed.c1ConditionalFields === true ? { c1ConditionalFields: true } : {}),
     ...(parsed.c2MappingContract === true ? { c2MappingContract: true } : {}),
+    ...(parsed.c2RequirementCoverage === true ? { c2RequirementCoverage: true } : {}),
     // Ollama の v1.2 の走りだけ、段の出力の上限の上書きの表を実行口へ渡す（Issue #776）
     ...(() => {
       const limits = stageOutputLimitsOf(provider, parsed.pipeline);
@@ -1432,6 +1446,7 @@ async function runStageFromPlanFile(
     ...(parsed.c1ReferenceEnum === true ? { c1ReferenceEnum: true } : {}),
     ...(parsed.c1ConditionalFields === true ? { c1ConditionalFields: true } : {}),
     ...(parsed.c2MappingContract === true ? { c2MappingContract: true } : {}),
+    ...(parsed.c2RequirementCoverage === true ? { c2RequirementCoverage: true } : {}),
     ...(stageOutputLimits === undefined ? {} : { stageOutputLimits }),
     // v1.2 の段の走りだけ、形の誤りの種類を段の記録に残す（Issue #783。v1.1α の段の走りは欄を足さない）
     ...(pipeline === "v1.2" ? { recordMalformedKinds: true } : {}),
@@ -1478,6 +1493,7 @@ async function runStageFromPlanFile(
     ...(parsed.c1ReferenceEnum === true ? { c1_reference_enum: "on" } : {}),
     ...(parsed.c1ConditionalFields === true ? { c1_conditional_fields: "on" } : {}),
     ...(parsed.c2MappingContract === true ? { c2_mapping_contract: "on" } : {}),
+    ...(parsed.c2RequirementCoverage === true ? { c2_requirement_coverage: "on" } : {}),
     // Ollama の v1.2 の段の走りだけ：上書きした段と値の表（付けなければ欄を出さない。Issue #776）
     ...(stageOutputLimits === undefined ? {} : { ollama_stage_output_limits: stageOutputLimits }),
   };
@@ -1593,7 +1609,8 @@ async function runCliOnce(deps: CliDeps): Promise<number> {
       : { ...conditions, ...v12Conditions, ...stageEffortConditions, ...ollamaLimitConditions,
           ...(parsed.c1ReferenceEnum === true ? { c1_reference_enum: "on" } : {}),
           ...(parsed.c1ConditionalFields === true ? { c1_conditional_fields: "on" } : {}),
-          ...(parsed.c2MappingContract === true ? { c2_mapping_contract: "on" } : {}) };
+          ...(parsed.c2MappingContract === true ? { c2_mapping_contract: "on" } : {}),
+          ...(parsed.c2RequirementCoverage === true ? { c2_requirement_coverage: "on" } : {}) };
 
   // `--plan-file`：包みを検査してから client を作る（検査で断れば API を呼ばない。Issue #495）
   if (parsed.planFile !== undefined) {

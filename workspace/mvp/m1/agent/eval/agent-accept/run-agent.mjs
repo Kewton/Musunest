@@ -891,7 +891,7 @@ const runOne = (job) => new Promise((resolve) => {
     let c1Report = null;
     if (runPipeline === V12_PIPELINE && !stageMode) {
       let record; try { record = JSON.parse(readFileSync(join(dir, BUILD_RECORD_PATH), "utf8")); } catch { record = null; }
-      if (Object.keys(c1Flags).length > 0 || record?.conditions && typeof record.conditions === "object" && ["c1_reference_enum", "c1_conditional_fields", "c2_mapping_contract"].some((k) => k in record.conditions)) {
+      if (Object.keys(c1Flags).length > 0 || record?.conditions && typeof record.conditions === "object" && ["c1_reference_enum", "c1_conditional_fields", "c2_mapping_contract", "c2_requirement_coverage"].some((k) => k in record.conditions)) {
         c1Report = c1BuildReport(c1Flags, record);
         if (c1Report.status !== "match") { stop = "C1 flags differ from native Build record"; stopCode = "c1:build-flags"; process.exitCode = 3; }
       }

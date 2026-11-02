@@ -3680,8 +3680,8 @@ test("#788 R6 base のバイト列：provider を省いた走りと ollama の�
 // S-175ac full runner integration; all repositories, plans and children are synthetic.
 function makeC1Repo(base) {
  const repo=makeV12Repo(base);
- const text=readFileSync(join(repo,"packages/factory/dist/cli.js"),"utf8").replace('  if (over.noRecord !== true)', `  for (const [arg,key] of [["--c1-reference-enum","c1_reference_enum"],["--c1-conditional-fields","c1_conditional_fields"],["--c2-mapping-contract","c2_mapping_contract"]]) {
-    if (process.argv[process.argv.indexOf(arg)+1] === "on" && process.env.FAKE_C1_MISSING !== "1" && !(key === "c2_mapping_contract" && process.env.FAKE_C2_MISSING === "1")) conditions[key]="on";
+ const text=readFileSync(join(repo,"packages/factory/dist/cli.js"),"utf8").replace('  if (over.noRecord !== true)', `  for (const [arg,key] of [["--c1-reference-enum","c1_reference_enum"],["--c1-conditional-fields","c1_conditional_fields"],["--c2-mapping-contract","c2_mapping_contract"],["--c2-requirement-coverage","c2_requirement_coverage"]]) {
+    if (process.argv[process.argv.indexOf(arg)+1] === "on" && process.env.FAKE_C1_MISSING !== "1" && !(key === "c2_mapping_contract" && process.env.FAKE_C2_MISSING === "1") && !(key === "c2_requirement_coverage" && process.env.FAKE_COV_MISSING === "1")) conditions[key]="on";
   }
   if (over.noRecord !== true)`);
  writeFileSync(join(repo,"packages/factory/dist/cli.js"),text);return repo;
@@ -3799,6 +3799,44 @@ test("S-175ad default/explicit C2 off argv and signature match pinned 2b72c9d by
     assert.equal(after.signature,before.signature);assert.equal(JSON.stringify(after.child_args),JSON.stringify(before.child_args));assert.equal(readFileSync(join(out,"P1-r1/received-argv.json"),"utf8"),argv);
     assert.ok(!("c2_mapping_contract" in after.params));renameSync(out,join(base,"off-"+i+"-"+j));
    }
+  }
+ });
+});
+
+const covOn=["--c2-requirement-coverage","on"];
+test("S-175ag coverage propagates/signs/audits four flags, refuses resume mixtures and missing child condition",async()=>{
+ await withRepo(async(base)=>{
+  const repo=makeC1Repo(base),fz=frozen557(base,repo),out=join(base,"out"),log=join(base,"spawn.log");
+  const args=["--build-from",fz,"--pipeline","v1.2","--only","P1","--runs","1","--concurrency","1",...c1Both,...c2On];
+  const r=runAgent(repo,out,[...args,...covOn],{FAKE_SPAWN_LOG:log});assert.equal(r.status,0,r.stderr);
+  const c=readJson(join(out,"conditions.json")),line=readJson(join(out,"P1-r1/summary.line.json"));assert.equal(c.params.c2_requirement_coverage,"on");assert.equal(c.signature,conditionsSignature(c));
+  assert.deepEqual(c.child_args[0].argv.slice(-8),[...c1Both,...c2On,...covOn]);assert.equal(line.c1_flags.observed.c2_requirement_coverage,"on");
+  assert.equal(runAgent(repo,out,[...args,"--resume"],{FAKE_SPAWN_LOG:log}).status,3);assert.equal(spawnCount(log),1);
+  assert.equal(runAgent(repo,out,[...args,...covOn,"--resume"],{FAKE_SPAWN_LOG:log}).status,0);assert.equal(spawnCount(log),1);
+  const f=join(out,"P1-r1/bundle/build-record.json"),v=readJson(f);delete v.conditions.c2_requirement_coverage;writeFileSync(f,JSON.stringify(v));
+  assert.equal(runAgent(repo,out,[...args,...covOn,"--resume"],{FAKE_SPAWN_LOG:log}).status,3);assert.equal(spawnCount(log),1);
+  const missing=runAgent(repo,join(base,"missing"),[...args,...covOn],{FAKE_COV_MISSING:"1"});assert.equal(missing.status,3);assert.equal(lastRunRecord(join(base,"missing")).stop_code,"c1:build-flags");
+ });
+});
+test("S-175ag invalid coverage never spawns; pilot preview has four flags on in all six child argv",async()=>{
+ await withRepo(async(base)=>{
+  const repo=makeC1Repo(base),fz=frozen557(base,repo),log=join(base,"spawn.log"),out=join(base,"out");
+  const args=["--build-from",fz,"--pipeline","v1.2","--only","P1,P7,P9","--runs","2",...c1Both,...c2On];
+  for(const flags of [["--c2-requirement-coverage"],["--c2-requirement-coverage","bad"],[...covOn,...covOn]]){const r=runAgent(repo,out,[...args,...flags],{FAKE_SPAWN_LOG:log});assert.equal(r.status,3);assert.equal(spawnCount(log),0);}
+  const dry=runAgent(repo,out,[...args,...covOn,"--dry-run"],{FAKE_SPAWN_LOG:log});assert.equal(dry.status,0,dry.stderr);
+  const preview=JSON.parse(dry.stdout);assert.equal(preview.child_args.length,6);assert.ok(preview.child_args.every(c=>JSON.stringify(c.argv.slice(-8))===JSON.stringify([...c1Both,...c2On,...covOn])));assert.equal(spawnCount(log),0);
+ });
+});
+test("S-175ag omitted/explicit coverage off preserve b5e51e1 argv and signature bytes",async()=>{
+ await withRepo(async(base)=>{
+  const repo=makeC1Repo(base),fz=frozen557(base,repo),out=join(base,"same-out");
+  const args=["--build-from",fz,"--pipeline","v1.2","--only","P1","--runs","1",...c1Both,...c2On];
+  const original="/Volumes/SSD_NX/tmp/musubi-tooling/b5e51e1f3450d1c046f0c5be461d7fdeb28c1b24/workspace/mvp/m1/agent/eval/agent-accept/run-agent.mjs";
+  const old=spawnSync(process.execPath,[original,repo,out,...args],{encoding:"utf8",env:{...process.env,JEV_API_KEY:""}});assert.equal(old.status,0,old.stderr);
+  const before=readJson(join(out,"conditions.json")),argv=readFileSync(join(out,"P1-r1/received-argv.json"),"utf8");renameSync(out,join(base,"old"));
+  for(const [i,flags] of [[],["--c2-requirement-coverage","off"]].entries()){
+   const r=runAgent(repo,out,[...args,...flags]);assert.equal(r.status,0,r.stderr);const after=readJson(join(out,"conditions.json"));
+   assert.equal(after.signature,before.signature);assert.equal(JSON.stringify(after.child_args),JSON.stringify(before.child_args));assert.equal(readFileSync(join(out,"P1-r1/received-argv.json"),"utf8"),argv);renameSync(out,join(base,"off"+i));
   }
  });
 });

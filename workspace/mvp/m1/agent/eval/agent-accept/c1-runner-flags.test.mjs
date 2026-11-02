@@ -29,3 +29,11 @@ test("S-175ad C2 is independent, off stays omitted and native C2 report must mat
  assert.equal(c1ConditionsMatch({},f),false);
  for(const args of [["--c2-mapping-contract"],["--c2-mapping-contract","bad"],["--c2-mapping-contract","on","--c2-mapping-contract","off"],["--c2-other","on"]])assert.throws(()=>parse(args));
 });
+
+test("S-175ag coverage is independent, omitted off preserves old audit keys, malformed values fail",()=>{
+ assert.deepEqual(parse(["--c2-requirement-coverage","off"]),{});
+ const f=parse(["--c2-requirement-coverage","on"]);assert.deepEqual(f,{c2_requirement_coverage:"on"});assert.deepEqual(c1Argv(f),["--c2-requirement-coverage","on"]);
+ assert.equal(c1BuildReport(f,{conditions:f}).status,"match");assert.equal(c1BuildReport(f,{conditions:{}}).status,"mismatch");assert.equal(c1ConditionsMatch({},f),false);
+ assert.ok(!("c2_requirement_coverage" in c1BuildReport({},null).expected));
+ for(const args of [["--c2-requirement-coverage"],["--c2-requirement-coverage","bad"],["--c2-requirement-coverage","on","--c2-requirement-coverage","off"]])assert.throws(()=>parse(args));
+});

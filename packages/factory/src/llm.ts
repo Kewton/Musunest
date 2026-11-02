@@ -109,6 +109,8 @@ export interface LlmStructuredRequest {
   readonly schema: unknown;
   /** Optional stricter generation schema. Native schema and stage checks remain unchanged. */
   readonly generationSchema?: unknown;
+  /** Opt-in C2 keyed wire representation; decoder checks all keys and explicit IDs before native validation. */
+  readonly requirementCoverage?: readonly string[];
   /** 出力トークンの上限。推論のトークンも含めて上限に入れる（§1.5） */
   readonly maxOutputTokens: number;
   /**

@@ -1,3 +1,4 @@
+import { c2CoverageSchema, decodeC2Coverage } from "./v12/c2-requirement-coverage.js";
 import { noteWireDiagnostic } from "./call-diagnostics.js";
 // @musunest/factory —— OpenAI の Responses API の adapter（02-architecture.md §2・§2.1・§2.2）。
 //
@@ -799,8 +800,17 @@ async function callStructuredWire<T>(
   if (text === undefined) throw malformedWire("no-body", "構造化出力の本文がありません");
   const parsed = parseResponseJson(text, config.readFencedJson);
   if (!parsed.ok) throw malformedWire("not-json", "構造化出力が JSON として読めません");
-  const output =
-    entry === undefined ? requireSchema(request.schema, parsed.value) : unwrapEnvelope(entry, parsed.value);
+  let output: unknown;
+  if (request.requirementCoverage !== undefined) {
+    // Validate the keyed shape with original native fields, not all generation refinements.
+    if (request.schemaName !== "mapping") throw malformedWire("schema", "c2-coverage:wrong-stage");
+    const wireSchema = c2CoverageSchema(request.schema as Record<string, unknown>, request.requirementCoverage);
+    const wireEnvelope = resolveStageEnvelope(request.schemaName, wireSchema, config.envelope);
+    const raw = wireEnvelope === undefined ? requireSchema(wireSchema, parsed.value) : unwrapEnvelope(wireEnvelope.entry, parsed.value);
+    const decoded = decodeC2Coverage(raw, request.requirementCoverage);
+    if (!decoded.ok) throw malformedWire("schema", decoded.code);
+    output = requireSchema(request.schema, decoded.output);
+  } else output = entry === undefined ? requireSchema(request.schema, parsed.value) : unwrapEnvelope(entry, parsed.value);
   return { output: output as T, usage };
 }
 

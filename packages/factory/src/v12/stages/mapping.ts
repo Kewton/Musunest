@@ -1,3 +1,4 @@
+import { c2CoverageSchema } from "../c2-requirement-coverage.js";
 // C2 要件の写像（08-architecture-v1.2.md §4 の C2・C2'・§6・§9 の手 3a・3b。Issue #593・#594・#627・#736）。
 //
 // 旗 `v12.ids` が on の走りだけ、T1 の要件ごとの部分（所属・確かめ方・分類）を書かせる。応答は要件ごとに
@@ -416,6 +417,7 @@ export interface MappingPrevious {
 /** C2 が受け取るもの */
 export interface MappingInput {
   readonly c2MappingContract?: boolean;
+  readonly c2RequirementCoverage?: boolean;
   readonly plan: ConfirmedPlan;
   readonly list: RequirementList;
   readonly documents: readonly PromptDocument[];
@@ -1003,7 +1005,7 @@ export function rejectedRequirementIds(list: RequirementList, rejections: readon
  * 作り直しの要求の頭（Issue #736）。`previous` は見ない（C3 の拒否のあとの 2 回目の要求は別に組む）
  */
 export function mappingWholeRequestOf(
-  input: Pick<MappingInput, "plan" | "list" | "documents" | "gateway" | "rows" | "ledger" | "c2MappingContract">,
+  input: Pick<MappingInput, "plan" | "list" | "documents" | "gateway" | "rows" | "ledger" | "c2MappingContract" | "c2RequirementCoverage">,
 ): LlmStructuredRequest {
   return withMappingContract(input, buildStructuredRequest({
     rules: ruleTexts(mappingRuleDefinitionsOf(input.ledger)),
@@ -1017,13 +1019,15 @@ export function mappingWholeRequestOf(
 
 /** Generation-only schema; off returns the exact pre-contract request object. */
 function withMappingContract(
-  input: Pick<MappingInput, "list" | "rows" | "documents" | "ledger" | "c2MappingContract">,
+  input: Pick<MappingInput, "list" | "rows" | "documents" | "ledger" | "c2MappingContract" | "c2RequirementCoverage">,
   request: LlmStructuredRequest,
   requirementIds: readonly string[] = input.list.requirements.map((requirement) => requirement.id),
 ): LlmStructuredRequest {
-  return input.c2MappingContract === true ? { ...request, generationSchema: c2MappingSchema(request.schema as Record<string, unknown>, {
+  const refined = input.c2MappingContract === true ? { ...request, generationSchema: c2MappingSchema(request.schema as Record<string, unknown>, {
     requirementIds, rows: input.rows, documents: input.documents, ...(input.ledger === undefined ? {} : { ledger: input.ledger }),
   }) } : request;
+  return input.c2RequirementCoverage === true ? { ...refined, requirementCoverage: [...requirementIds],
+    generationSchema: c2CoverageSchema((refined.generationSchema ?? refined.schema) as Record<string, unknown>, requirementIds) } : refined;
 }
 
 /** 初回の検査の結果：表、または落ちた要件だけを書き直す予定（Issue #660） */

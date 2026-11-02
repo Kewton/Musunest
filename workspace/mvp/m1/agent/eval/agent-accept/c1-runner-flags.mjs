@@ -1,5 +1,5 @@
 // One source for optional C1/C2 CLI flags, effective conditions and native Build audit.
-export const C1_FLAGS = { "--c1-reference-enum": "c1_reference_enum", "--c1-conditional-fields": "c1_conditional_fields", "--c2-mapping-contract": "c2_mapping_contract" };
+export const C1_FLAGS = { "--c1-reference-enum": "c1_reference_enum", "--c1-conditional-fields": "c1_conditional_fields", "--c2-mapping-contract": "c2_mapping_contract", "--c2-requirement-coverage": "c2_requirement_coverage" };
 export function parseC1Flags(args, mode) {
   const flags = {};
   for (let i = 2; i < args.length; i++) {
@@ -19,7 +19,7 @@ export function parseC1Flags(args, mode) {
 export const c1Argv = (flags) => Object.entries(C1_FLAGS).flatMap(([arg, key]) => flags[key] === "on" ? [arg, "on"] : []);
 export function c1BuildReport(flags, record) {
   const values = record?.conditions;
-  const keys = Object.values(C1_FLAGS).filter((key) => key !== "c2_mapping_contract" || flags[key] === "on" || values && typeof values === "object" && key in values);
+  const keys = Object.values(C1_FLAGS).filter((key) => !["c2_mapping_contract", "c2_requirement_coverage"].includes(key) || flags[key] === "on" || values && typeof values === "object" && key in values);
   const expected = Object.fromEntries(keys.map((k) => [k, flags[k] ?? "off"]));
   const observed = Object.fromEntries(keys.map((k) => [k, values && typeof values === "object" && k in values ? values[k] : "off"]));
   const enabled = Object.keys(flags).length > 0;

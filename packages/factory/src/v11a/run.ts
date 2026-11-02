@@ -282,6 +282,7 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
   readonly c1ReferenceEnum?: boolean;
   readonly c1ConditionalFields?: boolean;
   readonly c2MappingContract?: boolean;
+  readonly c2RequirementCoverage?: boolean;
   readonly c3Observability?: boolean;
   readonly stageEfforts?: StageEfforts;
   /**
@@ -1528,6 +1529,7 @@ async function runV11a(
             gateway: gateway.forStage("mapping"),
             rows,
             ...(input.c2MappingContract === true ? { c2MappingContract: true } : {}),
+            ...(input.c2RequirementCoverage === true ? { c2RequirementCoverage: true } : {}),
             ...(retry === undefined ? {} : { previous: retry }),
             onRejected: rejectionSink("mapping", round),
             ...withLedger,
