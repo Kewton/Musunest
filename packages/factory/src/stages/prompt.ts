@@ -190,7 +190,7 @@ export type StageFailure =
   /** 道具の引数が JSON として読めなかった（#302） */
   | { readonly kind: "toolArguments" }
   /** 応答が未完了だった（理由付き。拒否とは分ける。**同じ要求ではやり直さない**。§2.2・§1.5） */
-  | { readonly kind: "incomplete"; readonly reason: string }
+  | { readonly kind: "incomplete"; readonly reason: string; readonly responseStatus?: string }
   /** 要求そのものが不正だった（種類付き。拒否とは分ける。**同じ要求ではやり直さない**。§2.2） */
   | { readonly kind: "invalidRequest"; readonly code: string }
   /** 上のどれにも分類できない例外（**拒否に混ぜない**。#302） */
@@ -245,7 +245,7 @@ function mapCallFailure(result: CallFailure): StageFailure {
     case "limitExceeded":
       return { kind: "callLimit", limit: result.limit, max: result.max, actual: result.actual };
     case "incomplete":
-      return { kind: "incomplete", reason: result.reason };
+      return { kind: "incomplete", reason: result.reason, ...(result.responseStatus === undefined ? {} : { responseStatus: result.responseStatus }) };
     case "invalidRequest":
       return { kind: "invalidRequest", code: result.code };
     case "failed":

@@ -128,6 +128,7 @@ export interface FailureProblem {
 
 /** 失敗の帰属（どの段の・どの種類の失敗か。S-7） */
 export interface FailureAttribution {
+  readonly incomplete?: { readonly reason: string; readonly status: string };
   readonly stage: StageId;
   readonly kind: FailureKind;
   /**

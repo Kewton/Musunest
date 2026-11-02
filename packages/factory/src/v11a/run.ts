@@ -1,3 +1,5 @@
+import { C3Observability } from "../v12/c3-observability.js";
+import { incompleteReason, responseStatus } from "../call-diagnostics.js";
 // v1.1α の走らせる部分（07-architecture-v1.1a.md §1 の流れ図と表・§1.2〜§1.4・§3。Issue #510）。
 //
 // 確定した仕様（`plan`。最初の比較では凍結した組の確定した仕様）を入力に取り、planner は流さない。段の順：
@@ -280,6 +282,7 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
   readonly c1ReferenceEnum?: boolean;
   readonly c1ConditionalFields?: boolean;
   readonly c2MappingContract?: boolean;
+  readonly c3Observability?: boolean;
   readonly stageEfforts?: StageEfforts;
   /**
    * 段の出力の上限の上書きの表（段 → 値。Issue #776）。共通の口（`CallGateway`）と T2 の束ごとの口に渡し、
@@ -501,6 +504,7 @@ function stageFailureAttribution(stage: StageId, failure: StageFailure, withLimi
     return { stage, kind, limit: { name: failure.limit, max: failure.max, actual: failure.actual } };
   }
   if (failure.kind === "invalidRequest") return { stage, kind, code: failure.code };
+  if (failure.kind === "incomplete") return { stage, kind, incomplete: { reason: incompleteReason(failure.reason), status: responseStatus(failure.responseStatus) } };
   if (failure.kind === "malformed") {
     // 選ばれた失敗が形の誤りの印を持つときだけ足す（段の検査が落とした malformed〔problems あり〕は印を持たない。Issue #783）
     if (failure.malformedKind !== undefined) return { stage, kind, malformed_kind: failure.malformedKind };
@@ -824,6 +828,7 @@ async function runV11a(
   const resume = stageControl?.resume;
   // 実効の旗と、旗で選んだ台帳の導出（off なら undefined。段へは渡さない＝今の定数と関数。Issue #547）
   const flags = resolveV12Flags(input.flags);
+  const c3Observability = flags.ids && input.c3Observability !== false ? new C3Observability() : undefined;
   const ledger = ledgerViewOf(flags);
   const withLedger = ledger === undefined ? {} : { ledger };
   const flagsRecord = input.recordV12Flags === true ? { v12_flags: toPublicV12Flags(flags) } : {};
@@ -1254,7 +1259,7 @@ async function runV11a(
       summary,
       bundle: null,
       stopped: attribution,
-      diagnostics: [...diagnosticsFor(attribution, record, await rejectedCandidateRows()), ...buildTableRoundsFile(tableRoundRows(true))],
+      diagnostics: [...diagnosticsFor(attribution, record, await rejectedCandidateRows()), ...buildTableRoundsFile(tableRoundRows(true)), ...(await c3Observability?.files() ?? [])],
     };
   };
 
@@ -1335,6 +1340,7 @@ async function runV11a(
         })(),
         ...(testSpecCounts === undefined ? {} : { testSpec: testSpecCounts }),
         ...(rejectedRows.length === 0 ? {} : { rejected: rejectedRows }),
+        ...(c3Observability === undefined ? {} : { c3Diagnostics: await c3Observability.files() }),
         // 旗 `v12.ids` の C2 の回ごとの行（入口が診断に書く。行が無ければ欄を持たない。止まった走りは adopted が全部 false。Issue #699）
         ...(() => {
           const rounds = tableRoundRows(stopped !== null);
@@ -1415,6 +1421,7 @@ async function runV11a(
             advice: marks,
             documents: input.documents,
             gateway: gateway.forStage("semantic-check"),
+            ...(c3Observability === undefined ? {} : { observability: c3Observability }),
             ...withLedger,
             // 旗 `v12.ids`：R-sc-02 に構造の検査の読み方を足す（off は渡さない＝今の文のまま。表の targets の有無で推測しない。Issue #732）
             // 旗 `v12.ids`：対象を束に分けて同時に呼び、形のやり直しは 2 回の点検で共有した予算から使う（Issue #735）
@@ -2727,7 +2734,7 @@ async function runV11a(
       extraArtifacts,
     });
     // 診断（断った候補と、旗 `v12.ids` の C2 の回ごとの行）。どちらも納品物・記録・要約に入れない（Issue #501・#699）
-    const diagnostics = [...buildRejectedCandidateFiles(await rejectedCandidateRows()), ...buildTableRoundsFile(tableRoundRows(false))];
+    const diagnostics = [...buildRejectedCandidateFiles(await rejectedCandidateRows()), ...buildTableRoundsFile(tableRoundRows(false)), ...(await c3Observability?.files() ?? [])];
     return {
       kind: "generation",
       result: withBoundaries({

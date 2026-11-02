@@ -812,6 +812,7 @@ export interface StageVerificationCounts {
 
 /** 回す部分が返す、段の走りの結果 */
 export interface StageRunOutcome {
+  readonly c3Diagnostics?: readonly import("../bundle.js").BundleArtifact[];
   readonly providerBilling?: import("../provider-billing.js").ProviderBillingSummary;
   readonly stages: readonly StageRecord[];
   /** 範囲の中の早期停止（無ければ null） */

@@ -203,7 +203,7 @@ export class ProviderBillingLedger {
     estimate: (usage: LlmUsage) => number;
     settle: (guardUsd: number) => void;
     holdExcess: (excessUsd: number) => void;
-  }): { bind(signal: AbortSignal): void; close(allowSettlement?: boolean, failureKind?: string): void } {
+  }): { readonly attempt: number; bind(signal: AbortSignal): void; close(allowSettlement?: boolean, failureKind?: string): void } {
     this.register(input.pin);
     const row: ProviderBillingAttempt = {
       attempt: this.#attempts.length + 1, purpose: input.purpose, pin: input.pin,
@@ -247,6 +247,7 @@ export class ProviderBillingLedger {
       applyGuard();
     };
     return {
+      attempt: row.attempt,
       bind: (signal) => {
         bindProviderBilling(signal, (receipt) => note(receipt, signal));
         identityHooks.set(signal, (evidence) => {

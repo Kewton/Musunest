@@ -911,8 +911,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       ["ok", 0],
     ]);
     // 通る走りの診断は回ごとの行の 1 本だけ（候補が無い段のファイルは作らない。Issue #699）
-    expect(diagnosticPaths(clean.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
-    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_VOCABULARY_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(clean.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE, "diagnostics/semantic-check-observability.json"]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_VOCABULARY_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, "diagnostics/semantic-check-observability.json"]);
     const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ stage: "vocabulary", operation: null, call: 2, round: 1, attempt: 1, kind: "shape" });
@@ -932,7 +932,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(result.stopped).toBeNull();
     expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(result.record.stages.filter((record) => record.stage === "mapping").map((record) => [record.status, record.retries.shape])).toEqual([["ok", 1]]);
-    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, "diagnostics/semantic-check-observability.json"]);
     const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ stage: "mapping", operation: null, call: 1, round: 1, attempt: 1, kind: "shape" });
@@ -1059,7 +1059,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     ]);
     expect(countStage(carried.result, "semantic-check")).toBe(1);
     expect(carryEntriesOf(carried.result.bundle).map((entry) => entry.requirementId)).toEqual(["R3"]);
-    expect(diagnosticPaths(carried.result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(carried.result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, "diagnostics/semantic-check-observability.json"]);
     const candidates = rejectedOf(carried.result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(candidates).toHaveLength(1);
     // 2 回目は拒否された R3 だけの書き直しなので、候補は書き直した要件 1・保持した要件 3 の数を持つ（ID の値は持たない。Issue #661）
@@ -1078,7 +1078,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(passed.result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
     expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
-    expect(diagnosticPaths(passed.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(passed.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE, "diagnostics/semantic-check-observability.json"]);
   });
 
   /**
@@ -1801,7 +1801,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const r3 = MAPPED_IDS.verification.find((entry) => entry.requirementId === "R3");
     const r3Targets = r3?.kind === "structural" ? (r3.targets ?? []).reduce((sum, target) => sum + 1 + (target.sourceId === null ? 0 : 1), 0) : 0;
     expect(records[1]?.references).toEqual({ checked: 1 + r3Roles + r3Targets, unknown_ids: 0, duplicates: 0, cross_bundle_ids: 0 });
-    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE, "diagnostics/semantic-check-observability.json"]);
   });
 
   // ── 回ごとの行（`diagnostics/table-rounds.json`。Issue #699）────────────────────────

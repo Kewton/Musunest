@@ -1499,6 +1499,10 @@ async function runStageFromPlanFile(
     await deps.writeFile(joinPath(job.outDir, STAGE_DECLARATION_FILE), outcome.declaration.source);
   }
   await deps.writeFile(joinPath(job.outDir, STAGE_RUN_RECORD_FILE), stageJsonText(record));
+  for (const file of outcome.c3Diagnostics ?? []) {
+    await deps.makeDirectory(joinPath(job.outDir, "diagnostics"));
+    await deps.writeFile(joinPath(job.outDir, file.path), file.text);
+  }
   if (outcome.providerBilling !== undefined) {
     await deps.writeFile(joinPath(job.outDir, "provider-billing.json"), JSON.stringify(outcome.providerBilling));
   }

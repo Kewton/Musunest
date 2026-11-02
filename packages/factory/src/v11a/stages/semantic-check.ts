@@ -1,3 +1,4 @@
+import type { C3Observability } from "../../v12/c3-observability.js";
 // T1'' 表の意味の点検（07-architecture-v1.1a.md §1・§1.1・追加判断 A。Issue #507）。
 //
 // 名前の固定が防ぐのは事後の付け替えだけで、要件に対する表の意味の点検は別に要る（§1.1）。**LLM の別の会話**が
@@ -281,6 +282,7 @@ export function semanticShapeRetryBudgetOf(list: RequirementList): SemanticShape
 
 /** T1'' が受け取るもの */
 export interface SemanticCheckInput {
+  readonly observability?: C3Observability;
   /** 確定した仕様（引用の照合に使う。データには載せない） */
   readonly plan: ConfirmedPlan;
   readonly list: RequirementList;
@@ -395,6 +397,8 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
   const bundleRules = bundles.length > 1 ? [...rules, ...ruleTexts([SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION])] : rules;
   const callBundle = async (bundle: number): Promise<SemanticBundleResult> => {
     const bundleTargets = bundles[bundle] ?? [];
+    const trace = input.observability?.bundle(round, bundle, bundleTargets.length);
+    const bundleGateway = trace === undefined ? input.gateway : input.gateway.withObserver(trace.observer);
     let attempt = 0;
     let refused: readonly Problem[] | undefined;
     const check = (output: unknown): ShapeCheck<readonly SemanticJudgment[]> => {
@@ -410,10 +414,14 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
       return { ok: true, value: [] };
     };
     const references = bundles.length > 1 ? targets.filter((id) => !bundleTargets.includes(id)) : undefined;
-    const answer = await callStructuredChecked(input.gateway, {
-      request: semanticCheckRequest(input, bundleRules, bundleTargets, references),
-      check,
-    });
+    let answer;
+    try {
+      answer = await callStructuredChecked(bundleGateway, {
+        request: semanticCheckRequest(input, bundleRules, bundleTargets, references), check,
+        ...(trace === undefined ? {} : { onShapeRejected: (rejection: import("../../stages/prompt.js").ShapeRejection) => trace.reject(rejection.attempt, rejection.output, rejection.problems) }),
+      });
+    } catch (error) { trace?.thrown(); throw error; }
+    trace?.finish(answer.ok ? refused === undefined ? undefined : { kind: "malformed", attempts: 1, problems: refused } : answer.failure);
     if (!answer.ok) return { kind: "failed", failure: answer.failure };
     if (refused !== undefined) return { kind: "failed", failure: { kind: "malformed", attempts: 1, problems: refused } };
     return { kind: "ok", judgments: answer.value };

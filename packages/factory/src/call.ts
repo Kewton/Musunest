@@ -1,3 +1,4 @@
+import { addObserver, bindCallDiagnostic, callDiagnosticDetail, type CallDiagnosticDetail } from "./call-diagnostics.js";
 // 全 LLM 呼び出しを通す共通の口（02-architecture.md §1.5・§2.2）。
 //
 // **すべての LLM 呼び出しはこの口を通す**（段も adapter も、直接 `LlmClient` を呼ばない）。
@@ -149,6 +150,7 @@ export interface IncompleteResponseError extends Error {
   readonly kind: "incomplete";
   /** 未完了の理由（`max_output_tokens` など） */
   readonly reason: string;
+  readonly responseStatus?: string;
   /** 未完了でも usage は付くことがある。無ければ `undefined`（予約を残す） */
   readonly usage: LlmUsage | undefined;
 }
@@ -234,6 +236,8 @@ export type CallAttemptEnd =
 export interface CallAttemptObservation {
   /** 終わりを確定する（2 度目以降の呼び出しは無視される） */
   settle(end: CallAttemptEnd): void;
+  ledger?(attempt: number | null): void;
+  detail?(detail: CallDiagnosticDetail): void;
   /** 打ち切りのあとに client が遅れて応答・未完了を返した（usage が無ければ `undefined`） */
   late(usage: LlmUsage | undefined): void;
   /**
@@ -263,6 +267,7 @@ export function runNoteHook(key: object | undefined, bound: boolean): void {
  * `beginAttempt` は実呼び出しを始める直前に呼ばれ、始めなかった試行では呼ばれない。
  */
 export interface CallAttemptObserver {
+  beginCall?(): void;
   beginAttempt(): CallAttemptObservation;
 }
 
@@ -331,7 +336,7 @@ export type CallResult<T> =
   /** 呼び出しの回数の上限に触れた */
   | { readonly kind: "limitExceeded"; readonly limit: LimitName; readonly max: number; readonly actual: number }
   /** 応答が未完了だった（理由付き）。**同じ要求ではやり直さない**（§2.2・§1.5） */
-  | { readonly kind: "incomplete"; readonly reason: string; readonly usage: LlmUsage | undefined }
+  | { readonly kind: "incomplete"; readonly reason: string; readonly usage: LlmUsage | undefined; readonly responseStatus?: string }
   /** 要求そのものが不正だった（種類付き）。**同じ要求ではやり直さない**（§2.2） */
   | { readonly kind: "invalidRequest"; readonly code: string }
   /**
@@ -773,6 +778,18 @@ export class CallGateway {
     return view;
   }
 
+  /** Observation view shares all execution state and leaves request objects unchanged. */
+  withObserver(observer: CallAttemptObserver): CallGateway {
+    const view = new CallGateway({ client: this.#client, budget: this.#budget, rates: this.#rates,
+      now: this.#now, deadline: this.#deadline, limits: this.#limits, maxAttempts: this.#maxAttempts,
+      effort: this.#effort, callTimeoutMs: this.#callTimeoutMs,
+      ...(this.#gate === undefined ? {} : { gate: this.#gate }),
+      observer: addObserver(this.#observer, observer), recordMalformedKinds: this.#recordMalformedKinds,
+      stageOutputLimits: this.#stageOutputLimits });
+    view.#root = this.#root; view.#requestEffort = this.#requestEffort; view.#counts = this.#counts;
+    return view;
+  }
+
   /**
    * 段の出力の上限（`max_output_tokens`）を、effort と段から引く（§1.5・§2）。
    * **値は共通の上限の置き場所（limits.ts）にだけ置く**——段の側で値を書かない。
@@ -843,6 +860,7 @@ export class CallGateway {
 
   /** 構造化出力（①'・②'・⑤a・⑥'）を共通の口を通して呼ぶ */
   async callStructured<T>(request: LlmStructuredRequest): Promise<CallResult<LlmStructuredResponse<T>>> {
+    this.#observer?.beginCall?.();
     // 段の名前で引いた口だけ、要求に段の effort を載せる（指定の無い口の要求は今と同じ。Issue #664）
     const sent: LlmStructuredRequest = this.#requestEffort === undefined ? request : { ...request, effort: this.#requestEffort };
     return this.#run(structuredInputParts(sent), sent.maxOutputTokens, async (signal) => {
@@ -916,6 +934,7 @@ export class CallGateway {
       try {
         const accounting = this.#client.billingPin === undefined ? undefined
           : this.#budget.providerAttempt(this.#client.billingPin, reserved.reservation, this.#rates, "generation");
+        observation?.ledger?.(accounting?.attempt ?? null);
         const billedInvoke = accounting === undefined ? invoke : (signal: AbortSignal) => {
           accounting.bind(signal);
           return invoke(signal);
@@ -951,7 +970,7 @@ export class CallGateway {
           }
           // 未完了は usage の有無によらず**応答**として数える（誤りではない。Issue #446）
           this.#counts.attemptsResponded += 1;
-          return { kind: "incomplete", reason: error.reason, usage: error.usage };
+          return { kind: "incomplete", reason: error.reason, usage: error.usage, ...(error.responseStatus === undefined ? {} : { responseStatus: error.responseStatus }) };
         }
         // 要求そのものが不正な誤り（HTTP 400 など）は、拒否と分け、**同じ要求のままやり直さない**
         // ——やり直しても通らない（§2.2）。誤りの種類（code）だけを返し、本文の全文は残さない。
@@ -1026,6 +1045,7 @@ export class CallGateway {
     try {
       // 計量の加算の時点の印（遅着の帰属を、観測の callback の時点でなく加算の時点から解く。Issue #748 のレビュー R1）
       registerNoteHook(controller.signal, (bound) => observation?.note?.(bound));
+      if (observation?.detail !== undefined) bindCallDiagnostic(controller.signal, (detail) => observation.detail?.(detail));
       const call = invoke(controller.signal);
       if (observation === undefined) {
         // 打ち切ったあとに来る拒否を握る（待っていない側の拒否を、未処理のまま残さない）
@@ -1039,6 +1059,7 @@ export class CallGateway {
             },
             (error) => {
               const end = attemptEndOfError(error, this.#recordMalformedKinds);
+              observation.detail?.(callDiagnosticDetail(error, end));
               if (cancelled === undefined) observation.settle(end);
               else if (end.kind === "incomplete") observation.late(end.usage);
             },

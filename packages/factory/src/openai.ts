@@ -1,3 +1,4 @@
+import { noteWireDiagnostic } from "./call-diagnostics.js";
 // @musunest/factory —— OpenAI の Responses API の adapter（02-architecture.md §2・§2.1・§2.2）。
 //
 // 共通の契約の `LlmClient`（llm.ts）を、**`fetch` だけ**で実装する。手元でも Worker でも同じものが
@@ -158,9 +159,12 @@ export class OpenAiIncompleteError extends OpenAiAdapterError {
   /** 未完了でも付く usage。無ければ `undefined`（共通の口が予約を残す） */
   readonly usage: LlmUsage | undefined;
 
-  constructor(reason: string, usage: LlmUsage | undefined, message: string) {
+  readonly responseStatus?: string;
+
+  constructor(reason: string, usage: LlmUsage | undefined, message: string, responseStatus?: string) {
     super("incomplete", message);
     this.name = "OpenAiIncompleteError";
+    if (responseStatus !== undefined) this.responseStatus = responseStatus;
     this.reason = reason;
     this.usage = usage;
   }
@@ -460,6 +464,7 @@ async function requestWire(
       }
       throw new OpenAiAdapterError("network", `応答の本文を読めませんでした: ${messageOf(error)}`);
     }
+    noteWireDiagnostic(signal, response.status, text);
     if (config.observeWire !== undefined) {
       const observed = tryParseJson(text);
       await config.observeWire(observed.ok ? observed.value : undefined, signal, controller.signal);
@@ -910,6 +915,7 @@ function requireCompleted(wire: Record<string, unknown>, usage: LlmUsage | undef
       reason,
       usage,
       `応答が完了していません（status=${status}${reason === "" ? "" : `, reason=${reason}`}）`,
+      status,
     );
   }
 }

@@ -195,6 +195,18 @@ const realFileDeps = () => ({
 
 // ── 引数の読み取り ───────────────────────────────────────────────
 
+
+/** S-175ag adds only this diagnostic file; legacy output hash baselines remain unchanged. */
+async function legacyFilesAfterC3Check(paths: readonly string[], textOf: (path: string) => Promise<string>): Promise<readonly string[]> {
+  const file = "diagnostics/semantic-check-observability.json";
+  if (paths.includes(file)) {
+    const diagnostic = JSON.parse(await textOf(file)) as { schema: string; bundles: { terminal: string; attempts: unknown[] }[] };
+    expect(diagnostic.schema).toBe("factory/semantic-check-observability/v1");
+    expect(diagnostic.bundles.length).toBeGreaterThan(0);
+    expect(diagnostic.bundles.every((bundle) => bundle.terminal !== null && Array.isArray(bundle.attempts))).toBe(true);
+  }
+  return paths.filter((path) => path !== file);
+}
 describe("引数の読み取り（02 §3.2）", () => {
   it("`-- <依頼文> --out <ディレクトリ>` を読む", () => {
     expect(parseCliArguments(["--", "request.txt", "--out", "out"])).toEqual({
@@ -2004,7 +2016,7 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     expect(run.code).toBe(EXIT_OK);
     // 一気通貫の v1.2 と同じ封筒を選ぶ
     expect(run.makeClient.mock.calls).toEqual([[{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.2-ids" }]]);
-    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, "diagnostics/semantic-check-observability.json", DIAGNOSTICS_TABLE_ROUNDS_FILE]);
     const record = await stageRecordOf(dir);
     expect(new Set(stagesOf(record))).toEqual(new Set(["vocabulary", "mapping", "semantic-check"]));
     expect(record["range"]).toEqual({ start: "name-table", end: "semantic-check" });
@@ -2466,7 +2478,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     before[0]!.output_digest = await stageOutputDigest(checkpoint);
     expect([await sha256Hex(stageJsonText(record)), await sha256Hex(stageJsonText(checkpoint))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_713);
     expect(run.code).toBe(EXIT_OK);
-    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_VOCABULARY_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, "diagnostics/semantic-check-observability.json", DIAGNOSTICS_REJECTED_VOCABULARY_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
     expect(run.lines.at(-1)).toBe(
       JSON.stringify({ stage_pass: true, reached_stage: "semantic-check", budget_scope: "stage-run", exit_code: EXIT_OK }),
     );
@@ -2537,6 +2549,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
       stageCheckpointFile("t1-t2"),
       stageCheckpointFile("t2-b1"),
       STAGE_RUN_RECORD_FILE,
+      "diagnostics/semantic-check-observability.json",
       DIAGNOSTICS_REJECTED_TEST_SPEC_FILE,
       DIAGNOSTICS_TABLE_ROUNDS_FILE,
     ]);
@@ -2552,7 +2565,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     const dir = `${directory}/v12-stage-diag-none`;
     const run = await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: segment0(), pipeline: "v1.2" });
     expect(run.code).toBe(EXIT_OK);
-    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, "diagnostics/semantic-check-observability.json", DIAGNOSTICS_TABLE_ROUNDS_FILE]);
     // 回ごとの行の 1 本だけを書き、候補のファイルは無い
     const rounds = (JSON.parse(await fs.readFile(`${dir}/${DIAGNOSTICS_TABLE_ROUNDS_FILE}`, "utf8")) as { readonly rounds: readonly unknown[] }).rounds;
     expect(rounds).toHaveLength(1);
@@ -2831,6 +2844,7 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
       const text = await fs.readFile(`${dir}/${path}`, "utf8");
       return path === BUNDLE_MANIFEST_FILE ? text.replaceAll(JSON.stringify(dir), JSON.stringify("<out>")) : text;
     };
+    written = await legacyFilesAfterC3Check(written, textOf);
     const files: Record<string, string> = {};
     for (const path of [...written].sort()) files[path] = await sha256Hex(await textOf(path));
     const upstream: Record<string, unknown> = {};
@@ -5340,6 +5354,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     }
     if (timing !== undefined) timing.runMs += performance.now() - runStart;
     vi.restoreAllMocks();
+    written = await legacyFilesAfterC3Check(written, (path) => fs.readFile(`${dir}/${path}`, "utf8"));
     let hasSearch = false;
     /** 費用の印への置換に使う、ディレクトリを目印に置き換えた全ファイルの本文 */
     const budgetSources: { readonly path: string; readonly text: string }[] = [];
