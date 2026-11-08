@@ -453,7 +453,7 @@ describe("旗 v12.ids：要る検査の骨組みを渡したときだけ、「�
     JSON.parse(input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "null");
 
   it("骨組みは固定した試験から導いた 1 件（item・amount）", () => {
-    expect(SKELETON).toEqual([{ entity: "item", name: "amount", rowId: "f.item.amount", rowKind: "field", testIds: ["t1"], conflict: false }]);
+    expect(SKELETON).toEqual([{ requirementId: "R1", entity: "item", targets: ["amount"], testIds: ["t1"], conflict: false }]);
   });
 
   it("R-w11-07 の旗 ids の文：ID・why は同じで since に履歴。元の禁止の文をそのまま含み、例外は骨組みに競合なしで列挙された検査だけ（j：骨組みに無い要素に表の名前を許す文が無い）。規則の不備は 0", () => {
@@ -467,8 +467,9 @@ describe("旗 v12.ids：要る検査の骨組みを渡したときだけ、「�
     const added = text.slice(original.text.length);
     // 例外の文は 1 つで、骨組みに競合なしで列挙された検査だけを指す
     expect(added.match(/例外/g)).toHaveLength(1);
-    expect(added).toContain("この禁止の唯一の例外は、データ「要る検査の骨組み」に競合なしで列挙された検査で、その entity と名前で validations に 1 つずつ書く");
-    expect(added).toContain("競合の印の付いた件は書かない。");
+    expect(added).toContain("この禁止の唯一の例外は、データ「要る検査の骨組み」の件ごとに、その entity に、式がちょうどその項目を参照する検査を 1 つ書くことである");
+    expect(added).toContain("名前は builder が決め、表の名前を奪わない。");
+    expect(added).toContain("競合の印の付いた件も書く（その要件の試験は未解決になる）。");
     expect(added).toContain("骨組みに無い補助の要素には表の名前を使わない。");
     expect(added).not.toMatch(/計算.*例外|例外.*計算/);
     expect(added).not.toMatch(/使ってよい|奪ってよい/);

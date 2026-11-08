@@ -10,6 +10,8 @@ import { FIXTURE_YAML, fixtureList, fixtureTable, fixtureYaml, normalizedFixture
 import { bindTestsById, correspondenceFromTable, requiredValidationsOf } from "../v11a/bind-by-id.js";
 import { toV1 } from "../v11a/convert.js";
 import { createV11aEvaluator } from "../v11a/evaluate.js";
+import type { NameTable } from "../v11a/names.js";
+import { validationWorldOfDocument } from "../v11a/bind-by-id.js";
 import type { TestObserves } from "../v11a/stages/test-spec.js";
 import {
   buildRepairDiagnostic,
@@ -307,7 +309,7 @@ describe("旗 v12.ids の場所（純粋）：validate の試験は結び付け�
       ["test-unresolved", "v-abnormal", ["validation:item.amount"]],
     ]);
     expect(result.locations).toEqual(["validation:item.amount"]);
-    expect(result.additions).toEqual([{ key: "validation:item.amount", entity: "item", name: "amount" }]);
+    expect(result.additions).toEqual([{ key: "validation:item.amount", entity: "item", targets: ["amount"], name: "amount" }]);
     expect(canRepairFields(result)).toBe(true);
     // 二点測定の「前」：off（ids を渡さない）は同じ失敗が全部場所なし（no-element）で、欄だけの直しを使えない
     const off = locateFailures(input({ suite, source: NO_VALIDATION_YAML, mismatches: [{ testId: "v-normal" }], unresolved: [{ testId: "v-abnormal" }] }));
@@ -339,7 +341,7 @@ describe("旗 v12.ids の場所（純粋）：validate の試験は結び付け�
     const failures = { mismatches: [{ testId: "v-entity" }, { testId: "x-entity-compute" }] };
     const added = locateFailures(idsInput(suite, { ...failures }));
     expect(added.located.map((failure) => [failure.testId, failure.locations])).toEqual([["v-entity", ["validation:item.item"]]]);
-    expect(added.additions).toEqual([{ key: "validation:item.item", entity: "item", name: "item" }]);
+    expect(added.additions).toEqual([{ key: "validation:item.item", entity: "item", targets: ["item"], name: "item" }]);
     expect(added.unlocated.map((failure) => [failure.testId, failure.reason])).toEqual([["x-entity-compute", "no-element"]]);
     const present = withValidations(["  - name: item", "    entity: item", "    expression: amount > 0"]);
     const replaced = locateFailures(idsInput(suite, { source: present, ...failures }));
@@ -364,7 +366,7 @@ describe("旗 v12.ids の場所（純粋）：validate の試験は結び付け�
   it("(4') 検査 0 の版で 2 つの entity の同名の項目が両方 validate 不一致 → 骨組みの競合の印でどちらも追加の場所にならず場所なし（片方を選ばない）", () => {
     const suite: TestSuite = { tests: [vtest("v-member-title", "f.member.title"), vtest("v-item-title", "f.item.title")] };
     const value = idsInput(suite, { source: NO_VALIDATION_YAML, mismatches: [{ testId: "v-member-title" }, { testId: "v-item-title" }] });
-    expect(value.ids?.requiredValidations.map((entry) => [entry.entity, entry.name, entry.conflict])).toEqual([
+    expect(value.ids?.requiredValidations.map((entry) => [entry.entity, entry.targets[0], entry.conflict])).toEqual([
       ["member", "title", true],
       ["item", "title", true],
     ]);
@@ -403,7 +405,7 @@ describe("旗 v12.ids の場所（純粋）：validate の試験は結び付け�
     // 同じ検査を並びの書き方にすれば追加の場所になる（対照）
     const block = withValidations(["  - name: positive", "    entity: item", "    expression: amount > 0"]);
     expect(locateFailures(idsInput(suite, { source: block, mismatches: [{ testId: "v-amount" }] })).additions).toEqual([
-      { key: "validation:item.amount", entity: "item", name: "amount" },
+      { key: "validation:item.amount", entity: "item", targets: ["amount"], name: "amount" },
     ]);
   });
 
@@ -458,7 +460,7 @@ describe("旗 v12.ids の場所（純粋）：validate の試験は結び付け�
     const suite: TestSuite = { tests: [vtest("v-amount", "f.item.amount")] };
     const result = locateFailures(idsInput(suite, { source, mismatches: [{ testId: "v-amount" }] }));
     expect(result.locations).toEqual(["validation:item.amount"]);
-    expect(result.additions).toEqual([{ key: "validation:item.amount", entity: "item", name: "amount" }]);
+    expect(result.additions).toEqual([{ key: "validation:item.amount", entity: "item", targets: ["amount"], name: "amount" }]);
     expect(result.locations).not.toContain("validation:item.positive");
   });
 
@@ -468,8 +470,8 @@ describe("旗 v12.ids の場所（純粋）：validate の試験は結び付け�
     const value = idsInput(suite, failures);
     expect(JSON.stringify(locateFailures(value))).toBe(JSON.stringify(locateFailures(value)));
     expect(locateFailures(value).additions).toEqual([
-      { key: "validation:item.amount", entity: "item", name: "amount" },
-      { key: "validation:item.item", entity: "item", name: "item" },
+      { key: "validation:item.amount", entity: "item", targets: ["amount"], name: "amount" },
+      { key: "validation:item.item", entity: "item", targets: ["item"], name: "item" },
     ]);
     expect("additions" in locateFailures(input({ suite, ...failures }))).toBe(false);
   });
@@ -503,8 +505,8 @@ describe("旗 v12.ids の場所（純粋）：validate の試験は結び付け�
     }
     expect([...bound.values()].map((entry) => entry.kind)).toEqual(["bound", "bound", "unbound", "unbound"]);
     expect(result.additions).toEqual([
-      { key: "validation:item.title", entity: "item", name: "title" },
-      { key: "validation:member.member", entity: "member", name: "member" },
+      { key: "validation:item.title", entity: "item", targets: ["title"], name: "title" },
+      { key: "validation:member.member", entity: "member", targets: ["member"], name: "member" },
     ]);
   });
 
@@ -820,6 +822,96 @@ describe("修復へ渡す診断（純粋。Issue #761）：C7・B3・B3' を、�
     expect(entry.details).toEqual(["不一致の detail（実際 3・期待 5）", "未解決の detail（入力の型が違う）"]);
     // 1 件のまま（detail ごとに 2 件に増やさない）
     expect(diagnostic.tests.map((candidate) => candidate.testId)).toEqual(["r1-validate"]);
+  });
+});
+
+// ── 旗 v12.ids：検査の式の要件の場所と追加（Issue #801）──────────────────────────
+
+/** 検査の式の要件 R1（item の amount と rate）を持つ表 */
+const EXPR_TABLE: NameTable = {
+  rows: [
+    { id: "e.item", kind: "entity", entity: null, name: "item", role: "", source: null as never, type: null, options: null, groupBy: null, refEntity: null },
+    { id: "f.item.amount", kind: "field", entity: "e.item", name: "amount", role: "", source: null as never, type: "number", options: null, groupBy: null, refEntity: null },
+    { id: "f.item.rate", kind: "field", entity: "e.item", name: "rate", role: "", source: null as never, type: "number", options: null, groupBy: null, refEntity: null },
+  ],
+  ownership: [],
+  verification: [{ requirementId: "R1", kind: "validation-expression", targets: ["f.item.rate", "f.item.amount"] }],
+  classification: [],
+};
+
+const EXPR_SOURCE_EMPTY = [
+  "entities:",
+  "  - name: item",
+  "    fields:",
+  "      amount:",
+  "        type: number",
+  "      rate:",
+  "        type: number",
+  "computed:",
+  "  - name: double",
+  "    entity: item",
+  "    expression: amount * 2",
+  "    type: number",
+  "validations: []",
+  "actions: []",
+  "views: []",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+const expressionLocate = (source: string, conflict = false): LocateInput => ({
+  source,
+  table: EXPR_TABLE,
+  suite: { tests: [vtest("v", "f.item.amount", "field")] },
+  staticCheckPassed: true,
+  diagnostics: [],
+  correspondenceMisses: [],
+  rejections: [],
+  unmarked: [],
+  mismatches: [{ testId: "v" }],
+  unresolved: [],
+  ids: {
+    observes: new Map<string, TestObserves>([["v", "validation"]]),
+    requiredValidations: [{ requirementId: "R1", entity: "item", targets: ["amount", "rate"], testIds: ["v"], conflict }],
+  },
+});
+
+describe("旗 v12.ids：検査の式の要件は参照の集合で場所を決め、追加の場所は entity と集合から組む（Issue #801）", () => {
+  it("(1) 同じ集合の検査が無ければ、entity と正規化した集合の追加の場所 1 つ。同じ集合の検査が 1 つならその置換の場所", () => {
+    const added = locateFailures(expressionLocate(EXPR_SOURCE_EMPTY));
+    expect(added.additions).toEqual([{ key: "validation:item.amount+rate", entity: "item", targets: ["amount", "rate"] }]);
+    expect(added.located.map((failure) => failure.locations)).toEqual([["validation:item.amount+rate"]]);
+    const present = EXPR_SOURCE_EMPTY.replace(
+      "validations: []",
+      "validations:\n  - name: positive\n    entity: item\n    expression: rate + amount > 0",
+    );
+    const replaced = locateFailures(expressionLocate(present));
+    expect(replaced.located.map((failure) => failure.locations)).toEqual([["validation:item.positive"]]);
+    expect(replaced.additions).toEqual([]);
+  });
+
+  it("(2) 同じ集合の検査が 2 つ・競合の印・entity が宣言に無い → 場所なし（追加しない）", () => {
+    const two = EXPR_SOURCE_EMPTY.replace(
+      "validations: []",
+      "validations:\n  - name: one\n    entity: item\n    expression: amount + rate > 0\n  - name: two\n    entity: item\n    expression: rate + amount > 1",
+    );
+    expect(locateFailures(expressionLocate(two)).located).toEqual([]);
+    expect(locateFailures(expressionLocate(two)).additions).toEqual([]);
+    expect(locateFailures(expressionLocate(EXPR_SOURCE_EMPTY, true)).located).toEqual([]);
+    expect(locateFailures(expressionLocate(EXPR_SOURCE_EMPTY, true)).additions).toEqual([]);
+    const noEntity = EXPR_SOURCE_EMPTY.replace("  - name: item", "  - name: person");
+    expect(locateFailures(expressionLocate(noEntity)).additions).toEqual([]);
+  });
+
+  it("(3) 参照の集合の関数は同じ宣言の写しを使う（解決できない名前の検査は候補にしない）", () => {
+    const world = validationWorldOfDocument({
+      entities: [{ name: "item", fields: { amount: {}, rate: {} } }],
+      computed: [{ name: "double", entity: "item", expression: "amount * 2" }],
+      validations: [],
+    });
+    expect(world.entities.map((entity) => entity.name)).toEqual(["item"]);
   });
 });
 

@@ -89,18 +89,20 @@ export const DECL_CHECK_RULES: readonly string[] = ruleTexts(DECL_CHECK_RULE_DEF
 export const DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME = "要件に結び付いた検査";
 
 /**
- * R-dc-03 の ids の文に足す文（Issue #795）。結び付いた検査を所属に準ずる補助のデータとして扱わせ、塊そのものを
- * 要件が求めることの一覧や正しさの証明として読ませない。検査の式の意味は宣言から独立に読ませる。
+ * R-dc-03 の ids の文に足す文（Issue #795・#801）。結び付いた検査を所属に準ずる補助のデータとして扱わせ、塊そのものを
+ * 要件が求めることの一覧や正しさの証明として読ませない。検査の式の意味は宣言から独立に読ませ、`name` の null だけで
+ * 検査の欠落を推定させず、要件の文が求めない検査が無いことを拒否の理由にさせない。独立に欠落を確かめたときだけ
+ * empty-location で拒否させる。
  */
 export const DECL_CHECK_R03_IDS_SUFFIX =
-  "データの「要件に結び付いた検査」にある検査は、その要件の所属に準ずるものとして見て、追加の要素にあっても behavior-outside-ownership にしない。その塊は要件が求めることの一覧でも、正しさの証明でもない。検査の式が要件と合うかは宣言から読む。要件の文が求めない検査が無いことを拒否の理由にしない";
+  "データの「要件に結び付いた検査」にある検査は、その要件の所属に準ずるものとして見て、追加の要素にあっても behavior-outside-ownership にしない。その塊は要件が求めることの一覧でも、正しさの証明でもない。検査の式が要件と合うかは宣言から読む。塊の要素の name が null であることだけから、要件が求める検査の欠落を推定しない。要件の文が求めない検査が無いことを拒否の理由にしない。要件の文と宣言から、要件が求める検査の欠落を独立に確かめたときは empty-location で拒否する";
 
-/** R-dc-03 の ids の定義（今の文の後ろに `DECL_CHECK_R03_IDS_SUFFIX` を足したもの。Issue #795） */
+/** R-dc-03 の ids の定義（今の文の後ろに `DECL_CHECK_R03_IDS_SUFFIX` を足したもの。Issue #795・#801） */
 export const DECL_CHECK_IDS_R03_DEFINITION: RuleDefinition = {
   id: "R-dc-03",
   text: `${DECL_CHECK_RULE_DEFINITIONS.find((definition) => definition.id === "R-dc-03")?.text ?? ""}${DECL_CHECK_R03_IDS_SUFFIX}`,
-  why: "結び付いた検査による誤拒否を減らし、塊を補助のデータとして扱わせる（検査の式の意味は宣言から独立に読む。Issue #795）",
-  since: "Issue #507・旗 v12.ids の文は Issue #795（結び付いた検査を所属の外と数えない）",
+  why: "結び付いた検査による誤拒否を減らし、塊を補助のデータとして扱わせる（検査の式の意味は宣言から独立に読む。Issue #795・#801）",
+  since: "Issue #507・旗 v12.ids の文は Issue #795（結び付いた検査を所属の外と数えない）・#801（name の null から欠落を推定しない）",
 };
 
 /** B3' に足す規則の定義（flags の ids が真なら R-dc-03 だけ ids の文にする。Issue #795） */
@@ -121,12 +123,14 @@ export function declCheckRulesOf(ids: boolean): readonly string[] {
 export const DECL_CHECK_SCHEMA = judgmentsSchema(DECL_REJECTION_KINDS);
 
 /**
- * 要件に結び付いた検査 1 つ（B3' の要求の塊の要素。Issue #795）。所属 entity の名前・検査の名前・競合の印だけを持ち、
- * 試験の ID・期待・入力・合否・観測する性質は持たない（B3' の独立）。
+ * 要件に結び付いた検査 1 つ（B3' の要求の塊の要素。Issue #795・#801）。所属 entity の名前・対象の項目の名前の並び・
+ * この宣言で一意に結び付いた検査の名前（候補 0・2 つ以上・競合は null）・競合の印だけを持ち、試験の ID・期待・入力・合否・
+ * 観測する性質は持たない（B3' の独立）。
  */
 export interface DeclLinkedValidation {
   readonly entity: string | null;
-  readonly name: string;
+  readonly targets: readonly string[];
+  readonly name: string | null;
   readonly conflict: boolean;
 }
 

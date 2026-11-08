@@ -62,7 +62,7 @@
 // 「T1・T1'' のあとに残った全要件」に求める形なので、B6 で除いたあとの版の B3' の結果と組めない）。除く行の
 // 規則（その要件だけが所属させる行）とぶら下がりの検査は A1 と同じ関数（`ownersByRowId`・
 // `danglingRowReferences`・`pruneForCarryOver`）で掛ける。
-import type { ConfirmedPlan } from "@musunest/appspec-schema";
+import type { ConfirmedPlan, NormalizedAppSpec } from "@musunest/appspec-schema";
 import { sha256Hex, type Diagnostic } from "@musunest/spec-engine";
 import { JobBudget } from "../budget.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse, MalformedKindCounts, MalformedKindKey } from "../llm.js";
@@ -136,7 +136,16 @@ import {
 import { runStaticCheck } from "../stages/static-check.js";
 import type { DroppedNonstructuralTest } from "../stages/test-suite.js";
 import type { EvaluationContext } from "../stages/tools.js";
-import { correspondenceFromTable, extraElementsOf, markRows, requiredValidationsOf, type RequiredValidation } from "./bind-by-id.js";
+import {
+  correspondenceFromTable,
+  extraElementsOf,
+  markRows,
+  referenceFieldNamesOf,
+  requiredValidationsOf,
+  sameNameSet,
+  validationWorldOf,
+  type RequiredValidation,
+} from "./bind-by-id.js";
 import {
   buildTableRoundsFile,
   buildV11aArtifacts,
@@ -733,18 +742,54 @@ export function linkedValidationsByRequirement(
   suite: TestSuite,
   requiredValidations: readonly RequiredValidation[],
   requirementOrder: readonly string[],
+  table?: NameTable,
+  app?: NormalizedAppSpec,
 ): readonly DeclLinkedValidations[] {
+  const verificationById = new Map((table?.verification ?? []).map((entry) => [entry.requirementId, entry] as const));
+  const world = app === undefined ? undefined : validationWorldOf(app);
+  /** この宣言で一意に結び付いた検査の名前（候補 0・2 つ以上・競合は null。Issue #801） */
+  const nameOf = (entry: RequiredValidation): string | null => {
+    if (verificationById.get(entry.requirementId)?.kind === "validation-expression") {
+      if (entry.conflict || world === undefined) return null;
+      const wanted = new Set(entry.targets);
+      const candidates = world.validations.filter((validation) => {
+        if (validation.entity !== entry.entity) return false;
+        const references = referenceFieldNamesOf(world, validation.entity, validation.expression);
+        return references !== null && sameNameSet(references, wanted);
+      });
+      return candidates.length === 1 ? (candidates[0]?.name ?? null) : null;
+    }
+    // 名前で結ぶ契約のままの種類：対象の行の名前と同じ名前の検査が宣言に在れば、それが結び付く名前。
+    // 宣言を渡さない呼び出し（射影の単体）では、対象の名前をそのまま検査の名前として返す
+    const name = entry.targets[0];
+    if (name === undefined) return null;
+    if (world === undefined) return name;
+    return world.validations.some((validation) => validation.entity === entry.entity && validation.name === name) ? name : null;
+  };
   const requirementOfTest = new Map(suite.tests.map((test) => [test.id, test.target.requirementId] as const));
-  const byRequirement = new Map<string, { entity: string | null; name: string; conflict: boolean }[]>();
-  for (const validation of requiredValidations) {
-    const linked = { entity: validation.entity, name: validation.name, conflict: validation.conflict };
-    const seen = new Set<string>();
-    for (const testId of validation.testIds) {
-      const requirementId = requirementOfTest.get(testId);
-      if (requirementId === undefined || seen.has(requirementId)) continue;
-      seen.add(requirementId);
+  const byRequirement = new Map<string, DeclLinkedValidations["validations"][number][]>();
+  for (const entry of requiredValidations) {
+    const linked = { entity: entry.entity, targets: entry.targets, name: nameOf(entry), conflict: entry.conflict };
+    // 共有の検査（同じ行を複数の要件の試験が要求する）は、それぞれの要件に載せる（Issue #795）
+    const requirementIds = new Set(
+      entry.testIds.flatMap((testId) => {
+        const requirementId = requirementOfTest.get(testId);
+        return requirementId === undefined ? [] : [requirementId];
+      }),
+    );
+    for (const requirementId of requirementIds) {
+      if (!requirementOrder.includes(requirementId)) continue;
       const validations = byRequirement.get(requirementId) ?? [];
-      if (!validations.some((entry) => entry.entity === linked.entity && entry.name === linked.name)) validations.push(linked);
+      if (
+        !validations.some(
+          (candidate) =>
+            candidate.entity === linked.entity &&
+            candidate.name === linked.name &&
+            sameNameSet(new Set(candidate.targets), new Set(linked.targets)),
+        )
+      ) {
+        validations.push(linked);
+      }
       byRequirement.set(requirementId, validations);
     }
   }
@@ -1949,6 +1994,8 @@ async function runV11a(
                 context.suite,
                 requiredValidationsOf(table, context.suite, testSpec.observes),
                 targets,
+                table,
+                app,
               )
             : undefined;
           const output = await runStageOk("decl-check", async (): Promise<StageOutcome<DeclCheckOutput>> => {
@@ -2505,6 +2552,7 @@ async function runV11a(
               suite: context.suite,
               declaration: best.report.declaration.source,
               failures: located,
+              takenNames: table.rows.map((row) => row.name),
               ...repairDiagnosticFor(best, context.suite),
               documents: input.documents,
               gateway: gateway.forStage("repair"),

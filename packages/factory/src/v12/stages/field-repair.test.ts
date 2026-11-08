@@ -13,7 +13,7 @@ import { createRecordingClient, makeGateway } from "../../stages/__tests__/promp
 import { ruleDefinitionDefects, SHAPE_PROBLEMS_DATA_NAME } from "../../stages/prompt.js";
 import { strictSchemaProblems } from "../../stages/schema-strict.test.js";
 import { FIXTURE_DOCUMENTS, FIXTURE_YAML, fixtureList, fixtureTable, fixtureYaml } from "../../v11a/__tests__/fixtures.js";
-import { requiredValidationsOf } from "../../v11a/bind-by-id.js";
+import { requiredValidationsOf, validationWorldOfDocument } from "../../v11a/bind-by-id.js";
 import { canonicalJson } from "../../v11a/names.js";
 import type { TestObserves } from "../../v11a/stages/test-spec.js";
 import { expectNoAcceptanceMaterial } from "../../stages/__tests__/prompt.js";
@@ -345,7 +345,7 @@ describe("旗 v12.ids の欄だけの直し：追加の場所を enum とデー�
     };
     const { outcome, recording, failures } = await runIds([structured(answer)], EMPTY_YAML, ["v-normal", "v-abnormal", "r3-when"]);
     expect(outcome).toEqual({ ok: true, value: { replacements: answer.replacements, disputes: [], rejected: [] } });
-    expect(failures.additions).toEqual([{ key: AMOUNT, entity: "item", name: "amount" }]);
+    expect(failures.additions).toEqual([{ key: AMOUNT, entity: "item", targets: ["amount"], name: "amount" }]);
     const [request] = recording.structured;
     if (request === undefined) throw new Error("前提が壊れた：要求が無い");
     expect(enumOf(request.schema)).toEqual([AMOUNT, CLOSE]);
@@ -359,7 +359,7 @@ describe("旗 v12.ids の欄だけの直し：追加の場所を enum とデー�
     expect(request.rules).toEqual(FIELD_REPAIR_IDS_RULE_DEFINITIONS.map((definition) => definition.text));
     expect(FIELD_REPAIR_IDS_RULE_DEFINITIONS).toEqual([...FIELD_REPAIR_RULE_DEFINITIONS, FIELD_REPAIR_IDS_R07_DEFINITION]);
     expect(FIELD_REPAIR_IDS_R07_DEFINITION.text).toBe(
-      "追加の場所には、その entity と名前の検査 1 つの本文を `-` で始まる行から書く。名前と entity は変えない。式は要件と固定した試験から書く。別の要素を書かない。",
+      "追加の場所には、その entity に、式が示された項目をちょうど参照する検査 1 つの本文を `-` で始まる行から書く。名前は表の名前を奪わない。entity は変えない。式は要件と固定した試験から書く。別の要素を書かない。",
     );
     expect(ruleDefinitionDefects(FIELD_REPAIR_IDS_RULE_DEFINITIONS)).toEqual([]);
     expect(FIELD_REPAIR_RULE_DEFINITIONS.map((definition) => definition.id)).toEqual(["R-fr-01", "R-fr-02", "R-fr-03", "R-fr-04", "R-fr-05", "R-fr-06"]);
@@ -370,7 +370,7 @@ describe("旗 v12.ids の欄だけの直し：追加の場所を enum とデー�
 
   const good = { replacements: [{ location: AMOUNT, element: validationBody("amount", "amount > 0") }], disputes: [] };
   const badShapes: readonly (readonly [string, string, string, string])[] = [
-    ["名前が場所と違う追加", AMOUNT, validationBody("positive", "amount > 0"), FIELD_REPAIR_PROBLEMS.wrongName],
+    ["要求と違う名前の追加（名前で結ぶ種類）", AMOUNT, validationBody("positive", "amount > 0"), FIELD_REPAIR_PROBLEMS.wrongName],
     ["存在しない entity の名前を書いた追加", AMOUNT, validationBody("amount", "amount > 0").replace("entity: item", "entity: nowhere"), FIELD_REPAIR_PROBLEMS.wrongName],
     ["検査 2 つの追加", AMOUNT, `${validationBody("amount", "amount > 0")}\n${validationBody("other", "amount > 1")}`, FIELD_REPAIR_PROBLEMS.wrongKind],
     ["検査以外の要素（計算の欄）の追加", AMOUNT, validationBody("amount", "amount > 0", ["  type: number"]), FIELD_REPAIR_PROBLEMS.notValidation],
@@ -423,7 +423,7 @@ describe("旗 v12.ids の欄だけの直し：追加の場所を enum とデー�
 
   it("マージ：並びのある宣言は末尾に挿し込み、既存の検査と外の値が深く等しく、検査の数が +1。追加と置換の混在が 1 回で通る", () => {
     const failures = idsLocate(FIXTURE_YAML, ["v-entity", "v-normal", "r3-when"]);
-    expect(failures.additions).toEqual([{ key: ITEM, entity: "item", name: "item" }]);
+    expect(failures.additions).toEqual([{ key: ITEM, entity: "item", targets: ["item"], name: "item" }]);
     expect(failures.locations).toEqual([ITEM, AMOUNT, CLOSE]);
     const merged = mergeReplacements(
       FIXTURE_YAML,
@@ -456,7 +456,7 @@ describe("旗 v12.ids の欄だけの直し：追加の場所を enum とデー�
     const none = idsLocate(NO_SECTION_YAML, ["v-normal"]);
     expect(none.additions).toEqual([]);
     expect(none.unlocated.map((failure) => failure.reason)).toEqual(["no-element"]);
-    const addition = { key: AMOUNT, entity: "item", name: "amount" };
+    const addition = { key: AMOUNT, entity: "item", targets: ["amount"] };
     expect(mergeReplacements(NO_SECTION_YAML, [{ location: AMOUNT, element: validationBody("amount", "amount > 0") }], none.spans, [addition])).toEqual({
       ok: false,
       refusal: MERGE_REFUSALS.noSection,
@@ -469,8 +469,8 @@ describe("旗 v12.ids の欄だけの直し：追加の場所を enum とデー�
     const spill = `${validationBody("amount", "amount > 0")}\npermissions: []`;
     const spilled = mergeReplacements(EMPTY_YAML, [{ location: AMOUNT, element: spill }], empty.spans, empty.additions);
     expect(spilled.ok).toBe(false);
-    // 追加の場所に別の名前の検査を書いた本文（形の検査を経ずに渡した場合）も、その位置に無いので断る
-    expect(mergeReplacements(EMPTY_YAML, [{ location: AMOUNT, element: validationBody("positive", "amount > 0") }], empty.spans, empty.additions)).toEqual({
+    // 追加の場所に、示された項目と違う項目を参照する検査を書いた本文（形の検査を経ずに渡した場合）は、その位置の値が違うので断る
+    expect(mergeReplacements(EMPTY_YAML, [{ location: AMOUNT, element: validationBody("positive", "title > 0") }], empty.spans, empty.additions)).toEqual({
       ok: false,
       refusal: MERGE_REFUSALS.added,
     });
@@ -563,5 +563,79 @@ describe("診断（Issue #761）：渡したときだけ既存の 4 つの塊の
     );
     expect(ruleDefinitionDefects(FIELD_REPAIR_IDS_DIAGNOSTIC_RULE_DEFINITIONS)).toEqual([]);
     expectNoAcceptanceMaterial([withDiagnostic.input, ...(withDiagnostic.rules ?? [])]);
+  });
+});
+
+// ── 旗 v12.ids：検査の式の追加の場所を、名前ではなく参照の集合で照らす（Issue #801）──────
+
+describe("旗 v12.ids：追加の本文を entity と参照の集合で照らす（名前は builder が決める。Issue #801）", () => {
+  const SOURCE = [
+    "entities:",
+    "  - name: item",
+    "    fields:",
+    "      amount:",
+    "        type: number",
+    "      rate:",
+    "        type: number",
+    "computed:",
+    "  - name: double",
+    "    entity: item",
+    "    expression: amount * 2",
+    "    type: number",
+    "validations: []",
+    "actions: []",
+    "views: []",
+    "permissions: []",
+    "minIdentity:",
+    "  mode: anonymous",
+    "",
+  ].join("\n");
+  const KEY = "validation:item.amount+rate";
+  const ADDITIONS = [{ key: KEY, entity: "item", targets: ["amount", "rate"] }] as const;
+  const read = readSpecDocument(SOURCE);
+  if (!read.ok) throw new Error("前提が壊れた：宣言が読めない");
+  const world = validationWorldOfDocument(read.document as Record<string, unknown>);
+  const context = {
+    locations: [KEY],
+    spans: [],
+    source: SOURCE,
+    testIds: new Set<string>(),
+    additions: [...ADDITIONS],
+    world,
+    takenNames: new Set(["item", "amount", "rate", "double"]),
+  };
+  const body = (name: string, expression: string, entity = "item"): string =>
+    ["- name: " + name, `  entity: ${entity}`, `  expression: ${expression}`].join("\n");
+  const answer = (element: string) => ({ replacements: [{ location: KEY, element }], disputes: [] });
+
+  it("参照の集合が targets と等しければ、名前が表と違っても通る。違う項目を参照する本文・表の名前を奪う本文は固定文", () => {
+    expect(checkFieldRepairAnswer(answer(body("positive", "rate + amount > 0")), context)).toEqual({
+      ok: true,
+      value: { replacements: [{ location: KEY, element: body("positive", "rate + amount > 0") }], disputes: [], rejected: [] },
+    });
+    expect(checkFieldRepairAnswer(answer(body("positive", "amount > 0")), context)).toEqual({
+      ok: false,
+      problems: [{ field: "replacements[0].element", message: FIELD_REPAIR_PROBLEMS.wrongReference }],
+    });
+    expect(checkFieldRepairAnswer(answer(body("amount", "amount + rate > 0")), context)).toEqual({
+      ok: false,
+      problems: [{ field: "replacements[0].element", message: FIELD_REPAIR_PROBLEMS.takenName }],
+    });
+    expect(checkFieldRepairAnswer(answer(body("positive", "rate + amount > 0", "member")), context)).toEqual({
+      ok: false,
+      problems: [{ field: "replacements[0].element", message: FIELD_REPAIR_PROBLEMS.wrongName }],
+    });
+  });
+
+  it("マージは挿し込んだ検査を entity と参照の集合で照らし、名前を見ない。違う項目を参照する本文は断る", () => {
+    const spans = declarationSpans(SOURCE);
+    if (!spans.ok) throw new Error("前提が壊れた");
+    const merged = mergeReplacements(SOURCE, [{ location: KEY, element: body("positive", "rate + amount > 0") }], spans.spans, [...ADDITIONS]);
+    expect(merged.ok).toBe(true);
+    if (!merged.ok) return;
+    expect(merged.source).toContain("- name: positive");
+    expect(merged.source).toContain("expression: rate + amount > 0");
+    const wrong = mergeReplacements(SOURCE, [{ location: KEY, element: body("positive", "amount > 0") }], spans.spans, [...ADDITIONS]);
+    expect(wrong).toEqual({ ok: false, refusal: MERGE_REFUSALS.added });
   });
 });
