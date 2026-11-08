@@ -9,7 +9,7 @@
 //   5. 誤りを型付きで分類する（HTTP・timeout・拒否・未完了・形が合わない・道具の引数）（§2.2）
 //   6. 未完了の応答は、出力が JSON として読めても成功にしない（§2.2）
 //   7. adapter のソースが環境変数を読まない（§2.1・R-15）
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   LlmStructuredRequest,
   LlmToolRequest,
@@ -18,13 +18,22 @@ import type {
 import { OUTPUT_STAGES, maxOutputTokensForEffort } from "./limits.js";
 import {
   OPENAI_PROMPT_CACHE_KEY,
+  RESPONSES_BODY_RESERVED_KEYS,
   OpenAiAdapterError,
   OpenAiIncompleteError,
   createOpenAiLlmClient,
+  createResponsesLlmClient,
   type FetchLike,
   type OpenAiErrorKind,
   type OpenAiUsage,
 } from "./openai.js";
+import {
+  SHARED_BODY_MODEL,
+  SHARED_STRUCTURED_BODY_JSON,
+  SHARED_STRUCTURED_REQUEST,
+  SHARED_TOOL_BODY_JSON,
+  SHARED_TOOL_REQUEST,
+} from "./__tests__/openai.js";
 import {
   ENVELOPE_SCHEMA,
   ENVELOPE_SCHEMA_NAME,
@@ -1628,5 +1637,212 @@ describe("adapter は環境変数を読まない（02 §2.1・R-15）", () => {
     for (const token of forbidden) {
       expect(source.includes(token), `openai.ts に ${token} がある`).toBe(false);
     }
+  });
+});
+
+// ── 3.9. 共有の body の末尾に足す固定の欄（`extraBody`。Issue #788）────────────────────
+
+/** `extraBody` を渡せる client（宛先は固定の偽の値。偽物の fetch で body を観測する） */
+const responsesClient = (fetch: FetchLike, extraBody?: Readonly<Record<string, unknown>>) =>
+  createResponsesLlmClient({
+    apiKey: "test-key",
+    model: SHARED_BODY_MODEL,
+    url: "https://example.test/v1/responses",
+    fetch,
+    ...(extraBody === undefined ? {} : { extraBody }),
+  });
+
+/**
+ * 予約名の**試験側の独立した固定の一覧**（Issue #788 の 11 名。要求で省かれる欄の名前を含む全部）。
+ * 実装の `RESPONSES_BODY_RESERVED_KEYS` を列挙しない——実装から名前が抜けると試験対象も抜けるため（レビュー R4）。
+ */
+const RESERVED_BODY_NAMES_FIXED = [
+  "model",
+  "store",
+  "max_output_tokens",
+  "instructions",
+  "prompt_cache_key",
+  "prompt_cache_options",
+  "input",
+  "reasoning",
+  "text",
+  "tools",
+  "tool_choice",
+] as const;
+
+describe("extraBody：body を組み終えた最後に固定の欄を足す（Issue #788）", () => {
+  it("渡さなければ body は今とバイト列で同じ（比較元の固定値と一致する）", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
+    const client = responsesClient(fetch);
+    await client.callStructured(SHARED_STRUCTURED_REQUEST);
+    expect(JSON.stringify(captured[0]!.body)).toBe(SHARED_STRUCTURED_BODY_JSON);
+    await client.callWithTools(SHARED_TOOL_REQUEST);
+    expect(JSON.stringify(captured[1]!.body)).toBe(SHARED_TOOL_BODY_JSON);
+  });
+
+  it("構造化出力の body の**最後**に 1 欄を足す（ほかの欄の並びと値は同じ）", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
+    const provider = { only: ["x"], require_parameters: true, allow_fallbacks: false };
+    await responsesClient(fetch, { provider }).callStructured(SHARED_STRUCTURED_REQUEST);
+    const body = captured[0]!.body;
+    expect(Object.keys(body).at(-1)).toBe("provider");
+    const { provider: _provider, ...rest } = body;
+    expect(JSON.stringify(rest)).toBe(SHARED_STRUCTURED_BODY_JSON);
+  });
+
+  it("道具付きの body（通常・finalAnswerOnly）のどちらの最後にも足す", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ entity: "item" })))));
+    const client = responsesClient(fetch, { provider: "fixed" });
+    await client.callWithTools(SHARED_TOOL_REQUEST);
+    await client.callWithTools({ ...TOOL_REQUEST, schemaName: "answer", schema: SCHEMA, finalAnswerOnly: true });
+    for (const index of [0, 1]) {
+      expect(Object.keys(captured[index]!.body).at(-1), String(index)).toBe("provider");
+      expect(captured[index]!.body["provider"], String(index)).toBe("fixed");
+      const { provider: _provider, ...rest } = captured[index]!.body;
+      expect(rest["tools"], String(index)).toBeDefined();
+    }
+  });
+
+  it("予約名の集合が、試験側の独立した固定の 11 名と一致する（Issue #788 レビュー R4。実装から名前が抜けたら赤）", () => {
+    // 実装の定数を列挙しない（実装から名前が抜けると試験対象も抜けるため）。Issue の 11 名を固定で持つ
+    expect([...RESPONSES_BODY_RESERVED_KEYS].sort()).toEqual([...RESERVED_BODY_NAMES_FIXED].sort());
+    expect(RESERVED_BODY_NAMES_FIXED).toHaveLength(11);
+  });
+
+  it("予約名（独立の固定の 11 名。要求で省かれる欄の名前を含む全部）は受けず、作るときに投げる（fetch 0 回）", () => {
+    for (const key of RESERVED_BODY_NAMES_FIXED) {
+      const recording = recordingFetch(() => jsonResponse(completed(outputText("{}"))));
+      const fetch = vi.fn(recording.fetch);
+      expect(() => responsesClient(fetch, { [key]: 1 }), key).toThrow();
+      expect(fetch, key).not.toHaveBeenCalled();
+    }
+  });
+
+  it("整数の形の名前は受けず、作るときに投げる（fetch 0 回）", () => {
+    for (const key of ["0", "1", "42"]) {
+      const recording = recordingFetch(() => jsonResponse(completed(outputText("{}"))));
+      const fetch = vi.fn(recording.fetch);
+      expect(() => responsesClient(fetch, { [key]: 1 }), key).toThrow();
+      expect(fetch, key).not.toHaveBeenCalled();
+    }
+  });
+
+  it("JSON の値でないもの（関数・undefined・NaN・Infinity・toJSON を持つ値）は受けず、作るときに投げる（fetch 0 回。Issue #788 レビュー R1）", () => {
+    const cases: readonly { readonly name: string; readonly value: Readonly<Record<string, unknown>> }[] = [
+      { name: "トップレベルの関数", value: { custom: () => 1 } },
+      { name: "トップレベルの undefined", value: { custom: undefined } },
+      { name: "NaN", value: { custom: Number.NaN } },
+      { name: "Infinity", value: { custom: Number.POSITIVE_INFINITY } },
+      { name: "入れ子の関数", value: { custom: { deep: () => 1 } } },
+      { name: "入れ子の undefined", value: { custom: [1, undefined] } },
+      { name: "bigint", value: { custom: 1n } },
+      // JSON.stringify が toJSON を呼び、鍵をすり替えて model を上書きし整数キーを先頭へ出せる（レビュー R1 の再現）
+      { name: "トップレベルの toJSON（鍵のすり替え）", value: { toJSON: () => ({ model: "overwritten", "0": "first" }) } },
+      { name: "入れ子の toJSON", value: { custom: { toJSON: () => ({ model: "overwritten" }) } } },
+    ];
+    for (const c of cases) {
+      const recording = recordingFetch(() => jsonResponse(completed(outputText("{}"))));
+      const fetch = vi.fn(recording.fetch);
+      expect(() => responsesClient(fetch, c.value), c.name).toThrow();
+      expect(fetch, c.name).not.toHaveBeenCalled();
+    }
+  });
+
+  it("JSON の値は再帰的にそのまま複製され、NaN を null に変えない（Issue #788 レビュー R1）", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
+    await responsesClient(fetch, { provider: { keep: [1, 2.5, true, null, "x"], nested: { deep: [3] } } }).callStructured(
+      SHARED_STRUCTURED_REQUEST,
+    );
+    expect(captured[0]!.body["provider"]).toEqual({ keep: [1, 2.5, true, null, "x"], nested: { deep: [3] } });
+  });
+
+  it("`__proto__` という正当な JSON の名前も、値と末尾の位置を保って足す（Issue #788 レビュー R2）", async () => {
+    // オブジェクトのリテラルの `__proto__` は prototype の指定になるので、必ず JSON.parse で作る
+    const extraBody = JSON.parse('{"custom":{"marker":1},"__proto__":{"marker":1}}') as Record<string, unknown>;
+    let sent = "";
+    const rawFetch: FetchLike = async (_url, init) => {
+      sent = String(init.body);
+      return jsonResponse(completed(outputText(JSON.stringify({ items: [] }))));
+    };
+    await responsesClient(rawFetch, extraBody).callStructured(SHARED_STRUCTURED_REQUEST);
+    // 送る本文の末尾に、`custom` の次（末尾）に `__proto__` の欄が現れる
+    expect(sent.endsWith('"custom":{"marker":1},"__proto__":{"marker":1}}')).toBe(true);
+    const body = JSON.parse(sent) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(body, "__proto__")).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(body, "__proto__")?.value).toEqual({ marker: 1 });
+    // body の prototype は変えていない（欄が消えて prototype が変わる、が再現しない）
+    expect(Object.getPrototypeOf(body)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(body, "__proto__")?.enumerable).toBe(true);
+  });
+
+  it("値は作るときに複製して固定する（あとで元を書き換えても送る body は変わらない）", async () => {
+    const value = { only: ["x"], nested: [1, 2] };
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
+    const client = responsesClient(fetch, { provider: value });
+    value.only.push("y");
+    value.nested.push(3);
+    await client.callStructured(SHARED_STRUCTURED_REQUEST);
+    expect(captured[0]!.body["provider"]).toEqual({ only: ["x"], nested: [1, 2] });
+  });
+});
+
+// ── 3.10. 配列の複製は入力の map／species を呼ばない（Issue #788 レビュー 79C R1）──────────────
+
+describe("extraBody：配列は入力の map／species を呼ばず、穴・JSON でない型・変換の口を断る（Issue #788 レビュー 79C R1）", () => {
+  it("toJSON に「map を差し替えた配列」を渡しても、モデルを上書きせず整数の鍵を先頭に出さない（未検査の map を使う実装へ戻すと赤）", async () => {
+    // 未検査の `value.map(...)` を使う実装では、この map の返り値（関数）が複製結果の toJSON になり、
+    // JSON.stringify(body) が body.toJSON() を呼んで body 全体を {"0":"first","model":"overwritten"} に差し替える
+    const overrides = () => ({ model: "overwritten", "0": "first" });
+    const a: unknown[] = [];
+    Object.defineProperty(a, "map", { value: () => overrides, enumerable: false, configurable: true });
+    const extraBody = { toJSON: a };
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
+    let client: ReturnType<typeof responsesClient>;
+    try {
+      client = responsesClient(fetch, extraBody);
+    } catch {
+      // 作るときに断る実装でもよい（そのときは fetch は 0 回）
+      expect(fetch).not.toHaveBeenCalled();
+      return;
+    }
+    await client.callStructured(SHARED_STRUCTURED_REQUEST);
+    const body = captured[0]!.body;
+    // モデルは上書きされない・整数の鍵は先頭に出ない・配列は空のまま（map の返り値は混ざらない）
+    expect(body["model"]).toBe(SHARED_BODY_MODEL);
+    expect(Object.keys(body)).not.toContain("0");
+    expect(Object.keys(body).at(-1)).toBe("toJSON");
+    expect(body["toJSON"]).toEqual([]);
+  });
+
+  it("穴（Array(1)）・Map・Set・Date・RegExp・数の包み・クラスの実体は受けず、作るときに投げる（fetch 0 回）", () => {
+    const values: readonly { readonly name: string; readonly value: unknown }[] = [
+      { name: "穴", value: Array(1) },
+      { name: "Map", value: new Map([["x", 1]]) },
+      { name: "Set", value: new Set([1]) },
+      { name: "Date", value: new Date(0) },
+      { name: "RegExp", value: /x/u },
+      { name: "数の包み", value: new Number(1) },
+      { name: "クラスの実体", value: new (class { readonly x = 1; })() },
+      { name: "own の valueOf（変換の口）", value: { valueOf: () => 1 } },
+    ];
+    for (const c of values) {
+      const recording = recordingFetch(() => jsonResponse(completed(outputText("{}"))));
+      const fetch = vi.fn(recording.fetch);
+      expect(() => responsesClient(fetch, { custom: c.value }), c.name).toThrow();
+      expect(fetch, c.name).not.toHaveBeenCalled();
+    }
+  });
+
+  it("入れ子の配列の map も呼ばず、実際の要素だけを複製する（map の返り値は混ざらない）", async () => {
+    const inner: unknown[] = [1, 2];
+    Object.defineProperty(inner, "map", {
+      value: () => () => ({ model: "overwritten", "0": "first" }),
+      enumerable: false,
+      configurable: true,
+    });
+    const { fetch, captured } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify({ items: [] })))));
+    await responsesClient(fetch, { provider: { list: inner } }).callStructured(SHARED_STRUCTURED_REQUEST);
+    expect(captured[0]!.body["provider"]).toEqual({ list: [1, 2] });
+    expect(JSON.stringify(captured[0]!.body)).not.toContain("overwritten");
   });
 });

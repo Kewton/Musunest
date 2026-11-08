@@ -71,6 +71,24 @@ const RESPONSES_URL = "https://api.openai.com/v1/responses";
  */
 export const OPENAI_PROMPT_CACHE_KEY = "musunest-factory";
 
+/**
+ * `extraBody` で受け付けない予約名（Issue #788）。**今の body が持ちうる欄の名前の全部**——要求によって省かれる欄
+ * （`reasoning`・`text`・`tools`・`tool_choice`）も含む。`baseBody`・`buildStructuredBody`・`buildToolBody` が置く欄である。
+ */
+export const RESPONSES_BODY_RESERVED_KEYS: readonly string[] = [
+  "model",
+  "store",
+  "max_output_tokens",
+  "instructions",
+  "prompt_cache_key",
+  "prompt_cache_options",
+  "input",
+  "reasoning",
+  "text",
+  "tools",
+  "tool_choice",
+];
+
 /** fetch の差し替え口。Workers・ブラウザ・Node のどれでも同じ形で呼べる範囲だけを要求する（§2.1） */
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -198,6 +216,24 @@ export interface ResponsesAdapterOptions extends OpenAiAdapterOptions {
    * 印の無い要求の body は今のまま（道具の定義を送り、`tool_choice` は送らない）。
    */
   readonly finalAnswerWithoutTools?: boolean;
+  /**
+   * 封筒の段の構造化出力の要求だけ、`text.format.schema` を「外側の `result` の下にその段の枝
+   * （`buildStageBranch`）を 1 つだけ置いた、その段だけの封筒全体」にするか（既定はしない。Issue #790）。
+   * on にすると、**送る schema の上でも**その段の枝だけが正解になり、形の似た別の段の枝が選ばれにくくなる
+   * （提供元が strict の schema を応答の生成に強く効かせる場合。OpenRouter の fp8 の走りで使う）。`text.format.name`
+   * は今の封筒の名前のまま。**封筒の無い段・道具付きの要求・判定の口の要求は変えない**。off のとき body は
+   * バイト列で今と同じ（OpenAI・Ollama の要求を変えない）。
+   */
+  readonly stageOnlyEnvelope?: boolean;
+  /**
+   * body を組み終えた**後（送る直前）に末尾へ足す固定の欄**（Issue #788）。渡さなければ body は今とバイト列で同じ。
+   * 値は **JSON の値だけ**（再帰的に検査する）で、client を作るときに複製して固定する。**関数・`undefined`・
+   * `bigint`・`symbol`・有限でない数・変換の口（`toJSON`）を持つ値**、**予約名**（今の body が持ちうる欄の
+   * 名前の全部＝`RESPONSES_BODY_RESERVED_KEYS`）、JSON の列挙で先頭に来る整数の形の名前は受けず、client を
+   * 作るときに投げる（fetch は 0 回）。`__proto__` は正当な JSON の名前として、値と末尾の位置を保って足す。
+   * 構造化出力と道具付き（通常・`finalAnswerOnly`）のどちらの要求にも、同じ規則で足す。
+   */
+  readonly extraBody?: Readonly<Record<string, unknown>>;
 }
 
 interface WireConfig {
@@ -211,6 +247,10 @@ interface WireConfig {
   readonly presentSchema: boolean;
   readonly readFencedJson: boolean;
   readonly finalAnswerWithoutTools: boolean;
+  /** 封筒の段の `text.format.schema` をその段の枝 1 つだけにするか（Issue #790） */
+  readonly stageOnlyEnvelope: boolean;
+  /** body の末尾へ足す固定の欄（複製して固定済み。渡さなければ `undefined`。Issue #788） */
+  readonly extraBody: Readonly<Record<string, unknown>> | undefined;
 }
 
 /**
@@ -236,6 +276,10 @@ export function createResponsesLlmClient(options: ResponsesAdapterOptions): LlmC
     presentSchema: options.presentSchema === true,
     readFencedJson: options.readFencedJson === true,
     finalAnswerWithoutTools: options.finalAnswerWithoutTools === true,
+    // 封筒の段の schema をその段の枝 1 つだけにするか（既定 off。off は今とバイト列で同じ。Issue #790）
+    stageOnlyEnvelope: options.stageOnlyEnvelope === true,
+    // 予約名・整数の形の名前を弾いてから複製して固定する（作るときに投げる。fetch は 0 回。Issue #788）
+    extraBody: prepareExtraBody(options.extraBody),
   };
   return {
     callStructured: <T>(structuredRequest: LlmStructuredRequest) =>
@@ -250,6 +294,138 @@ export function createResponsesLlmClient(options: ResponsesAdapterOptions): LlmC
  */
 export function createOpenAiLlmClient(options: OpenAiAdapterOptions): LlmClient {
   return createResponsesLlmClient({ ...options, url: RESPONSES_URL, presentSchema: false });
+}
+
+/**
+ * 整数の形の名前（JSON の列挙で先頭に来る＝末尾追加を破る）か（Issue #788）。
+ * `"0"`・`"12"` は真、`"01"`・`"-1"`・`"1.5"`・`"x"` は偽。
+ */
+function isIntegerFormKey(key: string): boolean {
+  const value = Number(key);
+  return Number.isInteger(value) && value >= 0 && String(value) === key;
+}
+
+/**
+ * JSON の object として認めるもの（`null` の prototype か `Object.prototype` の **plain object だけ**）。
+ * `Map`・`Set`・`Date`・`RegExp`・数の包み・クラスの実体などは JSON の値ではないので断る（Issue #788 レビュー 79C R1）。
+ */
+function isPlainJsonObject(value: object): boolean {
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/** その object が、名前の**own の関数**（`valueOf` などの変換の口）を持つか（Issue #788 レビュー 79C R1） */
+function hasOwnFunctionHook(value: object, name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, name) && typeof (value as Record<string, unknown>)[name] === "function";
+}
+
+/**
+ * 配列を、**入力の `map` も `Symbol.species` も呼ばずに**、新しい通常の配列へ**添字ごとに検査して複製**する
+ * （Issue #788 レビュー 79C R1）。差し替えた `map` が関数を返して複製結果へ混ざる迂回を塞ぐ。
+ * **穴**（`!(index in value)`）は JSON の値ではないので断る（client を作るとき。fetch 0 回）。
+ */
+function cloneJsonArray(value: readonly unknown[], path: string): unknown[] {
+  const copy: unknown[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    if (!(index in value)) throw new Error(`extraBody の ${path}[${index}] に空きの添字があります`);
+    copy.push(cloneJsonValue(value[index], `${path}[${index}]`));
+  }
+  return copy;
+}
+
+/**
+ * `extraBody` の値を、**JSON の値の範囲**で再帰的に検査しながら複製する（Issue #788 レビュー R1・79C R1）。
+ * 関数・`undefined`・`bigint`・`symbol`・有限でない数（`NaN`・`Infinity`）・変換の口（`toJSON`・own の
+ * `valueOf`）を持つ値、JSON でない型（`Map`・`Set`・`Date`・`RegExp` など）は受けず、client を作るときに
+ * 投げる（fetch 0 回）。`JSON.stringify` で欄が黙って消える・数が `null` に変わる・変換の口で鍵がすり替わる、
+ * という迂回を塞ぐ。
+ *
+ * 配列は入力の `map`／species を呼ばず添字ごとに複製する（79C R1）。`__proto__` は予約名でも整数の形の
+ * 名前でもない**正当な JSON の名前**なので、代入（setter を通して欄が消える）ではなく **own の data
+ * property** として定義して保つ（レビュー R2）。
+ */
+function cloneJsonValue(value: unknown, path: string): unknown {
+  if (value === null) return null;
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return value;
+    case "number":
+      if (!Number.isFinite(value)) throw new Error(`extraBody の ${path} に有限でない数は渡せません`);
+      return value;
+    case "function":
+      throw new Error(`extraBody の ${path} に関数は渡せません`);
+    case "undefined":
+      throw new Error(`extraBody の ${path} に undefined は渡せません`);
+    case "bigint":
+      throw new Error(`extraBody の ${path} に bigint は渡せません`);
+    case "symbol":
+      throw new Error(`extraBody の ${path} に symbol は渡せません`);
+    default:
+      break;
+  }
+  const record = value as Record<string, unknown> & { readonly toJSON?: unknown };
+  if (typeof record.toJSON === "function" || hasOwnFunctionHook(value as object, "valueOf")) {
+    throw new Error(`extraBody の ${path} に変換の口（toJSON・valueOf）を持つ値は渡せません`);
+  }
+  if (Array.isArray(value)) {
+    return cloneJsonArray(value, path);
+  }
+  if (!isPlainJsonObject(value as object)) {
+    throw new Error(`extraBody の ${path} に JSON でない型の値は渡せません`);
+  }
+  const clone: Record<string, unknown> = {};
+  for (const key of Object.keys(record)) {
+    Object.defineProperty(clone, key, {
+      value: cloneJsonValue(record[key], `${path}.${key}`),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return clone;
+}
+
+/** 値を深く凍らせる（複製した固定の欄が、あとから書き換わらないようにする。Issue #788） */
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null) {
+    for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
+ * `extraBody` を検査し、複製して固定する（Issue #788）。値は **JSON の値だけ**を再帰的に複製し
+ * （`cloneJsonValue`）、**複製した後に実際に持つ鍵**へ予約名（`RESPONSES_BODY_RESERVED_KEYS`）と整数の形の
+ * 名前の検査を当てる（変換の口は先に断るので、鍵は入力のまま。レビュー R1）。違反は client を作るときに
+ * 投げる（fetch 0 回）。渡した値の複製を深く凍らせる（作るときの 1 回だけ）。
+ */
+function prepareExtraBody(
+  extraBody: Readonly<Record<string, unknown>> | undefined,
+): Readonly<Record<string, unknown>> | undefined {
+  if (extraBody === undefined) return undefined;
+  const clone = cloneJsonValue(extraBody, "extraBody") as Record<string, unknown>;
+  const reserved = new Set(RESPONSES_BODY_RESERVED_KEYS);
+  for (const key of Object.keys(clone)) {
+    if (reserved.has(key)) throw new Error(`extraBody に予約名は渡せません: ${key}`);
+    if (isIntegerFormKey(key)) throw new Error(`extraBody に整数の形の名前は渡せません: ${key}`);
+  }
+  return deepFreeze(clone);
+}
+
+/**
+ * 組み終えた body の**末尾**に固定の欄を足す（送る直前。Issue #788）。予約名と整数の形の名前は作るときに
+ * 弾いてあるので末尾に並ぶ。**object spread は `__proto__` も own の data property として写す**ので、
+ * `Object.assign`（`__proto__` を prototype への代入として扱い欄が消える）と違って欄の名前・値・末尾の
+ * 位置を保つ（レビュー R2）。渡さなければ body をそのまま返す。
+ */
+function applyExtraBody(
+  body: Record<string, unknown>,
+  extraBody: Readonly<Record<string, unknown>> | undefined,
+): Record<string, unknown> {
+  if (extraBody === undefined || Object.keys(extraBody).length === 0) return body;
+  return { ...body, ...extraBody };
 }
 
 // ── 呼び出し（fetch と timeout。§1.5・§2.1）────────────────────────────────
@@ -417,11 +593,36 @@ function buildStructuredBody(
     format: {
       type: "json_schema",
       name: envelope === undefined ? request.schemaName : envelope.name,
-      schema: envelope === undefined ? request.schema : envelope.schema,
+      // 封筒の段：既定は全段の枝の `anyOf`（今までと同じバイト列）。`stageOnlyEnvelope` が on のときだけ、
+      // その段の枝 1 つだけの封筒にする（Issue #790）。封筒の無い段はその要求の schema のまま。
+      schema:
+        envelope === undefined
+          ? request.schema
+          : config.stageOnlyEnvelope
+            ? buildStageOnlyEnvelopeSchema(envelope.entry)
+            : envelope.schema,
       strict: true,
     },
   };
   return body;
+}
+
+/**
+ * 外側の `result` の下に**その段の枝 1 つだけ**を置いた、その段だけの封筒全体を組む（Issue #790）。
+ * `buildEnvelopeSchema` の枝を 1 つに絞った形で、`anyOf` を使わない。**`text.format` で送る schema**
+ * （`stageOnlyEnvelope` が on の封筒の段）と、**Ollama が文で示す schema の塊**（`presentedStructuredSchema`）が
+ * 同じ関数を共有する——送る形と文で示す形を 1 か所に固定する。枝は**その要求の schema から解決した枝**
+ * （`resolveStageEnvelope` の `entry`）を渡す（起動時の定数の枝を渡さない）。
+ */
+function buildStageOnlyEnvelopeSchema(entry: StageEnvelopeEntry): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [ENVELOPE_RESULT_KEY],
+    properties: {
+      [ENVELOPE_RESULT_KEY]: buildStageBranch(entry),
+    },
+  };
 }
 
 /** schema の塊の頭の文（Ollama の Responses API は `text.format` で応答を縛らないので、形を文でも伝える。Issue #771） */
@@ -441,14 +642,7 @@ function presentedStructuredSchema(
   requestSchema: unknown,
 ): unknown {
   if (envelope === undefined) return requestSchema;
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: [ENVELOPE_RESULT_KEY],
-    properties: {
-      [ENVELOPE_RESULT_KEY]: buildStageBranch(envelope.entry),
-    },
-  };
+  return buildStageOnlyEnvelopeSchema(envelope.entry);
 }
 
 /**
@@ -605,7 +799,11 @@ async function callStructuredWire<T>(
   // 送る封筒と応答の取り出しは同じ枝で行う（その要求の schema と深く等しい枝。Issue #549 の直し）
   const envelope = resolveStageEnvelope(request.schemaName, request.schema, config.envelope);
   const entry = envelope?.entry;
-  const wire = await requestWire(config, buildStructuredBody(config, request, envelope), request.signal);
+  const wire = await requestWire(
+    config,
+    applyExtraBody(buildStructuredBody(config, request, envelope), config.extraBody),
+    request.signal,
+  );
   const usage = parseUsage(wire.usage);
   requireCompleted(wire, usage);
   requireNoRefusal(wire);
@@ -651,7 +849,7 @@ function unwrapEnvelope(entry: StageEnvelopeEntry, value: unknown): unknown {
 }
 
 async function callToolsWire(config: WireConfig, request: LlmToolRequest): Promise<LlmToolResponse> {
-  const wire = await requestWire(config, buildToolBody(config, request), request.signal);
+  const wire = await requestWire(config, applyExtraBody(buildToolBody(config, request), config.extraBody), request.signal);
   const usage = parseUsage(wire.usage);
   requireCompleted(wire, usage);
   requireNoRefusal(wire);
