@@ -12,6 +12,7 @@
 //   - 展開できない場合は固定文で落とす（黙って補わない・近い行に結ばない）。位置は cases の添字と欄名
 //
 // 展開した組には、呼ぶ側（`v11a/stages/test-spec.ts`）が今の形の検査と中身の検査を 1 つも省かずに掛ける。
+import { fixedClock, thisMonthRangeInTokyo, todayInTokyo } from "@musunest/spec-engine";
 import { TEST_KINDS, type RequirementNature, type TestKind, type TestOperation, type TestTargetKind } from "../fixed-test.js";
 import { AGENT_LIMITS } from "../limits.js";
 import type { RequirementList } from "../pipeline.js";
@@ -32,6 +33,33 @@ export const TEST_CASE_ID_PREFIX = "case:";
 
 /** 展開した試験の固定の日時（コードが作る試験と同じ定数） */
 export const TEST_CASE_CLOCK = GENERATED_TEST_CLOCK;
+
+/**
+ * 旗 `v12.ids` の T2 の要求に渡すデータの塊「時計」の中身（方法論 03 の H3。Issue #794）。時計はコードが決めて場合の展開で入れる
+ * （`TEST_CASE_CLOCK`）ので、期待の「今日」「今月」を同じ時計で数えられるよう、その値と、評価（spec-engine）が同じ時計から数える
+ * 今日・今月・今月の範囲を渡す
+ */
+export interface TestCaseClockData {
+  /** 試験の時計（オフセット付きの ISO 8601。引数そのまま） */
+  readonly clock: string;
+  /** 日本時間の今日（`YYYY-MM-DD`。`todayInTokyo`） */
+  readonly today: string;
+  /** 日本時間の今月（`YYYY-MM`。`today` の先頭 7 文字） */
+  readonly thisMonth: string;
+  /** 日本時間の今月の半開区間 `[from, to)`（`thisMonthRangeInTokyo`。`to` は翌月初でその日を含まない） */
+  readonly thisMonthRange: { readonly from: string; readonly to: string };
+}
+
+/**
+ * データの塊「時計」の中身を組む（純粋な関数。値の文字列を手で書かず、spec-engine の公開の関数だけで数える。Issue #794）。
+ * 本番は既定値（`TEST_CASE_CLOCK`）で呼ぶ。読めない時計は `fixedClock` が例外にする
+ */
+export function testCaseClockDataOf(clock: string = TEST_CASE_CLOCK): TestCaseClockData {
+  const fixed = fixedClock(clock);
+  const today = todayInTokyo(fixed);
+  const range = thisMonthRangeInTokyo(fixed);
+  return { clock, today, thisMonth: today.slice(0, 7), thisMonthRange: { from: range.from, to: range.to } };
+}
 
 /** 場合の参照の行（行 ID・参照元 entity の行 ID・値の JSON 文字列） */
 export interface TestCaseRow {

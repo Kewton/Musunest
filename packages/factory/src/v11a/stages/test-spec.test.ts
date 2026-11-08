@@ -3,7 +3,7 @@
 // 偽物の LLM（記録した応答）・偽物の判定・固定の時計（共通の口の時計は 0）で閉じる。外部の API は呼ばない。
 // 題材は v1.1α の共通の題材（`__tests__/fixtures.ts`。担当者と項目の抽象的な題材）を使う。
 import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-schema";
-import { sha256Hex } from "@musunest/spec-engine";
+import { fixedClock, sha256Hex, thisMonthRangeInTokyo, todayInTokyo } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import {
   STRUCTURAL_ASSERTIONS,
@@ -84,8 +84,10 @@ import {
   TEST_CASE_BUNDLE_MESSAGES,
   TEST_CASE_EXPAND_MESSAGES,
   TEST_CASE_FRAME_TEXTS,
+  TEST_CASE_CLOCK,
   TEST_CASE_ID_PREFIX,
   initialTestCaseFramesOf,
+  testCaseClockDataOf,
   testCasesSchemaOf,
   type InitialTestCaseFrame,
   type RetryTestCaseFrame,
@@ -108,6 +110,8 @@ import {
   TEST_OBSERVES,
   TEST_SPEC_DATA_NAMES,
   TEST_SPEC_DECIDED_NATURES_DATA_NAME,
+  TEST_SPEC_CLOCK_DATA_NAME,
+  TEST_SPEC_CLOCK_RULE_TEXT,
   TEST_SPEC_FRAMES_DATA_NAME,
   TEST_SPEC_RETAINED_DATA_NAME,
   TEST_SPEC_RETRY_DATA_NAMES,
@@ -2676,7 +2680,8 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
     }
     expect(dataBlockOf(onRequest.input, tableName)).toEqual(dataBlockOf(offRequest.input, tableName));
     // 手 3i（#653）：ids on は所属の後ろに必要な試験の枠の塊を足す（ほかの塊の並びは同じ）
-    expect(dataNamesOf(onRequest.input)).toEqual([...dataNamesOf(offRequest.input), TEST_SPEC_FRAMES_DATA_NAME]);
+    // #794：ids on は所属の後ろ・枠の前に時計の塊を足す
+    expect(dataNamesOf(onRequest.input)).toEqual([...dataNamesOf(offRequest.input), TEST_SPEC_CLOCK_DATA_NAME, TEST_SPEC_FRAMES_DATA_NAME]);
     for (const field of ["instructions", "documents", "schemaName", "maxOutputTokens"] as const) {
       expect(onRequest[field]).toEqual(offRequest[field]);
     }
@@ -3889,6 +3894,7 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
       expect(second.ids).toEqual(["R12"]);
       expect(dataNamesOf(second.input)).toEqual([
         ...TEST_SPEC_DATA_NAMES,
+        TEST_SPEC_CLOCK_DATA_NAME,
         TEST_SPEC_FRAMES_DATA_NAME,
         ...TEST_SPEC_RETRY_DATA_NAMES,
         TEST_SPEC_DECIDED_NATURES_DATA_NAME,
@@ -4195,7 +4201,13 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
       const second = run.requests.at(-1);
       if (second === undefined) throw new Error("要求が無い");
       expect(second.ids).toEqual(["R7"]);
-      expect(dataNamesOf(second.input)).toEqual([...TEST_SPEC_DATA_NAMES, TEST_SPEC_FRAMES_DATA_NAME, ...TEST_SPEC_RETRY_DATA_NAMES, TEST_SPEC_RETAINED_DATA_NAME]);
+      expect(dataNamesOf(second.input)).toEqual([
+        ...TEST_SPEC_DATA_NAMES,
+        TEST_SPEC_CLOCK_DATA_NAME,
+        TEST_SPEC_FRAMES_DATA_NAME,
+        ...TEST_SPEC_RETRY_DATA_NAMES,
+        TEST_SPEC_RETAINED_DATA_NAME,
+      ]);
       expect(dataBlockOf(second.input, TEST_SPEC_RETRY_DATA_NAMES[0])).toEqual(sliceOf(omitted, ["R7"]).cases);
       expect(dataBlockOf(second.input, TEST_SPEC_RETRY_DATA_NAMES[1])).toEqual([{ field: "requirements[0]", message: "abnormal の試験が無い" }]);
       expect(dataBlockOf(second.input, TEST_SPEC_RETAINED_DATA_NAME)).toEqual(["R6", "R8", "R9", "R10"]);
@@ -4368,7 +4380,7 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     const { outcome, recording } = await runS(base, [baseOk()]);
     if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
     const request = recording.structured[0]!;
-    expect(dataNamesOf(request.input)).toEqual([...TEST_SPEC_DATA_NAMES, TEST_SPEC_FRAMES_DATA_NAME]);
+    expect(dataNamesOf(request.input)).toEqual([...TEST_SPEC_DATA_NAMES, TEST_SPEC_CLOCK_DATA_NAME, TEST_SPEC_FRAMES_DATA_NAME]);
     const pruned = pruneForCarryOver(base.list, base.table, await carryOf(base.list, base.table));
     const generated = generateTests({ table: pruned.table, ledger, list: pruned.list });
     const expected = initialTestCaseFramesOf({ table: pruned.table, ledger, list: pruned.list, generated }, ["R1", "R2", "R3", "R4", "R5"]);
@@ -4572,8 +4584,165 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     expect(changed).toEqual(withLimit);
     expect(rules[withLimit[0]!]).toBe(`${before[withLimit[0]!] ?? ""}${frameLimitText()}`);
     expect(request.schema).toEqual(testCasesSchemaOf(ledger));
-    expect(dataNamesOf(request.input)).toEqual([...TEST_SPEC_DATA_NAMES, TEST_SPEC_FRAMES_DATA_NAME]);
+    expect(dataNamesOf(request.input)).toEqual([...TEST_SPEC_DATA_NAMES, TEST_SPEC_CLOCK_DATA_NAME, TEST_SPEC_FRAMES_DATA_NAME]);
     expectNoAcceptanceMaterial([requestText(request)]);
+  });
+
+  // ── Issue #794：コードが固定した時計の値をデータの塊「時計」として渡す ──────────────────────────────
+
+  /** 期待の時計の値（spec-engine の関数から導く。日付の文字列を二重に持たない） */
+  const expectedClockData = () => {
+    const fixed = fixedClock(TEST_CASE_CLOCK);
+    const range = thisMonthRangeInTokyo(fixed);
+    return { clock: TEST_CASE_CLOCK, today: todayInTokyo(fixed), thisMonth: todayInTokyo(fixed).slice(0, 7), thisMonthRange: { from: range.from, to: range.to } };
+  };
+  const clockBlocksOf = (request: LlmStructuredRequest) => dataNamesOf(request.input).filter((name) => name === TEST_SPEC_CLOCK_DATA_NAME);
+  /** 時計の塊がちょうど 1 つ、「要件ごとの所属」の直後にあり、中身が組む関数の既定値の結果と spec-engine の値に等しい */
+  const expectClockBlock = (request: LlmStructuredRequest) => {
+    expect(clockBlocksOf(request)).toHaveLength(1);
+    const names = dataNamesOf(request.input);
+    const [, , , , ownershipName] = TEST_SPEC_DATA_NAMES;
+    expect(names[names.indexOf(TEST_SPEC_CLOCK_DATA_NAME) - 1]).toBe(ownershipName);
+    expect(names[names.indexOf(TEST_SPEC_CLOCK_DATA_NAME) + 1]).toBe(TEST_SPEC_FRAMES_DATA_NAME);
+    const block = dataBlockOf(request.input, TEST_SPEC_CLOCK_DATA_NAME);
+    expect(block).toEqual(JSON.parse(JSON.stringify(testCaseClockDataOf())));
+    expect(block).toEqual(expectedClockData());
+  };
+  /**
+   * 直す前（2b68491）の形に戻す：時計の塊 1 つを**塊の名前で決めた位置**だけ外し、R-tsp-13 の末尾の時計の文だけを外す（文字列の置換で
+   * 広く消さない）。無ければそのまま（直す前のコードで測った値はこの関数を通しても変わらない）
+   */
+  const before794 = (request: LlmStructuredRequest): LlmStructuredRequest => {
+    const opener = `\n<data name="${String(TEST_SPEC_CLOCK_DATA_NAME)}">`;
+    const start = request.input.indexOf(opener);
+    const close = "\n</data>";
+    const input = start < 0 ? request.input : `${request.input.slice(0, start)}${request.input.slice(request.input.indexOf(close, start) + close.length)}`;
+    const sentence = typeof TEST_SPEC_CLOCK_RULE_TEXT === "string" ? TEST_SPEC_CLOCK_RULE_TEXT : undefined;
+    const rules = (request.rules ?? []).map((text) => (sentence !== undefined && text.endsWith(sentence) ? text.slice(0, -sentence.length) : text));
+    return { ...request, input, ...(request.rules === undefined ? {} : { rules }) };
+  };
+  const digestsOf = async (requests: readonly LlmStructuredRequest[]) =>
+    Promise.all(requests.map(({ signal: _signal, ...rest }) => sha256Hex(JSON.stringify(before794(rest as LlmStructuredRequest)))));
+  /** 要件 7 件（束 5＋2）の要求（束が 2 つ） */
+  const sevenRequests = async () => {
+    const seven = scenario([...BASE, ["R6", "金額を検査する。", ["f.item.amount"], "ruled"], ["R7", "題名を検査する。", ["f.item.title"], "ruled"]]);
+    const outputs = asCases([response([...baseTests(), ...validate("R6", "f.item.amount"), ...validate("R7", "f.item.title")], [...BASE_NATURES, { requirementId: "R6", nature: "ruled" }, { requirementId: "R7", nature: "ruled" }])]);
+    const inner = createCheckedRecordingClient(outputs.map(structured));
+    const bundled = bundledT2Client(inner.client);
+    const requests: LlmStructuredRequest[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest) {
+        requests.push(request);
+        return bundled.callStructured<T>(request);
+      },
+      callWithTools: (request) => bundled.callWithTools(request),
+    };
+    const outcome = await runTestSpec({
+      plan: seven.plan,
+      list: seven.list,
+      documents: FIXTURE_DOCUMENTS,
+      table: seven.table,
+      carryOver: await carryOf(seven.list, seven.table),
+      gateway: makeGateway(client, { maxAttempts: 1 }),
+      ledger,
+      ids: true,
+      bundleConcurrency: 1,
+    });
+    if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
+    return requests;
+  };
+  /** 中身のやり直しを 1 回含む走り（R1 の異常・境界の欠けで 2 回目を呼ぶ） */
+  const retryRequests = async () => {
+    const { outcome, recording } = await runS(base, [baseOk(validate("R1", "f.item.title", ["normal"])), baseOk()]);
+    if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
+    return recording.structured;
+  };
+  /**
+   * 直す前（2b68491）の要求の SHA-256（期待）。測り方：この worktree で製品のコード（v11a/stages/test-spec.ts・v12/test-cases.ts）だけを
+   * 2b68491 に戻し、この試験の台本を流して出た要求の値をそのまま固定した（直す前の要求には時計の塊も時計の文も無いので、`before794` は
+   * 何も外さない）。その後 2 本を戻し、差が無いことを確かめた。新しいコードの出力から作っていない
+   */
+  const BEFORE_794: Readonly<Record<string, readonly string[]>> = {
+    initial: ["216f7d20b24d77edd5d18417d887187be2ce42389f676bb9acc2e4c7d1a161ed"],
+    retry: ["216f7d20b24d77edd5d18417d887187be2ce42389f676bb9acc2e4c7d1a161ed", "7233b25160f68fbbfce574c869022382117ba18c786a057a13d552bea3641c7f"],
+    seven: ["b4719ad53eb50924ddf7bd91f2bb6e97938629ce1597e03df5cba1f46afff26d", "57b9e0375696d939a472c74d7a7b352d60c84934af8b3aaa14fbd4258107c91e"],
+    idsOff: ["14bcdecb311a55e44c979482e29e2e43af17697bf3b35d30cd9cf07daa9118a0", "d7263df7736f517d0d5ad9cbd3e27acd6648190fbc3816477eaf2e581e38f225"],
+    idsWithoutLedger: ["5cc08ee6359630ca3038e97da0c0984ff00d1511ecc2ee5f2ccb5a2eaecce781", "66c57de2d2d9e352adedaeb8a26e797558c34be0451075ec64df3fb6c4920b27"],
+    v11a: ["5cc08ee6359630ca3038e97da0c0984ff00d1511ecc2ee5f2ccb5a2eaecce781", "66c57de2d2d9e352adedaeb8a26e797558c34be0451075ec64df3fb6c4920b27"],
+  };
+
+  it("#794 (1) 実効の ids が真の T2 の初回の要求：時計の塊がちょうど 1 つ、所属の直後・枠の前にあり、中身は組む関数の既定値の結果（today は todayInTokyo、thisMonthRange は thisMonthRangeInTokyo）。塊と時計の文を位置で外すと直す前（2b68491）の要求と同じ（直す前は塊が無い）", async () => {
+    const { outcome, recording } = await runS(base, [baseOk()]);
+    if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
+    expect(recording.structured).toHaveLength(1);
+    const request = recording.structured[0]!;
+    expectClockBlock(request);
+    // 直す前（2b68491）の挙動：同じ要求に時計の塊は無い（塊と時計の文だけを外した要求が、直す前に測った要求と同じ）
+    const stripped = before794(request);
+    expect(dataNamesOf(stripped.input)).not.toContain(TEST_SPEC_CLOCK_DATA_NAME);
+    expect(await digestsOf(recording.structured)).toEqual(BEFORE_794["initial"]);
+    expectNoAcceptanceMaterial([requestText(request)]);
+  });
+
+  it("#794 (2) 中身のやり直しの要求と、束が 2 つの要求：どの要求にも時計の塊が 1 つ、同じ中身。塊と時計の文を位置で外すと直す前（2b68491）の要求の列と同じ", async () => {
+    const retry = await retryRequests();
+    expect(retry).toHaveLength(2);
+    expect(dataNamesOf(retry[1]!.input)).toContain(TEST_SPEC_RETRY_DATA_NAMES[0]);
+    const seven = await sevenRequests();
+    expect(seven.map(requestListedIds)).toEqual([["R1", "R2", "R3", "R4", "R5"], ["R6", "R7"]]);
+    for (const request of [...retry, ...seven]) expectClockBlock(request);
+    const contents = [...retry, ...seven].map((request) => JSON.stringify(dataBlockOf(request.input, TEST_SPEC_CLOCK_DATA_NAME)));
+    expect(new Set(contents).size).toBe(1);
+    expect(await digestsOf(retry)).toEqual(BEFORE_794["retry"]);
+    expect(await digestsOf(seven)).toEqual(BEFORE_794["seven"]);
+    expectNoAcceptanceMaterial([...retry, ...seven].map(requestText));
+  });
+
+  it("#794 (3) 負例：ids off（台帳だけ on）・入口の ids が真で台帳が無い・v1.1a（台帳も ids も無い）の T2 の要求は、時計の塊も時計の文も無く、直す前（2b68491）とバイト列で同じ", async () => {
+    const carryOver = await carryOf(base.list, base.table);
+    const common = { plan: base.plan, list: base.list, table: base.table, carryOver };
+    const cases = [
+      ["idsOff", { ...common, ledger }, [baseOk(), baseOk()]],
+      ["idsWithoutLedger", { ...common, ids: true }, [baseOk(), baseOk()]],
+      ["v11a", common, [baseOk(), baseOk()]],
+    ] as const;
+    for (const [name, options, outputs] of cases) {
+      const { recording } = await run(outputs, options);
+      expect(recording.structured.length, name).toBeGreaterThan(0);
+      for (const request of recording.structured) {
+        expect(clockBlocksOf(request), name).toEqual([]);
+        expect((request.rules ?? []).some((text) => text.includes(TEST_SPEC_CLOCK_RULE_TEXT)), name).toBe(false);
+        // 外す関数を通しても何も変わらない（外すものが無い）
+        const { signal: _signal, ...rest } = request;
+        expect(JSON.stringify(before794(rest as LlmStructuredRequest)), name).toBe(JSON.stringify(rest));
+      }
+      expect(await digestsOf(recording.structured), name).toEqual(BEFORE_794[name]);
+    }
+  });
+
+  it("#794 (4) 規則：旗 ids の R-tsp-13 は足した時計の文で終わり、日時の値（YYYY- で始まる文字列）を含まない。since に #794（why は同じ）。off の文と台帳だけ on の文は直す前（2b68491）と同じ", () => {
+    const textOf = (definitions: readonly { readonly id: string; readonly text: string }[]) => definitions.find((definition) => definition.id === "R-tsp-13")?.text ?? "";
+    const on = testSpecRuleDefinitionsOf(ledger, true);
+    const idsText = textOf(on);
+    expect(idsText.endsWith(TEST_SPEC_CLOCK_RULE_TEXT)).toBe(true);
+    expect(idsText).toBe(`試験の ID・操作（operation）・時計（clock）・構造の検査の中身（assertion）はコードが決めるので、場合に書かない。${TEST_SPEC_CLOCK_RULE_TEXT}`);
+    expect(idsText).not.toMatch(/\d{4}-/);
+    expect(TEST_SPEC_CLOCK_RULE_TEXT).toContain("「時計」");
+    // 直す前（2b68491）の off の文と台帳だけ on の文（同じ文）
+    const BEFORE_OFF_TEXT = "時計（clock）は固定の日時（オフセット付きの ISO 8601）にする。";
+    expect(textOf(TEST_SPEC_RULE_DEFINITIONS)).toBe(BEFORE_OFF_TEXT);
+    expect(textOf(testSpecRuleDefinitionsOf())).toBe(BEFORE_OFF_TEXT);
+    expect(textOf(testSpecRuleDefinitionsOf(ledger))).toBe(BEFORE_OFF_TEXT);
+    expect(textOf(testSpecRuleDefinitionsOf(ledger, false))).toBe(BEFORE_OFF_TEXT);
+    const onDefinition = on.find((definition) => definition.id === "R-tsp-13");
+    const offDefinition = testSpecRuleDefinitionsOf(ledger).find((definition) => definition.id === "R-tsp-13");
+    expect(onDefinition?.why).toBe(offDefinition?.why);
+    expect(onDefinition?.since).toContain("#794");
+    expect(offDefinition?.since).not.toContain("#794");
+    // R-tsp-13 のほかの規則の文は時計の文を持たない
+    expect(ruleTexts(on).filter((text) => text.includes(TEST_SPEC_CLOCK_RULE_TEXT))).toHaveLength(1);
+    expect(ruleDefinitionDefects(on)).toEqual([]);
+    expectNoAcceptanceMaterial([TEST_SPEC_CLOCK_RULE_TEXT, idsText]);
   });
 
   it("#663 (4)(5) 二点測定：要件 1 件に 16 本（生成 3＋LLM 13）の応答は 1 回で通り、17 本（生成 3＋LLM 14）は今までどおり上限の固定文で落ちて切り詰めない。中身のやり直しは 1 回（要求 2 回）", async () => {

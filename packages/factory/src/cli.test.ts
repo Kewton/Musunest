@@ -116,6 +116,8 @@ import { isGeneratedTestId } from "./v12/generated-tests.js";
 import { ruleTexts } from "./stages/prompt.js";
 import {
   TEST_SPEC_DATA_NAMES,
+  TEST_SPEC_CLOCK_DATA_NAME,
+  TEST_SPEC_CLOCK_RULE_TEXT,
   TEST_SPEC_FRAMES_DATA_NAME,
   TEST_SPEC_SCHEMA_NAME,
   testSpecRuleDefinitionsOf,
@@ -123,7 +125,12 @@ import {
 } from "./v11a/stages/test-spec.js";
 import * as testSpecModule from "./v11a/stages/test-spec.js";
 import * as declCheckStage from "./v11a/stages/decl-check.js";
-import { DECL_CHECK_SCHEMA_NAME } from "./v11a/stages/decl-check.js";
+import {
+  DECL_CHECK_IDS_R03_DEFINITION,
+  DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME,
+  DECL_CHECK_RULE_DEFINITIONS,
+  DECL_CHECK_SCHEMA_NAME,
+} from "./v11a/stages/decl-check.js";
 import { NAMED_FAILURE_MESSAGES } from "./v12/search-repair.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME, semanticCheckRuleDefinitionsOf } from "./v11a/stages/semantic-check.js";
 import { structuralReadingText } from "./v12/structural-meanings.js";
@@ -187,6 +194,29 @@ const realFileDeps = () => ({
     await fs.mkdir(path, { recursive: true });
   },
 });
+
+/** R-dc-03 の off の文（旗 ids off の定義から引く。Issue #795） */
+const DECL_CHECK_OFF_R03_TEXT = DECL_CHECK_RULE_DEFINITIONS.find((definition) => definition.id === DECL_CHECK_IDS_R03_DEFINITION.id)?.text ?? "";
+
+/**
+ * 旗 ids on の B3' の要求から、塊「要件に結び付いた検査」1 つ（塊の名前で決めた位置）と R-dc-03 の ids の文を外す
+ * （#795 の前の要求と照らす。Issue #795）。塊が在ればちょうど 1 つであることを確かめる。ほかの段の要求はそのまま
+ */
+function withoutLinkedValidationsOn(request: LlmStructuredRequest): LlmStructuredRequest {
+  if (request.schemaName !== DECL_CHECK_SCHEMA_NAME) return request;
+  const opener = `\n<data name="${DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME}">`;
+  const start = request.input.indexOf(opener);
+  const close = "\n</data>";
+  const input =
+    start < 0
+      ? request.input
+      : (() => {
+          expect(request.input.indexOf(opener, start + 1), "結び付いた検査の塊は 1 つ").toBe(-1);
+          return `${request.input.slice(0, start)}${request.input.slice(request.input.indexOf(close, start) + close.length)}`;
+        })();
+  const rules = (request.rules ?? []).map((text) => (text === DECL_CHECK_IDS_R03_DEFINITION.text ? DECL_CHECK_OFF_R03_TEXT : text));
+  return { ...request, input, rules };
+}
 
 // ── 引数の読み取り ───────────────────────────────────────────────
 
@@ -1465,6 +1495,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
         });
         return { ...restored, input };
       }
+      // Issue #795：旗 ids on の B3' は塊「要件に結び付いた検査」と R-dc-03 の ids の文を持つ。どちらも元に戻して比べる
+      if (request.schemaName === DECL_CHECK_SCHEMA_NAME) return withoutLinkedValidationsOn(request);
       return request;
     });
   };
@@ -1498,6 +1530,10 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
           const framesBlock = new RegExp(`\\n<data name="${TEST_SPEC_FRAMES_DATA_NAME}">\\n[\\s\\S]*?\\n</data>`);
           expect(framesBlock.test(input)).toBe(true);
           input = input.replace(framesBlock, "");
+          // #794：所属の後ろ・枠の前の時計の塊も旗 ids の走りだけの塊（ちょうど 1 つ在ることを確かめてから除く）
+          const clockBlock = new RegExp(`\\n<data name="${TEST_SPEC_CLOCK_DATA_NAME}">\\n[\\s\\S]*?\\n</data>`, "g");
+          expect(input.match(clockBlock)).toHaveLength(1);
+          input = input.replace(clockBlock, "");
         }
         // 旗 ids の走りの規則のうち、場合の形に差し替えた欄の名前の文（R-tsp-07・09・11・12・13・14。#625）と、必要な試験の枠の
         // R-tsp-03（#653）は旗 ids off の文に戻す
@@ -1547,6 +1583,11 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     );
   const withoutTableStage = (diff: Readonly<Record<string, readonly string[]>>): Readonly<Record<string, readonly string[]>> =>
     Object.fromEntries(Object.entries(diff).filter(([name]) => name !== "name-table"));
+  /** 旗 ids on の B3' で変わる規則の位置（R-dc-03）と、その名前で決めた差の場所（Issue #795） */
+  const DECL_IDS_RULES = ruleTexts(declCheckStage.declCheckRuleDefinitionsOf(true));
+  const DECL_OFF_RULES = ruleTexts(declCheckStage.declCheckRuleDefinitionsOf(false));
+  const DECL_RULE_DIFF_INDEX = DECL_OFF_RULES.findIndex((text, index) => text !== DECL_IDS_RULES[index]);
+  const DECL_RULE_DIFF_PATH = `$.rules[${DECL_RULE_DIFF_INDEX}]`;
 
   it("完走で 0：v1.1α の経路で流れ、表を組む段（ids on は C1・C2）の後の要求の差は台帳の enum-membership（#548）と empty-aggregate（#549）の行の分だけ（名指しの場所）。条件の記録の pipeline・prompt_version が v1.2、ほかの欄は v1.1a と同じ", async () => {
     const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
@@ -1585,8 +1626,10 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     };
     const ledgerDiff = withoutTableStage(LEDGER_REQUEST_DIFF);
     for (const diff of diffs) {
-      // T1''・T2・B1・B3' は名前の表（計算の行の aggregate）を載せるデータが違う
-      expect(diff.paths, diff.schemaName).toEqual(withInput(ledgerDiff[diff.schemaName] ?? []));
+      // T1''・T2・B1・B3' は名前の表（計算の行の aggregate）を載せるデータが違う。旗 ids on の B3' は R-dc-03 の ids の文
+      // （名指しの位置）と、塊「要件に結び付いた検査」（入力の末尾）も違う（Issue #795）
+      const expected = diff.schemaName === DECL_CHECK_SCHEMA_NAME ? withInput([DECL_RULE_DIFF_PATH]) : withInput(ledgerDiff[diff.schemaName] ?? []);
+      expect(diff.paths, diff.schemaName).toEqual(expected);
     }
     expect(diffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual([...Object.keys(ledgerDiff), "decl-check"]);
     // 旗 ids on の差（Issue #595）：T2 の R-tsp-16（$.rules[15]）が台帳の旗 ids の文になり、B1 の「固定した試験」（$.input）の末尾に
@@ -5012,26 +5055,42 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    *   stage-recounts d78e5d53…／stage-stop-repair c6d4b2e4…／stage-stop-commit f95fbfa3…／whole-stagnation 78f47029…／
    *   whole-adopting 092a3533…／whole-sets e13e5689…／whole-recounts 2940a375…）。欄だけの直しを含む `stage-mixed`・`whole-mixed` は
    * 診断が残るので #761 の取り直しの値のまま
+   *
+   * **Issue #794 の取り直し（旧値と理由）**：旗 ids の T2 の要求（束の初回・中身のやり直し）に、コードが固定した時計の値の塊「時計」1 つ
+   * と R-tsp-13 の末尾の時計の文を足したので、T2 を通る ids on の経路の要求の列が変わった。T2 を通る次の 7 経路だけ取り直した（旧値：
+   *   stage-search-repair-off 5dc5994e…／whole-stagnation 248017e1…／whole-adopting ca3074eb…／whole-sets acd0d9b6…／
+   *   whole-mixed 2fb98ee3…／whole-recounts 0a657756…／whole-search-repair-off b54b883d…）。`t2-b1` から始める stage-* の走り・
+   * ids off・v1.1a は T2 を通らないので旧値のまま。時計の塊と時計の文を位置で外した指紋（`withoutDiagnostics`）は
+   * 下の BEFORE_761_RAW・BEFORE_761_REQUESTS・BEFORE_761_BUDGET（旧の指紋）と一致する
+   *
+   * **Issue #795 の取り直し（旧値と理由）**：旗 ids の B3' の要求に、塊「要件に結び付いた検査」1 つと R-dc-03 の末尾の ids の文を
+   * 足したので、B3' を呼ぶ ids on の経路の要求の列が変わった。B3' を呼ぶ ids on の 16 経路だけ取り直した（旧値：
+   *   stage-stagnation 055ebe51…／stage-adopting 584eaf3e…／stage-sets 25a22183…／stage-mixed fe2b1148…／
+   *   stage-returned 7669c971…／stage-recounts de005c95…／stage-stop-repair 4e17820e…／stage-stop-first-eval fd323bfc…／
+   *   stage-stop-commit ab11a902…／whole-stagnation f5adc99b…／whole-adopting a9652bde…／whole-sets fca50c6f…／
+   *   whole-mixed 589712b1…／whole-recounts 2a3fe011…／stage-search-repair-off eca92253…／whole-search-repair-off a335530b…）。
+   *   ids off・v1.1a は B3' の旗の文を持たないので旧値のまま。塊と規則の文を位置で外した指紋（`withoutDiagnostics`）は
+   *   下の BEFORE_761_RAW・BEFORE_761_REQUESTS・BEFORE_761_BUDGET（旧の指紋）と一致する
    */
   const BEFORE_746: Readonly<Record<string, string>> = {
-    "stage-stagnation": "055ebe51378e8035e4ea152c509710fc84473c6d954be3d1168cb17b4ced9a1f",
-    "stage-adopting": "584eaf3e017350fb46a395f74ac640038a782c7b306b572e7ccbe6890fecd313",
-    "stage-sets": "25a22183c57cdbb64fe6b74e699063c6356201a037265d561f2731a1ac437146",
-    "stage-mixed": "fe2b1148ed2168a0c7aaeb2e94bccdcc01e7e4f63713b6f5116026c8fbdc0a29",
-    "stage-returned": "7669c971267262ebc921bd61046f1d9e3540a12d3892a48d9508e281b544af78",
-    "stage-recounts": "de005c953d91b30fc27a7a24c2d41292be6cabf35242a0525a03804d1bd33252",
-    "stage-stop-repair": "4e17820e9cd8415b24850f555bed05d332ce45a3c79eb1d6eedb93ee1a892dac",
-    "stage-stop-first-eval": "fd323bfcc9d82f0f102dbf43d9ce14db17bc05cc9b8c0ff84c91939270710948",
-    "stage-stop-commit": "ab11a902ec436a60193e2b2b4c5ab3bf4afd6ae88b338dbb74bc042944100909",
-    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
-    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
-    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
-    "whole-mixed": "2fb98ee37e8a4e2b3cab5b8a1dbdd723ffb5e87011b45f9019ad51c79feb062b",
-    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
+    "stage-stagnation": "7123faace1099eca54b188bcb571d27850bd9a06d9519822ba631e2811914832",
+    "stage-adopting": "66a368abcb50c8a6d620c9ce365a457fdb000e40f75af1309df4af8ae19442bd",
+    "stage-sets": "af5d0c06cb05d20bf20f02a7c8d64819c5d2acffdf75b33b0c9116173dab873f",
+    "stage-mixed": "6c7a8d4405afcfb946478234ddec16bba9b3325e8c7a29fe678868ea02b7fd42",
+    "stage-returned": "2c526069477d0913563cb7cfb123d5866564f212d970c40f79662a3ae2ae6261",
+    "stage-recounts": "71b516b950f98825c6769da2a9da74d04762aa6acf2dffff1c457acaa0df8e50",
+    "stage-stop-repair": "834ed3d14c64c85792a17267fd325d3e910e88530142e546356aaa561d16f331",
+    "stage-stop-first-eval": "ffd1c10c0086037dd583e3dffb1c65d426788341d3fbf96c8874fc776b00b225",
+    "stage-stop-commit": "798da084657d49892bc8543c867bc560da20559c0706faa411975527127e1450",
+    "whole-stagnation": "fba02b2acc1c51880303888c5975fdaf7710b4ba8898c1c318cf571156b60897",
+    "whole-adopting": "1c00d9e844350a7930a9f81e82be575c22545c1e2801ddd362ca9c296e9d8ad0",
+    "whole-sets": "6d85af64487108677d7f260b3520f78023c0dea2df54c37bd07f6156a50ac4e6",
+    "whole-mixed": "c17b8e6f10a4519353a92da2ac6f5e08ac66be6697cecffdef7458d5f255443e",
+    "whole-recounts": "d37a80c6bbdf58516957d82600e1651c91cff121c235e911b69e2f6e0c20b849",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
-    "stage-search-repair-off": "5dc5994e2dffc41aab246647e4b9b5d61d281194cf7cfff32d01525c95c311cd",
-    "whole-search-repair-off": "b54b883dcc61c988952fbce4d66ff2bc6cdd8174f24d797824d4bde1371875bb",
+    "stage-search-repair-off": "52ffc1bff4ca7a45ef740c522e240e40472074ae502acb462f8aa02d8146d683",
+    "whole-search-repair-off": "df1fa5649b563bf458e8905dbfcc2c808f4611ba184047fda6ee670bcd17ba80",
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
@@ -5144,12 +5203,81 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     return [...rules.slice(0, index), ...rules.slice(index + 1)];
   }
 
-  /** 要求 1 つ（JSON の文字列か写像）から、診断の塊と R-fr-08 を外す。形（文字列か写像か・欄の順）は変えない */
+  /**
+   * Issue #794：旗 ids の T2 の要求の時計の塊 1 つを、**塊の名前で決めた位置**だけ外す（「要件ごとの所属」の直後にあることを確かめる）。
+   * 塊が無ければそのまま
+   */
+  function withoutClockBlock(input: string): string {
+    const opener = `\n<data name="${TEST_SPEC_CLOCK_DATA_NAME}">`;
+    const start = input.indexOf(opener);
+    if (start < 0) return input;
+    expect(input.indexOf(opener, start + 1), "時計の塊は 1 つ").toBe(-1);
+    const [, , , , ownershipName] = TEST_SPEC_DATA_NAMES;
+    const close = "\n</data>";
+    expect(input.lastIndexOf(`<data name="${ownershipName}">`, start), "時計の塊は所属の後ろ").toBeGreaterThanOrEqual(0);
+    expect(input.slice(0, start).endsWith(close), "時計の塊は塊の直後").toBe(true);
+    const end = input.indexOf(close, start);
+    if (end < 0) throw new Error("前提が壊れた：時計の塊の終わりが無い");
+    return `${input.slice(0, start)}${input.slice(end + close.length)}`;
+  }
+
+  /** 旗 ids の R-tsp-13 の文（#794 の後。規則の id で引く）と、末尾の時計の文を外した文（#794 の前） */
+  const IDS_R13_TEXT = (() => {
+    const definitions = testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true);
+    const index = definitions.findIndex((definition) => definition.id === "R-tsp-13");
+    if (index < 0) throw new Error("前提が壊れた：R-tsp-13 が定義に無い");
+    const after = ruleTexts([definitions[index]!])[0] ?? "";
+    if (!after.endsWith(TEST_SPEC_CLOCK_RULE_TEXT)) throw new Error("前提が壊れた：旗 ids の R-tsp-13 が時計の文で終わらない");
+    return { after, before: after.slice(0, -TEST_SPEC_CLOCK_RULE_TEXT.length) };
+  })();
+
+  /** Issue #794：旗 ids の T2 の要求の規則から、R-tsp-13 の末尾の時計の文だけを外す（その文の規則が 1 つであることを確かめる） */
+  function withoutClockRule(rules: readonly string[]): readonly string[] {
+    const index = rules.indexOf(IDS_R13_TEXT.after);
+    if (index < 0) return rules;
+    expect(rules.filter((rule) => rule === IDS_R13_TEXT.after), "時計の文の R-tsp-13 は 1 つ").toHaveLength(1);
+    return [...rules.slice(0, index), IDS_R13_TEXT.before, ...rules.slice(index + 1)];
+  }
+
+  /**
+   * Issue #795：旗 ids の B3' の要求の塊「要件に結び付いた検査」1 つを、**塊の名前で決めた位置**だけ外す
+   * （「追加の要素」の直後にあることを確かめる）。塊が無ければそのまま
+   */
+  function withoutLinkedBlock(input: string): string {
+    const opener = `\n<data name="${DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME}">`;
+    const start = input.indexOf(opener);
+    if (start < 0) return input;
+    expect(input.indexOf(opener, start + 1), "結び付いた検査の塊は 1 つ").toBe(-1);
+    const close = "\n</data>";
+    const end = input.indexOf(close, start);
+    if (end < 0) throw new Error("前提が壊れた：結び付いた検査の塊の終わりが無い");
+    return `${input.slice(0, start)}${input.slice(end + close.length)}`;
+  }
+
+  /** Issue #795：旗 ids の B3' の規則から、R-dc-03 の ids の文だけを off の文に戻す（その規則が 1 つであることを確かめる） */
+  function withoutLinkedRule(rules: readonly string[]): readonly string[] {
+    const index = rules.indexOf(DECL_CHECK_IDS_R03_DEFINITION.text);
+    if (index < 0) return rules;
+    expect(rules.filter((rule) => rule === DECL_CHECK_IDS_R03_DEFINITION.text), "R-dc-03 の ids の文は 1 つ").toHaveLength(1);
+    return [...rules.slice(0, index), DECL_CHECK_OFF_R03_TEXT, ...rules.slice(index + 1)];
+  }
+
+  /**
+   * 要求 1 つ（JSON の文字列か写像）から、診断の塊と R-fr-08 を外す。Issue #794：旗 ids の T2 の時計の塊と R-tsp-13 の末尾の時計の文も
+   * 外す（どちらも在るか、どちらも無いか）。形（文字列か写像か・欄の順）は変えない
+   */
   function withoutDiagnostic(value: unknown): unknown {
     const object = typeof value === "string" ? (JSON.parse(value) as Record<string, unknown>) : { ...(value as Record<string, unknown>) };
     const next: Record<string, unknown> = { ...object };
-    if (Array.isArray(object["rules"])) next["rules"] = withoutR08(object["rules"] as readonly string[]);
-    if (typeof object["input"] === "string") next["input"] = withoutDiagnosticBlock(object["input"]);
+    if (Array.isArray(object["rules"])) {
+      next["rules"] = withoutLinkedRule(withoutClockRule(withoutR08(object["rules"] as readonly string[])));
+    }
+    if (typeof object["input"] === "string") {
+      next["input"] = withoutLinkedBlock(withoutClockBlock(withoutDiagnosticBlock(object["input"])));
+    }
+    const hadClockRule = Array.isArray(object["rules"]) && (object["rules"] as readonly string[]).includes(IDS_R13_TEXT.after);
+    const hadClockBlock = typeof object["input"] === "string" && object["input"] !== withoutClockBlock(object["input"]);
+    expect(hadClockBlock, "時計の塊と時計の文は対").toBe(hadClockRule);
     return typeof value === "string" ? JSON.stringify(next) : next;
   }
 
@@ -5374,8 +5502,18 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "stage-v11a": "b4e6ebe698f85d4b2015554d745099aacc12018207dbba2cbbe2bd40f60481eb",
     "whole-v11a": "d16eceeaa1148ff63334635e65a9ab9402262a1f280f505b92746ea9e6394444",
   };
-  /** 一気通貫の全出力の指紋が、診断の入力長に由来する費用（budget_*）で変わる 4 経路（要求の列で裏付ける） */
-  const WHOLE_COST_AFFECTED = new Set(["whole-stagnation", "whole-adopting", "whole-sets", "whole-recounts"]);
+  /**
+   * 一気通貫の全出力の指紋が、入力長に由来する費用（budget_*）で変わる経路（要求の列で裏付ける）。#761 の診断の 4 経路と、
+   * Issue #795 で B3' の入力長が変わった 2 経路（whole-mixed・whole-search-repair-off。予約の端数の浮動小数の表れが変わる）
+   */
+  const WHOLE_COST_AFFECTED = new Set([
+    "whole-stagnation",
+    "whole-adopting",
+    "whole-sets",
+    "whole-recounts",
+    "whole-mixed",
+    "whole-search-repair-off",
+  ]);
   /**
    * #761 の前（f9bf3b3）の、**診断の塊と R-fr-08 を外し、budget_* の値だけを固定の印に替えた**全出力の指紋（期待）。
    *
@@ -5389,6 +5527,16 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "whole-sets": "afb63e0962c9ab0fd031b88cd71814c4042961bbebc44353c48d2dbcda3f834f",
     "whole-recounts": "af26e804452f3d711e529a5c9671f6276341e70b03a39844847f7ee6344157d0",
   };
+  /**
+   * Issue #795 の前の、**B3' の塊と R-dc-03 の ids の文を外し、budget_* の値だけを固定の印に替えた**全出力の指紋（期待）。
+   * #795 で B3' の入力長が変わり、予約の端数の浮動小数の表れが変わる 2 経路。塊と文を外した要求は #795 の前と同じ
+   */
+  const BEFORE_795_BUDGET: Readonly<Record<string, string>> = {
+    "whole-mixed": "0c560b407f214f9115e3d366f7d1306da5b32e70c2e9050a19b789f83cd8d7c1",
+    "whole-search-repair-off": "8cf44cc06499042297ae53826453603f104c032e2e1b9e6d7d07253eb70c94a1",
+  };
+  /** 費用の印に替えた全出力の期待（#761 の 4 経路は #761 の値、#795 の 2 経路は #795 の値） */
+  const budgetExpectedOf = (name: string): string | undefined => BEFORE_795_BUDGET[name] ?? BEFORE_761_BUDGET[name];
   /** 費用の印に替えるキー（f9bf3b3 の 4 経路の出力に現れた budget_*。ほかのキーを替えていないことをこの集合で照らす） */
   const BUDGET_KEYS = ["budget_remaining_usd", "budget_reserved_usd", "budget_usd"];
   it("budget_* の印への置換はキーの位置だけで、隣のキーや値の文字列を替えない", () => {
@@ -5439,7 +5587,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     // 採否の並び）が f9bf3b3 と一致する。印に替えたキーが budget_* だけであることも照らす
     for (const entry of INVARIANT_RUNS) {
       if (!WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(budgetDigests[entry.name], entry.name).toBe(BEFORE_761_BUDGET[entry.name]);
+      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf(entry.name));
       expect(budgetKeySets[entry.name], entry.name).toEqual(BUDGET_KEYS);
       // 印に替えたのは budget_* だけで、導出し直したのは manifest の要約の行（sha256・size_bytes）だけ
       expect(budgetDerivedSets[entry.name], entry.name).toEqual([{ path: "artifacts/summary.json", fields: ["sha256", "size_bytes"] }]);
@@ -5469,26 +5617,37 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    * stage-returned 4a3d8c40…／stage-recounts 25d652b0…／stage-stop-repair 1c991819…／stage-stop-commit 241ad6a1…／
    * whole-stagnation 78f47029…／whole-adopting 092a3533…／whole-sets e13e5689…／whole-recounts 2940a375…）。
    * `stage-mixed`・`whole-mixed` は欄だけの直しを含むので #761 の取り直しの値のまま
+   *
+   * **Issue #794 の取り直し（旧値と理由）**：BEFORE_746 の注と同じ理由で、T2 を通る ids on の 7 経路だけ取り直した（旧値：
+   *   stage-search-repair-off 5dc5994e…／whole-stagnation 248017e1…／whole-adopting ca3074eb…／whole-sets acd0d9b6…／
+   *   whole-mixed 2fb98ee3…／whole-recounts 0a657756…／whole-search-repair-off b54b883d…）。ほかは旧値のまま
+   *
+   * **Issue #795 の取り直し（旧値と理由）**：BEFORE_746 の注と同じ理由で、B3' を呼ぶ ids on の 16 経路だけ取り直した（旧値：
+   *   stage-stagnation 0ef2fe8b…／stage-adopting d40f0f31…／stage-sets a3969eaa…／stage-mixed 192d1807…／
+   *   stage-returned a2f5dad9…／stage-recounts adbcd1aa…／stage-stop-repair 1bd073e2…／stage-stop-first-eval df320daf…／
+   *   stage-stop-commit 1bbfcba6…／whole-stagnation f5adc99b…／whole-adopting a9652bde…／whole-sets fca50c6f…／
+   *   whole-mixed 589712b1…／whole-recounts 2a3fe011…／stage-search-repair-off eca92253…／whole-search-repair-off a335530b…）。
+   *   ids off・v1.1a は旧値のまま
    */
   const BEFORE_748_BASE: Readonly<Record<string, string>> = {
-    "stage-stagnation": "0ef2fe8bc20c81f4a8dba870cdb2103f14ba42b0c064cccd68f01c3c163008f8",
-    "stage-adopting": "d40f0f31882cd2b83f5d93b308283cf18ba0b63b9a1cd72f31d332fd31fcf8d1",
-    "stage-sets": "a3969eaa6be4fe49cbffbebc81010fbb5df3312b0d325cbf3b873ad9c92cbf05",
-    "stage-mixed": "192d1807e23342fc26db90a68bfd1c52bd53d7597d42c67c6e7d3ec791da36fc",
-    "stage-returned": "a2f5dad9b7cefe9e2e530c3517774be719f2cefb24d4db19864174b2cde09429",
-    "stage-recounts": "adbcd1aa9c7f452cb352d11cd873eab96966a1be4f155479a67b3444f844d004",
-    "stage-stop-repair": "1bd073e2d94a519d53762e8e0b6fecb78f9731ff306e4422377288a9eee681bb",
-    "stage-stop-first-eval": "df320daf50a2c3e343c582894f57af6874bee3bd02d881ad445e36734f8d490f",
-    "stage-stop-commit": "1bbfcba658904ff0c2aa4fbe935e00cbcb427a466928b678b81c2017695a3373",
-    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
-    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
-    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
-    "whole-mixed": "2fb98ee37e8a4e2b3cab5b8a1dbdd723ffb5e87011b45f9019ad51c79feb062b",
-    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
+    "stage-stagnation": "dcd6cb24b804ae4d21e391b9d38632006827a9eb00dcc23aa5e3761aa92ae56e",
+    "stage-adopting": "bcc1e76c3b7a4d461940a26fa966539ab6ef9599c032f45df8a346cba7be49fe",
+    "stage-sets": "5a87741f7b3e6f1ddbd21404fd99f2877927247fdbf5a9d7e1f1b7f54181970f",
+    "stage-mixed": "1a364ed509595569c61329d4ec3fd6d0be956cd52fdc2ff1143c3b6ba1a8ac92",
+    "stage-returned": "1f572cbe4b5e36a4d60399699f3ad1a6317fe4b5ded39ae4b736474da76249bd",
+    "stage-recounts": "44156ab27997f88ce9b9dc3e4603754fda54471c2cbb9ba940c925898f16f086",
+    "stage-stop-repair": "f7bba3aa12f9ca4dad5ebf5c5319b66f3f440ed6a7ce6606a83a7b4803d19e73",
+    "stage-stop-first-eval": "0783975e0d141d2f4b05f27e4384eb524ef61f7fd282846e7e46b8f19ebb7a27",
+    "stage-stop-commit": "15f1385f99503285050f5a339ef380226fe3dec14476c1795b20ffcfd9dac21f",
+    "whole-stagnation": "fba02b2acc1c51880303888c5975fdaf7710b4ba8898c1c318cf571156b60897",
+    "whole-adopting": "1c00d9e844350a7930a9f81e82be575c22545c1e2801ddd362ca9c296e9d8ad0",
+    "whole-sets": "6d85af64487108677d7f260b3520f78023c0dea2df54c37bd07f6156a50ac4e6",
+    "whole-mixed": "c17b8e6f10a4519353a92da2ac6f5e08ac66be6697cecffdef7458d5f255443e",
+    "whole-recounts": "d37a80c6bbdf58516957d82600e1651c91cff121c235e911b69e2f6e0c20b849",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
-    "stage-search-repair-off": "5dc5994e2dffc41aab246647e4b9b5d61d281194cf7cfff32d01525c95c311cd",
-    "whole-search-repair-off": "b54b883dcc61c988952fbce4d66ff2bc6cdd8174f24d797824d4bde1371875bb",
+    "stage-search-repair-off": "52ffc1bff4ca7a45ef740c522e240e40472074ae502acb462f8aa02d8146d683",
+    "whole-search-repair-off": "df1fa5649b563bf458e8905dbfcc2c808f4611ba184047fda6ee670bcd17ba80",
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
@@ -5534,7 +5693,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     // 4 経路は、診断と R-fr-08 を外し budget_* の値だけを印に替えた全出力が f9bf3b3 と一致する（印のキーも budget_* だけ）
     for (const entry of INVARIANT_RUNS) {
       if (!WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(budgetDigests[entry.name], entry.name).toBe(BEFORE_761_BUDGET[entry.name]);
+      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf(entry.name));
       expect(budgetKeySets[entry.name], entry.name).toEqual(BUDGET_KEYS);
       expect(budgetDerivedSets[entry.name], entry.name).toEqual([{ path: "artifacts/summary.json", fields: ["sha256", "size_bytes"] }]);
     }
@@ -7049,6 +7208,15 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     // 置き換え前の直書きの 5 語と**同じ集合**であることを、語を走査対象に書かずに集合の指紋で示す
     expect(ACCEPTANCE_MATERIAL_WORDS).toHaveLength(5);
     expect(await sha256Hex(ACCEPTANCE_MATERIAL_WORDS.join("・"))).toBe("e4cb9426e93a171e20821092d041bb621c5aa6f6a4455dc4cb239c0346abe7f7");
+  });
+
+  it("R7 題材の言葉が、今回変更したファイル（Issue #795：B3' の要件に結び付いた検査）に無い", async () => {
+    const root = new URL("./", import.meta.url).pathname;
+    const files = ["cli.test.ts", "v11a/run.ts", "v11a/run.test.ts", "v11a/stages/decl-check.ts", "v11a/stages/decl-check.test.ts"];
+    for (const name of files) {
+      const text = await fs.readFile(`${root}${name}`, "utf8");
+      for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text.includes(word), `${name}: ${word}`).toBe(false);
+    }
   });
 
   it("R7 題材の言葉が、今回変更したファイル（Issue #776：段の出力の上限の上書きの表）に無い", async () => {
