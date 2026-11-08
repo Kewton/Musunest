@@ -80,6 +80,12 @@
 //          表は対象の各 checkout の dist（ollama.js の OLLAMA_STAGE_OUTPUT_LIMITS）から独立に読む。v1.2 の走りで表が無い・形が違えば
 //          provider:ollama-limits-unavailable で断る（子 0 本）。同じ表どうしの比較と再開は通り、表の違う群の比較は compare:ollama-limits-differ で断る
 //          （新しい欄は比較の照合から外さない）。--provider を省いた走り・明示 openai の走りは欄を足さず、条件と署名は今までと同じ
+// #788（LLM の adapter に OpenRouter を足す。README §5.1）：
+//   --provider openrouter：--provider ollama と同じ形。子を起こす前に、対象の checkout（比較なら両方）の dist が対応している
+//          （openrouter.js と DEFAULT_OPENROUTER_MODEL・OPENROUTER_API_KEY_ENV を公開している）ことを確かめ、無ければ
+//          provider:openrouter-unavailable で断る（子 0 本）。対応していれば子の argv に --provider openrouter と dist の既定モデルを渡し、
+//          条件の params.provider・params.provider_api_key_env に provider と鍵の環境変数の名前（値ではない）を残す。比較の既定の照合は
+//          defaultsOf の model_openrouter を見る（モデルか鍵の名前だけが違えば compare:defaults-differ）。Ollama の上限の表の欄は openrouter の走りに載せない
 // 採点は: node score-agent.mjs <repo> <out> [--label high]（リポジトリ・出力先の順で渡す）。比較は score-agent.mjs <repo> <out> --compare
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
@@ -135,9 +141,9 @@ if ((plan && planOnly) || (buildFrom !== null && (plan || planOnly || script)) |
 // #513：経路（--pipeline）・対のファイルを書く（--make-pairs）・対にした交互の計測（--compare）。値を取る引数は値が無いか -- で始まれば組めない
 const valueOf = (flag) => { const i = args.indexOf(flag); if (i < 0) return null; const v = args[i + 1]; return v === undefined || v === "" || v.startsWith("--") ? "" : v; };
 const pipelineArg = valueOf("--pipeline"), pipeline = pipelineArg ?? "v1";
-// #771：LLM の adapter（--provider openai|ollama）。省けば今までどおり openai で、子の argv も条件の記録も署名も変えない
+// #771：LLM の adapter（--provider openai|ollama|openrouter。#788 で openrouter を足した）。省けば今までどおり openai で、子の argv も条件の記録も署名も変えない
 const providerArg = valueOf("--provider"), provider = providerArg ?? "openai";
-if (providerArg === "" || (providerArg !== null && provider !== "openai" && provider !== "ollama")) refuseCode("provider:unknown");
+if (providerArg === "" || (providerArg !== null && provider !== "openai" && provider !== "ollama" && provider !== "openrouter")) refuseCode("provider:unknown");
 // #771 再レビュー：provider の欄を足すのは既定（openai）でないときだけ。--provider openai の明示は省略と同じ argv・条件・署名にする
 const providerExplicit = provider !== "openai";
 const compare = args.includes("--compare"), makePairsOut = valueOf("--make-pairs"), baselineArg = valueOf("--baseline"), pairsArg = valueOf("--pairs");
@@ -179,6 +185,17 @@ async function loadOllama(ctx) {
   return { model: mod.DEFAULT_OLLAMA_MODEL, keyEnv };
 }
 /**
+ * #788：OpenRouter に対応した工場の dist か（`openrouter.js` と `DEFAULT_OPENROUTER_MODEL`・`OPENROUTER_API_KEY_ENV` を公開している）。
+ * provider を省いた計測は読まない（旧の checkout でも今までどおり動く）。モデルの名前は dist の値を使い、手書きしない
+ */
+async function loadOpenRouter(ctx) {
+  let mod;
+  try { mod = await import(pathToFileURL(join(ctx.distDir, "openrouter.js")).href); } catch { return null; }
+  const keyEnv = ctx.factory?.OPENROUTER_API_KEY_ENV;
+  if (typeof mod.DEFAULT_OPENROUTER_MODEL !== "string" || mod.DEFAULT_OPENROUTER_MODEL === "" || typeof keyEnv !== "string" || keyEnv === "") return null;
+  return { model: mod.DEFAULT_OPENROUTER_MODEL, keyEnv };
+}
+/**
  * #776：上書きする段の名前（**キーの集合をこれに固定する**。Issue #776 レビュー R2）。並びはキー昇順
  * （`decl-check` < `repair` < `semantic-check`）で、記録・署名・比較の正規の形でもある（レビュー R3）
  */
@@ -211,9 +228,12 @@ const sameOllamaLimits = (a, b) => {
 // #771：Ollama の公開値（既定のモデル・鍵の環境変数の名前）は checkout ごとに持つ（比較元は比較元の dist の値。候補の値を写さない）
 main.ollama = provider === "ollama" ? await loadOllama(main) : null;
 if (provider === "ollama" && main.ollama === null) refuseCode("provider:ollama-unavailable");
-const model = opt("--model", provider === "ollama" ? main.ollama.model : openai.DEFAULT_OPENAI_MODEL);
-/** #771：条件の記録に残す、その checkout の鍵の環境変数の名前（値は読まない・残さない） */
-const apiKeyEnvOf = (ctx) => (provider === "ollama" ? ctx.ollama.keyEnv : ctx.factory.API_KEY_ENV);
+// #788：OpenRouter の公開値（既定のモデル・鍵の環境変数の名前）も同じく checkout ごとに持つ
+main.openrouter = provider === "openrouter" ? await loadOpenRouter(main) : null;
+if (provider === "openrouter" && main.openrouter === null) refuseCode("provider:openrouter-unavailable");
+const model = opt("--model", provider === "ollama" ? main.ollama.model : provider === "openrouter" ? main.openrouter.model : openai.DEFAULT_OPENAI_MODEL);
+/** #771・#788：条件の記録に残す、その checkout の鍵の環境変数の名前（値は読まない・残さない） */
+const apiKeyEnvOf = (ctx) => (provider === "ollama" ? ctx.ollama.keyEnv : provider === "openrouter" ? ctx.openrouter.keyEnv : ctx.factory.API_KEY_ENV);
 const perRunBudget = Number(opt("--factory-budget-usd", String(factory.DEFAULT_BUDGET_USD)));
 const deadlineMin = Number(opt("--deadline-min", String(factory.DEFAULT_DEADLINE_MS / 60000)));
 
@@ -333,6 +353,9 @@ if (compare) {
   // #771：比較では両群に同じ provider とモデルを渡す。比較元の dist も Ollama に対応していることを子を起こす前に確かめる
   baseline.ollama = provider === "ollama" ? await loadOllama(baseline) : null;
   if (provider === "ollama" && baseline.ollama === null) refuseCode("provider:ollama-unavailable");
+  // #788：OpenRouter も同じく、比較元の dist が対応していることを子を起こす前に確かめる
+  baseline.openrouter = provider === "openrouter" ? await loadOpenRouter(baseline) : null;
+  if (provider === "openrouter" && baseline.openrouter === null) refuseCode("provider:openrouter-unavailable");
 }
 // 段だけの対の比較 × v1.2（#638）：両群とも v1.2 の経路なので、比較元の dist の旗の組も読み、候補の組と名前 → 真偽の集合として同じことを確かめる（子を起こす前）
 let baselineEntry = null;
@@ -924,6 +947,8 @@ async function runCompare() {
     reasoning_effort: ctx.limits.DEFAULT_REASONING_EFFORT, vocabulary_version: ctx.factory.VOCABULARY_VERSION,
     // #771：--provider ollama のときは、既定のモデルと鍵の環境変数もその checkout の provider の値（指定が無ければ今のまま）
     ...(provider === "ollama" ? { model_ollama: ctx.ollama.model } : {}),
+    // #788：--provider openrouter のときも、既定のモデル（鍵の名前は api_key_env に入る）
+    ...(provider === "openrouter" ? { model_openrouter: ctx.openrouter.model } : {}),
     api_key_env: apiKeyEnvOf(ctx), jev_key_env: ctx.factory.JEV_API_KEY_ENV,
     ...(!providerExplicit ? {} : { provider }),
   });

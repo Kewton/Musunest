@@ -124,6 +124,10 @@ const fakeOpenai = 'export const DEFAULT_OPENAI_MODEL = "fake-model";\n';
 const FAKE_OLLAMA_LIMITS = 'export const OLLAMA_STAGE_OUTPUT_LIMITS = { "semantic-check": 32768, "decl-check": 32768, repair: 65536 };\n';
 const fakeOllama = `export const DEFAULT_OLLAMA_MODEL = "fake-ollama-model";\n${FAKE_OLLAMA_LIMITS}`;
 const FAKE_OLLAMA_KEY_ENV_EXPORT = 'export const OLLAMA_API_KEY_ENV = "OLLAMA_API_KEY";\n';
+// #788：OpenRouter に対応した工場の dist（openrouter.js の既定のモデルと、cli.js の OPENROUTER_API_KEY_ENV）
+const FAKE_OPENROUTER_MODEL = "fake-openrouter-model";
+const fakeOpenRouter = `export const DEFAULT_OPENROUTER_MODEL = ${JSON.stringify(FAKE_OPENROUTER_MODEL)};\n`;
+const FAKE_OPENROUTER_KEY_ENV_EXPORT = 'export const OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY";\n';
 const fakeLimits = 'export const DEFAULT_REASONING_EFFORT = "high";\nexport const STAGE_MAX_OUTPUT_TOKENS = { low: { requirements: 2048 }, medium: { requirements: 16384 }, high: { requirements: 16384 } };\n';
 // 偽物の appspec-schema の files（工場の入口が生成に渡す文書の置き場所を引く口。packages/appspec-schema/src/files.ts と同じ形）
 const fakeSchemaFiles = `export const CONTRACT_DIR = "contract";
@@ -145,18 +149,19 @@ function makeSet(over = {}) {
   return { schema: EVAL_SET_SCHEMA, id: "dev-p1-p10", version: 1, role: "development", title: "t", source: { document: "workspace/mvp/m1/grammar-trial/stage1-patterns.md" }, styles: { S1: "s1", S2: "s2" }, items, ...over };
 }
 
-/** 一時の偽物のリポジトリを作る。dist は src より後に書くので「作り直した」根拠が立つ。ollama を真にすると Ollama に対応した dist になる（#771）。ollamaLimits を偽にすると ollama.js が既定のモデルだけになる（#776） */
-function makeRepo(base, { ollama = false, ollamaLimits = true } = {}) {
+/** 一時の偽物のリポジトリを作る。dist は src より後に書くので「作り直した」根拠が立つ。ollama を真にすると Ollama に対応した dist になる（#771）。ollamaLimits を偽にすると ollama.js が既定のモデルだけになる（#776）。openrouter を真にすると OpenRouter に対応した dist になる（#788） */
+function makeRepo(base, { ollama = false, ollamaLimits = true, openrouter = false } = {}) {
   const repo = join(base, "repo");
   mkdirSync(join(repo, "packages/factory/dist"), { recursive: true });
   mkdirSync(join(repo, "packages/factory/src"), { recursive: true });
   mkdirSync(join(repo, "workspace/mvp/m1/grammar-trial"), { recursive: true });
   writeFileSync(join(repo, "packages/factory/package.json"), JSON.stringify({ type: "module" }));
   writeFileSync(join(repo, "packages/factory/src/index.ts"), "export {};\n");
-  writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeCli + (ollama ? FAKE_OLLAMA_KEY_ENV_EXPORT : ""));
+  writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeCli + (ollama ? FAKE_OLLAMA_KEY_ENV_EXPORT : "") + (openrouter ? FAKE_OPENROUTER_KEY_ENV_EXPORT : ""));
   writeFileSync(join(repo, "packages/factory/dist/cli-plan.js"), fakeCliPlan);
   writeFileSync(join(repo, "packages/factory/dist/openai.js"), fakeOpenai);
   if (ollama) writeFileSync(join(repo, "packages/factory/dist/ollama.js"), ollamaLimits ? fakeOllama : 'export const DEFAULT_OLLAMA_MODEL = "fake-ollama-model";\n');
+  if (openrouter) writeFileSync(join(repo, "packages/factory/dist/openrouter.js"), fakeOpenRouter);
   writeFileSync(join(repo, "packages/factory/dist/limits.js"), fakeLimits);
   writeFileSync(join(repo, "workspace/mvp/m1/grammar-trial/stage1-patterns.md"), makeTable());
   // #425：spec-engine の dist・生成に渡す文書・採点の定義と集計のコード（指紋を取るだけ。中身は動かさない）
@@ -369,6 +374,151 @@ test("同じ Ollama の条件の再開は通り、provider の変更は断る（
     assert.ok(changed.stderr.includes("[resume:signature]"), changed.stderr);
     assert.deepEqual(treeOf(out), before);
   }, { ollama: true });
+});
+
+// ── #788：LLM の adapter に OpenRouter を足す（--provider openrouter。README §5.1）
+// run-agent は --provider ollama と同じ形で openrouter を受ける：対象の checkout の dist が対応していることを子を起こす前に確かめ、
+// 子の argv に provider と dist の既定モデルを渡し、条件に provider と鍵の環境変数の名前（値ではない）を残す。Ollama の上限の表は載せない
+
+test("#788 旧の checkout（OpenRouter に対応していない dist）は --provider openrouter を子を起こす前に固定の理由で断る", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-openrouter-old");
+    const log = join(base, "spawn-openrouter-old.log");
+    const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--provider", "openrouter"], { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 3);
+    assert.ok(r.stderr.includes("[provider:openrouter-unavailable]"), r.stderr);
+    assert.equal(spawnCount(log), 0);
+    assert.ok(!existsSync(out) || readdirSync(out).length === 0);
+  });
+});
+
+/** #788：対応しているふりをした壊れた dist を作る（`openrouter.js` はあるが公開値が欠ける・`cli.js` が鍵の名前を公開しない） */
+async function withBrokenOpenRouter(kind, fn) {
+  await withRepo(async (base, repo) => {
+    if (kind === "no-model") writeFileSync(join(repo, "packages/factory/dist/openrouter.js"), "export const OTHER = 1;\n");
+    if (kind === "empty-model") writeFileSync(join(repo, "packages/factory/dist/openrouter.js"), 'export const DEFAULT_OPENROUTER_MODEL = "";\n');
+    if (kind === "no-keyenv") writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeCli);
+    await fn(base, repo);
+  }, { openrouter: true });
+}
+
+test("#788 dist の公開値の検査：openrouter.js が既定のモデルを公開しない・空・cli.js が OPENROUTER_API_KEY_ENV を公開しない dist は、provider:openrouter-unavailable と断る（子 0 本・何も書かない）", async () => {
+  for (const kind of ["no-model", "empty-model", "no-keyenv"]) {
+    await withBrokenOpenRouter(kind, async (base, repo) => {
+      const out = join(base, `out-openrouter-${kind}`);
+      const log = join(base, `spawn-openrouter-${kind}.log`);
+      const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--provider", "openrouter"], { FAKE_SPAWN_LOG: log });
+      assert.equal(r.status, 3, `${kind}: ${r.stderr}`);
+      assert.ok(r.stderr.includes("[provider:openrouter-unavailable]"), `${kind}: ${r.stderr}`);
+      assert.equal(spawnCount(log), 0, kind);
+      assert.ok(!existsSync(out) || readdirSync(out).length === 0, kind);
+    });
+  }
+});
+
+test("#788 OpenRouter に対応した checkout は、argv に provider と dist の既定モデルを渡し、条件に provider と鍵の名前だけを残す（Ollama の上限の表は無い）", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-openrouter");
+    const keyValue = "or-SECRET-MARK";
+    const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--provider", "openrouter"], { OPENROUTER_API_KEY: keyValue });
+    assert.equal(r.status, 0, r.stderr);
+    const received = JSON.parse(readFileSync(join(out, "P1-r1", "received-argv.json"), "utf8"));
+    const at = received.indexOf("--provider");
+    assert.ok(at >= 0, "argv に --provider が無い");
+    assert.equal(received[at + 1], "openrouter");
+    assert.equal(received[received.indexOf("--model") + 1], FAKE_OPENROUTER_MODEL);
+    const cond = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    assert.equal(cond.params.provider, "openrouter");
+    assert.equal(cond.params.provider_api_key_env, "OPENROUTER_API_KEY");
+    assert.equal(cond.params.model, FAKE_OPENROUTER_MODEL);
+    // Ollama の段の出力の上限の表の欄は openrouter の走りに載らない
+    assert.equal("ollama_stage_output_limits" in cond.params, false);
+    // run-agent と score-agent が同じ署名の式で一致する
+    assert.equal(conditionsSignature(cond), cond.signature);
+    // 鍵の値は記録にも出力にも残らない
+    assert.equal(readFileSync(join(out, "conditions.json"), "utf8").includes(keyValue), false);
+    assert.equal(r.stdout.includes(keyValue), false);
+    assert.equal(r.stderr.includes(keyValue), false);
+  }, { openrouter: true });
+});
+
+test("#788 同じ OpenRouter の条件の再開は通り、provider の変更は断る", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-openrouter-resume");
+    const log = join(base, "spawn-openrouter-resume.log");
+    const args = ["--only", "P1", "--runs", "1", "--concurrency", "1", "--provider", "openrouter"];
+    assert.equal(runAgent(repo, out, args, { FAKE_SPAWN_LOG: log }).status, 0);
+    assert.equal(spawnCount(log), 1);
+    rmSync(join(out, "P1-r1"), { recursive: true, force: true });
+    // 同じ provider の再開は通る
+    const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.deepEqual(spawnLines(log), ["P1-r1", "P1-r1"]);
+    // provider を変えた再開は断る（署名が変わる）
+    const before = treeOf(out);
+    const changed = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--concurrency", "1", "--provider", "ollama", "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(changed.status, 3);
+    assert.ok(changed.stderr.includes("[resume:signature]"), changed.stderr);
+    assert.deepEqual(treeOf(out), before);
+  }, { openrouter: true, ollama: true });
+});
+
+// ── #788：比較 × OpenRouter
+
+/** #788：比較の両 checkout を OpenRouter に対応させる。比較元の公開値（鍵の名前・既定のモデル）は別に与えられる。baselineOpenRouter を偽にすると比較元は未対応 */
+function makeOpenRouterCompare(base, { baselineOpenRouter = true, baselineKeyEnv = "OPENROUTER_API_KEY", baselineModel = FAKE_OPENROUTER_MODEL } = {}) {
+  const c = makeCompare(base);
+  const keyEnvExport = (name) => `export const OPENROUTER_API_KEY_ENV = ${JSON.stringify(name)};\n`;
+  writeFileSync(join(c.repo, "packages/factory/dist/cli.js"), fakeCompareCli() + keyEnvExport("OPENROUTER_API_KEY"));
+  writeFileSync(join(c.repo, "packages/factory/dist/openrouter.js"), fakeOpenRouter);
+  if (baselineOpenRouter) {
+    writeFileSync(join(c.baseline, "packages/factory/dist/cli.js"), fakeCompareCli() + keyEnvExport(baselineKeyEnv));
+    writeFileSync(join(c.baseline, "packages/factory/dist/openrouter.js"), `export const DEFAULT_OPENROUTER_MODEL = ${JSON.stringify(baselineModel)};\n`);
+  }
+  return c;
+}
+
+test("#788 比較 × --provider openrouter：比較元の鍵の環境変数の名前・既定のモデルが候補と違えば compare:defaults-differ で断る（子 0 本・何も書かない）", async () => {
+  await withRepo(async (base) => {
+    for (const [label, opts] of [["key", { baselineKeyEnv: "BASE_OPENROUTER_API_KEY" }], ["model", { baselineModel: "base-openrouter-model" }]]) {
+      const c = makeOpenRouterCompare(join(base, `r788-${label}`), opts);
+      const pairs = makePairsFile(c.repo, c, join(base, `pairs-r788-${label}.json`), 1);
+      const log = join(base, `spawn-r788-${label}.log`), out = join(base, `out-r788-${label}`);
+      assertCompareRefused(runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5", "--provider", "openrouter"]), { FAKE_SPAWN_LOG: log }), "compare:defaults-differ", log, out, label);
+    }
+  });
+});
+
+test("#788 比較 × --provider openrouter：比較元だけ対応していなければ provider:openrouter-unavailable で断る（exit 3・子 0 本・何も書かない）", async () => {
+  await withRepo(async (base) => {
+    const c = makeOpenRouterCompare(join(base, "r788-old"), { baselineOpenRouter: false });
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-r788-old.json"), 1);
+    const log = join(base, "spawn-r788-old.log"), out = join(base, "out-r788-old");
+    assertCompareRefused(runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5", "--provider", "openrouter"]), { FAKE_SPAWN_LOG: log }), "provider:openrouter-unavailable", log, out);
+  });
+});
+
+test("#788 比較 × --provider openrouter：両方が対応し公開値が同じなら、両群の子に provider と既定モデルが渡り、各群の条件・既定・shared.params の provider と鍵の名前が一致する", async () => {
+  await withRepo(async (base) => {
+    const c = makeOpenRouterCompare(join(base, "r788-ok"));
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-r788-ok.json"), 1);
+    const log = join(base, "spawn-r788-ok.log"), out = join(base, "out-r788-ok");
+    const r = runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5", "--provider", "openrouter"]), { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(compareLog(log).length, 4);
+    for (const g of ["v1", "v1.1a"]) {
+      const argv = readJson(join(out, g, "P1-r1", "received-argv.json"));
+      assert.equal(argv[argv.indexOf("--provider") + 1], "openrouter", g);
+      assert.equal(argv[argv.indexOf("--model") + 1], FAKE_OPENROUTER_MODEL, g);
+      const cond = readJson(join(out, g, "conditions.json"));
+      assert.deepEqual([cond.params.provider, cond.params.provider_api_key_env, cond.params.model], ["openrouter", "OPENROUTER_API_KEY", FAKE_OPENROUTER_MODEL], g);
+      assert.equal("ollama_stage_output_limits" in cond.params, false, g);
+      assert.equal(conditionsSignature(cond), cond.signature, g);
+    }
+    const rec = readJson(join(out, "comparison.json"));
+    for (const g of ["v1", "v1.1a"]) assert.deepEqual([rec.groups[g].defaults.provider, rec.groups[g].defaults.api_key_env, rec.groups[g].defaults.model_openrouter], ["openrouter", "OPENROUTER_API_KEY", FAKE_OPENROUTER_MODEL], g);
+    assert.deepEqual([rec.shared.params.provider, rec.shared.params.provider_api_key_env, rec.shared.params.model], ["openrouter", "OPENROUTER_API_KEY", FAKE_OPENROUTER_MODEL]);
+  });
 });
 
 test("500 文字を超え分かれ UTF-8 の途中で切れた標準出力・標準エラーを、成功でも非 0 でもそのままのバイト列で残す", async () => {
@@ -3397,4 +3547,48 @@ test("#776 レビュー R3 上限表の並び順：比較元の表だけキー�
     assertRefused(runAgent(repo, bad, cmp(differ), { FAKE_SPAWN_LOG: log }), "compare:ollama-limits-differ", log, n1, "値の違う表");
     assertNothingWritten(bad, "値の違う表");
   });
+});
+
+// ── #788 レビュー R6：provider を省いた走り・ollama の走りの argv・条件・署名を、base（2b68491）の固定値と照合する
+//
+// base の checkout で採った値（同じ人工の dist・同じ時計・同じ出力先 `out-<label>`。一時ディレクトリの絶対パスだけを
+// `<tmp>` に置き換えた）。条件の署名は残し、score-agent の式と整合すること、正規化した条件の式の固定値とも一致することを
+// 独立に確かめる。`source` と `factory` の出力順を入れ替える変異で、この照合が赤になる。
+const R6_BASE_CONDITIONS = {
+  omit: "{\"schema\":\"musunest-factory/agent-accept-conditions/v5\",\"measurement_id\":\"out-omit\",\"source\":{\"commit\":null,\"dirty\":null},\"factory\":{\"dist_dir\":\"packages/factory/dist\",\"fingerprint\":\"34a1e02f8234816d01adf8c38eb8ec4d0a39dc93ce08f7d5dec92b19aa1d0baf\",\"rebuilt\":true},\"spec_engine\":{\"dist_dir\":\"packages/spec-engine/dist\",\"fingerprint\":\"c3d8806fb491af226ff85f474893101b9399307c6e8feca766247c0fa700641a\",\"files\":1},\"document\":{\"path\":\"workspace/mvp/m1/grammar-trial/stage1-patterns.md\",\"sha256\":\"4844f759b6b38864195f2aa58360ee4e139ee445fc924862eaaf615a8a380eaf\"},\"set\":{\"path\":\"workspace/mvp/m1/agent/eval/sets/dev-p1-p10.json\",\"sha256\":\"bdc621d43c74617d81082e6e60e2850d319d62f9d3f8fc5b4b9aca6c814d35a8\",\"id\":\"dev-p1-p10\",\"version\":1,\"role\":\"development\",\"items\":[{\"id\":\"P1\",\"subject\":\"A\",\"style\":\"S1\",\"writable\":true},{\"id\":\"P2\",\"subject\":\"A\",\"style\":\"S2\",\"writable\":true},{\"id\":\"P3\",\"subject\":\"B\",\"style\":\"S1\",\"writable\":false},{\"id\":\"P4\",\"subject\":\"B\",\"style\":\"S2\",\"writable\":false},{\"id\":\"P5\",\"subject\":\"C\",\"style\":\"S1\",\"writable\":true},{\"id\":\"P6\",\"subject\":\"C\",\"style\":\"S2\",\"writable\":true},{\"id\":\"P7\",\"subject\":\"D\",\"style\":\"S1\",\"writable\":false},{\"id\":\"P8\",\"subject\":\"D\",\"style\":\"S2\",\"writable\":false},{\"id\":\"P9\",\"subject\":\"E\",\"style\":\"S1\",\"writable\":true},{\"id\":\"P10\",\"subject\":\"E\",\"style\":\"S2\",\"writable\":true}]},\"prompt_documents\":{\"contract\":{\"dir\":\"packages/appspec-schema/contract\",\"fingerprint\":\"b7f707132d35330c40de0e1cdd852954017a5fd3f7dac9272b4c84578d70f1a0\",\"files\":2},\"semantics\":{\"path\":\"packages/appspec-schema/docs/semantics.md\",\"sha256\":\"c8ee92caa2cd99f885e045eb35596a5be3791c2ee6ee5017c1a82ac70bf96f44\"},\"vocabulary\":{\"path\":\"packages/appspec-schema/vocabulary.yaml\",\"sha256\":\"0c293fb3284eb6775e73f665a30f17b73dbb80dce19c5676eb91a00b7e3752bd\"}},\"judge\":{\"configuration\":\"llm-only\",\"jev_key_env\":\"JEV_API_KEY\"},\"params\":{\"effort\":\"high\",\"model\":\"fake-model\",\"plan\":false,\"answers_mode\":\"none\",\"mode\":\"build\",\"patterns\":[\"P1\"],\"runs\":1,\"concurrency\":1,\"budget_usd\":15,\"factory_budget_usd\":0.3,\"factory_deadline_min\":10,\"stage_output_limits\":{\"requirements\":16384},\"pipeline\":\"v1\",\"stage_output_limits_v11a\":null},\"child_args\":[{\"id\":\"P1-r1\",\"argv\":[\"<tmp>/repo/packages/factory/dist/cli.js\",\"<tmp>/out-omit/P1-r1/request.md\",\"--out\",\"<tmp>/out-omit/P1-r1/bundle\",\"--effort\",\"high\",\"--model\",\"fake-model\",\"--budget\",\"0.3\",\"--deadline\",\"10\"]}],\"scoring\":{\"dir\":\"workspace/mvp/m1/agent/eval\",\"fingerprint\":\"8602ff8b9614c9ed052d3e9c0aacb80f7afd718735f93a66d1e32abf6ce45f2f\",\"files\":[{\"path\":\"engine.mjs\",\"sha256\":\"562fc7c4f9fc0b1d779ca4be8a265c5fbd3da742803ded2ff0412943ef54acb5\"},{\"path\":\"score-claims.mjs\",\"sha256\":\"579ffc8c7b9b95f4579e549a1f55b0209aef8dbc8a27e3d1d8a7830bfbe4369c\"},{\"path\":\"rubric-v5.mjs\",\"sha256\":\"5cc78d1484df8925eabae4eacee48da70ee39b658e7d9e407b0cacc975180051\"},{\"path\":\"agent-accept/score-agent.mjs\",\"sha256\":\"6e33de0e0725e0eb55b2e1eb41d5f5d250ba6c69008b12120e5afe0bc97376a6\"},{\"path\":\"subjects/A.json\",\"sha256\":\"8cf6756fc3478c14c04bddf19e4419a85dc67a9173ce209e841839b6f3defb07\"},{\"path\":\"subjects/B.json\",\"sha256\":\"97d75e53a20502a198d6c126e2e6de2d45f24753dd5fa03b8c9d3e325500b00f\"},{\"path\":\"subjects/C.json\",\"sha256\":\"2c2992cb23af57ab0e244eef0b3d227574b2b77fd769ff034066358618478f18\"},{\"path\":\"subjects/D.json\",\"sha256\":\"39d581eeb49b65111af8bfa330e50621f7c53895bf9c567677ef83e53c5a00f6\"},{\"path\":\"subjects/E.json\",\"sha256\":\"1eb2898bee6500c10cc33be2bc78dd6256627d1a0acb2f393aaa2e196eb583db\"},{\"path\":\"definition:A\",\"source\":\"subjects/A.json\",\"sha256\":\"8cf6756fc3478c14c04bddf19e4419a85dc67a9173ce209e841839b6f3defb07\"},{\"path\":\"definition:B\",\"source\":\"subjects/B.json\",\"sha256\":\"97d75e53a20502a198d6c126e2e6de2d45f24753dd5fa03b8c9d3e325500b00f\"},{\"path\":\"definition:C\",\"source\":\"subjects/C.json\",\"sha256\":\"2c2992cb23af57ab0e244eef0b3d227574b2b77fd769ff034066358618478f18\"},{\"path\":\"definition:D\",\"source\":\"subjects/D.json\",\"sha256\":\"39d581eeb49b65111af8bfa330e50621f7c53895bf9c567677ef83e53c5a00f6\"},{\"path\":\"definition:E\",\"source\":\"subjects/E.json\",\"sha256\":\"1eb2898bee6500c10cc33be2bc78dd6256627d1a0acb2f393aaa2e196eb583db\"}],\"missing\":[]},\"scripts\":{\"mode\":\"post-hoc\",\"fingerprint\":\"21627716626e5520e809aa6847a6747237234d817fc5e20f491d3d9f115de3a9\",\"files\":[{\"subject\":\"A\",\"path\":\"workspace/mvp/m1/agent/eval/sets/scripts/A.json\",\"sha256\":\"65aaae1a661f41316a65b72768b1e665fa3eaa2fe4d4dee494d800982d43d8c9\"},{\"subject\":\"B\",\"path\":\"workspace/mvp/m1/agent/eval/sets/scripts/B.json\",\"sha256\":\"3c7f1bc1af5290027e36de445e3ee8b74789f72061c266fd42c62c2cc532f7c6\"},{\"subject\":\"C\",\"path\":\"workspace/mvp/m1/agent/eval/sets/scripts/C.json\",\"sha256\":\"3222ca8eac181ce2ae693523f6605003a44c502e337254b7d1282fc4f601dcac\"},{\"subject\":\"D\",\"path\":\"workspace/mvp/m1/agent/eval/sets/scripts/D.json\",\"sha256\":\"510e9d496179fc6fea1369a3f16a24db99cbf81f2a344db338874f28561fe24d\"},{\"subject\":\"E\",\"path\":\"workspace/mvp/m1/agent/eval/sets/scripts/E.json\",\"sha256\":\"5dc41e511cfc55a4de597b53143e1712d0866d8c909fe78d76af5af33cd6909e\"}]},\"frozen\":null,\"comparison\":null}",
+  ollama: "{\"schema\":\"musunest-factory/agent-accept-conditions/v5\",\"measurement_id\":\"out-ollama\",\"source\":{\"commit\":null,\"dirty\":null},\"factory\":{\"dist_dir\":\"packages/factory/dist\",\"fingerprint\":\"34a1e02f8234816d01adf8c38eb8ec4d0a39dc93ce08f7d5dec92b19aa1d0baf\",\"rebuilt\":true},\"spec_engine\":{\"dist_dir\":\"packages/spec-engine/dist\",\"fingerprint\":\"c3d8806fb491af226ff85f474893101b9399307c6e8feca766247c0fa700641a\",\"files\":1},\"document\":{\"path\":\"workspace/mvp/m1/grammar-trial/stage1-patterns.md\",\"sha256\":\"4844f759b6b38864195f2aa58360ee4e139ee445fc924862eaaf615a8a380eaf\"},\"set\":{\"path\":\"workspace/mvp/m1/agent/eval/sets/dev-p1-p10.json\",\"sha256\":\"bdc621d43c74617d81082e6e60e2850d319d62f9d3f8fc5b4b9aca6c814d35a8\",\"id\":\"dev-p1-p10\",\"version\":1,\"role\":\"development\",\"items\":[{\"id\":\"P1\",\"subject\":\"A\",\"style\":\"S1\",\"writable\":true},{\"id\":\"P2\",\"subject\":\"A\",\"style\":\"S2\",\"writable\":true},{\"id\":\"P3\",\"subject\":\"B\",\"style\":\"S1\",\"writable\":false},{\"id\":\"P4\",\"subject\":\"B\",\"style\":\"S2\",\"writable\":false},{\"id\":\"P5\",\"subject\":\"C\",\"style\":\"S1\",\"writable\":true},{\"id\":\"P6\",\"subject\":\"C\",\"style\":\"S2\",\"writable\":true},{\"id\":\"P7\",\"subject\":\"D\",\"style\":\"S1\",\"writable\":false},{\"id\":\"P8\",\"subject\":\"D\",\"style\":\"S2\",\"writable\":false},{\"id\":\"P9\",\"subject\":\"E\",\"style\":\"S1\",\"writable\":true},{\"id\":\"P10\",\"subject\":\"E\",\"style\":\"S2\",\"writable\":true}]},\"prompt_documents\":{\"contract\":{\"dir\":\"packages/appspec-schema/contract\",\"fingerprint\":\"b7f707132d35330c40de0e1cdd852954017a5fd3f7dac9272b4c84578d70f1a0\",\"files\":2},\"semantics\":{\"path\":\"packages/appspec-schema/docs/semantics.md\",\"sha256\":\"c8ee92caa2cd99f885e045eb35596a5be3791c2ee6ee5017c1a82ac70bf96f44\"},\"vocabulary\":{\"path\":\"packages/appspec-schema/vocabulary.yaml\",\"sha256\":\"0c293fb3284eb6775e73f665a30f17b73dbb80dce19c5676eb91a00b7e3752bd\"}},\"judge\":{\"configuration\":\"llm-only\",\"jev_key_env\":\"JEV_API_KEY\"},\"params\":{\"effort\":\"high\",\"model\":\"fake-ollama-model\",\"plan\":false,\"answers_mode\":\"none\",\"mode\":\"build\",\"patterns\":[\"P1\"],\"runs\":1,\"concurrency\":1,\"budget_usd\":15,\"factory_budget_usd\":0.3,\"factory_deadline_min\":10,\"stage_output_limits\":{\"requirements\":16384},\"pipeline\":\"v1\",\"stage_output_limits_v11a\":null,\"provider\":\"ollama\",\"provider_api_key_env\":\"OLLAMA_API_KEY\"},\"child_args\":[{\"id\":\"P1-r1\",\"argv\":[\"<tmp>/repo/packages/factory/dist/cli.js\",\"<tmp>/out-ollama/P1-r1/request.md\",\"--out\",\"<tmp>/out-ollama/P1-r1/bundle\",\"--effort\",\"high\",\"--model\",\"fake-ollama-model\",\"--budget\",\"0.3\",\"--deadline\",\"10\",\"--provider\",\"ollama\"]}],\"scoring\":{\"dir\":\"workspace/mvp/m1/agent/eval\",\"fingerprint\":\"8602ff8b9614c9ed052d3e9c0aacb80f7afd718735f93a66d1e32abf6ce45f2f\",\"files\":[{\"path\":\"engine.mjs\",\"sha256\":\"562fc7c4f9fc0b1d779ca4be8a265c5fbd3da742803ded2ff0412943ef54acb5\"},{\"path\":\"score-claims.mjs\",\"sha256\":\"579ffc8c7b9b95f4579e549a1f55b0209aef8dbc8a27e3d1d8a7830bfbe4369c\"},{\"path\":\"rubric-v5.mjs\",\"sha256\":\"5cc78d1484df8925eabae4eacee48da70ee39b658e7d9e407b0cacc975180051\"},{\"path\":\"agent-accept/score-agent.mjs\",\"sha256\":\"6e33de0e0725e0eb55b2e1eb41d5f5d250ba6c69008b12120e5afe0bc97376a6\"},{\"path\":\"subjects/A.json\",\"sha256\":\"8cf6756fc3478c14c04bddf19e4419a85dc67a9173ce209e841839b6f3defb07\"},{\"path\":\"subjects/B.json\",\"sha256\":\"97d75e53a20502a198d6c126e2e6de2d45f24753dd5fa03b8c9d3e325500b00f\"},{\"path\":\"subjects/C.json\",\"sha256\":\"2c2992cb23af57ab0e244eef0b3d227574b2b77fd769ff034066358618478f18\"},{\"path\":\"subjects/D.json\",\"sha256\":\"39d581eeb49b65111af8bfa330e50621f7c53895bf9c567677ef83e53c5a00f6\"},{\"path\":\"subjects/E.json\",\"sha256\":\"1eb2898bee6500c10cc33be2bc78dd6256627d1a0acb2f393aaa2e196eb583db\"},{\"path\":\"definition:A\",\"source\":\"subjects/A.json\",\"sha256\":\"8cf6756fc3478c14c04bddf19e4419a85dc67a9173ce209e841839b6f3defb07\"},{\"path\":\"definition:B\",\"source\":\"subjects/B.json\",\"sha256\":\"97d75e53a20502a198d6c126e2e6de2d45f24753dd5fa03b8c9d3e325500b00f\"},{\"path\":\"definition:C\",\"source\":\"subjects/C.json\",\"sha256\":\"2c2992cb23af57ab0e244eef0b3d227574b2b77fd769ff034066358618478f18\"},{\"path\":\"definition:D\",\"source\":\"subjects/D.json\",\"sha256\":\"39d581eeb49b65111af8bfa330e50621f7c53895bf9c567677ef83e53c5a00f6\"},{\"path\":\"definition:E\",\"source\":\"subjects/E.json\",\"sha256\":\"1eb2898bee6500c10cc33be2bc78dd6256627d1a0acb2f393aaa2e196eb583db\"}],\"missing\":[]},\"scripts\":{\"mode\":\"post-hoc\",\"fingerprint\":\"21627716626e5520e809aa6847a6747237234d817fc5e20f491d3d9f115de3a9\",\"files\":[{\"subject\":\"A\",\"path\":\"workspace/mvp/m1/agent/eval/sets/scripts/A.json\",\"sha256\":\"65aaae1a661f41316a65b72768b1e665fa3eaa2fe4d4dee494d800982d43d8c9\"},{\"subject\":\"B\",\"path\":\"workspace/mvp/m1/agent/eval/sets/scripts/B.json\",\"sha256\":\"3c7f1bc1af5290027e36de445e3ee8b74789f72061c266fd42c62c2cc532f7c6\"},{\"subject\":\"C\",\"path\":\"workspace/mvp/m1/agent/eval/sets/scripts/C.json\",\"sha256\":\"3222ca8eac181ce2ae693523f6605003a44c502e337254b7d1282fc4f601dcac\"},{\"subject\":\"D\",\"path\":\"workspace/mvp/m1/agent/eval/sets/scripts/D.json\",\"sha256\":\"510e9d496179fc6fea1369a3f16a24db99cbf81f2a344db338874f28561fe24d\"},{\"subject\":\"E\",\"path\":\"workspace/mvp/m1/agent/eval/sets/scripts/E.json\",\"sha256\":\"5dc41e511cfc55a4de597b53143e1712d0866d8c909fe78d76af5af33cd6909e\"}]},\"frozen\":null,\"comparison\":null}",
+};
+const R6_BASE_ARGV = {
+  omit: "[\"<tmp>/repo/packages/factory/dist/cli.js\",\"<tmp>/out-omit/P1-r1/request.md\",\"--out\",\"<tmp>/out-omit/P1-r1/bundle\",\"--effort\",\"high\",\"--model\",\"fake-model\",\"--budget\",\"0.3\",\"--deadline\",\"10\"]",
+  ollama: "[\"<tmp>/repo/packages/factory/dist/cli.js\",\"<tmp>/out-ollama/P1-r1/request.md\",\"--out\",\"<tmp>/out-ollama/P1-r1/bundle\",\"--effort\",\"high\",\"--model\",\"fake-ollama-model\",\"--budget\",\"0.3\",\"--deadline\",\"10\",\"--provider\",\"ollama\"]",
+};
+const R6_BASE_SIGNATURE = {
+  omit: "2383550ee8d0d0b1715a1df721f3be0249269a92e307b17c3eb5501aecc564f5",
+  ollama: "88b8d0234be9c28255e1ace7bfbd949073150f4819ef040331cd29f67b08894a",
+};
+
+/** 条件から started_at と signature を外し、一時ディレクトリの絶対パスだけを `<tmp>` に置き換えた文字列（base の形） */
+function normalizedConditionsText(cond, base) {
+  const { started_at: _startedAt, signature: _signature, ...measured } = cond;
+  return JSON.stringify(measured).split(base).join("<tmp>");
+}
+
+test("#788 R6 base のバイト列：provider を省いた走りと ollama の走りの argv・条件・署名が、base（2b68491）の固定値と同じ", async () => {
+  for (const [label, extra] of [["omit", []], ["ollama", ["--provider", "ollama"]]]) {
+    await withRepo(async (base, repo) => {
+      const out = join(base, `out-${label}`);
+      const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--concurrency", "1", ...extra], { JEV_API_KEY: "" });
+      assert.equal(r.status, 0, `${label}: ${r.stderr}`);
+      const cond = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+      // 条件のバイト列（source・factory の並びまで含む。指紋の値も含む）
+      assert.equal(normalizedConditionsText(cond, base), R6_BASE_CONDITIONS[label], `${label}: 条件のバイト列`);
+      // 子の argv（要求の並びと値）
+      const argv = JSON.stringify(JSON.parse(readFileSync(join(out, "P1-r1", "received-argv.json"), "utf8")));
+      assert.equal(argv.split(base).join("<tmp>"), R6_BASE_ARGV[label], `${label}: argv`);
+      // 署名は残し、score-agent の式と整合する
+      assert.equal(conditionsSignature(cond), cond.signature, `${label}: 署名が式と合わない`);
+      // 正規化した条件（パスだけを除いた旧のバイト列）の式の署名も、base の固定値と一致する
+      assert.equal(conditionsSignature(JSON.parse(normalizedConditionsText(cond, base))), R6_BASE_SIGNATURE[label], `${label}: 署名の固定値`);
+    }, { ollama: true });
+  }
 });

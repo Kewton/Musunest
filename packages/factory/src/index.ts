@@ -25,6 +25,8 @@ export * from "./limits.js";
 export * from "./openai.js";
 // Ollama Cloud の Responses API（OpenAI 互換）の adapter（Issue #771。共有の実装の薄い包み）
 export * from "./ollama.js";
+// OpenRouter（Responses API 互換・提供元を固定）の adapter（Issue #788。共有の実装の薄い包み）
+export * from "./openrouter.js";
 export * from "./schema-check.js";
 
 // ── 判定の口（Issue #330。Jev の adapter・LLM の adapter・偽物。`judge-jev.ts` が Jev の入口を持つ）──
