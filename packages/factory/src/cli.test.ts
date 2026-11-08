@@ -45,7 +45,13 @@ import { createFakeJudge } from "./judge-fake.js";
 import type { JudgeAnswer } from "./judge.js";
 import { FakeLlmSchemaMismatchError, uncheckedBecause, type RecordedCall } from "./llm-fake.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL, OpenAiIncompleteError } from "./openai.js";
-import { FIELD_REPAIR_IDS_DIAGNOSTIC_RULE_DEFINITIONS, FIELD_REPAIR_IDS_R08_DEFINITION, FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "./v12/stages/field-repair.js";
+import {
+  FIELD_REPAIR_IDS_DIAGNOSTIC_RULE_DEFINITIONS,
+  FIELD_REPAIR_IDS_R07_DEFINITION,
+  FIELD_REPAIR_IDS_R08_DEFINITION,
+  FIELD_REPAIR_SCHEMA_NAME,
+  MERGE_REFUSALS,
+} from "./v12/stages/field-repair.js";
 import { REPAIR_DIAGNOSTIC_DATA_NAME } from "./stages/repair.js";
 import {
   ENVELOPE_SCHEMA,
@@ -136,7 +142,7 @@ import {
 import { NAMED_FAILURE_MESSAGES } from "./v12/search-repair.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME, semanticCheckRuleDefinitionsOf } from "./v11a/stages/semantic-check.js";
 import { structuralReadingText } from "./v12/structural-meanings.js";
-import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
+import { WRITE_V11A_DATA_NAMES, WRITE_V11A_IDS_R07_DEFINITION, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
 import { MAPPING_SCHEMA_NAME } from "./v12/stages/mapping.js";
 import * as mappingModule from "./v12/stages/mapping.js";
@@ -167,12 +173,194 @@ const IDS_C2_RULE_TEXTS: readonly string[] = ledgerModule.PROPERTY_LEDGER.flatMa
   row.rules.t1Ids === undefined ? [] : [row.rules.t1Ids.text],
 );
 const IDS_C2_RULE_TEXT = IDS_C2_RULE_TEXTS.join("");
+/** 記録から 1 つの鍵を外した写し（Issue #815。連鎖で照らさない台本を除く） */
+function withoutOne<T>(record: Readonly<Record<string, T>>, key: string): Record<string, T> {
+  const { [key]: _removed, ...rest } = record;
+  return rest;
+}
+
 /** 要求・記録の文字列から、旗 ids の C2 への 3 文を位置で外す（Issue #806。旧の指紋と照らす） */
 function withoutIdsC2Texts<T>(value: T): T {
   const walk = (inner: unknown): unknown => {
     if (typeof inner === "string") return inner.split(IDS_C2_RULE_TEXT).join("");
     if (Array.isArray(inner)) return inner.map(walk);
     if (typeof inner !== "object" || inner === null) return inner;
+    return Object.fromEntries(Object.entries(inner as Record<string, unknown>).map(([key, entry]) => [key, walk(entry)]));
+  };
+  return walk(value) as T;
+}
+
+// ── Issue #815：#801 の段の復元（今の要求から、戻した旧の値（db91af3）を照らす）──────────────
+//
+// 復元の順は新しい差から古い差へ：#813 → #806 → #805 → #801 → #800。ここは #801 の段だけを扱い、
+// 骨組みの形・R-w11-07 の文・B3' の塊・R-dc-03 の文・R-fr-07 の文を #800 の組み立てに戻す。
+
+/** Issue #800 の前の R-w11-07 の旗 ids の文（#801 の復元に使う） */
+const OLD_WRITE_V11A_IDS_R07_TEXT =
+  "表に無い補助の要素（計算・検査など）は、要件に要るときだけ足してよい。ただし表の名前を奪わない（表にある名前を別の要素に使わない）。この禁止の唯一の例外は、データ「要る検査の骨組み」に競合なしで列挙された検査で、その entity と名前で validations に 1 つずつ書く（式は要件と固定した試験から書く）。競合の印の付いた件は書かない。骨組みに無い補助の要素には表の名前を使わない。";
+/** Issue #800 の前の R-fr-07 の旗 ids の文（#801 の復元に使う） */
+const OLD_FIELD_REPAIR_IDS_R07_TEXT =
+  "追加の場所には、その entity と名前の検査 1 つの本文を `-` で始まる行から書く。名前と entity は変えない。式は要件と固定した試験から書く。別の要素を書かない。";
+/** Issue #800 の前の R-dc-03 の ids の文の末尾（#795 の文のまま） */
+const OLD_DECL_CHECK_R03_IDS_SUFFIX =
+  "データの「要件に結び付いた検査」にある検査は、その要件の所属に準ずるものとして見て、追加の要素にあっても behavior-outside-ownership にしない。その塊は要件が求めることの一覧でも、正しさの証明でもない。検査の式が要件と合うかは宣言から読む。要件の文が求めない検査が無いことを拒否の理由にしない";
+/** Issue #800 の前の R-dc-03 の ids の文 */
+const OLD_DECL_CHECK_IDS_R03_TEXT = `${DECL_CHECK_RULE_DEFINITIONS.find((definition) => definition.id === "R-dc-03")?.text ?? ""}${OLD_DECL_CHECK_R03_IDS_SUFFIX}`;
+
+/** 新しい形の骨組み（{requirementId, entity, targets, testIds, conflict}）を #800 の形に組み直す */
+function oldValidationsOf(
+  skeleton: readonly Record<string, unknown>[],
+  table: readonly Record<string, unknown>[] | undefined,
+  tests: readonly Record<string, unknown>[],
+): readonly Record<string, unknown>[] | undefined {
+  const rowById = new Map<string, Record<string, unknown>>();
+  (table ?? []).forEach((row) => {
+    if (typeof row["id"] === "string") rowById.set(row["id"], row);
+  });
+  const entityName = (id: unknown): string | null => {
+    if (typeof id !== "string") return null;
+    const row = rowById.get(id);
+    return row !== undefined && row["kind"] === "entity" && typeof row["name"] === "string" ? row["name"] : null;
+  };
+  const rowIndex = new Map<string, number>();
+  (table ?? []).forEach((row, index) => {
+    if (typeof row["id"] === "string") rowIndex.set(row["id"], index);
+  });
+  const testById = new Map(tests.flatMap((test) => (typeof test["id"] === "string" ? [[test["id"], test] as const] : [])));
+  type Group = { readonly index: number; readonly rowId: string; readonly rowKind: string; readonly entity: unknown; readonly name: string; readonly testIds: string[] };
+  const groups: Group[] = [];
+  for (const entry of skeleton) {
+    const targets = Array.isArray(entry["targets"]) ? (entry["targets"] as readonly unknown[]).map(String) : [];
+    let groupIndex = 0;
+    for (const testId of Array.isArray(entry["testIds"]) ? entry["testIds"] : []) {
+      const test = testById.get(String(testId));
+      const target = test?.["target"] as { readonly roleId?: unknown; readonly kind?: unknown } | undefined;
+      const id = target?.roleId;
+      const kind = target?.kind;
+      if (typeof id !== "string" || typeof kind !== "string") continue;
+      const existing = groups.find((group) => group.rowId === id && group.rowKind === kind);
+      if (existing !== undefined) {
+        existing.testIds.push(String(testId));
+        continue;
+      }
+      const row = rowById.get(id);
+      if (table !== undefined && (row === undefined || row["kind"] !== kind)) continue;
+      const name = row !== undefined ? String(row["name"]) : (targets[groupIndex] ?? targets[0] ?? "");
+      const entity = row !== undefined ? (row["kind"] === "entity" ? name : entityName(row["entity"])) : (entry["entity"] ?? null);
+      groups.push({ index: row !== undefined ? (rowIndex.get(id) ?? 0) : groups.length, rowId: id, rowKind: kind, entity, name, testIds: [String(testId)] });
+      groupIndex += 1;
+    }
+  }
+  if (groups.length === 0) return undefined;
+  const ordered = [...groups].sort((a, b) => a.index - b.index);
+  return ordered.map((group) => ({
+    entity: group.entity,
+    name: group.name,
+    rowId: group.rowId,
+    rowKind: group.rowKind,
+    testIds: group.testIds,
+    conflict: ordered.some((other) => other !== group && other.name === group.name),
+  }));
+}
+
+/** 要求の input の骨組みの塊を #800 の組み立てに戻し、旗 ids の文を #800 の文に戻す */
+function restoreOld801InText(text: string): string {
+  const blockOf = (name: string, source: string): { readonly start: number; readonly end: number; readonly text: string } | undefined => {
+    const opener = `<data name="${name}">\n`;
+    const open = source.indexOf(opener);
+    if (open < 0) return undefined;
+    const start = open + opener.length;
+    const close = source.indexOf("\n</data>", start);
+    return close < 0 ? undefined : { start, end: close, text: source.slice(start, close) };
+  };
+  const withRules = text
+    .split(WRITE_V11A_IDS_R07_DEFINITION.text)
+    .join(OLD_WRITE_V11A_IDS_R07_TEXT)
+    .split(FIELD_REPAIR_IDS_R07_DEFINITION.text)
+    .join(OLD_FIELD_REPAIR_IDS_R07_TEXT)
+    .split(DECL_CHECK_IDS_R03_DEFINITION.text)
+    .join(OLD_DECL_CHECK_IDS_R03_TEXT);
+  const skeletonBlock = blockOf(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, withRules);
+  if (skeletonBlock === undefined) return withRules;
+  let skeleton: unknown;
+  let table: readonly Record<string, unknown>[] | undefined;
+  let suite: { readonly tests?: readonly Record<string, unknown>[] };
+  try {
+    skeleton = JSON.parse(skeletonBlock.text);
+    const tableBlock = blockOf("名前の表", withRules);
+    table = tableBlock === undefined ? undefined : (JSON.parse(tableBlock.text) as readonly Record<string, unknown>[]);
+    const suiteBlock = blockOf(WRITE_V11A_DATA_NAMES[2]!, withRules);
+    suite = (suiteBlock === undefined ? {} : JSON.parse(suiteBlock.text)) as { readonly tests?: readonly Record<string, unknown>[] };
+  } catch {
+    return withRules;
+  }
+  if (!Array.isArray(skeleton) || skeleton.length === 0) return withRules;
+  const old = oldValidationsOf(
+    skeleton as readonly Record<string, unknown>[],
+    table === undefined ? undefined : Array.isArray(table) ? table : undefined,
+    suite.tests ?? [],
+  );
+  if (old === undefined) return withRules;
+  return `${withRules.slice(0, skeletonBlock.start)}${JSON.stringify(old, null, 2)}${withRules.slice(skeletonBlock.end)}`;
+}
+
+/** B3' の塊「要件に結び付いた検査」から targets を外し、#800 の形（{entity, name, conflict}）に戻す */
+function restoreOldLinkedInText(text: string): string {
+  const opener = `<data name="${DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME}">\n`;
+  const open = text.indexOf(opener);
+  if (open < 0) return text;
+  const start = open + opener.length;
+  const close = text.indexOf("\n</data>", start);
+  if (close < 0) return text;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.slice(start, close));
+  } catch {
+    return text;
+  }
+  if (!Array.isArray(parsed)) return text;
+  const old = parsed.map((entry) => {
+    if (typeof entry !== "object" || entry === null) return entry;
+    const record = entry as Record<string, unknown>;
+    const validations = Array.isArray(record["validations"]) ? record["validations"] : [];
+    const withoutTargets = validations.map((validation) => {
+      if (typeof validation !== "object" || validation === null) return validation;
+      const { targets: _targets, ...rest } = validation as Record<string, unknown>;
+      return rest;
+    });
+    return { ...record, validations: withoutTargets };
+  });
+  return `${text.slice(0, start)}${JSON.stringify(old, null, 2)}${text.slice(close)}`;
+}
+
+/** #801 の段を外した 1 本の要求（input の骨組み・B3' の塊・rules の文を #800 に戻す） */
+function restoreOld801OnRequest<T extends { readonly input?: unknown; readonly rules?: unknown }>(request: T): T {
+  const out: Record<string, unknown> = { ...(request as Record<string, unknown>) };
+  if (typeof out["input"] === "string") out["input"] = restoreOldLinkedInText(restoreOld801InText(out["input"]));
+  if (Array.isArray(out["rules"])) out["rules"] = (out["rules"] as readonly unknown[]).map((text) => (typeof text === "string" ? restoreOld801InText(text) : text));
+  return out as T;
+}
+
+/**
+ * #801 の段を外した要求の列（`requests`）。構造化・道具の要求の組は各要求に、段の走りの要求の列は
+ * JSON 文字列を本文に戻してから掛け、同じ JSON 文字列に戻す
+ */
+function restoreOld801<T>(value: T): T {
+  const walk = (inner: unknown): unknown => {
+    if (Array.isArray(inner)) return inner.map(walk);
+    if (typeof inner === "string") {
+      try {
+        const parsed: unknown = JSON.parse(inner);
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && "input" in (parsed as Record<string, unknown>)) {
+          return JSON.stringify(walk(parsed));
+        }
+      } catch {
+        return inner;
+      }
+      return inner;
+    }
+    if (typeof inner !== "object" || inner === null) return inner;
+    if ("input" in (inner as Record<string, unknown>)) return restoreOld801OnRequest(inner as { readonly input?: unknown; readonly rules?: unknown });
     return Object.fromEntries(Object.entries(inner as Record<string, unknown>).map(([key, entry]) => [key, walk(entry)]));
   };
   return walk(value) as T;
@@ -5353,9 +5541,13 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
 
   /** Issue #795：旗 ids の B3' の規則から、R-dc-03 の ids の文だけを off の文に戻す（その規則が 1 つであることを確かめる） */
   function withoutLinkedRule(rules: readonly string[]): readonly string[] {
-    const index = rules.indexOf(DECL_CHECK_IDS_R03_DEFINITION.text);
+    // Issue #815：先に #801 の段を戻した列（`OLD_DECL_CHECK_IDS_R03_TEXT`）にも当たるようにする
+    const index = rules.findIndex((rule) => rule === DECL_CHECK_IDS_R03_DEFINITION.text || rule === OLD_DECL_CHECK_IDS_R03_TEXT);
     if (index < 0) return rules;
-    expect(rules.filter((rule) => rule === DECL_CHECK_IDS_R03_DEFINITION.text), "R-dc-03 の ids の文は 1 つ").toHaveLength(1);
+    expect(
+      rules.filter((rule) => rule === DECL_CHECK_IDS_R03_DEFINITION.text || rule === OLD_DECL_CHECK_IDS_R03_TEXT),
+      "R-dc-03 の ids の文は 1 つ",
+    ).toHaveLength(1);
     return [...rules.slice(0, index), DECL_CHECK_OFF_R03_TEXT, ...rules.slice(index + 1)];
   }
 
@@ -5477,6 +5669,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     readonly digest: string;
     readonly stripped: string;
     readonly strippedRequests: string;
+    /** Issue #815：復元の順に #801 の段も外した要求の列の指紋（戻した旧の値と照らす） */
+    readonly oldStrippedRequests: string;
     readonly budgetNormalized: string;
     readonly budgetKeys: readonly string[];
     readonly budgetDerived: BudgetNormalizedFiles["derived"];
@@ -5606,6 +5800,11 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const budgetNormalized = await sha256Hex(
       JSON.stringify({ files: budgetFiles.files, requests: strippedRequests, code, line: budgetLine }).replaceAll(directory, "<tmp>"),
     );
+    // Issue #815：復元の順（#813 → #806 → #805 → #801 → #800）に #801 の段も外した要求の列。戻した旧の値（db91af3）と照らす。
+    // 全出力・費用の指紋は checkpoint の output_digest に #800 の経路の差を持つので、要求と body だけを連鎖で照らす
+    const oldRequests = restoreOld801(requests);
+    const oldStrippedRequests = withoutDiagnostics(oldRequests);
+    const oldStrippedRequestsDigest = await sha256Hex(JSON.stringify(oldStrippedRequests));
     // Issue #813：段の走りの要求列は `requestText` の JSON 文字列の並びで、枠の塊の改行がエスケープされている。本文に戻して
     // `withoutFrameFieldNormal` を掛け直すと（#794・#663 の文は元から含む）、診断と R-fr-08 を外した要求列・全出力・
     // 診断と R-fr-08 を外した全出力が旧値に戻る。取り直しの根拠を、注ではなく等値で照らす
@@ -5626,6 +5825,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       digest,
       stripped,
       strippedRequests: strippedRequestsDigest,
+      oldStrippedRequests: oldStrippedRequestsDigest,
       budgetNormalized,
       budgetKeys: [...new Set(budgetFiles.keys)].sort(),
       budgetDerived: budgetFiles.derived,
@@ -5698,9 +5898,33 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
   /**
    * Issue #800：台帳に足した行の文と C2 の schema の欄を `withoutValidationExpression` で外しても、T2 の枠（値の対象から項目・
    * entity を外し、値の対象が無い要件を免除する）が変わる ids on の経路は、旧の指紋と合わない。**上の旧値は残したまま**、
-   * 経路が変わる台本として新しい期待を直接固定する（ids off・v1・v1.1a の値は変えない）
+   * 経路が変わる台本として新しい期待を直接固定する（ids off・v1・v1.1a の値は変えない）。
+   * Issue #815：値を #801 の前（db91af3）に戻した。区分：字どおり戻すだけ（全出力の checkpoint の output_digest に #800 の
+   * 経路の差を持つため連鎖では照らさない。直接固定した Issue：#800）。#801 の値は `BEFORE_746_801`
    */
   const BEFORE_746_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "11fbfca2b2afa7f3b85ff3d97ae231cc5ace2e82ae4ed216946db5f434a6c666",
+    "stage-adopting": "c83f6ba4c02599b6b7810ffade3e40ea8877a9b15f21366d9318bd4f6d103e07",
+    "stage-sets": "9698928e2cb48c22cf171fc6a2d6545581463a48ce0cb028398492e6e2e06aca",
+    "stage-mixed": "5240cefe691b1ce82c7fdfb5e472fcec02ecab99ae8cae8a3a1474018279c44a",
+    "stage-returned": "5f2e735e693e85882afaea2ab63ed514f70b805f81afac4fd3f2cc6c16066344",
+    "stage-recounts": "4e51e9d179cb1e49483154e0119832d9a12f1320bf8fb1c5cc9fea9b486c1d50",
+    "stage-stop-repair": "9f26df28b8a7518958f778cb432aafd949f3077ee2dedd796296158503108a60",
+    "stage-stop-first-eval": "fa508ed3f82e4fcbf680ad92345ee2263864efb3d186dcc00b6ed8a92328c20b",
+    "stage-stop-commit": "9ae79a30e1f5df2c4495ad0fc5437c23effb8a389115185558a972c644e2ed6a",
+    "whole-stagnation": "f3c552f06a6b34db62c6fddb3931413565a85fa059eedb65ab77ccc42bbfb2df",
+    "whole-adopting": "32cdac31366d76f94c211bc7b66118f1ff3ab09ac55c86f6998cf969ac3f23ff",
+    "whole-sets": "03000c2abba9e26a77473627f7dc5ea675ae0c40446572133794c631f7edff8b",
+    "whole-mixed": "f8f6bae44c7a4e18800c906ce5cfec7e106128f86fbf1371779fde91be345615",
+    "whole-recounts": "7013d30de1d3514958571c0538a4090f99ec2d453ee9a8302fc541490f7fc39a",
+    "stage-search-repair-off": "976cb9b83a8ea59333ce3eec02a8c861e4a3ffe49c32c41acb03b688f9e5ea7c",
+    "whole-search-repair-off": "0b3f93b1e83a8e971980a45528717865e8e0f25400b53f813346ab0875bb668a",
+  };
+  /**
+   * Issue #801 の値（`BEFORE_746_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。
+   * 区分：連鎖で照らす（`stage-search-repair-off` だけは #813 が経路を変えたので字どおり戻すだけ。直接固定した Issue：#813）
+   */
+  const BEFORE_746_801: Readonly<Record<string, string>> = {
     "stage-stagnation": "2f3faf318225b10194f1917a23ae6a91070582d939e406a7ba2e51031409008c",
     "stage-adopting": "71c17a27902ff79c2f94197296062efe3e88eb7ad29afa8302a6c781313170cd",
     "stage-sets": "fc286ff643856c8c55609876773649c2b0653cdea5ec0a67a169d137d830a83c",
@@ -5718,7 +5942,27 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "stage-search-repair-off": "a37acf94234f4c2df76444dfe1b9cd53814796cd8e4d35c14b30cd8584a2cd9c",
     "whole-search-repair-off": "758fd5614ac8a1170ed4276287ab30f08e7cc28fbd3b6791faad7c1b97f92a81",
   };
+  /** Issue #815：値を #801 の前（db91af3）に戻した。区分：字どおり戻すだけ（直接固定した Issue：#800）。#801 の値は `BEFORE_748_BASE_801` */
   const BEFORE_748_BASE_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "cb1c9775fe1514e4e9e9e789402f91fabed20277d5b47a721677303bce4147ab",
+    "stage-adopting": "3a1f86d6abb08c472a3852c17350c6689fa9993dda16c0d21cc225d28b9fdec9",
+    "stage-sets": "017b26b7fabc144f595a8c4280ecb86e6a71f38297354fbbc94d3b6a5e07c8b6",
+    "stage-mixed": "6e691aaea07205938eb6bf62a48be69dee828a2233f0da7ad6028facde67c7a6",
+    "stage-returned": "07b41986d2f281c462a0375d4c3ecc4ffad7e4839b850437c8ce6325358b1b7e",
+    "stage-recounts": "2262479ff2c70c87e010b82f5a8627920026da2be5396578e035f029453a5e9b",
+    "stage-stop-repair": "c2528e34a3ca6623c62a5823a9df79951fd00199be4efebaee775452549a7633",
+    "stage-stop-first-eval": "32bde2e6e436c6315138c9ab6b4f9baad914bbbd65dbcca734d942a722f67e2e",
+    "stage-stop-commit": "6c021bb209e8188e1c04dcbf42e60618cdd46f5cbac6ace10c11eb2cbe27c226",
+    "whole-stagnation": "f3c552f06a6b34db62c6fddb3931413565a85fa059eedb65ab77ccc42bbfb2df",
+    "whole-adopting": "32cdac31366d76f94c211bc7b66118f1ff3ab09ac55c86f6998cf969ac3f23ff",
+    "whole-sets": "03000c2abba9e26a77473627f7dc5ea675ae0c40446572133794c631f7edff8b",
+    "whole-mixed": "f8f6bae44c7a4e18800c906ce5cfec7e106128f86fbf1371779fde91be345615",
+    "whole-recounts": "7013d30de1d3514958571c0538a4090f99ec2d453ee9a8302fc541490f7fc39a",
+    "stage-search-repair-off": "976cb9b83a8ea59333ce3eec02a8c861e4a3ffe49c32c41acb03b688f9e5ea7c",
+    "whole-search-repair-off": "0b3f93b1e83a8e971980a45528717865e8e0f25400b53f813346ab0875bb668a",
+  };
+  /** Issue #801 の値（`BEFORE_748_BASE_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす（`stage-search-repair-off` は #813。直接固定した Issue：#813） */
+  const BEFORE_748_BASE_801: Readonly<Record<string, string>> = {
     "stage-stagnation": "30da71282f0505765704d336850d3e8baa2645e1e06c1885d88d9081e8dfc56a",
     "stage-adopting": "7a7ff4fd0d8fdb797abf6bbb3ccdd5b8d7fe40bed7672c61e3e33e17928efce0",
     "stage-sets": "d9fd8b55adc2530c66e49056fcb08291a36227e23018a5feac017e46e4fc1a55",
@@ -5822,7 +6066,21 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "whole-mixed": "456d98719c604f2a90df493d9a79c848a9b382c8441d0bd978ba31c1fcf49376",
     "whole-search-repair-off": "4da606328926cd9803475648cc51ebb668881ee4ef86f1d5812ffd8109498bde",
   };
+  /** Issue #815：値を #801 の前（db91af3）に戻した。区分：字どおり戻すだけ（直接固定した Issue：#800）。#801 の値は `BEFORE_761_RAW_801` */
   const BEFORE_761_RAW_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "b9fc8aa8162a3d4911f28f7cef093d93ba5cb9291d267302468c0c618cadc190",
+    "stage-adopting": "a6f70fad3e2f334e2d92be1154f8768b7b7fb0dea73836e0bc798cb5962db8bb",
+    "stage-sets": "cfc043d4d8de249f447948605833f9aff2a9f2a64d7931550e212ffca509e639",
+    "stage-mixed": "ba709dd49d9c8c13f4a78eeecf5770d95fd2400dc5a1202eb2fae4b3bdbf56b8",
+    "stage-returned": "a020ebe732c208c157b0abe4ab35a7c7fb7ffe0ba57282c69d6bb07fee3da253",
+    "stage-recounts": "dc63e55fbe6a87d5683fba40421ef0599e095c5808c5b798b1054201cdc50331",
+    "stage-stop-repair": "aa5fcfffb8b6db79b49fc9601cc6b35afc117a2a84f59789f11dabba81ad0484",
+    "stage-stop-first-eval": "16b14f116cfc47bc8f7f444ca0a9e6762c1923143564b56eab80ca8e6fd3bc61",
+    "stage-stop-commit": "d9528065b58971fbb7cca79c5f4b84f2c964733438bd3302c0067c1ba8653d35",
+    "stage-search-repair-off": "aa031822f2cf86e44a440c06dee29d5a1516dd44fa2f61146f20ab085a9dd836",
+  };
+  /** Issue #801 の値（`BEFORE_761_RAW_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす（`stage-search-repair-off` は #813。直接固定した Issue：#813） */
+  const BEFORE_761_RAW_801: Readonly<Record<string, string>> = {
     "stage-stagnation": "372c56984fcb3cce7f5e811374f149645c1997173f9465b47ee5bf3689b5e67d",
     "stage-adopting": "ba2b93d694f6fbaac13e9145af7c346ec48c7bd46a25730d11ad721c31c38e52",
     "stage-sets": "750e31050098abceb987a63a694af07eb904d5f75c7c3e6b140db727b5b8843f",
@@ -5834,7 +6092,27 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "stage-stop-commit": "82c7ec61c4640598759923e670222bc60d7eabe41d165b86e1574979722b04b0",
     "stage-search-repair-off": "c064d53fe231a99982ec0ebc08e2948ca82a626d794f95e1b5a24be73300ae5d",
   };
+  /** Issue #815：値を #801 の前（db91af3）に戻した。区分：連鎖で照らす（`stage-search-repair-off` だけは #813 の経路の差。直接固定した Issue：#813）。#801 の値は `BEFORE_761_REQUESTS_801`。今の等値は `_801` で保つ */
   const BEFORE_761_REQUESTS_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "5c51234f156300cf85d282ff2cc32d78891e925da3fb0eddf5e7ae1edc01705a",
+    "stage-adopting": "fe3d32ced7ac8e7137af99369c198d1f36789ca952f9627cc295677544abb21e",
+    "stage-sets": "793a6df6db6e06e70fe12a0b73b7bbffe88df22aa2852d97cfc266c6a78ad590",
+    "stage-mixed": "516f8648cc4924f1e6bbb97b130ed6ea53a9aafd388c92123669880ab25ed68e",
+    "stage-returned": "f6de1db43d14d2f726e496fa55819c01a7e44cc222be1b448093b08d91fb2c37",
+    "stage-recounts": "97a224bd9c6626a5826d4562ef0092b83fa052a54125235f88bda5f9c135e976",
+    "stage-stop-repair": "c443fac0fadb5908f183ef34427f57848a8b62df79b8e05f344d47e94c5d6da7",
+    "stage-stop-first-eval": "dcb789bf2c1e0fbb4fced70f7fd069f33b3786f8fbfc6a1fb5a11652782c9adb",
+    "stage-stop-commit": "b6747a8c137ebe1ad9da7eda39e6100c3627fa5d109858e4b12a836b9ad54558",
+    "whole-stagnation": "1beafeade5f80b2970bf58765ed43c9a157d71e14f8b9aa01125863388269485",
+    "whole-adopting": "25054935f7daba9932ee930cf9fb2d3bc0f289da585b1fd64843aabd9938b4f7",
+    "whole-sets": "e08b138f04db2a038c132b68a290cc860bc1624f730d3f48c8e086228f2651ff",
+    "whole-mixed": "fa8156e6aeb50211a74c639905f25ca75acdfa698d5bee52d2bafed716118786",
+    "whole-recounts": "a0c5594483ab016dbc3147598609eac4a517644cd5abab978660caacab1e84e6",
+    "stage-search-repair-off": "3c21beb9077abd87a0234d6243ff7edac295f378142e72a63b37b42422c527f0",
+    "whole-search-repair-off": "7b30f391f4c943a574d2242f9dc8f6e094139887b47d9e3ef4ea7bfca2bd3d55",
+  };
+  /** Issue #801 の値（`BEFORE_761_REQUESTS_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす（`stage-search-repair-off` は #813。直接固定した Issue：#813） */
+  const BEFORE_761_REQUESTS_801: Readonly<Record<string, string>> = {
     "stage-stagnation": "39d709782210e6c637cc1515b14f03756bf46e8b33187061e8976de8080fcaef",
     "stage-adopting": "8202bae2f648a7c2851a04d365766faac7808ad42506b8c845489e52caa1e39b",
     "stage-sets": "fee277e50ccd866b279560b54d33088c26aa55b314cd8b30a11590d15414b6e3",
@@ -5852,21 +6130,35 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "stage-search-repair-off": "d953399678e314ecfea3681f33fa716ded260d7f8b0ec00c87833acd4e52e7b1",
     "whole-search-repair-off": "066527ad5fbd562c0ec6ce139cc435d5ba15ec4ec7ce9680d281a1af1892f9b2",
   };
+  /** Issue #815：値を #801 の前（db91af3）に戻した。区分：字どおり戻すだけ（直接固定した Issue：#800）。#801 の値は `BEFORE_761_BUDGET_801` */
   const BEFORE_761_BUDGET_800: Readonly<Record<string, string>> = {
+    "whole-stagnation": "d36fa97a26ffea73d8df7bbff8133de338d4032786fbab10f032c30da7767c70",
+    "whole-adopting": "4f351dca100e00654905c20f17c5549c87d9506562f789f5786eec3db67b1269",
+    "whole-sets": "a8752a9c071c62a617d1fb6034ff34f3679ff5d9ce45ad7d29d47efb2478369a",
+    "whole-recounts": "4b663c7a7e19a2497f5ce2d3358d80ed46c0d312ead85144a96ba614cdc553fd",
+  };
+  /** Issue #801 の値（`BEFORE_761_BUDGET_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす */
+  const BEFORE_761_BUDGET_801: Readonly<Record<string, string>> = {
     "whole-stagnation": "5e3f2de5f4c23515b0750a4fc48166dd99e8cae7587265fd655b39e297652829",
     "whole-adopting": "1cdc44a49c5d7d05075effe0b0684a54bc04ea9d9c59347fa37c55751141afaf",
     "whole-sets": "d9d3afeda2a36be5961f0a9578ccd1f1de38d84d0c15381c363d90190a182c83",
     "whole-recounts": "7743ad73baca090a7e6910ca2fce0468dff0156840e741523ac8c29bafcc2dd8",
   };
+  /** Issue #815：値を #801 の前（db91af3）に戻した。区分：字どおり戻すだけ（直接固定した Issue：#800）。#801 の値は `BEFORE_795_BUDGET_801` */
   const BEFORE_795_BUDGET_800: Readonly<Record<string, string>> = {
+    "whole-mixed": "5bcef53bb34d443f998f7418774a8ce9dc13f01ff24b46d1aefeb1f36cd4ee26",
+    "whole-search-repair-off": "c5a335c7042b951552fdd966e60c87222a5d7fd00493dc7c66c06cb0abd7b96d",
+  };
+  /** Issue #801 の値（`BEFORE_795_BUDGET_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす */
+  const BEFORE_795_BUDGET_801: Readonly<Record<string, string>> = {
     "whole-mixed": "f5f91e06ec5355e12014eb9e01042b6910eb34fa9b614365ac7414eb6c4d93bc",
     "whole-search-repair-off": "6739a0ae3872882851da2fff075fe489840bf38bb8e50c2b9616161735b31e29",
   };
-  /** 費用の印に替えた全出力の期待（#800 で取り直した値を先に、旧値は残す） */
-  const budgetExpectedOf800 = (name: string): string | undefined => BEFORE_795_BUDGET_800[name] ?? BEFORE_761_BUDGET_800[name] ?? budgetExpectedOf(name);
+  /** 費用の印に替えた全出力の期待（#801 で取り直した値を先に、戻した旧値は残す） */
+  const budgetExpectedOf801 = (name: string): string | undefined => BEFORE_795_BUDGET_801[name] ?? BEFORE_761_BUDGET_801[name] ?? budgetExpectedOf(name);
   /** 費用の印に替えた全出力の期待（#806 で取り直した値を先に。ids on の経路だけ） */
   const budgetExpectedOf806 = (name: string): string | undefined =>
-    BEFORE_795_BUDGET_806[name] ?? BEFORE_761_BUDGET_806[name] ?? budgetExpectedOf800(name);
+    BEFORE_795_BUDGET_806[name] ?? BEFORE_761_BUDGET_806[name] ?? budgetExpectedOf801(name);
   /** 費用の印に替えた全出力の期待（#761 の 4 経路は #761 の値、#795 の 2 経路は #795 の値） */
   const budgetExpectedOf = (name: string): string | undefined => BEFORE_795_BUDGET[name] ?? BEFORE_761_BUDGET[name];
   /** 費用の印に替えるキー（f9bf3b3 の 4 経路の出力に現れた budget_*。ほかのキーを替えていないことをこの集合で照らす） */
@@ -5894,41 +6186,65 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const strippedDigests: Record<string, string> = {};
     const strippedRequestDigests: Record<string, string> = {};
     const budgetDigests: Record<string, string> = {};
+    /** Issue #815：復元の順（#813 → #806 → #805 → #801 → #800）に #801 の段も外した要求の列。戻した旧の値と照らす */
+    const oldStrippedRequestDigests: Record<string, string> = {};
     const budgetKeySets: Record<string, readonly string[]> = {};
     const budgetDerivedSets: Record<string, BudgetNormalizedFiles["derived"]> = {};
     const searched: Record<string, boolean> = {};
     const restoredStages: Record<string, { readonly whole: string; readonly stripped: string; readonly requests: string }> = {};
     for (const entry of INVARIANT_RUNS) {
-      const { digest, stripped, strippedRequests, budgetNormalized, budgetKeys, budgetDerived, hasSearch, restoredStage } =
-        await invariantDigest(entry);
+      const {
+        digest,
+        stripped,
+        strippedRequests,
+        oldStrippedRequests,
+        budgetNormalized,
+        budgetKeys,
+        budgetDerived,
+        hasSearch,
+        restoredStage,
+      } = await invariantDigest(entry);
       digests[entry.name] = digest;
       strippedDigests[entry.name] = stripped;
       strippedRequestDigests[entry.name] = strippedRequests;
+      oldStrippedRequestDigests[entry.name] = oldStrippedRequests;
       budgetDigests[entry.name] = budgetNormalized;
       budgetKeySets[entry.name] = budgetKeys;
       budgetDerivedSets[entry.name] = budgetDerived;
       searched[entry.name] = hasSearch;
       if (restoredStage !== undefined) restoredStages[entry.name] = restoredStage;
     }
-    expect(digests).toEqual({ ...BEFORE_746, ...BEFORE_746_800, ...BEFORE_746_806, ...BEFORE_746_813 });
+    // 今の等値の期待は #801 の値（`_801`）で保つ（Issue #815）。`_800` は #801 の前（db91af3）に戻した値
+    expect(digests).toEqual({ ...BEFORE_746, ...BEFORE_746_801, ...BEFORE_746_806, ...BEFORE_746_813 });
+    // Issue #815：復元の順（#813 → #806 → #805 → #801 → #800）に #801 の段も外した要求の列が、戻した旧の値と等しい。
+    // `stage-search-repair-off` だけは #813 が経路を変えた台本で、文字列のままの枠の復元ができないので連鎖では照らさない
+    //（字どおり戻すだけ。直接固定した Issue：#813）。全出力の指紋は checkpoint の output_digest に #800 の経路の差を持つので
+    // 連鎖では照らさない（字どおり戻すだけ。直接固定した Issue：#800）
+    expect(withoutOne(oldStrippedRequestDigests, "stage-search-repair-off")).toEqual(
+      withoutOne({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_800 }, "stage-search-repair-off"),
+    );
+    // 戻した旧の値は #801 の値と違う（字どおり戻すだけの値も、値の集合として木に残す。Issue #815）
+    expect(BEFORE_761_RAW_800["stage-stagnation"]).not.toBe(BEFORE_761_RAW_801["stage-stagnation"]);
+    expect(BEFORE_761_BUDGET_800["whole-stagnation"]).not.toBe(BEFORE_761_BUDGET_801["whole-stagnation"]);
+    expect(BEFORE_795_BUDGET_800["whole-mixed"]).not.toBe(BEFORE_795_BUDGET_801["whole-mixed"]);
     // Issue #813：`stage-search-repair-off` の取り直しの根拠を等値で照らす。要求列（JSON 文字列）を本文に戻してから
     // `withoutFrameFieldNormal` を掛け直すと、診断と R-fr-08 を外した要求列・全出力・診断と R-fr-08 を外した全出力が
     // 旧値（既存の定数）に戻る。復元の外に残るのは枠の塊だけで、ほかの欄は変わっていない
     expect(BEFORE_746_800["stage-search-repair-off"]).toBe(BEFORE_748_BASE_800["stage-search-repair-off"]);
     expect(restoredStages["stage-search-repair-off"]).toEqual({
-      whole: BEFORE_746_800["stage-search-repair-off"],
+      whole: BEFORE_746_801["stage-search-repair-off"],
       stripped: BEFORE_761_RAW_806["stage-search-repair-off"],
-      requests: BEFORE_761_REQUESTS_800["stage-search-repair-off"],
+      requests: BEFORE_761_REQUESTS_801["stage-search-repair-off"],
     });
     // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと（search_repair・requests・stage_spans を残したまま）、直す前（f9bf3b3）の生出力とバイト列で同じ
     for (const entry of INVARIANT_RUNS) {
       if (WHOLE_COST_AFFECTED.has(entry.name)) continue;
       expect(strippedDigests[entry.name], entry.name).toBe(
-        BEFORE_761_RAW_813[entry.name] ?? BEFORE_761_RAW_806[entry.name] ?? BEFORE_761_RAW_800[entry.name] ?? BEFORE_761_RAW[entry.name],
+        BEFORE_761_RAW_813[entry.name] ?? BEFORE_761_RAW_806[entry.name] ?? BEFORE_761_RAW_801[entry.name] ?? BEFORE_761_RAW[entry.name],
       );
     }
     // 費用が入力長で変わる 4 経路を含む全部の要求の列は、旧値（f9bf3b3）と一致する
-    expect(strippedRequestDigests).toEqual({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_800, ...BEFORE_761_REQUESTS_813 });
+    expect(strippedRequestDigests).toEqual({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_801, ...BEFORE_761_REQUESTS_813 });
     // 4 経路は、診断と R-fr-08 を外し budget_* の値だけを印に替えた全出力（記録・納品物・要約のほかの欄・終了コード・往復の数と
     // 採否の並び）が f9bf3b3 と一致する。印に替えたキーが budget_* だけであることも照らす
     for (const entry of INVARIANT_RUNS) {
@@ -6001,6 +6317,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const digests: Record<string, string> = {};
     const strippedDigests: Record<string, string> = {};
     const strippedRequestDigests: Record<string, string> = {};
+    /** Issue #815：復元の順に #801 の段も外した要求の列の指紋（戻した旧の値と照らす） */
+    const oldStrippedRequestDigests: Record<string, string> = {};
     const budgetDigests: Record<string, string> = {};
     const budgetKeySets: Record<string, readonly string[]> = {};
     const budgetDerivedSets: Record<string, BudgetNormalizedFiles["derived"]> = {};
@@ -6018,26 +6336,31 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       const entry = INVARIANT_RUNS[index]!;
       current = `${entry.name}（${index + 1}/${INVARIANT_RUNS.length}）`;
       currentTiming = { ioMs: 0, runMs: 0, hashMs: 0 };
-      const { digest, stripped, strippedRequests, budgetNormalized, budgetKeys, budgetDerived, hasSearch } = await invariantDigest(entry, true, currentTiming);
+      const { digest, stripped, strippedRequests, oldStrippedRequests, budgetNormalized, budgetKeys, budgetDerived, hasSearch } = await invariantDigest(entry, true, currentTiming);
       timings.push({ name: entry.name, ...currentTiming });
       digests[entry.name] = digest;
       strippedDigests[entry.name] = stripped;
       strippedRequestDigests[entry.name] = strippedRequests;
+      oldStrippedRequestDigests[entry.name] = oldStrippedRequests;
       budgetDigests[entry.name] = budgetNormalized;
       budgetKeySets[entry.name] = budgetKeys;
       budgetDerivedSets[entry.name] = budgetDerived;
       searched[entry.name] = hasSearch;
     }
-    expect(digests).toEqual({ ...BEFORE_748_BASE, ...BEFORE_748_BASE_800, ...BEFORE_748_BASE_806, ...BEFORE_748_BASE_813 });
+    expect(digests).toEqual({ ...BEFORE_748_BASE, ...BEFORE_748_BASE_801, ...BEFORE_748_BASE_806, ...BEFORE_748_BASE_813 });
+    // Issue #815：復元の順に #801 の段も外した要求の列が、戻した旧の値と等しい（`stage-search-repair-off` は #813 の経路の差）
+    expect(withoutOne(oldStrippedRequestDigests, "stage-search-repair-off")).toEqual(
+      withoutOne({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_800 }, "stage-search-repair-off"),
+    );
     // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと（search_repair・requests・stage_spans を残したまま）、直す前（f9bf3b3）の生出力とバイト列で同じ
     for (const entry of INVARIANT_RUNS) {
       if (WHOLE_COST_AFFECTED.has(entry.name)) continue;
       expect(strippedDigests[entry.name], entry.name).toBe(
-        BEFORE_761_RAW_813[entry.name] ?? BEFORE_761_RAW_806[entry.name] ?? BEFORE_761_RAW_800[entry.name] ?? BEFORE_761_RAW[entry.name],
+        BEFORE_761_RAW_813[entry.name] ?? BEFORE_761_RAW_806[entry.name] ?? BEFORE_761_RAW_801[entry.name] ?? BEFORE_761_RAW[entry.name],
       );
     }
     // 費用が入力長で変わる 4 経路を含む全部の要求の列は、旧値（f9bf3b3）と一致する
-    expect(strippedRequestDigests).toEqual({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_800, ...BEFORE_761_REQUESTS_813 });
+    expect(strippedRequestDigests).toEqual({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_801, ...BEFORE_761_REQUESTS_813 });
     // 4 経路は、診断と R-fr-08 を外し budget_* の値だけを印に替えた全出力が f9bf3b3 と一致する（印のキーも budget_* だけ）
     for (const entry of INVARIANT_RUNS) {
       if (!WHOLE_COST_AFFECTED.has(entry.name)) continue;

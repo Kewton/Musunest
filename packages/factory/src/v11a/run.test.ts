@@ -150,7 +150,13 @@ import { constraintIdsIn, ruleTexts, SHAPE_PROBLEMS_DATA_NAME } from "../stages/
 import { MAPPING_LEDGER_DATA_NAMES, MAPPING_REWRITE_MESSAGES, MAPPING_SCHEMA_NAME } from "../v12/stages/mapping.js";
 import { VOCABULARY_SCHEMA_NAMES } from "../v12/stages/vocabulary.js";
 import { structuralReadingText } from "../v12/structural-meanings.js";
-import { FIELD_REPAIR_DIAGNOSTIC_DATA_NAME, FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS, mergeReplacements } from "../v12/stages/field-repair.js";
+import {
+  FIELD_REPAIR_DIAGNOSTIC_DATA_NAME,
+  FIELD_REPAIR_IDS_R07_DEFINITION,
+  FIELD_REPAIR_SCHEMA_NAME,
+  MERGE_REFUSALS,
+  mergeReplacements,
+} from "../v12/stages/field-repair.js";
 import { canRepairFields, locateFailures } from "../v12/locate.js";
 import { natureQuestionName } from "../stages/test-suite.js";
 import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenarios } from "../__tests__/baseline-capture.js";
@@ -259,7 +265,10 @@ function withoutLinkedValidationsOn(request: LlmStructuredRequest): LlmStructure
           expect(request.input.indexOf(opener, start + 1), "結び付いた検査の塊は 1 つ").toBe(-1);
           return `${request.input.slice(0, start)}${request.input.slice(request.input.indexOf(close, start) + close.length)}`;
         })();
-  const rules = (request.rules ?? []).map((text) => (text === DECL_CHECK_IDS_R03_DEFINITION.text ? DECL_CHECK_OFF_R03_TEXT : text));
+  // Issue #815：先に #801 の段を戻した列（`OLD_DECL_CHECK_IDS_R03_TEXT`）にも当たるようにする
+  const rules = (request.rules ?? []).map((text) =>
+    text === DECL_CHECK_IDS_R03_DEFINITION.text || text === OLD_DECL_CHECK_IDS_R03_TEXT ? DECL_CHECK_OFF_R03_TEXT : text,
+  );
   return { ...request, input, rules };
 }
 
@@ -272,39 +281,29 @@ function withoutLinkedValidations(requests: readonly LlmStructuredRequest[]): re
 const OLD_WRITE_V11A_IDS_R07_TEXT =
   "表に無い補助の要素（計算・検査など）は、要件に要るときだけ足してよい。ただし表の名前を奪わない（表にある名前を別の要素に使わない）。この禁止の唯一の例外は、データ「要る検査の骨組み」に競合なしで列挙された検査で、その entity と名前で validations に 1 つずつ書く（式は要件と固定した試験から書く）。競合の印の付いた件は書かない。骨組みに無い補助の要素には表の名前を使わない。";
 
+/** Issue #800 の前の R-fr-07 の旗 ids の文（Issue #801 の復元に使う。欄だけの直しの body に載る） */
+const OLD_FIELD_REPAIR_IDS_R07_TEXT =
+  "追加の場所には、その entity と名前の検査 1 つの本文を `-` で始まる行から書く。名前と entity は変えない。式は要件と固定した試験から書く。別の要素を書かない。";
+
+/** Issue #800 の前の R-dc-03 の ids の文の末尾（Issue #801 の復元に使う。#795 の文のまま） */
+const OLD_DECL_CHECK_R03_IDS_SUFFIX =
+  "データの「要件に結び付いた検査」にある検査は、その要件の所属に準ずるものとして見て、追加の要素にあっても behavior-outside-ownership にしない。その塊は要件が求めることの一覧でも、正しさの証明でもない。検査の式が要件と合うかは宣言から読む。要件の文が求めない検査が無いことを拒否の理由にしない";
+/** Issue #800 の前の R-dc-03 の ids の文（先頭の定義は今と同じ。末尾だけ #795 の文に戻す） */
+const OLD_DECL_CHECK_IDS_R03_TEXT = `${DECL_CHECK_RULE_DEFINITIONS.find((definition) => definition.id === "R-dc-03")?.text ?? ""}${OLD_DECL_CHECK_R03_IDS_SUFFIX}`;
+
 /**
- * Issue #801 の復元：旗 ids の B1 の要求から、新しい形の骨組み（{requirementId, entity, targets, testIds, conflict}）を
- * 直す前（#800）の形（{entity, name, rowId, rowKind, testIds, conflict}）に組み直し、R-w11-07 の ids の文を #800 の文へ戻す。
- * 骨組みが選んだ試験（testIds）と名前の表から、直す前の関数（行ごとにまとめ、名前が重なれば競合）の値を再構成する。
+ * Issue #801 の復元：新しい形の骨組み（{requirementId, entity, targets, testIds, conflict}）を、直す前（#800）の
+ * 形（{entity, name, rowId, rowKind, testIds, conflict}）に組み直す。骨組みが選んだ試験（testIds）と、
+ * 名前の表（要求に在るとき）または固定した試験の対象（body には表が無い）から、直す前の関数（行ごとにまとめ、
+ * 名前が重なれば競合）の値を再構成する。組めないときは undefined
  */
-function restoreOldRequiredValidations<
-  T extends { readonly schemaName: string; readonly input: string; readonly rules?: readonly string[] },
->(request: T): T {
-  if (request.schemaName !== WRITE_V11A_SCHEMA_NAME) return request;
-  const blockOf = (name: string): string | undefined => {
-    const after = request.input.split(`<data name="${name}">\n`)[1];
-    return after === undefined ? undefined : after.split("\n</data>")[0];
-  };
-  const skeletonText = blockOf(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME);
-  const rules =
-    request.rules === undefined
-      ? undefined
-      : request.rules.map((text) => (text === WRITE_V11A_IDS_R07_DEFINITION.text ? OLD_WRITE_V11A_IDS_R07_TEXT : text));
-  const withRules = rules === undefined ? request : { ...request, rules };
-  if (skeletonText === undefined) return withRules;
-  let skeleton: unknown;
-  let table: readonly Record<string, unknown>[];
-  let suite: { readonly tests?: readonly Record<string, unknown>[] };
-  try {
-    skeleton = JSON.parse(skeletonText);
-    table = JSON.parse(blockOf("名前の表") ?? "[]") as readonly Record<string, unknown>[];
-    suite = JSON.parse(blockOf(WRITE_V11A_DATA_NAMES[2]!) ?? "{}") as { readonly tests?: readonly Record<string, unknown>[] };
-  } catch {
-    return withRules;
-  }
-  if (!Array.isArray(skeleton) || skeleton.length === 0) return withRules;
+function oldRequiredValidationsOf(
+  skeleton: readonly Record<string, unknown>[],
+  table: readonly Record<string, unknown>[] | undefined,
+  tests: readonly Record<string, unknown>[],
+): readonly Record<string, unknown>[] | undefined {
   const rowById = new Map<string, Record<string, unknown>>();
-  table.forEach((row) => {
+  (table ?? []).forEach((row) => {
     if (typeof row["id"] === "string") rowById.set(row["id"], row);
   });
   const entityName = (id: unknown): string | null => {
@@ -313,46 +312,148 @@ function restoreOldRequiredValidations<
     return row !== undefined && row["kind"] === "entity" && typeof row["name"] === "string" ? row["name"] : null;
   };
   const rowIndex = new Map<string, number>();
-  table.forEach((row, index) => {
+  (table ?? []).forEach((row, index) => {
     if (typeof row["id"] === "string") rowIndex.set(row["id"], index);
   });
-  const testById = new Map((suite.tests ?? []).flatMap((test) => (typeof test["id"] === "string" ? [[test["id"], test] as const] : [])));
-  const groups = new Map<string, { row: Record<string, unknown>; testIds: string[] }>();
-  for (const entry of skeleton as readonly { readonly testIds?: readonly unknown[] }[]) {
-    for (const testId of entry.testIds ?? []) {
+  const testById = new Map(tests.flatMap((test) => (typeof test["id"] === "string" ? [[test["id"], test] as const] : [])));
+  type Group = { readonly index: number; readonly rowId: string; readonly rowKind: string; readonly entity: unknown; readonly name: string; readonly testIds: string[] };
+  const groups: Group[] = [];
+  for (const entry of skeleton) {
+    const targets = Array.isArray(entry["targets"]) ? (entry["targets"] as readonly unknown[]).map(String) : [];
+    let groupIndex = 0;
+    for (const testId of Array.isArray(entry["testIds"]) ? entry["testIds"] : []) {
       const test = testById.get(String(testId));
       const target = test?.["target"] as { readonly roleId?: unknown; readonly kind?: unknown } | undefined;
       const id = target?.roleId;
-      if (typeof id !== "string") continue;
+      const kind = target?.kind;
+      if (typeof id !== "string" || typeof kind !== "string") continue;
+      const existing = groups.find((group) => group.rowId === id && group.rowKind === kind);
+      if (existing !== undefined) {
+        existing.testIds.push(String(testId));
+        continue;
+      }
       const row = rowById.get(id);
-      if (row === undefined || row["kind"] !== target?.kind) continue;
-      const group = groups.get(id) ?? { row, testIds: [] };
-      group.testIds.push(String(testId));
-      groups.set(id, group);
+      if (table !== undefined && (row === undefined || row["kind"] !== kind)) continue;
+      // body には名前の表が無いので、要件の対象（targets）の並びを試験の組の並びに合わせる
+      const name = row !== undefined ? String(row["name"]) : (targets[groupIndex] ?? targets[0] ?? "");
+      const entity = row !== undefined ? (row["kind"] === "entity" ? name : entityName(row["entity"])) : (entry["entity"] ?? null);
+      groups.push({ index: row !== undefined ? (rowIndex.get(id) ?? 0) : groups.length, rowId: id, rowKind: kind, entity, name, testIds: [String(testId)] });
+      groupIndex += 1;
     }
   }
-  const ordered = [...groups.values()].sort(
-    (a, b) => (rowIndex.get(String(a.row["id"])) ?? 0) - (rowIndex.get(String(b.row["id"])) ?? 0),
+  if (groups.length === 0) return undefined;
+  const ordered = [...groups].sort((a, b) => a.index - b.index);
+  return ordered.map((group) => ({
+    entity: group.entity,
+    name: group.name,
+    rowId: group.rowId,
+    rowKind: group.rowKind,
+    testIds: group.testIds,
+    conflict: ordered.some((other) => other !== group && other.name === group.name),
+  }));
+}
+
+/** 要求の input から、骨組みの塊を直す前（#800）の組み立てに戻す（Issue #801 の復元） */
+function restoreOldRequiredValidationsInText(text: string): string {
+  const blockOf = (name: string, source: string): { readonly start: number; readonly end: number; readonly text: string } | undefined => {
+    const opener = `<data name="${name}">\n`;
+    const open = source.indexOf(opener);
+    if (open < 0) return undefined;
+    const start = open + opener.length;
+    const close = source.indexOf("\n</data>", start);
+    return close < 0 ? undefined : { start, end: close, text: source.slice(start, close) };
+  };
+  const withRules = text
+    .split(WRITE_V11A_IDS_R07_DEFINITION.text)
+    .join(OLD_WRITE_V11A_IDS_R07_TEXT)
+    .split(FIELD_REPAIR_IDS_R07_DEFINITION.text)
+    .join(OLD_FIELD_REPAIR_IDS_R07_TEXT);
+  const skeletonBlock = blockOf(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, withRules);
+  if (skeletonBlock === undefined) return withRules;
+  let skeleton: unknown;
+  let table: readonly Record<string, unknown>[] | undefined;
+  let suite: { readonly tests?: readonly Record<string, unknown>[] };
+  try {
+    skeleton = JSON.parse(skeletonBlock.text);
+    const tableBlock = blockOf("名前の表", withRules);
+    table = tableBlock === undefined ? undefined : (JSON.parse(tableBlock.text) as readonly Record<string, unknown>[]);
+    const suiteBlock = blockOf(WRITE_V11A_DATA_NAMES[2]!, withRules);
+    suite = (suiteBlock === undefined ? {} : JSON.parse(suiteBlock.text)) as { readonly tests?: readonly Record<string, unknown>[] };
+  } catch {
+    return withRules;
+  }
+  if (!Array.isArray(skeleton) || skeleton.length === 0) return withRules;
+  const old = oldRequiredValidationsOf(
+    skeleton as readonly Record<string, unknown>[],
+    table === undefined ? undefined : Array.isArray(table) ? table : undefined,
+    suite.tests ?? [],
   );
-  const old = ordered.map((entry) => {
-    const row = entry.row;
-    const name = String(row["name"]);
-    const entity = row["kind"] === "entity" ? name : entityName(row["entity"]);
-    return {
-      entity,
-      name,
-      rowId: String(row["id"]),
-      rowKind: String(row["kind"]),
-      testIds: entry.testIds,
-      conflict: ordered.some((other) => other !== entry && String(other.row["name"]) === name),
-    };
+  if (old === undefined) return withRules;
+  return `${withRules.slice(0, skeletonBlock.start)}${JSON.stringify(old, null, 2)}${withRules.slice(skeletonBlock.end)}`;
+}
+
+/**
+ * Issue #801 の復元：旗 ids の B1 の要求から、新しい形の骨組みを直す前（#800）の形に組み直し、
+ * R-w11-07 の ids の文を #800 の文へ戻す（`restoreOldRequiredValidationsInText` を input に当てる）
+ */
+function restoreOldRequiredValidations<
+  T extends { readonly schemaName: string; readonly input: string; readonly rules?: readonly string[] },
+>(request: T): T {
+  if (request.schemaName === WRITE_V11A_SCHEMA_NAME) {
+    const rules =
+      request.rules === undefined
+        ? undefined
+        : request.rules.map((text) => (text === WRITE_V11A_IDS_R07_DEFINITION.text ? OLD_WRITE_V11A_IDS_R07_TEXT : text));
+    const withRules = rules === undefined ? request : { ...request, rules };
+    return { ...withRules, input: restoreOldRequiredValidationsInText(request.input) } as T;
+  }
+  if (request.schemaName === DECL_CHECK_SCHEMA_NAME) {
+    // Issue #801：B3' の塊から targets を外し、R-dc-03 の ids の文を #795 の文（#800 の文）へ戻す
+    const rules =
+      request.rules === undefined
+        ? undefined
+        : request.rules.map((text) => (text === DECL_CHECK_IDS_R03_DEFINITION.text ? OLD_DECL_CHECK_IDS_R03_TEXT : text));
+    const withRules = rules === undefined ? request : { ...request, rules };
+    return { ...withRules, input: restoreOldLinkedValidationsInText(request.input) } as T;
+  }
+  return request;
+}
+
+/** 要求の input から、B3' の塊「要件に結び付いた検査」の要素を #800 の形（{entity, name, conflict}）に戻す */
+function restoreOldLinkedValidationsInText(text: string): string {
+  const opener = `<data name="${DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME}">\n`;
+  const open = text.indexOf(opener);
+  if (open < 0) return text;
+  const start = open + opener.length;
+  const close = text.indexOf("\n</data>", start);
+  if (close < 0) return text;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.slice(start, close));
+  } catch {
+    return text;
+  }
+  if (!Array.isArray(parsed)) return text;
+  const old = parsed.map((entry) => {
+    if (typeof entry !== "object" || entry === null) return entry;
+    const record = entry as Record<string, unknown>;
+    const validations = Array.isArray(record["validations"]) ? record["validations"] : [];
+    const withoutTargets = validations.map((validation) => {
+      if (typeof validation !== "object" || validation === null) return validation;
+      const { targets: _targets, ...rest } = validation as Record<string, unknown>;
+      return rest;
+    });
+    return { ...record, validations: withoutTargets };
   });
-  const restored = JSON.stringify(old, null, 2);
-  const input = request.input.replace(
-    new RegExp(`(<data name="${WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME}">\\n)[\\s\\S]*?(\\n<\\/data>)`),
-    `$1${restored}$2`,
-  );
-  return { ...withRules, input } as T;
+  return `${text.slice(0, start)}${JSON.stringify(old, null, 2)}${text.slice(close)}`;
+}
+
+/** Issue #801 の復元：受けた body の文字列（入力を含む）の骨組みを、直す前（#800）の組み立てに戻す */
+function restoreOldWriteInBody(root: unknown): unknown {
+  if (typeof root === "string") return restoreOldRequiredValidationsInText(root);
+  if (Array.isArray(root)) return root.map(restoreOldWriteInBody);
+  if (typeof root !== "object" || root === null) return root;
+  return Object.fromEntries(Object.entries(root as Record<string, unknown>).map(([key, value]) => [key, restoreOldWriteInBody(value)]));
 }
 
 afterEach(() => {
@@ -1317,7 +1418,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 11ca852ea32e6f3085c5cf91987ba986e9561aea6a442458ea408d2ce851de80）
       // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 23e96f59c9b15af3b01e23a7b81c879a139b7776c1e0e6a823739e637b1c0852）
       // 要求の SHA-256 は Issue #795 で取り直した（旗 ids on の B3' のデータに塊「要件に結び付いた検査」を足し、R-dc-03 の ids の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutLinkedValidations`。旧 b397d6409d7bb8fe3e8dd289563117390ec92c6ddf0210d7da840c3efc343f5f）
-      "ecd221aeac1983c97d91a8f6dba7c2f05b4832909a13351fc1ceb1142ae1a0e5",
+      // Issue #815：#801 の前（db91af3）の値に戻した（#801 の値は `BEFORE_DIGESTS_801`）。区分：字どおり戻すだけ（#800 で経路が変わる台本）。連鎖では照らさない。直接固定した Issue：#800
+      "6a54106962fdd2d18044d4efa54e8bf7c6b517c4ffdae8674e1b0def1cd0bdd3",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d3d46bd0bae1ed1bce66a419612e4d05b1d6d0cefa9b95072d2af39c8137d700）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 ef2dc4cd77f101896bc8c4c377efeabe8f621d092497fdef0ee93b69490e031f）
@@ -1336,7 +1438,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 a61b8eb44bff4d25b0770176166625d28060dfa421594be3033ff047f10b3634）
       // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 fca5a4eeaad8ab62b049891ea21784f097cc9f715f7ffe27fdf3fa46f2f84179）
       // 要求の SHA-256 は Issue #795 で取り直した（旗 ids on の B3' のデータに塊「要件に結び付いた検査」を足し、R-dc-03 の ids の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutLinkedValidations`。旧 5b18feeb728eda386d9523d6da712dc86522812b75c6cb8794f17f12487069d9）
-      "3d3e9be92aaa146a522d335d4a47539566b2e7487489f41dc6c6bf0086981e9e",
+      // Issue #815：#801 の前（db91af3）の値に戻した（#801 の値は `BEFORE_DIGESTS_801`）。区分：字どおり戻すだけ（#800 で経路が変わる台本）。連鎖では照らさない。直接固定した Issue：#800
+      "df6ae87c829452f506cb899f8b306726cb34a2520d7de6c22b180b0a10ed8f59",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 c479ec4fc3ac733a9b470499f5d8fc631583a94ca9e4169834ae571ea7499645）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 a3848402cdf1bbedbdbb51431bd971ccc94a351d6bfb88ae7a9f56054cdec635）
@@ -1357,7 +1460,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 37d215a03b3d1fb251479e18ff68b18cba8c3ba4bb473c2667e0bd44e480192c）
       // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 c71bc450115d4e4bcefe329eac1ef6280b6f20fc155782ab881cda8368fe8b9d）
       // 要求の SHA-256 は Issue #795 で取り直した（旗 ids on の B3' のデータに塊「要件に結び付いた検査」を足し、R-dc-03 の ids の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutLinkedValidations`。旧 70844607c361197004f0c489d2f446f717ddb340c855a02a3f21a2cd401e518c）
-      "01c5fbf9e5f0c2b1672383d757efc5f4d3738a4a8e3ed932178f4f14688e56bc",
+      // Issue #815：#801 の前（db91af3）の値に戻した（#801 の値は `BEFORE_DIGESTS_801`）。区分：字どおり戻すだけ（#800 で経路が変わる台本）。連鎖では照らさない。直接固定した Issue：#800
+      "ce4170fb7d74694faf33c2f0a829481b2b49c9eb0a9d1270bfc009ccde40482e",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 2f032bbaf50ff8e7c6c0fbe9708107eb043cca23ae2bc5b6b25680e7c2f4151a）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 f039481b055d8d893ee5535d5b56acc5182d6e5b392c8c4f3a21c4632403f859）
@@ -1393,10 +1497,59 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 a8445592525ce05b953014bcc300b19b10bd6e4a8361d10c34ec79d20412452d）
       // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 f194a77e72fc71d29fb2d45966a2934dd85d47c7f74c7ad597811208892ee273）
       // 要求の SHA-256 は Issue #795 で取り直した（旗 ids on の B3' のデータに塊「要件に結び付いた検査」を足し、R-dc-03 の ids の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutLinkedValidations`。旧 b63b9c2a1aa4d3b949b5ef26d2b5bdc1f4011806ec6226313a2443797d240d3c）
-      "5233fb8c7ed42aedcf38a7cc4e6b4cfcfa6197af9a5b5f59a4c01a390b554b5b",
+      // Issue #815：#801 の前（db91af3）の値に戻した（#801 の値は `BEFORE_DIGESTS_801`）。区分：字どおり戻すだけ（#800 で経路が変わる台本）。連鎖では照らさない。直接固定した Issue：#800
+      "1d0de0383e04aad02d6dce30ba4981fb62dc61e88d0878a6bfbfc6c7e5ca4e51",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d762715a3037b44cbc202848f40b5fa2cd1551bba549bd418f56fefc0e9def0e）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 4a2626d7964d9f231142488d8151d75f3c36d8ef216d65f06c6fb63bc8a102ab）
+      "b9cdc24d6836b26f9d42b07c9185319786fc91c8d9b8eeef6704ad7982722a4e",
+    ],
+  };
+  /**
+   * Issue #801 の値（`BEFORE_DIGESTS` の 3 番目＝要求の全体）。`BEFORE_DIGESTS` は #801 の前（db91af3）の値に戻したので、
+   * #801 の後の値をここに置く（今の等値の期待はこちらで保つ）。区分：字どおり戻すだけ。直接固定した Issue：#800
+   */
+  const BEFORE_DIGESTS_801: Readonly<Record<string, readonly string[]>> = {
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": [
+      "865511262ad4b1eec243d96a87d5716fa5dac5794bcc0967769bd9fda0974edc",
+      "68ef6a89239bdc818759f7cac71e164122fe07351e47230cdaaa473bf22c9665",
+      "ecd221aeac1983c97d91a8f6dba7c2f05b4832909a13351fc1ceb1142ae1a0e5",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "e575ee2943955e7458a1a6cc6270e8967300299f9af4df9db4e8f38785f494f1",
+    ],
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": [
+      "771d2acf15b3903ea4b81cd6e6fb4cd6d4600944a807484c985dacbb6128e7e6",
+      "e3d7a7c0ddc54deec945cf292f2a0311b13f829390b9cdadc8b1022906e5107f",
+      "3d3e9be92aaa146a522d335d4a47539566b2e7487489f41dc6c6bf0086981e9e",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "c8be607630dff4415097005dc4019066d50b3cc43426793be2d2dbbc925fb676",
+    ],
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": [
+      "c2a1c208a549dd9320f05ca078149cff2c691f163c9de1ef9a53da25426de89c",
+      "4b521a13c9199048e8f1c4ea507c5e2fa114baf0a4df5fd74319790204f6796a",
+      "01c5fbf9e5f0c2b1672383d757efc5f4d3738a4a8e3ed932178f4f14688e56bc",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "5bb0dd43d3dfd24dff1251fb46f241b30ae10949a4a360e1b8a9ad5c92f81963",
+    ],
+    "(4) C2 が 2 回落ちて止まる": [
+      "14927cf4ff8e5b827eb9f11391b5c422f6b789ccb1ff6878608c6cc351fa25c1",
+      "62a0d8984a6a06d59674e2a3daf142cbf34425567d43c37c53461d94613f8a8e",
+      "f82fa77127b88ffcb12ca79f150cbe0d16438e055cc543503e8f44b8c83181f5",
+      "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ],
+    "(4) C1 の束 2 が 2 回落ちて止まる": [
+      "191c0f74c9fc3a2b07234379b3c6f2e9f99e36f7300804c0325cd1f126763e58",
+      "e56ba79e38dfcd5bfdde73a5eb04a9477d643dbba57c5cffc1d6194da3d8944d",
+      "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+      "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ],
+    "(5) 形で 1 度も落ちない": [
+      "8a7be5d0b40243e22114d434e400f45dc55ff41add9d357888593eaa4d460aea",
+      "958e1dcb2de103b1d9358ed0e7af7bf6b7918a6478c15dfb0c9e5930d21f69ae",
+      "5233fb8c7ed42aedcf38a7cc4e6b4cfcfa6197af9a5b5f59a4c01a390b554b5b",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       "b9cdc24d6836b26f9d42b07c9185319786fc91c8d9b8eeef6704ad7982722a4e",
     ],
   };
@@ -1413,8 +1566,13 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
   // Issue #724 で取り直した（初回の C2 の要求の規則と schema が変わるため。旧 865603b1b7822c4a8a1e5f9ce348fa1d2ae57f6a29a00270b3893f7740d5cb95）
   // Issue #725 で取り直した（旗 ids と ledger が on の初回の C2 の要求のデータに台帳の未対応の観測の塊を足し、台帳版の R-map-03 の文を直したため。旧 f557b06dfea31a88264e5db7aacb66068a3f61398e4571fcd760ccfccfe8cb37）
   const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING = "b8760480b88790bfbe174c310a95b59f04edf06e0c921d47a7413a4ee0ce0397";
-  /** Issue #800：上の値の 3 番目（要求の全体）を、T2 の枠の変更の分だけ取り直した値（旧値は残す） */
-  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_800 = "9255ece2150a91967e321cc70fac790209448064e090347b1fc52b33a5586e52";
+  /**
+   * Issue #800：上の値の 3 番目（要求の全体）を、T2 の枠の変更の分だけ取り直した値。Issue #815 で値を #801 の前（db91af3）に
+   * 戻した。区分：連鎖で照らす（復元の順に #801 の段を足した値がこの値に戻る）。#801 の値は `..._801`
+   */
+  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_800 = "c49d34b1c8ae201dde1d90c864d532c9e500195827ae958b5d9b1d067b54abaa";
+  /** Issue #801 の値（上の値の 3 番目。今の等値の期待はこちらで保つ） */
+  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_801 = "9255ece2150a91967e321cc70fac790209448064e090347b1fc52b33a5586e52";
   /**
    * 直す前の値：上の台本の要求から C2 の要求（schemaName が mapping のもの）を全部外した残りの SHA-256（base 2c514cf の mapping.ts・
    * names.ts・generated-tests.ts・fixtures.ts に戻した作業木で測った値。新しいコードの出力から作っていない。Issue #724）。#724 で要求の
@@ -1483,9 +1641,59 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
   /**
    * Issue #800：`BEFORE_DIGESTS` の 3 番目（要求の全体）だけを、T2 の枠の変更（値の対象から項目・entity を外し、値の対象が無い要件を
    * 免除する）の分だけ取り直した値。**上の `BEFORE_DIGESTS` の旧値は残す**。`withoutValidationExpression` で台帳に足した行の文と
-   * schema の欄を外しても、枠の値そのものが変わる台本（経路が変わる台本）なので、許可した差分として新しい期待を直接固定する
+   * schema の欄を外しても、枠の値そのものが変わる台本（経路が変わる台本）なので、許可した差分として新しい期待を直接固定する。
+   * Issue #815：値を #801 の前（db91af3）に戻した。区分：連鎖で照らす（`oldShapeStructured` の 3 番目がこの値に戻る）。
+   * #801 の値は `BEFORE_DIGESTS_800_801`
    */
   const BEFORE_DIGESTS_800: Readonly<Record<string, readonly string[]>> = {
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": [
+      "865511262ad4b1eec243d96a87d5716fa5dac5794bcc0967769bd9fda0974edc",
+      "68ef6a89239bdc818759f7cac71e164122fe07351e47230cdaaa473bf22c9665",
+      "437b7e3eec5c592b33619504d1a7ef1a737a2c9766b738f1d19496cb3d035713",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "e575ee2943955e7458a1a6cc6270e8967300299f9af4df9db4e8f38785f494f1",
+    ],
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": [
+      "771d2acf15b3903ea4b81cd6e6fb4cd6d4600944a807484c985dacbb6128e7e6",
+      "e3d7a7c0ddc54deec945cf292f2a0311b13f829390b9cdadc8b1022906e5107f",
+      "d0b722482dc42db8bbc1263b92810fc3a5d632f1795b961b66499fb723c19f8a",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "c8be607630dff4415097005dc4019066d50b3cc43426793be2d2dbbc925fb676",
+    ],
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": [
+      "c2a1c208a549dd9320f05ca078149cff2c691f163c9de1ef9a53da25426de89c",
+      "4b521a13c9199048e8f1c4ea507c5e2fa114baf0a4df5fd74319790204f6796a",
+      "f7f796420633480a2d0f165a99fd29ea325c323b47fd2425374f6a35d50cf04b",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "5bb0dd43d3dfd24dff1251fb46f241b30ae10949a4a360e1b8a9ad5c92f81963",
+    ],
+    "(4) C2 が 2 回落ちて止まる": [
+      "14927cf4ff8e5b827eb9f11391b5c422f6b789ccb1ff6878608c6cc351fa25c1",
+      "62a0d8984a6a06d59674e2a3daf142cbf34425567d43c37c53461d94613f8a8e",
+      "47d5c641aab1ceaa36389a297ccc3e85aeffed4900dbf02f89ce563616102536",
+      "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ],
+    "(4) C1 の束 2 が 2 回落ちて止まる": [
+      "191c0f74c9fc3a2b07234379b3c6f2e9f99e36f7300804c0325cd1f126763e58",
+      "e56ba79e38dfcd5bfdde73a5eb04a9477d643dbba57c5cffc1d6194da3d8944d",
+      "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+      "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ],
+    "(5) 形で 1 度も落ちない": [
+      "8a7be5d0b40243e22114d434e400f45dc55ff41add9d357888593eaa4d460aea",
+      "958e1dcb2de103b1d9358ed0e7af7bf6b7918a6478c15dfb0c9e5930d21f69ae",
+      "97c6d27229990c9d65388d05b799e9b68fdc38ee52d10a5918a0d32ecc5dda77",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "b9cdc24d6836b26f9d42b07c9185319786fc91c8d9b8eeef6704ad7982722a4e",
+    ],
+  };
+  /**
+   * Issue #801 の値（`BEFORE_DIGESTS_800` の 3 番目＝要求の全体の、#801 の後）。今の等値の期待はこちらで保つ。
+   * 区分：連鎖で照らす（#801 の段を復元の順から外すと `BEFORE_DIGESTS_800` との照合が赤になる）
+   */
+  const BEFORE_DIGESTS_800_801: Readonly<Record<string, readonly string[]>> = {
     "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": [
       "865511262ad4b1eec243d96a87d5716fa5dac5794bcc0967769bd9fda0974edc",
       "68ef6a89239bdc818759f7cac71e164122fe07351e47230cdaaa473bf22c9665",
@@ -1595,6 +1803,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
 
   it("(1)〜(5) の台本の段の記録・要約・LLM への要求・終了コード・納品物は、直す前（a61f2ce で測った SHA-256）と同じ（Issue #657）", async () => {
     const measured: Record<string, readonly string[]> = {};
+    /** Issue #815：復元の順（#813 → #806 → #805 → #801 → #800）で #801 の段も戻した値。戻した旧の値と照らす */
+    const measuredOld: Record<string, readonly string[]> = {};
     const measuredMaterials: Record<string, string> = {};
     const measuredWithoutMapping: Record<string, string> = {};
     const measuredWithoutReading: Record<string, string> = {};
@@ -1610,7 +1820,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // Issue #813：T2 の R-tsp-02 の新しい文と枠の免除の枝を #813 の前に戻す（#663 の上限の文の復元より前）
       // Issue #806：旗 ids の C2 への 3 文も位置で外して、旧の指紋と照らす
       const restoredStructured = withoutIdsC2Texts(withoutFrameFieldNormal(withoutValidationExpression(recording.structured)));
-      // Issue #801：骨組みの新しい形と R-w11-07 の ids の文を、直す前（#800）の形・文に組み直す（旧の指紋と照らす）
+      // Issue #801：骨組みの新しい形と R-w11-07 の ids の文を、直す前（#800）の形・文に組み直す（旧の指紋と照らす）。
+      // #805 は台本 (1)〜(5) の経路を変えないので、この復元の順（#813 → #806 → #805 → #801 → #800）の #805 の段は空
       const oldShapeStructured = restoredStructured.map(restoreOldRequiredValidations);
       // 止まる走りの診断の一覧（materials.json）は、断った候補の要約（rejected）の鍵を外した残りを照らす。rejected は下で期待を固定する
       const listing = result.diagnostics.find((artifact) => artifact.path === DIAGNOSTICS_LISTING_FILE);
@@ -1629,6 +1840,12 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       );
       measured[script.name] = await Promise.all(
         [result.record, result.summary, { structured: restoredStructured, tools: recording.tools }, result.summary.exit_code, files].map((value) =>
+          sha256Hex(JSON.stringify(value)),
+        ),
+      );
+      // Issue #815：復元の順に #801 の段（骨組みの新しい形と R-w11-07 の ids の文）も外した値が、戻した旧の値（#801 の前）に等しい
+      measuredOld[script.name] = await Promise.all(
+        [result.record, result.summary, { structured: oldShapeStructured, tools: recording.tools }, result.summary.exit_code, files].map((value) =>
           sha256Hex(JSON.stringify(value)),
         ),
       );
@@ -1665,7 +1882,12 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         ).toBe(true);
       }
     }
-    expect(measured).toEqual({ ...BEFORE_DIGESTS, ...BEFORE_DIGESTS_800 });
+    // 今の等値の期待は、#801 の値（`_801`）で保つ（Issue #815）。`BEFORE_DIGESTS` は #801 の前の値のまま残す（字どおり戻すだけ）
+    expect(measured).toEqual({ ...BEFORE_DIGESTS_801, ...BEFORE_DIGESTS_800_801 });
+    // 復元の順に #801 の段も外した値は、戻した旧の値（`BEFORE_DIGESTS_800`＝#801 の前）に等しい
+    expect(measuredOld).toEqual(BEFORE_DIGESTS_800);
+    // `BEFORE_DIGESTS` も #801 の前の値のまま残す（字どおり戻すだけ）。#801 の値とは違うことを照らす
+    expect(BEFORE_DIGESTS).not.toEqual(BEFORE_DIGESTS_801);
     expect(measuredWithoutLinked).toEqual({ ...BEFORE_795_REQUESTS, ...BEFORE_REQUESTS_800.linked });
     expect(measuredWithoutReading).toEqual({ ...BEFORE_732_REQUESTS, ...BEFORE_REQUESTS_800.reading });
     expect(measuredWithoutLimit).toEqual({ ...BEFORE_663_REQUESTS, ...BEFORE_REQUESTS_800.limit });
@@ -1691,9 +1913,24 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         tools: thirdRun.recording.tools,
       }),
     );
-    expect(thirdDigest).toBe(BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_800);
+    // 今の等値の期待は #801 の値で保つ（Issue #815）
+    expect(thirdDigest).toBe(BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_801);
+    // 復元の順（#813 → #806 → #805 → #801 → #800）に #801 の段も足すと、戻した旧の値（#801 の前）に等しい
+    const thirdDigestOld = await sha256Hex(
+      JSON.stringify({
+        structured: withoutIdsReading(
+          withoutIdsLimit(
+            withoutLinkedValidations(
+              withoutIdsC2Texts(withoutFrameFieldNormal(withoutValidationExpression(thirdRun.recording.structured).map(restoreOldRequiredValidations))),
+            ),
+          ),
+        ).filter((_, index) => index !== 5),
+        tools: thirdRun.recording.tools,
+      }),
+    );
+    expect(thirdDigestOld).toBe(BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_800);
     // 旧値は残す（T2 の枠の変更で取れなくなった値）。新しい値と違うことを照らす
-    expect(BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING).not.toBe(BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_800);
+    expect(BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING).not.toBe(BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_801);
     // rejected は、形の試行ごとの候補 2 件（attempt 1・2 の順）で、それぞれ問題の一覧（problem_count と固定文）を持つ
     expect(Object.keys(rejectedSummaries)).toEqual(Object.keys(BEFORE_MATERIALS_DIGESTS));
     for (const [name, rejected] of Object.entries(rejectedSummaries)) {
@@ -8108,6 +8345,9 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
   /** 送った body（偽物の fetch が実際に受けた body）の SHA-256 */
   const bodyShas = async (sent: readonly WireSent[]): Promise<readonly string[]> =>
     Promise.all(sent.map(async (candidate) => await sha256Hex(JSON.stringify(candidate.body))));
+  /** Issue #801 の復元を当てた body の SHA-256（戻した旧の値と照らす） */
+  const restoredBodyShas = async (sent: readonly WireSent[]): Promise<readonly string[]> =>
+    Promise.all(sent.map(async (candidate) => await sha256Hex(JSON.stringify(restoreOldWriteInBody(candidate.body)))));
 
   /** 欄だけの直しの 2 往復（W2 → W1 → 正しい版）で修復が 2 回・採否は 2 → 1 → 0 */
   const FIELD_CALLS = (): RecordedCall[] => [
@@ -8223,8 +8463,17 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
    * 流す一時の試験を足し、`sha256(JSON.stringify(sent.body))` を記録した（一気通貫と段の走りの両方で同じ値）。測った後に一時の
    * 試験を戻し、補助（node_modules などの link）を消してから `git worktree remove` で消した。**旧値（bb769d6・直す前）**は
    * `BB769D6_FULL_BODY_SHA`——診断の塊があるので一致しない（直す前の挙動）。
+   * Issue #815：値を #801 の前（db91af3）に戻した。区分：連鎖で照らす（復元の順に #801 の段も外した body がこの値に戻る）。
+   * #801 の値は `F9BF3B3_FULL_BODY_SHA_801`
    */
   const F9BF3B3_FULL_BODY_SHA = [
+    "9fbb8ee3925cc507086726de650528f4ad2a9e2808267eecb77191c835a8e5f4",
+    "c68bff9ef2c2eb360703eeadcb2673bb7effeb794e1e603059905b59f653473e",
+  ] as const;
+  /**
+   * Issue #801 の値（上の body の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす
+   */
+  const F9BF3B3_FULL_BODY_SHA_801 = [
     "fb00c84f0ceadee05f6b118cd32a2b660a274b26cbaf58a552622c526dd4bafe",
     "a4ffb740ef37ceeb35f1354d3b3609206bea586964db9bde30e9b85dc5974400",
   ] as const;
@@ -8243,7 +8492,9 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
       const tools = run.sent.filter((sent) => sent.kind === "tools");
       expect(tools).toHaveLength(2);
       for (const sent of tools) expect(hasFullDiagnostic(sent)).toBe(false);
-      expect(await bodyShas(tools)).toEqual([...F9BF3B3_FULL_BODY_SHA]);
+      // 今の body の等値の期待は #801 の値で保ち、復元の順に #801 の段も外した body は戻した旧の値に等しい（Issue #815）
+      expect(await bodyShas(tools)).toEqual([...F9BF3B3_FULL_BODY_SHA_801]);
+      expect(await restoredBodyShas(tools)).toEqual([...F9BF3B3_FULL_BODY_SHA]);
     }
     // 直す段はどちらの実行口も 1 回（一気通貫は record、段の走りは stages）
     expect(generation.result.record.stages.filter((record) => record.stage === "repair")).toHaveLength(1);
@@ -8255,7 +8506,7 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
     ]);
     expect(roundsOf(generation.result.bundle).map((round) => round.hand)).toEqual(["repair"]);
     // 直す前（bb769d6）は診断の塊があり、同じ body ではなかった（今の body から取り除いて比べない。上の実測の旧値）
-    expect(BB769D6_FULL_BODY_SHA).not.toEqual(F9BF3B3_FULL_BODY_SHA);
+    expect(BB769D6_FULL_BODY_SHA).not.toEqual(F9BF3B3_FULL_BODY_SHA_801);
   });
 
   /**
@@ -8263,9 +8514,15 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
    * 取り方：`git worktree add --detach <リポジトリの外の一時ディレクトリ> bb769d6` で作った一時の worktree に、下の台本と同じ走り
    * （`idsHead({ yaml: W2 })` から欄だけの直し 2 回。同じ入力・同じ一番良い版・同じ応答・同じ adapter の設定）を流す一時の試験を
    * 足して測った。測った後に一時の試験を戻し、補助を消してから `git worktree remove` で消した。診断の塊を含む body なので、
-   * #764 の後も欄だけの直しの要求はこの値のまま（完了条件 (2)）。
+   * #764 の後も欄だけの直しの要求はこの値のまま（完了条件 (2)）。Issue #815：値を #801 の前（db91af3）に戻した。
+   * 区分：連鎖で照らす（復元の順に #801 の段も外した body がこの値に戻る）。#801 の値は `BB769D6_FIELD_BODY_SHA_801`
    */
   const BB769D6_FIELD_BODY_SHA = [
+    "9984b5c0d3bf27316bfdfee8a8fe95d8e7a447547c9d2637624fffea21038389",
+    "fbe186d1e2de9e615527bcd9f114b0a3f990dd600a49bd7026051fb7fbfff97c",
+  ] as const;
+  /** Issue #801 の値（上の body の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす */
+  const BB769D6_FIELD_BODY_SHA_801 = [
     "2a1dc261d02a675abcddd5d7aec07452ce938d52fe759b2a31f76bc2b85987c7",
     "961b9f768ff6b4a3f14263af6dc017fda64397acaacbd36cc72c05ce0a67d64b",
   ] as const;
@@ -8287,7 +8544,9 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
     const fields = wire.sent.filter((sent) => sent.schemaName === FIELD_REPAIR_SCHEMA_NAME);
     expect(fields).toHaveLength(2);
     for (const sent of fields) expect(hasDiagnostic(sent)).toBe(true);
-    expect(await bodyShas(fields)).toEqual([...BB769D6_FIELD_BODY_SHA]);
+    // 今の body の等値の期待は #801 の値で保ち、復元の順に #801 の段も外した body は戻した旧の値に等しい（Issue #815）
+    expect(await bodyShas(fields)).toEqual([...BB769D6_FIELD_BODY_SHA_801]);
+    expect(await restoredBodyShas(fields)).toEqual([...BB769D6_FIELD_BODY_SHA]);
     // 往復の数と採否の並びも直す前（bb769d6）と同じ（2 往復・2 → 1 → 0）
     expect(result.record.stages.filter((stage) => stage.stage === "repair")).toHaveLength(2);
     expect(totalsOf(result.bundle)).toEqual([
@@ -8337,9 +8596,14 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
    * と同じ台本（同じ入力・同じ最良版・同じ応答・同じ adapter の設定。全文の直しの候補を採ったあと欄だけの直しへ入る）を
    * 流す一時の試験を足し、偽物の fetch が実際に受けた body の `sha256(JSON.stringify(body))` を記録した（一気通貫と段の走りで
    * 同じ値）。測った後に一時の試験を戻し、補助（node_modules・dist の link）を消してから `git worktree remove`（force なし）で
-   * 消した。診断の塊を含む body なので #764 の後もこの値のまま。
+   * 消した。診断の塊を含む body なので #764 の後もこの値のまま。Issue #815：値を #801 の前（db91af3）に戻した。
+   * 区分：連鎖で照らす（復元の順に #801 の段も外した body がこの値に戻る）。#801 の値は `BB769D6_HANDOFF_FIELD_BODY_SHA_801`
    */
   const BB769D6_HANDOFF_FIELD_BODY_SHA = [
+    "2f938971e45be809c0a7e4f794e278286512b308fe7684be22aaff33b2df9f46",
+  ] as const;
+  /** Issue #801 の値（上の body の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす */
+  const BB769D6_HANDOFF_FIELD_BODY_SHA_801 = [
     "8f9c5be2c09fd9307897540b77010daee4ac67228619121a947f49bd5a89f01d",
   ] as const;
   /**
@@ -8350,8 +8614,14 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
    * 同じ値）。この台本の全文の直しは道具の呼び出しを挟まず最後の応答が 1 本なので、継続の要求は無い。測った後に一時の試験を
    * 戻し、補助を消して `git status --porcelain` が空を確かめ、`git worktree remove`（force なし）で消した。今の body から診断を
    * 取り除いて比べた値ではない。bb769d6 の同じ台本の全文の body は診断の塊があるので `ee74d20e…` で一致しない。
+   * Issue #815：値を #801 の前（db91af3）に戻した。区分：連鎖で照らす（復元の順に #801 の段も外した body がこの値に戻る）。
+   * #801 の値は `F9BF3B3_HANDOFF_FULL_BODY_SHA_801`
    */
   const F9BF3B3_HANDOFF_FULL_BODY_SHA = [
+    "6c62de47e0e97c6f20aeea9a0f8bfe7bc63cd6c0bb8e4c4e89e0b9e9d21ef23b",
+  ] as const;
+  /** Issue #801 の値（上の body の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす */
+  const F9BF3B3_HANDOFF_FULL_BODY_SHA_801 = [
     "b507dfa3e4ee2678703dbbff8d3f47915a6cb97ba106f67206eb994eb66303af",
   ] as const;
   /** 同じ台本の版の (出所, 違反の数, 採ったか) の並び（bb769d6 の実測。修復 2 往復・全文→欄だけ・すべて採用） */
@@ -8375,11 +8645,14 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
     expect(fields).toHaveLength(1);
     // 全文の直しの body に診断の塊は無い
     for (const sent of tools) expect(hasFullDiagnostic(sent)).toBe(false);
-    // 全文の直しの body は #761 の前（f9bf3b3）と同じ（診断の塊が無い body）
-    expect(await bodyShas(tools)).toEqual([...F9BF3B3_HANDOFF_FULL_BODY_SHA]);
+    // 全文の直しの body は #761 の前（f9bf3b3）と同じ（診断の塊が無い body）。今の値は #801 の値で保ち、
+    // 復元の順に #801 の段も外した body は戻した旧の値に等しい（Issue #815）
+    expect(await bodyShas(tools)).toEqual([...F9BF3B3_HANDOFF_FULL_BODY_SHA_801]);
+    expect(await restoredBodyShas(tools)).toEqual([...F9BF3B3_HANDOFF_FULL_BODY_SHA]);
     // 同じ走りの中の欄だけの直しの body は、同じ台本の bb769d6 の body と一致する（診断の塊がある）
     for (const sent of fields) expect(hasDiagnostic(sent)).toBe(true);
-    expect(await bodyShas(fields)).toEqual([...BB769D6_HANDOFF_FIELD_BODY_SHA]);
+    expect(await bodyShas(fields)).toEqual([...BB769D6_HANDOFF_FIELD_BODY_SHA_801]);
+    expect(await restoredBodyShas(fields)).toEqual([...BB769D6_HANDOFF_FIELD_BODY_SHA]);
     // 採否と回数の並びは同じ台本の等値（修復の段は 2 回。全文→欄だけの順）
     expect(result.record.stages.filter((stage) => stage.stage === "repair")).toHaveLength(2);
     expect(roundsOf(result.bundle).map((round) => round.hand)).toEqual(["repair", "field-repair"]);
@@ -8402,11 +8675,14 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
     expect(fields).toHaveLength(1);
     // 全文の直しの body に診断の塊は無い
     for (const sent of tools) expect(hasFullDiagnostic(sent)).toBe(false);
-    // 全文の直しの body は #761 の前（f9bf3b3）と同じ（診断の塊が無い body）
-    expect(await bodyShas(tools)).toEqual([...F9BF3B3_HANDOFF_FULL_BODY_SHA]);
+    // 全文の直しの body は #761 の前（f9bf3b3）と同じ（診断の塊が無い body）。今の値は #801 の値で保ち、
+    // 復元の順に #801 の段も外した body は戻した旧の値に等しい（Issue #815）
+    expect(await bodyShas(tools)).toEqual([...F9BF3B3_HANDOFF_FULL_BODY_SHA_801]);
+    expect(await restoredBodyShas(tools)).toEqual([...F9BF3B3_HANDOFF_FULL_BODY_SHA]);
     // 同じ走りの中の欄だけの直しの body は、同じ台本の bb769d6 の body と一致する（診断の塊がある）
     for (const sent of fields) expect(hasDiagnostic(sent)).toBe(true);
-    expect(await bodyShas(fields)).toEqual([...BB769D6_HANDOFF_FIELD_BODY_SHA]);
+    expect(await bodyShas(fields)).toEqual([...BB769D6_HANDOFF_FIELD_BODY_SHA_801]);
+    expect(await restoredBodyShas(fields)).toEqual([...BB769D6_HANDOFF_FIELD_BODY_SHA]);
     // 採否と回数の並びは同じ台本の等値（修復の段は 2 回。全文→欄だけの順）
     expect(outcome.stages.filter((record) => record.stage === "repair")).toHaveLength(2);
     expect(stageHandsOf(outcome)).toEqual(["repair", "field-repair"]);
@@ -8702,8 +8978,20 @@ describe("最後の答えの枠を取っておく（旗 v12.ids の探索 on の
    *
    * 今の head では 1〜6 回目の body がこの値とそのまま一致し、7 回目は `tool_choice` の 1 キーだけを除いた
    * JSON の SHA が 7 番目の値と一致する（足されたのは道具を選ばせない指定だけ）。
+   * Issue #815：値を #801 の前（db91af3）に戻した。区分：連鎖で照らす（復元の順に #801 の段も外した body がこの値に戻る）。
+   * #801 の値は `BEFORE_768_BODY_SHA_801`
    */
   const BEFORE_768_BODY_SHA = [
+    "9fbb8ee3925cc507086726de650528f4ad2a9e2808267eecb77191c835a8e5f4",
+    "8ec81b99f165db65ff99a68faf4f6b0935aaab6042f2bd2755feed6e28c7d204",
+    "2ca54844448e22349158a578990a0a16a3527a294f87d62e5740d3979b20ddb9",
+    "77609928f0c144ed23be4a0d3e511db17f624e4fb8527049d748506863e7d8ed",
+    "d8a749023ba59acbf609f3fca39ac44ed6552d13ae2cf0b452c3f7e76215bfdc",
+    "abb575b5ad9d3bd70187b674f57cce5f8395af2d07f4d708421e71e7af6a4a09",
+    "9f1d1d6217256db704c9f621bd17989d7e8e09633e5ee405d70f373472816f5d",
+  ] as const;
+  /** Issue #801 の値（上の 7 本の body の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす */
+  const BEFORE_768_BODY_SHA_801 = [
     "fb00c84f0ceadee05f6b118cd32a2b660a274b26cbaf58a552622c526dd4bafe",
     "f9f4cebde538d73a71ed05a3789906e5ded615fa822652af2a283db0cbba121a",
     "9addddb269350f316b521d6bb4830c2a4f4770e9af24007aecaebbc5d09b51b0",
@@ -8783,12 +9071,16 @@ describe("最後の答えの枠を取っておく（旗 v12.ids の探索 on の
     expect(JSON.stringify(tools[0]?.body)).not.toContain("tool_choice");
     const seventh = tools[6];
     if (seventh === undefined) throw new Error("前提が壊れた：7 回目の要求が無い");
-    // 1〜6 回目の body は 7b47038 の実測とそのまま一致する（何も除かない）
+    // 1〜6 回目の body は 7b47038 の実測とそのまま一致する（何も除かない）。今の等値の期待は #801 の値で保つ（Issue #815）
     const rawShas = await Promise.all(tools.map((sent) => sha256Hex(JSON.stringify(sent.body))));
-    expect(rawShas.slice(0, 6)).toEqual(BEFORE_768_BODY_SHA.slice(0, 6));
+    expect(rawShas.slice(0, 6)).toEqual(BEFORE_768_BODY_SHA_801.slice(0, 6));
     // 7 回目に足されたのは道具を選ばせない指定だけ（その 1 キーを除いた JSON が 7b47038 の 7 回目と一致）
     expect(seventh.body["tool_choice"]).toBe("none");
-    expect(await sha256Hex(JSON.stringify(withoutToolChoice(seventh.body)))).toBe(BEFORE_768_BODY_SHA[6]);
+    expect(await sha256Hex(JSON.stringify(withoutToolChoice(seventh.body)))).toBe(BEFORE_768_BODY_SHA_801[6]);
+    // 復元の順に #801 の段も外した body は、戻した旧の値（`BEFORE_768_BODY_SHA`）に等しい（Issue #815）
+    const restoredShas = await Promise.all(tools.map((sent) => sha256Hex(JSON.stringify(restoreOldWriteInBody(sent.body)))));
+    expect(restoredShas.slice(0, 6)).toEqual(BEFORE_768_BODY_SHA.slice(0, 6));
+    expect(await sha256Hex(JSON.stringify(restoreOldWriteInBody(withoutToolChoice(seventh.body))))).toBe(BEFORE_768_BODY_SHA[6]);
     expect(run.stopped).toBeNull();
     expect(run.verdict).toBe("full");
     if (run.outcome !== undefined) expect(run.outcome).toEqual({ result: "pass", verdict: "full" });
