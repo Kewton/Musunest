@@ -85,8 +85,56 @@ export const DECL_CHECK_RULE_DEFINITIONS: readonly RuleDefinition[] = [
 /** B3' に足す規則（定義の `text` から組む） */
 export const DECL_CHECK_RULES: readonly string[] = ruleTexts(DECL_CHECK_RULE_DEFINITIONS);
 
+/** 要件に結び付いた検査のデータの名前（旗 `v12.ids` の走りで、要件が 1 つ以上あるときだけ「追加の要素」の後に足す。Issue #795） */
+export const DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME = "要件に結び付いた検査";
+
+/**
+ * R-dc-03 の ids の文に足す文（Issue #795）。結び付いた検査を所属に準ずる補助のデータとして扱わせ、塊そのものを
+ * 要件が求めることの一覧や正しさの証明として読ませない。検査の式の意味は宣言から独立に読ませる。
+ */
+export const DECL_CHECK_R03_IDS_SUFFIX =
+  "データの「要件に結び付いた検査」にある検査は、その要件の所属に準ずるものとして見て、追加の要素にあっても behavior-outside-ownership にしない。その塊は要件が求めることの一覧でも、正しさの証明でもない。検査の式が要件と合うかは宣言から読む。要件の文が求めない検査が無いことを拒否の理由にしない";
+
+/** R-dc-03 の ids の定義（今の文の後ろに `DECL_CHECK_R03_IDS_SUFFIX` を足したもの。Issue #795） */
+export const DECL_CHECK_IDS_R03_DEFINITION: RuleDefinition = {
+  id: "R-dc-03",
+  text: `${DECL_CHECK_RULE_DEFINITIONS.find((definition) => definition.id === "R-dc-03")?.text ?? ""}${DECL_CHECK_R03_IDS_SUFFIX}`,
+  why: "結び付いた検査による誤拒否を減らし、塊を補助のデータとして扱わせる（検査の式の意味は宣言から独立に読む。Issue #795）",
+  since: "Issue #507・旗 v12.ids の文は Issue #795（結び付いた検査を所属の外と数えない）",
+};
+
+/** B3' に足す規則の定義（flags の ids が真なら R-dc-03 だけ ids の文にする。Issue #795） */
+export function declCheckRuleDefinitionsOf(ids: boolean): readonly RuleDefinition[] {
+  return ids
+    ? DECL_CHECK_RULE_DEFINITIONS.map((definition) =>
+        definition.id === DECL_CHECK_IDS_R03_DEFINITION.id ? DECL_CHECK_IDS_R03_DEFINITION : definition,
+      )
+    : DECL_CHECK_RULE_DEFINITIONS;
+}
+
+/** B3' に足す規則（flags の ids が真なら R-dc-03 だけ ids の文。Issue #795） */
+export function declCheckRulesOf(ids: boolean): readonly string[] {
+  return ruleTexts(declCheckRuleDefinitionsOf(ids));
+}
+
 /** B3' の JSON Schema */
 export const DECL_CHECK_SCHEMA = judgmentsSchema(DECL_REJECTION_KINDS);
+
+/**
+ * 要件に結び付いた検査 1 つ（B3' の要求の塊の要素。Issue #795）。所属 entity の名前・検査の名前・競合の印だけを持ち、
+ * 試験の ID・期待・入力・合否・観測する性質は持たない（B3' の独立）。
+ */
+export interface DeclLinkedValidation {
+  readonly entity: string | null;
+  readonly name: string;
+  readonly conflict: boolean;
+}
+
+/** 要件ごとの、要件に結び付いた検査（旗 `v12.ids` の走りだけ渡す。Issue #795） */
+export interface DeclLinkedValidations {
+  readonly requirementId: string;
+  readonly validations: readonly DeclLinkedValidation[];
+}
 
 /** B3' が受け取るもの */
 export interface DeclCheckInput {
@@ -102,6 +150,11 @@ export interface DeclCheckInput {
   readonly app: NormalizedAppSpec;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
+  /**
+   * 要件ごとの、要件に結び付いた検査（旗 `v12.ids` の走りだけが渡す。Issue #795）。渡したときだけ規則を ids の版にし、
+   * 対象の要件のうち 1 つ以上あるものだけを対象の順にデータの塊として足す。省けば今の要求のまま
+   */
+  readonly linkedValidations?: readonly DeclLinkedValidations[];
 }
 
 /** B3' の結果（宣言の SHA-256 に結ぶ完全な結果。`unmarked` の要件を含む） */
@@ -123,6 +176,21 @@ function hasContext(marks: ReadonlyMap<string, DeclarationMark>, ids: readonly s
   return ids.every((id) => {
     const mark = marks.get(id);
     return mark !== undefined && mark.references.every((reference) => reference.path !== null);
+  });
+}
+
+/**
+ * 要件ごとの結び付いた検査を、点検の対象の要件のうち 1 つ以上あるものだけ、対象の順に並べる（Issue #795）。
+ * 検査の並び・重複・`conflict` は呼ぶ側（走りの射影）が決めた値をそのまま使う。
+ */
+function linkedValidationsForTargets(
+  linked: readonly DeclLinkedValidations[],
+  targets: readonly string[],
+): readonly DeclLinkedValidations[] {
+  const byId = new Map(linked.map((entry) => [entry.requirementId, entry.validations] as const));
+  return targets.flatMap((requirementId) => {
+    const validations = byId.get(requirementId);
+    return validations === undefined || validations.length === 0 ? [] : [{ requirementId, validations }];
   });
 }
 
@@ -155,9 +223,12 @@ export async function runDeclCheck(input: DeclCheckInput): Promise<StageOutcome<
   };
   if (targets.length === 0) return { ok: true, value: assemble([]) };
 
+  const ids = input.linkedValidations !== undefined;
+  // 塊の中身は点検の対象の要件のうち 1 つ以上あるものだけ、対象の順にする（Issue #795）
+  const linked = ids ? linkedValidationsForTargets(input.linkedValidations ?? [], targets) : undefined;
   const targetSet = new Set(targets);
   const request = buildStructuredRequest({
-    rules: DECL_CHECK_RULES,
+    rules: declCheckRulesOf(ids),
     documents: input.documents,
     data: [
       {
@@ -183,6 +254,9 @@ export async function runDeclCheck(input: DeclCheckInput): Promise<StageOutcome<
       { name: "宣言", text: input.declaration.source },
       { name: "該当箇所の印", text: serializeJson([...marks.values()]) },
       { name: "追加の要素", text: serializeJson(extraElementsOf(input.app, input.table)) },
+      ...(linked === undefined || linked.length === 0
+        ? []
+        : [{ name: DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME, text: serializeJson(linked) }]),
     ],
     schemaName: DECL_CHECK_SCHEMA_NAME,
     schema: DECL_CHECK_SCHEMA,
