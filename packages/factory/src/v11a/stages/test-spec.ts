@@ -94,10 +94,12 @@ import {
   mergeBundleCases,
   retainedBundleOutput,
   retryTestCaseFramesOf,
+  testCaseClockDataOf,
   testCasesSchemaOf,
   toCasePositions,
   type BundleRetryPlan,
   type TestCase,
+  type TestCaseClockData,
   type TestCasesOutput,
 } from "../../v12/test-cases.js";
 import { V12_T2_BUNDLE } from "../../v12/limits.js";
@@ -729,6 +731,13 @@ const testSpecCasesFormHeadOf = (ledger: LedgerView): string =>
   `場合ごとに、観測する性質（observes）は計算の行の場合だけ書き（${computationObservesOf(ledger).join(" か ")}）、項目・entity・操作の行の場合は null にする（コードが台帳から決める：項目・entity の行は validation、操作の行は when）。期待（expected）は kind が ok なら value だけ、error なら code だけを書く。`;
 
 /**
+ * 旗 `v12.ids` の R-tsp-13 の末尾に足す、期待の今日・今月をデータの「時計」の値で数える文（日時の値は書かない。値はデータで渡す。
+ * 方法論 04：規則で値を運ばない。Issue #794）
+ */
+export const TEST_SPEC_CLOCK_RULE_TEXT =
+  "期待の値の今日・今月は、データの「時計」の値（today・thisMonth・thisMonthRange）で数える（今月の範囲は from を含み to を含まない）。";
+
+/**
  * 旗 `v12.ids` の T2 の規則のうち、欄の名前を指す文の場合の形（JSON の文字列の書き方・対象の指し方・入力の契約・値の鍵・時計・
  * 要件 ID。#625）。ID・why は変えず、since に場合の形の履歴を足す。「名前を推測しない」「要件の文から独立に分類する」「異常の期待は
  * 操作ごとの型」の文は変えない
@@ -742,7 +751,7 @@ const TEST_SPEC_CASES_TEXTS: Readonly<Record<string, string>> = {
     "入力（input）に固定の行 ID（rowId）と値（values。入力が無ければ空の写像 \"{}\"）を、評価の対象の行 ID（targetRowId）に入力か参照の行の rowId（行を評価しないときは null）を、空であることを明示する entity の表の id を emptyEntities に書く。同じ場合の中で行 ID を重ねない。参照の値（ref・list）に書く行 ID は、その行の rowId と同じにする。",
   "R-tsp-12":
     "入力の値（input.values）と参照の行の値（rows の values）の直下の鍵は、その entity（参照の行は entityId の entity）の項目（kind が field）の表の id だけにする。行の ID は input.rowId・rows の rowId に置き、値の鍵（id・rowId）にしない。値の無い参照の行も、値を空の写像（\"{}\"）にして entityId を書く。",
-  "R-tsp-13": "試験の ID・操作（operation）・時計（clock）・構造の検査の中身（assertion）はコードが決めるので、場合に書かない。",
+  "R-tsp-13": `試験の ID・操作（operation）・時計（clock）・構造の検査の中身（assertion）はコードが決めるので、場合に書かない。${TEST_SPEC_CLOCK_RULE_TEXT}`,
   "R-tsp-14":
     "場合の要件 ID（requirementId）は要件の一覧のものだけを使う。一覧に無い要件 ID を作らない。確定した仕様にあっても一覧に無い要件（持ち越しの要件）の場合は書かない。",
 };
@@ -753,6 +762,9 @@ const TEST_SPEC_CASES_TEXTS: Readonly<Record<string, string>> = {
  */
 const TEST_SPEC_FRAME_EXISTENCE_TEXT =
   "existence-only と分類した要件は、コードが在ることの試験を作った対象に場合を書かない。コードの試験が無い計算・条件のある操作の対象には正常（normal）の場合だけ書いてよい。検査（validate）・異常・境界の場合は書かない。";
+
+/** 旗 `v12.ids` の R-tsp-13 の、データの「時計」で数える文の履歴（since の末尾に足す。#794） */
+const CLOCK_SINCE = "（旗 v12.ids の時計のデータで数える文は #794）";
 
 /** 旗 `v12.ids` の枠の文の履歴（since の末尾に足す。#653） */
 const FRAME_SINCE = "（旗 v12.ids の必要な試験の枠は #653）";
@@ -803,7 +815,7 @@ export function testSpecRuleDefinitionsOf(ledger?: LedgerView, ids = false): rea
     }
     const casesText = ids ? TEST_SPEC_CASES_TEXTS[definition.id] : undefined;
     if (casesText !== undefined) {
-      return { ...definition, text: casesText, since: `${definition.since}（旗 v12.ids の場合の形は #625）${definition.id === "R-tsp-09" ? FRAME_SINCE : ""}` };
+      return { ...definition, text: casesText, since: `${definition.since}（旗 v12.ids の場合の形は #625）${definition.id === "R-tsp-09" ? FRAME_SINCE : ""}${definition.id === "R-tsp-13" ? CLOCK_SINCE : ""}` };
     }
     return definition;
   });
@@ -945,6 +957,12 @@ export const TEST_SPEC_RETAINED_DATA_NAME = "書き直さない要件";
  */
 export const TEST_SPEC_FRAMES_DATA_NAME = "必要な試験の枠";
 
+/**
+ * 旗 `v12.ids` の T2 で「要件ごとの所属」の後ろ・「必要な試験の枠」の前に足す、コードが固定した時計の値の塊の名前（中身は
+ * `testCaseClockDataOf()`。初回もやり直しも、どの束にも同じ中身を 1 つ。方法論 03 の H3。Issue #794）
+ */
+export const TEST_SPEC_CLOCK_DATA_NAME = "時計";
+
 /** 判定で決めた種類の塊の 1 行（要件 ID・種類） */
 interface DecidedNatureRow {
   readonly requirementId: string;
@@ -993,6 +1011,7 @@ function buildData(
   ledger?: LedgerView,
   retainedIds: readonly string[] = [],
   frames?: readonly unknown[],
+  clockData?: TestCaseClockData,
 ): readonly PromptData[] {
   const [planName, listName, tableName, verificationName, ownershipName] = TEST_SPEC_DATA_NAMES;
   const data: PromptData[] = [
@@ -1020,6 +1039,7 @@ function buildData(
     },
     { name: ownershipName, text: serializeJson(deriveOwnership(table)) },
   ];
+  if (clockData !== undefined) data.push({ name: TEST_SPEC_CLOCK_DATA_NAME, text: serializeJson(clockData) });
   if (frames !== undefined) data.push({ name: TEST_SPEC_FRAMES_DATA_NAME, text: serializeJson(frames) });
   if (previous.length > 0) {
     const [testsName, problemsName] = TEST_SPEC_RETRY_DATA_NAMES;
@@ -1410,6 +1430,8 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
         ledger,
         retainedIds,
         frames,
+        // 旗 `v12.ids` の束の要求（初回・中身のやり直し）だけ：コードが固定した時計の値（#794）
+        testCaseClockDataOf(),
       ),
       schemaName: TEST_SPEC_SCHEMA_NAME,
       schema,

@@ -169,7 +169,7 @@ import { identityMappings, toV1 } from "./convert.js";
 import { lostCoverage } from "./coverage.js";
 import { createV11aEvaluator, type V11aEvaluator } from "./evaluate.js";
 import { nameTableSha256, ownersByRowId, type NameTable, type NameTableRow } from "./names.js";
-import { runDeclCheck, type DeclCheckOutput } from "./stages/decl-check.js";
+import { runDeclCheck, type DeclCheckOutput, type DeclLinkedValidations } from "./stages/decl-check.js";
 import {
   JUDGE_ADVICE_THRESHOLDS,
   judgeAdviceMarks,
@@ -722,6 +722,36 @@ export function undeterminedJudgeAdvice(list: RequirementList, table: NameTable)
 function coversExactly(judgments: readonly { readonly requirementId: string }[], targets: readonly string[]): boolean {
   const ids = judgments.map((judgment) => judgment.requirementId);
   return ids.length === targets.length && new Set(ids).size === ids.length && ids.every((id) => targets.includes(id));
+}
+
+/**
+ * 要る検査の骨組みを、試験の要件 ID で要件ごとに射影する（旗 `v12.ids` の B3' の入力。Issue #795）。検査は骨組みの順、
+ * 要件は渡した順。同じ要件の中の同じ検査（entity・name）は 1 つに落とし、複数の要件に共有される検査はそれぞれの要件に
+ * 載せ、`conflict` は骨組みの全体で求めた値のまま（要件ごとに求め直さない）。
+ */
+export function linkedValidationsByRequirement(
+  suite: TestSuite,
+  requiredValidations: readonly RequiredValidation[],
+  requirementOrder: readonly string[],
+): readonly DeclLinkedValidations[] {
+  const requirementOfTest = new Map(suite.tests.map((test) => [test.id, test.target.requirementId] as const));
+  const byRequirement = new Map<string, { entity: string | null; name: string; conflict: boolean }[]>();
+  for (const validation of requiredValidations) {
+    const linked = { entity: validation.entity, name: validation.name, conflict: validation.conflict };
+    const seen = new Set<string>();
+    for (const testId of validation.testIds) {
+      const requirementId = requirementOfTest.get(testId);
+      if (requirementId === undefined || seen.has(requirementId)) continue;
+      seen.add(requirementId);
+      const validations = byRequirement.get(requirementId) ?? [];
+      if (!validations.some((entry) => entry.entity === linked.entity && entry.name === linked.name)) validations.push(linked);
+      byRequirement.set(requirementId, validations);
+    }
+  }
+  return requirementOrder.flatMap((requirementId) => {
+    const validations = byRequirement.get(requirementId);
+    return validations === undefined || validations.length === 0 ? [] : [{ requirementId, validations }];
+  });
 }
 
 /** 候補の宣言の 1 版 */
@@ -1912,6 +1942,15 @@ async function runV11a(
           const targets = context.list.requirements.map((requirement) => requirement.id);
           // 追加の要素の一覧は A1 の関数 1 つが正本（B3' の段も同じ関数・同じ入力で作る。D4）
           const extraElements = extraElementsOf(app, table);
+          // 旗 `v12.ids` の走りだけ、その版の時点の有効な組（棄却・持ち越しを外した後の組）から要件ごとの結び付いた検査を
+          // 導き、B1・直す段に渡す骨組みと同じ関数・同じ組で渡す（Issue #795）。ids off は欄を渡さない＝今の要求のまま
+          const linkedValidations = flags.ids
+            ? linkedValidationsByRequirement(
+                context.suite,
+                requiredValidationsOf(table, context.suite, testSpec.observes),
+                targets,
+              )
+            : undefined;
           const output = await runStageOk("decl-check", async (): Promise<StageOutcome<DeclCheckOutput>> => {
             const checked = await runDeclCheck({
               plan: input.plan,
@@ -1921,6 +1960,7 @@ async function runV11a(
               app,
               documents: input.documents,
               gateway: gateway.forStage("decl-check"),
+              ...(linkedValidations === undefined ? {} : { linkedValidations }),
             });
             if (!checked.ok) return checked;
             const problems: Problem[] = [];
