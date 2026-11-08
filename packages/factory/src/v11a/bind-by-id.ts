@@ -156,10 +156,16 @@ export interface RequiredValidation {
 }
 
 /**
- * 固定した組と表から、要る検査の骨組みを導く（純粋。宣言に依らない）。観測する性質が `validation` の validate の試験だけ
- * （既定値・選択肢の集合の試験は専用の照合で検査を要求しないので除く）。同じ行の試験は 1 件にまとめ、並びは表の行の順
- * （試験 ID は組の順）。同じ名前を 2 つ以上の行が要求すれば（別 entity の同名・同じ（entity・名前）を要求する entity の行と項目の
- * 行）、その全件に競合の印を付ける（並びで選ばない）。呼ぶ側は評価の文脈と同じ組（棄却・持ち越しで外した後の組）を渡す。
+ * validate の試験のうち、検査（宣言の validations）を要求する観測する性質（M-03。検査の式も `validation` と同じに扱う暫定。
+ * Issue #800）
+ */
+export const VALIDATION_OBSERVES: ReadonlySet<string> = new Set(["validation", "validation-expression"]);
+
+/**
+ * 固定した組と表から、要る検査の骨組みを導く（純粋。宣言に依らない）。観測する性質が `validation`（と検査の式。Issue #800）の
+ * validate の試験だけ（既定値・選択肢の集合の試験は専用の照合で検査を要求しないので除く）。同じ行の試験は 1 件にまとめ、並びは
+ * 表の行の順（試験 ID は組の順）。同じ名前を 2 つ以上の行が要求すれば（別 entity の同名・同じ（entity・名前）を要求する entity の
+ * 行と項目の行）、その全件に競合の印を付ける（並びで選ばない）。呼ぶ側は評価の文脈と同じ組（棄却・持ち越しで外した後の組）を渡す。
  */
 export function requiredValidationsOf(
   table: NameTable,
@@ -169,7 +175,7 @@ export function requiredValidationsOf(
   const rowIndex = new Map(table.rows.map((row, index) => [row.id, index] as const));
   const entries = new Map<string, { row: NameTableRow; location: DeclarationLocation; testIds: string[] }>();
   for (const test of suite.tests) {
-    if (observes.get(test.id) !== "validation") continue;
+    if (observes.get(test.id) === undefined || !VALIDATION_OBSERVES.has(observes.get(test.id) as string)) continue;
     const location = requiredValidationLocation(table, test);
     const row = table.rows.find((candidate) => candidate.id === test.target.roleId);
     if (location === undefined || row === undefined) continue;

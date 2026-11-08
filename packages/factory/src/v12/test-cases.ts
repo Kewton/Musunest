@@ -23,6 +23,7 @@ import {
   GENERATED_TEST_CLOCK,
   aggregateTargetsOf,
   emptyAggregateCodeTestsOf,
+  frameValueTargetIdsOf,
   normalOnlyOwnershipRequirementIds,
   type GeneratedTests,
 } from "./generated-tests.js";
@@ -380,6 +381,7 @@ function valueKeysOf(text: string): readonly string[] {
  */
 export function expandTestCases(output: TestCasesOutput, table: NameTable, ledger: LedgerView): TestCasesExpansion {
   const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const verificationById = new Map(table.verification.map((entry) => [entry.requirementId, entry] as const));
   const isEntity = (id: string): boolean => rowById.get(id)?.kind === "entity";
   const problems: Problem[] = [];
   const tests: Record<string, unknown>[] = [];
@@ -421,7 +423,12 @@ export function expandTestCases(output: TestCasesOutput, table: NameTable, ledge
       } else if (entry.observes !== null) {
         problems.push({ field: `${at}.observes`, message: TEST_CASE_EXPAND_MESSAGES.observesLegacy });
       } else {
-        observes = derivedObservesOf(ledger, row.kind, caseOperationOf(row));
+        // 項目・entity の行は、要件の確かめ方が検査の式（validation-expression）ならその性質、そうでなければ今の一意の導出（Issue #800）
+        const verification = verificationById.get(entry.requirementId);
+        observes =
+          (row.kind === "field" || row.kind === "entity") && verification?.kind === "validation-expression"
+            ? verification.kind
+            : derivedObservesOf(ledger, row.kind, caseOperationOf(row));
         if (observes === undefined) problems.push({ field: `${at}.observes`, message: TEST_CASE_EXPAND_MESSAGES.observesUndetermined });
       }
     }
@@ -878,18 +885,22 @@ const FRAME_LIMIT = AGENT_LIMITS.testsPerRequirement;
 const isOperationWithWhen = (row: NameTableRow): boolean =>
   row.kind === "operation" && row.type !== null && typeof row.type === "object" && "hasWhen" in row.type && row.type.hasWhen === true;
 
-/** 値の対象の候補（表の所属の項目・entity・操作・計算の行。導いた親 entity・画面の行・表に無い行は入れない）と合法な正常の対象 */
-function frameTargetsOf(table: NameTable, requirementId: string): { readonly valueTargets: readonly string[]; readonly normalTargets: readonly string[] } {
+/**
+ * 値の対象の候補（計算・条件つき操作の行と、確かめ方が検査の式の要件の targets。項目・entity・画面の行は入れない）と合法な正常の対象
+ * （計算・条件つき操作の行）。枠と門の免除は同じ関数（`frameValueTargetIdsOf`）の値を使う（Issue #800）
+ */
+function frameTargetsOf(
+  table: NameTable,
+  ledger: LedgerView,
+  requirementId: string,
+): { readonly valueTargets: readonly string[]; readonly normalTargets: readonly string[] } {
   const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
   const roles = table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? [];
-  const owned = roles.flatMap((role) => {
+  const normalTargets = roles.flatMap((role) => {
     const row = rowById.get(role.id);
-    return row === undefined || row.kind === "screen" ? [] : [row];
+    return row !== undefined && (row.kind === "computation" || isOperationWithWhen(row)) ? [row.id] : [];
   });
-  return {
-    valueTargets: owned.map((row) => row.id),
-    normalTargets: owned.filter((row) => row.kind === "computation" || isOperationWithWhen(row)).map((row) => row.id),
-  };
+  return { valueTargets: frameValueTargetIdsOf(table, ledger, requirementId), normalTargets };
 }
 
 /** コードの試験の写し（対象・種類・観測する性質。並びは組の順） */
@@ -924,7 +935,7 @@ export function initialTestCaseFramesOf(input: TestCaseFramesInput, requirementI
   const aggregateTargets = aggregateTargetsOf(table);
   return requirementIds.map((requirementId) => {
     const codeTests = codeTestsOf(generated.tests, generated.observes, requirementId, aggregateIds);
-    const { valueTargets, normalTargets } = frameTargetsOf(table, requirementId);
+    const { valueTargets, normalTargets } = frameTargetsOf(table, ledger, requirementId);
     const roles = table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? [];
     const conditional = new Map<string, TestKind[]>();
     for (const { test } of emptyAggregateCodeTestsOf(requirementId, roles, aggregateTargets, ledger)) {
@@ -991,7 +1002,7 @@ export function retryTestCaseFramesOf(
   return requirementIds.map((requirementId, index) => {
     const adopted = natures.get(requirementId) ?? "ruled";
     const codeTests = codeTestsOf(kept.tests, kept.observes, requirementId, new Set());
-    const { valueTargets, normalTargets } = frameTargetsOf(table, requirementId);
+    const { valueTargets, normalTargets } = frameTargetsOf(table, ledger, requirementId);
     const roles = table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? [];
     const absent =
       adopted === "ruled" ? emptyAggregateCodeTestsOf(requirementId, roles, aggregateTargets, ledger).filter(({ test }) => !keptIds.has(test.id)) : [];

@@ -92,6 +92,8 @@ import {
   nameTableSha256,
   ownersByRowId,
   ownershipWithCheckTargets,
+  ownershipWithValidationTargets,
+  validationExpressionTargetsValid,
   shapeOfMappingEntry,
   type MappingEntry,
   type NameTable,
@@ -358,6 +360,9 @@ export function legacyMappingSchemaOf(ledger?: UpstreamLedgerView): Record<strin
 }
 
 function mappingSchemaWith(checks: Record<string, unknown>, ledger?: UpstreamLedgerView): Record<string, unknown> {
+  // 検査の式（validation-expression）の行がある台帳だけ、確かめ方に targets（行 ID の並びか null）を足す（Issue #800）。
+  // 無い台帳（ids off の封筒の旧の枝）の schema は変えない
+  const withTargets = ledger !== undefined && [...ledger.rowByVerificationKind.values()].some((entry) => entry.t1?.targets === true);
   return {
     type: "object",
     additionalProperties: false,
@@ -387,10 +392,19 @@ function mappingSchemaWith(checks: Record<string, unknown>, ledger?: UpstreamLed
             verification: {
               type: "object",
               additionalProperties: false,
-              required: ["kind", "value", "reason", "checks", "constraintIds"],
+              required: withTargets ? ["kind", "value", "targets", "reason", "checks", "constraintIds"] : ["kind", "value", "reason", "checks", "constraintIds"],
               properties: {
                 kind: { type: "string", enum: [...(ledger?.verificationKinds ?? NAME_TABLE_VERIFICATION_KINDS)] },
                 value: { type: ["string", "null"], description: "確かめ方の値（選択肢のキー。ほかの種類は null）" },
+                ...(withTargets
+                  ? {
+                      targets: {
+                        type: ["array", "null"],
+                        items: { type: "string" },
+                        description: "検査の式（validation-expression）が縛る項目の行の ID（同じ entity の項目。ほかの種類は null）",
+                      },
+                    }
+                  : {}),
                 reason: { type: ["string", "null"] },
                 checks,
                 constraintIds: { type: "array", items: { type: "string" } },
@@ -773,6 +787,13 @@ export function inspectMappingSourced(
   if (problems.length > 0) return { ok: false, problems, sources: problems.map(() => "response"), tableRequirementIds: null };
   // 検査の対象を照らして所属に足す（対象に問題がある要件は足さない。落ちる応答は採用しない）
   const entries = (shaped as readonly MappingEntry[]).map((entry, index) => {
+    if (entry.verification.kind === "validation-expression") {
+      // 検査の式（Issue #800）：targets が全部正しいときだけ entity と対象の項目を所属に足す（悪い targets は表の検査が固定文で落とす）
+      const targets = entry.verification.targets;
+      return validationExpressionTargetsValid(rows, targets)
+        ? { ...entry, roles: ownershipWithValidationTargets(entry.roles, rows, targets) }
+        : entry;
+    }
     if (entry.verification.kind !== "structural" || entry.verification.targets === undefined) return entry;
     const before = problems.length;
     checkCheckTargets(rows, entry.verification.targets, `requirements[${String(index)}].verification`, problems);

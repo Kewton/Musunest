@@ -218,6 +218,7 @@ describe("B4 の照合の名前：有効で試験の型（または評価の方�
       "default-value",
       "enum-membership",
       "empty-aggregate",
+      "validation-expression",
     ]);
     for (const row of active) expect(names, row.id).toContain(row.evaluation);
     // 未対応の行は照合の名前を持たない（B4 は未解決にする）
@@ -723,7 +724,7 @@ describe("when の行：引き継いだ行の未定義の列を埋める（期�
 
 describe("non-requirement の行：決まりも対象の項目も無い説明文。T1'' の受理だけで有効になる", () => {
   it("行の欄：確かめ方の種類 non-requirement（欄なし）・所属 0 行・分類の値は見ない・受理で除く、受理条件の文がある、試験の型・組・網羅・B4 は無い、外は見ない", () => {
-    expect(PROPERTY_LEDGER.at(-1)?.id).toBe("non-requirement");
+    expect(PROPERTY_LEDGER.find((row) => row.id === "non-requirement")).toBeDefined();
     expect(NON_REQUIREMENT.state).toBe("active");
     expect(NON_REQUIREMENT.inherited).toBe(false);
     expect(NON_REQUIREMENT.since).toBe("Issue #550");
@@ -797,8 +798,8 @@ describe("non-requirement の行：決まりも対象の項目も無い説明文
   });
 
   it("二点測定：写しから when・non-requirement の行を消すと落ち、写しの値の欄を変えても落ちる。行の数は 2c より 1 多い（2a より 3 多い）", () => {
-    expect(PROPERTY_LEDGER).toHaveLength(LEDGER_ROWS_2C.length + 1);
-    expect(PROPERTY_LEDGER).toHaveLength(LEDGER_2A.length + 3);
+    expect(PROPERTY_LEDGER).toHaveLength(LEDGER_ROWS_2C.length + 2);
+    expect(PROPERTY_LEDGER).toHaveLength(LEDGER_2A.length + 4);
     for (const id of ["when", "non-requirement"]) {
       const line = COPY_TEXT.split("\n").find((candidate) => candidate.startsWith(`| ${id} |`));
       if (line === undefined) throw new Error("前提が壊れた");
@@ -808,6 +809,7 @@ describe("non-requirement の行：決まりも対象の項目も無い説明文
     expect(copyDefects(COPY_TEXT, LEDGER_ROWS_2C)).toEqual([
       "写しの when の行がコードと違う",
       "写しに台帳に無い non-requirement の行がある",
+      "写しに台帳に無い validation-expression の行がある",
       "写しの行の並びが台帳の順と違う",
     ]);
     expect(COPY_TEXT).toContain("**有効になるのは T1''（独立の点検）が受理したときだけ**");
@@ -836,6 +838,7 @@ describe("期待の値の書き手：default-value・enum-membership は code、
       "default-value",
       "enum-membership",
       "empty-aggregate",
+      "validation-expression",
     ]);
   });
 
@@ -859,7 +862,8 @@ describe("期待の値の書き手：default-value・enum-membership は code、
 
   it("導出：旗 ids の T2 の文の並びは、台帳の T2 の文の並びの各行を旗 ids の文に差し替え、T2 の文の無い行の旗 ids の文（view-structure・existence。#624）を台帳の順に足したもの。旗 ids の文を持たない台帳では同じ", () => {
     const view = PROPERTY_LEDGER_VIEW;
-    const evaluable = PROPERTY_LEDGER.filter((row) => row.state !== "registered-unsupported");
+    // off の導出は旗 ids だけが要る行（検査の式）を除く（Issue #800）
+    const evaluable = view.rows.filter((row) => row.state !== "registered-unsupported");
     const evaluableWithText = evaluable.filter((row) => row.rules.t2 !== null);
     expect(view.t2IdsFormTexts).toEqual(evaluable.flatMap((row) => { const text = row.rules.t2Ids ?? row.rules.t2; return text === null ? [] : [text]; }));
     // T2 の文の無い行の旗 ids の文は view-structure・existence の 2 つだけ（off の並びは変えない）
@@ -1215,14 +1219,16 @@ describe("部分の指紋（境界 t1-t2 の上流の台帳の見方。全体の
 
   /** 上流の見方に入る値を、妥当な台帳のまま 1 つずつ変えた台帳 */
   const sensitive = (): readonly { readonly name: string; readonly rows: readonly PropertyRow[] }[] => {
-    const t1Rows = PROPERTY_LEDGER.filter((row) => row.t1 !== null);
+    // off の導出は旗 ids だけが要る行（検査の式）を除くので、off の感度はその行を変えない（ids の感度は下の別の試験で見る）
+    const applicable = PROPERTY_LEDGER.filter((row) => row.requires === undefined);
+    const t1Rows = applicable.filter((row) => row.t1 !== null);
     return [
       // 各文
-      ...PROPERTY_LEDGER.filter((row) => row.rules.t1 !== null).map((row) => ({
+      ...applicable.filter((row) => row.rules.t1 !== null).map((row) => ({
         name: `${row.id} の T1 の規則の文`,
         rows: withRow(row.id, (target) => ({ ...target, rules: { ...target.rules, t1: marked(target.rules.t1) } })),
       })),
-      ...PROPERTY_LEDGER.filter((row) => row.rules.t1Acceptance !== null).map((row) => ({
+      ...applicable.filter((row) => row.rules.t1Acceptance !== null).map((row) => ({
         name: `${row.id} の T1'' の受理条件の文`,
         rows: withRow(row.id, (target) => ({ ...target, rules: { ...target.rules, t1Acceptance: marked(target.rules.t1Acceptance) } })),
       })),
@@ -1318,13 +1324,13 @@ describe("部分の指紋（境界 t1-t2 の上流の台帳の見方。全体の
     const withCondition = (change: (t2: PropertyConditionT2) => PropertyConditionT2) =>
       withRow("when", (row) => ({ ...row, t2Condition: change(row.t2Condition as PropertyConditionT2) }));
     return [
-      // 写しの欄
-      ...PROPERTY_LEDGER.flatMap((row) => [
+      // 写しの欄（off の導出に含まれる行だけ。旗 ids だけが要る行は下の別の試験で見る）
+      ...PROPERTY_LEDGER.filter((row) => row.requires === undefined).flatMap((row) => [
         { name: `${row.id} の since`, rows: withRow(row.id, (target) => ({ ...target, since: marked(target.since) })) },
         { name: `${row.id} の why`, rows: withRow(row.id, (target) => ({ ...target, why: marked(target.why) })) },
       ]),
       // T2・ids の T2・B1 の規則の文（無い行には足す）
-      ...PROPERTY_LEDGER.flatMap((row) =>
+      ...PROPERTY_LEDGER.filter((row) => row.requires === undefined).flatMap((row) =>
         (["t2", "t2Ids", "b1"] as const).map((key) => ({
           name: `${row.id} の規則の文 ${key}`,
           rows: withRow(row.id, (target) => ({ ...target, rules: { ...target.rules, [key]: target.rules[key] === null ? "足した文。" : marked(target.rules[key]) } })),

@@ -77,6 +77,7 @@ import {
   generateTests,
   ledgerTargetsOf,
   normalOnlyOwnershipRequirementIds,
+  validationTargetsOf,
   type AggregateTarget,
   type GeneratedTests,
   type LedgerTarget,
@@ -357,6 +358,8 @@ export function checkEvaluabilityByLedger(
 ): readonly Problem[] {
   const problems: Problem[] = [];
   const targets = table === undefined ? new Map<string, LedgerTarget>() : ledgerTargetsOf(table, ledger);
+  // 検査の式（validation-expression）の要件 → targets の項目（Issue #800）
+  const validationTargets = table === undefined ? new Map<string, readonly string[]>() : validationTargetsOf(table, ledger);
   suite.tests.forEach((test, index) => {
     const field = `tests[${index}].observes`;
     const observed: string | undefined = observes.get(test.id);
@@ -371,6 +374,23 @@ export function checkEvaluabilityByLedger(
     }
     if (row.state === "registered-unsupported") {
       problems.push({ field, message: row.unsupportedMessage ?? LEDGER_UNREGISTERED_OBSERVES_MESSAGE });
+      return;
+    }
+    if (row.t1 !== null && row.t1.targets === true && row.t2Validation != null) {
+      // 検査の式：確かめ方がこの種類の要件にだけ書け、対象はその要件の targets の 1 つ（固定文は行の記述子。Issue #800）
+      const required = validationTargets.get(test.target.requirementId);
+      if (required === undefined) {
+        problems.push({ field, message: row.t2Validation.messages.notAllowed });
+        return;
+      }
+      if (
+        test.operation !== row.t2Validation.operation ||
+        test.target.kind !== row.t2Validation.targetKind ||
+        test.target.roleId === undefined ||
+        !required.includes(test.target.roleId)
+      ) {
+        problems.push({ field, message: row.t2Validation.messages.target });
+      }
       return;
     }
     if (row.t1 !== null && row.t2 !== null) {
@@ -605,6 +625,41 @@ export function checkConditionTests(
     }
     if (test.expected.kind === "ok" && typeof test.expected.value !== "boolean") {
       problems.push({ field: `${at}.expected`, message: t2.messages.expected });
+    }
+  });
+  return problems;
+}
+
+/**
+ * 式の計算（種別 expression・操作 compute）の正常の期待の型の門（K6。旗 `v12.ids`。Issue #800）。対象の行の `valueType` が
+ * boolean なら decode 済みの期待の値が真偽、number なら数か null であることを求める。集計・精算・見出しごとの集計は対象外
+ * （集計の期待の門のまま）。でなければ固定文で落とす（位置は試験の添字と欄名）。期待の値を書き換えない
+ */
+export const EXPRESSION_TEST_MESSAGES = {
+  boolean: "計算（式）の真偽の行の正常の期待の値は、真偽（true・false）であること",
+  number: "計算（式）の数の行の正常の期待の値は、数か null であること",
+} as const;
+
+export function checkExpressionTests(
+  suite: TestSuite,
+  observes: ReadonlyMap<string, TestObserves>,
+  table: NameTable,
+): readonly Problem[] {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const problems: Problem[] = [];
+  suite.tests.forEach((test, index) => {
+    if (test.operation !== "compute" || test.target.kind !== "computation") return;
+    if (observes.get(test.id) !== "value") return;
+    const row = test.target.roleId === undefined ? undefined : rowById.get(test.target.roleId);
+    if (row === undefined || row.kind !== "computation") return;
+    const type = row.type;
+    if (type === null || typeof type !== "object" || !("form" in type) || type.form !== "expression") return;
+    if (test.expected.kind !== "ok") return;
+    const value = test.expected.value;
+    if (type.valueType === "boolean" && typeof value !== "boolean") {
+      problems.push({ field: `tests[${index}].expected`, message: EXPRESSION_TEST_MESSAGES.boolean });
+    } else if (type.valueType === "number" && value !== null && typeof value !== "number") {
+      problems.push({ field: `tests[${index}].expected`, message: EXPRESSION_TEST_MESSAGES.number });
     }
   });
   return problems;
@@ -1679,6 +1734,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
               ...checkLedgerTests(suite, observes, targets, quoted),
               ...checkAggregateTests(suite, observes, pruned.table, ledger),
               ...checkConditionTests(suite, observes, pruned.table, ledger),
+              ...(ids ? checkExpressionTests(suite, observes, pruned.table) : []),
               ...(kept === undefined ? [] : checkGeneratedOverlap(llmSuite, llmObserves, kept, pruned.table, ledger)),
             ];
       if (problems.length === 0) {

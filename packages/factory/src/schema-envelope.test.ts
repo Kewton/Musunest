@@ -44,7 +44,7 @@ import { SURFACE_DIFF_SCHEMA_NAME } from "./plan/surface.js";
 import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
 import { TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
 import { testCasesSchemaOf } from "./v12/test-cases.js";
-import { PROPERTY_LEDGER_VIEW, V12_FLAGS_OFF, V12_PIPELINE_FLAGS, fromPublicV12Flags } from "./v12/ledger.js";
+import { PROPERTY_LEDGER_VIEW, PROPERTY_LEDGER_VIEW_IDS, V12_FLAGS_OFF, V12_PIPELINE_FLAGS, fromPublicV12Flags } from "./v12/ledger.js";
 import { VOCABULARY_BUNDLES } from "./v12/ids.js";
 import { MAPPING_SCHEMA_NAME, legacyMappingSchemaOf, mappingSchemaOf } from "./v12/stages/mapping.js";
 import { VOCABULARY_SCHEMA_NAMES, vocabularySchemaOf } from "./v12/stages/vocabulary.js";
@@ -499,7 +499,9 @@ describe("経路 v1.2 の封筒は 1 つ（旗の組から導き、全段で同�
           ? { stage: entry.stage, schema: legacyMappingSchemaOf(PROPERTY_LEDGER_VIEW) }
           : entry.stage === TEST_SPEC_SCHEMA_NAME
             ? { stage: entry.stage, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW) }
-            : entry,
+            : entry.stage === NAME_TABLE_SCHEMA_NAME
+              ? { stage: entry.stage, schema: nameTableSchemaOf(PROPERTY_LEDGER_VIEW) }
+              : entry,
       ),
     );
     expect(ENVELOPE_SCHEMA_V12).toEqual(buildEnvelopeSchema(STAGE_ENVELOPE_ENTRIES_V12));
@@ -623,7 +625,7 @@ describe("旗 v12.ids の C1・C2 の枝は v1.2 の封筒にだけ載る（Issu
   it("v1.2-ids の封筒の末尾に C1 の 3 束と C2 の枝があり、schema は段が渡すものと同じ導出（strict）。v1.2 の封筒の末尾は C2 だけが旧の schema", () => {
     const tail = STAGE_ENVELOPE_ENTRIES_V12_IDS.slice(V11A_STAGES.length);
     const vocabulary = VOCABULARY_BUNDLES.map((bundle) => ({ stage: VOCABULARY_SCHEMA_NAMES[bundle], schema: vocabularySchemaOf(bundle, PROPERTY_LEDGER_VIEW) }));
-    expect(tail).toEqual([...vocabulary, { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(PROPERTY_LEDGER_VIEW) }]);
+    expect(tail).toEqual([...vocabulary, { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(PROPERTY_LEDGER_VIEW_IDS) }]);
     for (const entry of tail) {
       expect(strictProblems(buildStageBranch(entry)), entry.stage).toEqual([]);
       const resolved = resolveStageEnvelope(entry.stage, JSON.parse(JSON.stringify(entry.schema)), "v1.2-ids");
@@ -638,7 +640,7 @@ describe("旗 v12.ids の C1・C2 の枝は v1.2 の封筒にだけ載る（Issu
 
   it("C2 の枝の checks の欄（targetId・sourceId）は v1.2・v1.2-ids の封筒の JSON にだけある。v1・v1.1α の封筒には無い（Issue #594・#682）", () => {
     const branch = STAGE_ENVELOPE_ENTRIES_V12_IDS.find((entry) => entry.stage === MAPPING_SCHEMA_NAME);
-    expect(branch?.schema).toEqual(mappingSchemaOf(PROPERTY_LEDGER_VIEW));
+    expect(branch?.schema).toEqual(mappingSchemaOf(PROPERTY_LEDGER_VIEW_IDS));
     for (const key of ['"targetId"', '"sourceId"']) {
       for (const schema of [ENVELOPE_SCHEMA_V12, ENVELOPE_SCHEMA_V12_IDS]) expect(JSON.stringify(schema).includes(key), key).toBe(true);
       for (const schema of [ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_V11A, ENVELOPE_SCHEMA_V12_LEDGER]) expect(JSON.stringify(schema).includes(key), key).toBe(false);
@@ -677,7 +679,8 @@ describe("旗 ids on の v1.2 は識別子 v1.2-ids の封筒を全段で送る�
     expect(ENVELOPE_SCHEMA_V12_IDS).toEqual(buildEnvelopeSchema(STAGE_ENVELOPE_ENTRIES_V12_IDS));
     expect(STAGE_ENVELOPE_ENTRIES_V12_IDS.map((entry) => entry.stage)).toEqual(STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage));
     const changed = STAGE_ENVELOPE_ENTRIES_V12_IDS.filter((entry, index) => JSON.stringify(entry) !== JSON.stringify(STAGE_ENVELOPE_ENTRIES_V12[index]));
-    expect(changed.map((entry) => entry.stage)).toEqual([TEST_SPEC_SCHEMA_NAME, MAPPING_SCHEMA_NAME]);
+    // Issue #800：旗 ids の行（検査の式）を v1.2（ids off）の導出から除くので、T1 の枝も v1.2-ids と違う
+    expect(changed.map((entry) => entry.stage)).toEqual([NAME_TABLE_SCHEMA_NAME, TEST_SPEC_SCHEMA_NAME, MAPPING_SCHEMA_NAME]);
     expect(ENVELOPE_SCHEMA_V12_IDS).not.toEqual(ENVELOPE_SCHEMA_V12);
   });
 
@@ -711,11 +714,11 @@ describe("旗 ids on の v1.2 は識別子 v1.2-ids の封筒を全段で送る�
 
   it("識別子 v1.2-ids では、C1・C2 と T1''〜B5' の全段が同じ実体（1 種類のバイト列）の封筒を送る。新しい C2 の schema を識別子 v1.2 で送ると第 3 の道（段ごとの差し替え）に落ちる", () => {
     const requests = [
-      { stage: NAME_TABLE_SCHEMA_NAME, schema: nameTableSchemaOf(PROPERTY_LEDGER_VIEW) },
-      { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW, true) },
+      { stage: NAME_TABLE_SCHEMA_NAME, schema: nameTableSchemaOf(PROPERTY_LEDGER_VIEW_IDS) },
+      { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW_IDS, true) },
       ...STAGE_ENVELOPE_ENTRIES_V11A.filter((entry) => entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME),
-      ...VOCABULARY_BUNDLES.map((bundle) => ({ stage: VOCABULARY_SCHEMA_NAMES[bundle], schema: vocabularySchemaOf(bundle, PROPERTY_LEDGER_VIEW) })),
-      { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(PROPERTY_LEDGER_VIEW) },
+      ...VOCABULARY_BUNDLES.map((bundle) => ({ stage: VOCABULARY_SCHEMA_NAMES[bundle], schema: vocabularySchemaOf(bundle, PROPERTY_LEDGER_VIEW_IDS) })),
+      { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(PROPERTY_LEDGER_VIEW_IDS) },
     ];
     expect(requests).toHaveLength(10);
     const sent = new Set<string>();

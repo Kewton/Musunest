@@ -285,25 +285,54 @@ const ownedOfKind = (owned: readonly NameTableRow[], kinds: readonly TestTargetK
   owned.filter((row) => kinds.includes(row.kind));
 
 /**
- * 所属の行がすべて、必須の kind が normal だけの試験の型の対象（台帳の `ownershipRows` の組ごとの対象の種類＝画面・entity の行）
- * である要件 ID（一覧の順。#624）。正常・異常・境界のそろいの不足の免除に使う。**免除は台帳の型と所属だけで決め、作った試験の
- * 有無・数では決めない**。所属が 0 行の要件は載せない
+ * 所属の行がすべて、必須の kind が normal だけの試験の型の対象（画面・entity の行）の要件、または値の対象（計算・条件つき操作の行と、
+ * 確かめ方が検査の式の要件の targets）が無い要件の ID（一覧の順）。正常・異常・境界のそろいの不足の免除に使う。**免除は値の対象が
+ * 無いことで決め、作った試験の有無・数では決めない**。所属が 0 行の要件は載せない（Issue #624・#800）。
  */
 export function normalOnlyOwnershipRequirementIds(table: NameTable, ledger: LedgerView, list: RequirementList): readonly string[] {
-  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
-  const rolesById = new Map(table.ownership.map((entry) => [entry.requirementId, entry.roles] as const));
-  const kinds = new Set(
-    ledger.ownershipRows.filter((row) => row.t2.requiredKinds.every((kind) => kind === "normal")).flatMap((row) => row.t2.targetKinds),
-  );
   return list.requirements
     .filter((requirement) => {
-      const roles = rolesById.get(requirement.id) ?? [];
-      return roles.length > 0 && roles.every((role) => {
-        const owned = rowById.get(role.id);
-        return owned !== undefined && kinds.has(owned.kind);
-      });
+      const roles = table.ownership.find((entry) => entry.requirementId === requirement.id)?.roles ?? [];
+      return roles.length > 0 && frameValueTargetIdsOf(table, ledger, requirement.id).length === 0;
     })
     .map((requirement) => requirement.id);
+}
+
+/** 条件（when）を持つ操作の行か */
+const isOperationWithWhenForFrame = (row: NameTableRow): boolean =>
+  row.kind === "operation" && row.type !== null && typeof row.type === "object" && "hasWhen" in row.type && row.type.hasWhen === true;
+
+/**
+ * 値の対象の候補（計算・条件つき操作の行と、確かめ方が検査の式の要件の targets。項目・entity・画面の行は入れない）。枠と門の
+ * 免除が同じ関数の値を使うための正本で、並びは所属の順のあとに targets の順（Issue #800）
+ */
+export function frameValueTargetIdsOf(table: NameTable, ledger: LedgerView, requirementId: string): readonly string[] {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const roles = table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? [];
+  const owned = roles.flatMap((role) => {
+    const row = rowById.get(role.id);
+    return row !== undefined && (row.kind === "computation" || isOperationWithWhenForFrame(row)) ? [row.id] : [];
+  });
+  const verification = table.verification.find((entry) => entry.requirementId === requirementId);
+  const targets =
+    verification?.kind === "validation-expression" && ledger.rowByVerificationKind.get(verification.kind)?.t1?.targets === true
+      ? verification.targets.filter((id) => rowById.get(id)?.kind === "field")
+      : [];
+  return [...new Set([...owned, ...targets])];
+}
+
+/**
+ * 表の確かめ方が検査の式（validation-expression）の要件 → その `targets` の項目の行の ID（Issue #800）。T2' が validate の
+ * 試験の対象をこの一覧に照らす。旗 `v12.ids` と台帳が on の走りの表だけが対象を持つ
+ */
+export function validationTargetsOf(table: NameTable, ledger: LedgerView): ReadonlyMap<string, readonly string[]> {
+  const targets = new Map<string, readonly string[]>();
+  for (const entry of table.verification) {
+    if (entry.kind !== "validation-expression") continue;
+    if (ledger.rowByVerificationKind.get(entry.kind)?.t1?.targets !== true) continue;
+    targets.set(entry.requirementId, entry.targets);
+  }
+  return targets;
 }
 
 /**

@@ -107,6 +107,7 @@ import {
   revert735,
   revertBundleFiles735,
   requestListedIds,
+  withoutValidationExpression,
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
 import * as callModule from "./call.js";
@@ -1186,7 +1187,7 @@ const V11A_TABLE_IDS: NameTable = withCodeIds(withAggregates(V11A_TABLE));
 const v11aRenamed = <T,>(value: T): T => renameIds(value, V11A_CODE_RENAME);
 
 /** v1.2 の走りの C1 の 3 束と C2 の記録（台帳を渡せば、その台帳の schema に合わせる。Issue #593） */
-const v12TableCalls = (ledger: LedgerView = ledgerModule.PROPERTY_LEDGER_VIEW): RecordedCall[] =>
+const v12TableCalls = (ledger: LedgerView = ledgerModule.PROPERTY_LEDGER_VIEW_IDS): RecordedCall[] =>
   idsResponseList(idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledger)).map((output) => structured(output));
 
 /**
@@ -1464,10 +1465,14 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
    * 「要る検査の骨組み」の塊を外し、R-w11-07 を旗 ids off の文に戻す（塊が在ることを確かめてから）
    */
   const withoutIdsGenerated = (requests: readonly unknown[], ledger: LedgerView = PROPERTY_LEDGER_VIEW, generated = true): unknown[] => {
-    const idsRules = ruleTexts(testSpecRuleDefinitionsOf(ledger, true));
+    // Issue #800：既定の呼び出しは ids と ledger が on の走り（検査の式の行を含む導出）を戻す。2B などの固有の台帳はそのまま使う
+    const idsLedger = ledger === PROPERTY_LEDGER_VIEW ? ledgerModule.PROPERTY_LEDGER_VIEW_IDS : ledger;
+    const idsRules = ruleTexts(testSpecRuleDefinitionsOf(idsLedger, true));
     const offRules = ruleTexts(testSpecRuleDefinitionsOf(ledger));
-    const idsSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(ledger, true));
+    const idsSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(idsLedger, true));
     const offSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(ledger));
+    // Issue #800：旗 ids on の B1 は台帳の検査の式の行の文（R-w11-13）を末尾に持つ。比べる相手には無いので外す
+    const newRowB1 = idsLedger === ledgerModule.PROPERTY_LEDGER_VIEW_IDS ? (ledgerModule.PROPERTY_LEDGER.find((row) => row.id === "validation-expression")?.rules.b1 ?? "") : "";
     const [, , testsName] = WRITE_V11A_DATA_NAMES;
     const testsBlock = new RegExp(`(<data name="${testsName}">\\n)([\\s\\S]*?)(\\n</data>)`);
     return requests.map((value) => {
@@ -1493,7 +1498,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
           expect(parsed.tests.some((test) => isGeneratedTestId(test.id))).toBe(generated);
           return `${head}${JSON.stringify({ ...parsed, tests: parsed.tests.filter((test) => !isGeneratedTestId(test.id)) }, null, 2)}${tail}`;
         });
-        return { ...restored, input };
+        // Issue #800：旗 ids on の B1 は台帳の検査の式の行の文を末尾に足す。比べる相手には無いので外す
+        return { ...restored, rules: (restored.rules ?? []).filter((text) => text !== newRowB1), input };
       }
       // Issue #795：旗 ids on の B3' は塊「要件に結び付いた検査」と R-dc-03 の ids の文を持つ。どちらも元に戻して比べる
       if (request.schemaName === DECL_CHECK_SCHEMA_NAME) return withoutLinkedValidationsOn(request);
@@ -1663,10 +1669,32 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     spy2C.mockRestore();
     const before2CRequests = withoutStructuralRequirement(withoutCheckTargets(laterRequests(v12Before2C.recording.structured)), LEDGER_VIEW_2C);
     const diffs2C = requestDiffsOf(onRequests, before2CRequests);
-    const when2C = withoutTableStage(WHEN_NON_REQUIREMENT_REQUEST_DIFF);
+    // Issue #800：ids on の B1 は台帳の検査の式の行の文（R-w11-13）を末尾に持つ。ids off（run.test の #550）の期待は変えず、
+    // ids on の比較にだけ差を足す
+    const when2C = withoutTableStage({ ...WHEN_NON_REQUIREMENT_REQUEST_DIFF, [WRITE_V11A_SCHEMA_NAME]: ["$.rules"] });
     for (const diff of diffs2C) expect(diff.paths, diff.schemaName).toEqual(when2C[diff.schemaName] ?? []);
     expect(diffs2C.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(when2C));
-    expect(JSON.stringify(withoutWhenAndNonRequirement(onRequests))).toBe(JSON.stringify(before2CRequests));
+    // Issue #800：ids on の要求から検査の式の行の文だけを外す（ほかの #595・#666・#795 の塊は 2C の走りにもあるので残す）
+    const fullT2Rules = ruleTexts(testSpecRuleDefinitionsOf(ledgerModule.PROPERTY_LEDGER_VIEW_IDS, true));
+    const noNewT2Rules = ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true));
+    const fullC3Rules = ruleTexts(semanticCheckRuleDefinitionsOf(ledgerModule.PROPERTY_LEDGER_VIEW_IDS, true));
+    const noNewC3Rules = ruleTexts(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true));
+    const newRowB1Rule = ledgerModule.PROPERTY_LEDGER.find((row) => row.id === "validation-expression")?.rules.b1 ?? "";
+    const stripValidationExpression = (requests: readonly unknown[]): unknown[] =>
+      requests.map((value) => {
+        const request = value as LlmStructuredRequest;
+        if (request.schemaName === TEST_SPEC_SCHEMA_NAME) {
+          return { ...request, rules: (request.rules ?? []).map((text) => { const at = fullT2Rules.indexOf(text); return at < 0 ? text : (noNewT2Rules[at] ?? text); }) };
+        }
+        if (request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME) {
+          return { ...request, rules: (request.rules ?? []).map((text) => { const at = fullC3Rules.indexOf(text); return at < 0 ? text : (noNewC3Rules[at] ?? text); }) };
+        }
+        if (request.schemaName === WRITE_V11A_SCHEMA_NAME) {
+          return { ...request, rules: (request.rules ?? []).filter((text) => text !== newRowB1Rule) };
+        }
+        return request;
+      });
+    expect(JSON.stringify(withoutWhenAndNonRequirement(stripValidationExpression(onRequests)))).toBe(JSON.stringify(before2CRequests));
     expect(v12Before2C.code).toBe(v12.code);
     expect(v12Before2C.summary).toEqual(v12.summary);
     expect(v12Before2C.record.conditions).toEqual(v12.record.conditions);
@@ -1973,7 +2001,7 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
   const segment0 = (): RecordedCall[] => v12Head().slice(0, 5);
   /** C2 が 2 回とも形で断られる応答（C1 の 3 束は通る） */
   const c2Broken = (): RecordedCall[] => {
-    const outputs = idsResponseList(idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW));
+    const outputs = idsResponseList(idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW_IDS));
     const mapping = outputs[3] as { readonly requirements: readonly unknown[] };
     return [...outputs.slice(0, 3).map((output) => structured(output)), structured({ requirements: mapping.requirements.slice(1) }), structured({ requirements: mapping.requirements.slice(0, -1) })];
   };
@@ -2344,7 +2372,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     vi.restoreAllMocks();
   });
 
-  const outputs = () => idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW);
+  const outputs = () => idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW_IDS);
   const raw = (): readonly Record<string, unknown>[] => idsResponseList(outputs());
   const rawFields = (): { readonly fields: readonly Record<string, unknown>[] } => raw()[1] as { readonly fields: readonly Record<string, unknown>[] };
   const fieldsWithEntity = (entity: string) => ({
@@ -2732,7 +2760,7 @@ describe("旗 v12.ids の C3 の構造の検査の読み方（Issue #732）：�
     expect(wholeRules).toHaveLength(1);
     expect(stageRules).toEqual(wholeRules);
     expect(wholeRules[0]).toContain(structuralReadingText());
-    expect(wholeRules[0]).toBe(ruleTexts(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true))[1]);
+    expect(wholeRules[0]).toBe(ruleTexts(semanticCheckRuleDefinitionsOf(ledgerModule.PROPERTY_LEDGER_VIEW_IDS, true))[1]);
     // ids off（台帳と探索は on）の走りは読み方の文を持たない
     const flags = { ledger: true, searchRepair: true, ids: false };
     vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => flags);
@@ -5411,6 +5439,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       };
       line = JSON.stringify(run.summary);
     }
+    // Issue #800：台帳に足した行の文と C2 の schema の欄を外して、旧の指紋と照らす
+    requests = withoutValidationExpression(requests);
     if (timing !== undefined) timing.runMs += performance.now() - runStart;
     vi.restoreAllMocks();
     let hasSearch = false;
@@ -5535,6 +5565,89 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "whole-mixed": "0c560b407f214f9115e3d366f7d1306da5b32e70c2e9050a19b789f83cd8d7c1",
     "whole-search-repair-off": "8cf44cc06499042297ae53826453603f104c032e2e1b9e6d7d07253eb70c94a1",
   };
+  /**
+   * Issue #800：台帳に足した行の文と C2 の schema の欄を `withoutValidationExpression` で外しても、T2 の枠（値の対象から項目・
+   * entity を外し、値の対象が無い要件を免除する）が変わる ids on の経路は、旧の指紋と合わない。**上の旧値は残したまま**、
+   * 経路が変わる台本として新しい期待を直接固定する（ids off・v1・v1.1a の値は変えない）
+   */
+  const BEFORE_746_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "11fbfca2b2afa7f3b85ff3d97ae231cc5ace2e82ae4ed216946db5f434a6c666",
+    "stage-adopting": "c83f6ba4c02599b6b7810ffade3e40ea8877a9b15f21366d9318bd4f6d103e07",
+    "stage-sets": "9698928e2cb48c22cf171fc6a2d6545581463a48ce0cb028398492e6e2e06aca",
+    "stage-mixed": "5240cefe691b1ce82c7fdfb5e472fcec02ecab99ae8cae8a3a1474018279c44a",
+    "stage-returned": "5f2e735e693e85882afaea2ab63ed514f70b805f81afac4fd3f2cc6c16066344",
+    "stage-recounts": "4e51e9d179cb1e49483154e0119832d9a12f1320bf8fb1c5cc9fea9b486c1d50",
+    "stage-stop-repair": "9f26df28b8a7518958f778cb432aafd949f3077ee2dedd796296158503108a60",
+    "stage-stop-first-eval": "fa508ed3f82e4fcbf680ad92345ee2263864efb3d186dcc00b6ed8a92328c20b",
+    "stage-stop-commit": "9ae79a30e1f5df2c4495ad0fc5437c23effb8a389115185558a972c644e2ed6a",
+    "whole-stagnation": "f3c552f06a6b34db62c6fddb3931413565a85fa059eedb65ab77ccc42bbfb2df",
+    "whole-adopting": "32cdac31366d76f94c211bc7b66118f1ff3ab09ac55c86f6998cf969ac3f23ff",
+    "whole-sets": "03000c2abba9e26a77473627f7dc5ea675ae0c40446572133794c631f7edff8b",
+    "whole-mixed": "f8f6bae44c7a4e18800c906ce5cfec7e106128f86fbf1371779fde91be345615",
+    "whole-recounts": "7013d30de1d3514958571c0538a4090f99ec2d453ee9a8302fc541490f7fc39a",
+    "stage-search-repair-off": "976cb9b83a8ea59333ce3eec02a8c861e4a3ffe49c32c41acb03b688f9e5ea7c",
+    "whole-search-repair-off": "0b3f93b1e83a8e971980a45528717865e8e0f25400b53f813346ab0875bb668a",
+  };
+  const BEFORE_748_BASE_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "cb1c9775fe1514e4e9e9e789402f91fabed20277d5b47a721677303bce4147ab",
+    "stage-adopting": "3a1f86d6abb08c472a3852c17350c6689fa9993dda16c0d21cc225d28b9fdec9",
+    "stage-sets": "017b26b7fabc144f595a8c4280ecb86e6a71f38297354fbbc94d3b6a5e07c8b6",
+    "stage-mixed": "6e691aaea07205938eb6bf62a48be69dee828a2233f0da7ad6028facde67c7a6",
+    "stage-returned": "07b41986d2f281c462a0375d4c3ecc4ffad7e4839b850437c8ce6325358b1b7e",
+    "stage-recounts": "2262479ff2c70c87e010b82f5a8627920026da2be5396578e035f029453a5e9b",
+    "stage-stop-repair": "c2528e34a3ca6623c62a5823a9df79951fd00199be4efebaee775452549a7633",
+    "stage-stop-first-eval": "32bde2e6e436c6315138c9ab6b4f9baad914bbbd65dbcca734d942a722f67e2e",
+    "stage-stop-commit": "6c021bb209e8188e1c04dcbf42e60618cdd46f5cbac6ace10c11eb2cbe27c226",
+    "whole-stagnation": "f3c552f06a6b34db62c6fddb3931413565a85fa059eedb65ab77ccc42bbfb2df",
+    "whole-adopting": "32cdac31366d76f94c211bc7b66118f1ff3ab09ac55c86f6998cf969ac3f23ff",
+    "whole-sets": "03000c2abba9e26a77473627f7dc5ea675ae0c40446572133794c631f7edff8b",
+    "whole-mixed": "f8f6bae44c7a4e18800c906ce5cfec7e106128f86fbf1371779fde91be345615",
+    "whole-recounts": "7013d30de1d3514958571c0538a4090f99ec2d453ee9a8302fc541490f7fc39a",
+    "stage-search-repair-off": "976cb9b83a8ea59333ce3eec02a8c861e4a3ffe49c32c41acb03b688f9e5ea7c",
+    "whole-search-repair-off": "0b3f93b1e83a8e971980a45528717865e8e0f25400b53f813346ab0875bb668a",
+  };
+  const BEFORE_761_RAW_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "b9fc8aa8162a3d4911f28f7cef093d93ba5cb9291d267302468c0c618cadc190",
+    "stage-adopting": "a6f70fad3e2f334e2d92be1154f8768b7b7fb0dea73836e0bc798cb5962db8bb",
+    "stage-sets": "cfc043d4d8de249f447948605833f9aff2a9f2a64d7931550e212ffca509e639",
+    "stage-mixed": "ba709dd49d9c8c13f4a78eeecf5770d95fd2400dc5a1202eb2fae4b3bdbf56b8",
+    "stage-returned": "a020ebe732c208c157b0abe4ab35a7c7fb7ffe0ba57282c69d6bb07fee3da253",
+    "stage-recounts": "dc63e55fbe6a87d5683fba40421ef0599e095c5808c5b798b1054201cdc50331",
+    "stage-stop-repair": "aa5fcfffb8b6db79b49fc9601cc6b35afc117a2a84f59789f11dabba81ad0484",
+    "stage-stop-first-eval": "16b14f116cfc47bc8f7f444ca0a9e6762c1923143564b56eab80ca8e6fd3bc61",
+    "stage-stop-commit": "d9528065b58971fbb7cca79c5f4b84f2c964733438bd3302c0067c1ba8653d35",
+    "stage-search-repair-off": "aa031822f2cf86e44a440c06dee29d5a1516dd44fa2f61146f20ab085a9dd836",
+  };
+  const BEFORE_761_REQUESTS_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "5c51234f156300cf85d282ff2cc32d78891e925da3fb0eddf5e7ae1edc01705a",
+    "stage-adopting": "fe3d32ced7ac8e7137af99369c198d1f36789ca952f9627cc295677544abb21e",
+    "stage-sets": "793a6df6db6e06e70fe12a0b73b7bbffe88df22aa2852d97cfc266c6a78ad590",
+    "stage-mixed": "516f8648cc4924f1e6bbb97b130ed6ea53a9aafd388c92123669880ab25ed68e",
+    "stage-returned": "f6de1db43d14d2f726e496fa55819c01a7e44cc222be1b448093b08d91fb2c37",
+    "stage-recounts": "97a224bd9c6626a5826d4562ef0092b83fa052a54125235f88bda5f9c135e976",
+    "stage-stop-repair": "c443fac0fadb5908f183ef34427f57848a8b62df79b8e05f344d47e94c5d6da7",
+    "stage-stop-first-eval": "dcb789bf2c1e0fbb4fced70f7fd069f33b3786f8fbfc6a1fb5a11652782c9adb",
+    "stage-stop-commit": "b6747a8c137ebe1ad9da7eda39e6100c3627fa5d109858e4b12a836b9ad54558",
+    "whole-stagnation": "1beafeade5f80b2970bf58765ed43c9a157d71e14f8b9aa01125863388269485",
+    "whole-adopting": "25054935f7daba9932ee930cf9fb2d3bc0f289da585b1fd64843aabd9938b4f7",
+    "whole-sets": "e08b138f04db2a038c132b68a290cc860bc1624f730d3f48c8e086228f2651ff",
+    "whole-mixed": "fa8156e6aeb50211a74c639905f25ca75acdfa698d5bee52d2bafed716118786",
+    "whole-recounts": "a0c5594483ab016dbc3147598609eac4a517644cd5abab978660caacab1e84e6",
+    "stage-search-repair-off": "3c21beb9077abd87a0234d6243ff7edac295f378142e72a63b37b42422c527f0",
+    "whole-search-repair-off": "7b30f391f4c943a574d2242f9dc8f6e094139887b47d9e3ef4ea7bfca2bd3d55",
+  };
+  const BEFORE_761_BUDGET_800: Readonly<Record<string, string>> = {
+    "whole-stagnation": "d36fa97a26ffea73d8df7bbff8133de338d4032786fbab10f032c30da7767c70",
+    "whole-adopting": "4f351dca100e00654905c20f17c5549c87d9506562f789f5786eec3db67b1269",
+    "whole-sets": "a8752a9c071c62a617d1fb6034ff34f3679ff5d9ce45ad7d29d47efb2478369a",
+    "whole-recounts": "4b663c7a7e19a2497f5ce2d3358d80ed46c0d312ead85144a96ba614cdc553fd",
+  };
+  const BEFORE_795_BUDGET_800: Readonly<Record<string, string>> = {
+    "whole-mixed": "5bcef53bb34d443f998f7418774a8ce9dc13f01ff24b46d1aefeb1f36cd4ee26",
+    "whole-search-repair-off": "c5a335c7042b951552fdd966e60c87222a5d7fd00493dc7c66c06cb0abd7b96d",
+  };
+  /** 費用の印に替えた全出力の期待（#800 で取り直した値を先に、旧値は残す） */
+  const budgetExpectedOf800 = (name: string): string | undefined => BEFORE_795_BUDGET_800[name] ?? BEFORE_761_BUDGET_800[name] ?? budgetExpectedOf(name);
   /** 費用の印に替えた全出力の期待（#761 の 4 経路は #761 の値、#795 の 2 経路は #795 の値） */
   const budgetExpectedOf = (name: string): string | undefined => BEFORE_795_BUDGET[name] ?? BEFORE_761_BUDGET[name];
   /** 費用の印に替えるキー（f9bf3b3 の 4 経路の出力に現れた budget_*。ほかのキーを替えていないことをこの集合で照らす） */
@@ -5575,19 +5688,19 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       budgetDerivedSets[entry.name] = budgetDerived;
       searched[entry.name] = hasSearch;
     }
-    expect(digests).toEqual(BEFORE_746);
+    expect(digests).toEqual({ ...BEFORE_746, ...BEFORE_746_800 });
     // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと（search_repair・requests・stage_spans を残したまま）、直す前（f9bf3b3）の生出力とバイト列で同じ
     for (const entry of INVARIANT_RUNS) {
       if (WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_RAW[entry.name]);
+      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_RAW_800[entry.name] ?? BEFORE_761_RAW[entry.name]);
     }
     // 費用が入力長で変わる 4 経路を含む全部の要求の列は、旧値（f9bf3b3）と一致する
-    expect(strippedRequestDigests).toEqual(BEFORE_761_REQUESTS);
+    expect(strippedRequestDigests).toEqual({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_800 });
     // 4 経路は、診断と R-fr-08 を外し budget_* の値だけを印に替えた全出力（記録・納品物・要約のほかの欄・終了コード・往復の数と
     // 採否の並び）が f9bf3b3 と一致する。印に替えたキーが budget_* だけであることも照らす
     for (const entry of INVARIANT_RUNS) {
       if (!WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf(entry.name));
+      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf800(entry.name));
       expect(budgetKeySets[entry.name], entry.name).toEqual(BUDGET_KEYS);
       // 印に替えたのは budget_* だけで、導出し直したのは manifest の要約の行（sha256・size_bytes）だけ
       expect(budgetDerivedSets[entry.name], entry.name).toEqual([{ path: "artifacts/summary.json", fields: ["sha256", "size_bytes"] }]);
@@ -5682,18 +5795,18 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       budgetDerivedSets[entry.name] = budgetDerived;
       searched[entry.name] = hasSearch;
     }
-    expect(digests).toEqual(BEFORE_748_BASE);
+    expect(digests).toEqual({ ...BEFORE_748_BASE, ...BEFORE_748_BASE_800 });
     // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと（search_repair・requests・stage_spans を残したまま）、直す前（f9bf3b3）の生出力とバイト列で同じ
     for (const entry of INVARIANT_RUNS) {
       if (WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_RAW[entry.name]);
+      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_RAW_800[entry.name] ?? BEFORE_761_RAW[entry.name]);
     }
     // 費用が入力長で変わる 4 経路を含む全部の要求の列は、旧値（f9bf3b3）と一致する
-    expect(strippedRequestDigests).toEqual(BEFORE_761_REQUESTS);
+    expect(strippedRequestDigests).toEqual({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_800 });
     // 4 経路は、診断と R-fr-08 を外し budget_* の値だけを印に替えた全出力が f9bf3b3 と一致する（印のキーも budget_* だけ）
     for (const entry of INVARIANT_RUNS) {
       if (!WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf(entry.name));
+      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf800(entry.name));
       expect(budgetKeySets[entry.name], entry.name).toEqual(BUDGET_KEYS);
       expect(budgetDerivedSets[entry.name], entry.name).toEqual([{ path: "artifacts/summary.json", fields: ["sha256", "size_bytes"] }]);
     }
@@ -6062,7 +6175,7 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     };
   }
 
-  const LARGE_TABLE_RESPONSES = idsResponsesOf(LARGE_LIST, LARGE_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW);
+  const LARGE_TABLE_RESPONSES = idsResponsesOf(LARGE_LIST, LARGE_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW_IDS);
   const LARGE_C1: readonly RecordedCall[] = [
     structured(LARGE_TABLE_RESPONSES.entities),
     structured(LARGE_TABLE_RESPONSES.fields),

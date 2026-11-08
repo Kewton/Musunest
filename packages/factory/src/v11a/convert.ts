@@ -31,7 +31,7 @@ import type {
   RoleNameMapping,
 } from "../pipeline.js";
 import { deriveOwnership, sharedRowIds, type NameTable, type NameTableVerification } from "./names.js";
-import { PROPERTY_LEDGER_VIEW, type UpstreamLedgerView } from "../v12/ledger.js";
+import { PROPERTY_LEDGER_VIEW_IDS, type UpstreamLedgerView } from "../v12/ledger.js";
 
 /** 確かめ方の種類が台帳の外の種類にも性質の台帳にも無いときの固定文（写さずに断る。Issue #548） */
 export const UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE = "v1 の型への写し：確かめ方の種類が性質の台帳に無い";
@@ -81,10 +81,11 @@ function toVerification(entry: NameTableVerification, ledger: UpstreamLedgerView
 }
 
 /**
- * 名前の表を v1 の型へ写す（決定的。§2.2）。`ledger` は確かめ方の種類を引く台帳の導出で、省けばコードの台帳
- * （旗に依らない。台帳の外の種類と default-value の写しは旗 off の今とバイト列で同じ）。
+ * 名前の表を v1 の型へ写す（決定的。§2.2）。`ledger` は確かめ方の種類を引く台帳の導出で、省けば台帳の**全行**から導いた
+ * 変換用の見方（`PROPERTY_LEDGER_VIEW_IDS`。変換が読むのは確かめ方の種類の一覧だけ。off の表に旗 `v12.ids` の種類は
+ * 現れないので off の写しは今と同じ。Issue #800）。
  */
-export function toV1(table: NameTable, ledger: UpstreamLedgerView = PROPERTY_LEDGER_VIEW): V1Conversion {
+export function toV1(table: NameTable, ledger: UpstreamLedgerView = PROPERTY_LEDGER_VIEW_IDS): V1Conversion {
   const ownership: readonly RequirementRoleOwnership[] = deriveOwnership(table).map((entry) => ({
     requirementId: entry.requirementId,
     ownership: entry.roles.map((role) => ({ roleId: role.id, basis: role.basis, reason: role.reason })),
