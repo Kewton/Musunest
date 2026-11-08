@@ -173,6 +173,7 @@ import {
   type CarryOverReason,
   type DeclJudgment,
   type PrunedForCarryOver,
+  type SemanticJudgment,
 } from "./carry-over.js";
 import { identityMappings, toV1 } from "./convert.js";
 import { lostCoverage } from "./coverage.js";
@@ -194,6 +195,8 @@ import {
   type SemanticRejection,
 } from "./stages/name-table.js";
 import {
+  composeRecheckJudgments,
+  recheckTargetsOf,
   runSemanticCheck,
   semanticCheckTargets,
   semanticShapeRetryBudgetOf,
@@ -1460,9 +1463,16 @@ async function runV11a(
         ? undefined
         : { table: resume.table, tableSha256: resume.tableSha256, semantic: resume.semanticCheck, advice: resume.judgeAdvice };
     /**
-     * J4 → T1''（C3）を 1 回回す（表を組む段が T1 でも C2 でも同じ関数。旗 `v12.ids` の走りの C3 の表の型は同じ。Issue #593）
+     * J4 → T1''（C3）を 1 回回す（表を組む段が T1 でも C2 でも同じ関数。旗 `v12.ids` の走りの C3 の表の型は同じ。Issue #593）。
+     * 旗 `v12.ids` の C3 の 2 回目は `recheck`（再点検の部分）を渡すと、C3 の対象を部分にし、保つ要件は 1 回目の判定
+     * （`previousJudgments`）で合成した結果を返す（Issue #805）。記録（`raw`）は C3 に実際に渡した部分の結果のまま。
      */
-    const checkTableRound = async (round: number, output: { readonly table: NameTable; readonly tableSha256: string }) => {
+    const checkTableRound = async (
+      round: number,
+      output: { readonly table: NameTable; readonly tableSha256: string },
+      recheck?: readonly string[],
+      previousJudgments?: readonly SemanticJudgment[],
+    ) => {
       // J4（判定の口があるときだけ。予算の包みを渡す。助言であって門ではない。D5）
       const advice =
         judgeBudget === undefined
@@ -1473,12 +1483,16 @@ async function runV11a(
 
       // T1''（完全な結果だけを受ける。表の SHA の合わない結果・判定の欠落は形の落ちとして止める）
       const targets = semanticCheckTargets(list, output.table);
-      // 旗 `v12.ids`：束の数を回ごとに残し、形のやり直しの予算は 2 回の点検で 1 つを共有する（Issue #735）
+      const requested = recheck === undefined ? targets : recheck.filter((id) => targets.includes(id));
+      const kept = recheck === undefined ? undefined : targets.filter((id) => !requested.includes(id));
+      // 旗 `v12.ids`：束の数を回ごとに残し、形のやり直しの予算は 2 回の点検で 1 つを共有する（Issue #735）。
+      // 2 回目の束の数は再点検の部分の数（0 を含む。Issue #805）
       if (flags.ids) {
         semanticShapeRetries ??= semanticShapeRetryBudgetOf(list);
-        semanticBundleRounds.push({ round, bundles: Math.ceil(targets.length / V12_T2_BUNDLE.size) });
+        semanticBundleRounds.push({ round, bundles: Math.ceil(requested.length / V12_T2_BUNDLE.size) });
       }
       const shapeRetries = semanticShapeRetries;
+      let raw: SemanticCheckOutput | undefined;
       const semantic = await runStageOk(
         "semantic-check",
         async (): Promise<StageOutcome<SemanticCheckOutput>> => {
@@ -1492,32 +1506,47 @@ async function runV11a(
             ...withLedger,
             // 旗 `v12.ids`：R-sc-02 に構造の検査の読み方を足す（off は渡さない＝今の文のまま。表の targets の有無で推測しない。Issue #732）
             // 旗 `v12.ids`：対象を束に分けて同時に呼び、形のやり直しは 2 回の点検で共有した予算から使う（Issue #735）
-            ...(flags.ids && shapeRetries !== undefined ? { ids: true, round, shapeRetries } : {}),
+            // 旗 `v12.ids` の 2 回目：対象を再点検の部分にし、参照の塊・R-sc-06・R-sc-07 を足す（Issue #805）
+            ...(flags.ids && shapeRetries !== undefined
+              ? { ids: true, round, shapeRetries, ...(recheck === undefined ? {} : { recheck: requested }) }
+              : {}),
           });
           if (!checked.ok) return checked;
+          raw = checked.value;
           const problems: Problem[] = [];
           if (checked.value.tableSha256 !== output.tableSha256) {
             problems.push({ field: "tableSha256", message: "表の意味の点検の結果が、採用した表の SHA-256 と合わない" });
           }
-          if (!coversExactly(checked.value.judgments, targets)) {
+          // 再点検の部分を渡した 2 回目は、部分の判定と保つ要件の 1 回目の判定を合成してから完全性を確かめる（Issue #805）
+          const composed =
+            recheck === undefined
+              ? { ok: true as const, value: checked.value.judgments }
+              : composeRecheckJudgments(targets, requested, previousJudgments ?? [], checked.value.judgments);
+          if (!composed.ok) return { ok: false, failure: { kind: "malformed", attempts: 1, problems: composed.problems } };
+          if (!coversExactly(composed.value, targets)) {
             problems.push({ field: "judgments", message: "表の意味の点検の判定が、対象の要件にちょうど 1 つずつでない" });
           }
-          return problems.length > 0 ? { ok: false, failure: { kind: "malformed", attempts: 1, problems } } : checked;
+          return problems.length > 0
+            ? { ok: false, failure: { kind: "malformed", attempts: 1, problems } }
+            : { ok: true, value: { tableSha256: checked.value.tableSha256, judgments: composed.value, targets } };
         },
         // C3 は各回の段全体の span を別の欄にも残す（Issue #748）
         requestLog === undefined ? undefined : { stage: "semantic-check", round },
       );
+      const recorded = raw ?? { tableSha256: semantic.tableSha256, judgments: recheck === undefined ? semantic.judgments : [], targets: requested };
       semanticRounds.push({
         round,
-        tableSha256: semantic.tableSha256,
-        targets: semantic.targets,
-        judgments: semantic.judgments,
+        tableSha256: recorded.tableSha256,
+        targets: recorded.targets,
+        judgments: recorded.judgments,
         advice: marks,
+        // 2 回目だけ、部分の外で 1 回目の判定を保つ要件の並びを持つ（Issue #805）
+        ...(kept === undefined ? {} : { keptRequirementIds: kept }),
       });
       const rejections = semantic.judgments.filter(
         (judgment): judgment is SemanticRejection => judgment.verdict === "reject",
       );
-      return { semantic, advice, marks, rejections };
+      return { semantic, advice, marks, rejections, requested, kept, recorded };
     };
 
     if (flags.ids && resume === undefined) {
@@ -1634,12 +1663,29 @@ async function runV11a(
           target_id: entry.targetId,
           removed_row_ids: entry.removedRowIds,
         }));
-        const { semantic, advice, marks, rejections } = await checkTableRound(round, output);
+        // 旗 `v12.ids` の C3 の 2 回目は、1 回目の表と 2 回目の表・C2 が書き直した要件から再点検の部分を導き、
+        // 部分の外の要件は 1 回目の判定を保つ（Issue #805）。部分が 0 件でも合成は完全になる
+        const recheck =
+          flags.ids && round > 1 && firstRound !== undefined && rewrittenIds !== null
+            ? recheckTargetsOf({
+                list,
+                previousTable: firstRound.table,
+                currentTable: output.table,
+                rewrittenRequirementIds: rewrittenIds,
+              })
+            : undefined;
+        const { semantic, advice, marks, rejections, kept, recorded } = await checkTableRound(
+          round,
+          output,
+          recheck,
+          firstRound?.semantic.judgments,
+        );
         tableRound.semantic_check = {
-          table_sha256: semantic.tableSha256,
-          targets: semantic.targets,
-          judgments: semantic.judgments,
+          table_sha256: recorded.tableSha256,
+          targets: recorded.targets,
+          judgments: recorded.judgments,
           advice: marks,
+          ...(kept === undefined ? {} : { kept_requirement_ids: kept }),
         };
         const checked = { table: output.table, tableSha256: output.tableSha256, semantic, advice };
         // 拒否が残れば、2 回目が未使用なら C2 の 2 回目（前回の写像・拒否・印をデータで。C1 は呼ばない）。使用済みなら持ち越し

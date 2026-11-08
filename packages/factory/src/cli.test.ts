@@ -6674,14 +6674,10 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     await heldC2.whenPending(4);
     clock.advance(10);
     await heldC2.release(3);
-    // C3 の 2 回目（束 3 つ）を、束 1 → 0 → 2 の順に完了させる
-    await heldC3.whenPending(6);
+    // C3 の 2 回目は再点検の部分（書き直した R3 の 1 束）だけ（Issue #805）
+    await heldC3.whenPending(4);
     clock.advance(10);
     await heldC3.release(3);
-    clock.advance(10);
-    await heldC3.release(4);
-    clock.advance(10);
-    await heldC3.release(5);
     const { run, record, requests, spans, stages } = await runPromise;
     expect(run.code, JSON.stringify(record["stopped"])).toBe(EXIT_OK);
     expect(stages.map((stage) => stage["stage"])).toEqual([
@@ -6702,27 +6698,26 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       [4, 830, 950],
       // C2 の 2 回目（R3 だけ）
       [5, 960, 1_070],
-      // C3 の 2 回目：3 束が 1_070/1_170/1_270 に始まり、束 0 → 1 → 2 の順（1_380/1_390/1_400）で終わる
-      [6, 1_070, 1_380],
-      [6, 1_170, 1_390],
-      [6, 1_270, 1_400],
+      // C3 の 2 回目：再点検の部分の 1 束が 1_070 に始まり 1_180 に終わる（Issue #805）
+      [6, 1_070, 1_180],
     ]);
     expect(spans).toEqual([
       // C2 の初回の span は、いちばん遅い束（束 1）の終わりまで
       { stage: "mapping", round: 1, start_ms: 300, end_ms: 630, stage_indices: [3] },
       // C3 の 1 回目の span は、いちばん遅い束（束 1）の終わりまで
       { stage: "semantic-check", round: 1, start_ms: 630, end_ms: 960, stage_indices: [4] },
-      { stage: "semantic-check", round: 2, start_ms: 1_070, end_ms: 1_400, stage_indices: [6] },
+      { stage: "semantic-check", round: 2, start_ms: 1_070, end_ms: 1_180, stage_indices: [6] },
     ]);
     expect(spans.filter((span) => span["stage"] === "semantic-check").map((span) => span["round"])).toEqual([1, 2]);
-    // 段の時間（= span の時間）は、行の時間の和とは違う（C3 の両 round とも）
+    // 段の時間（= span の時間）は、行の時間の和とは違う（束が複数の回）。1 束の回（再点検の部分）は行の和と同じ
     for (const span of spans.filter((entry) => entry["stage"] === "semantic-check")) {
       const [index] = span["stage_indices"] as readonly number[];
       const rows = requests.filter((request) => request["stage_index"] === index);
       const sum = rows.reduce((total, request) => total + ((request["end_ms"] as number) - (request["start_ms"] as number)), 0);
       const spanMs = (span["end_ms"] as number) - (span["start_ms"] as number);
       expect(spanMs).toBe(stages[index!]!["duration_ms"]);
-      expect(spanMs).not.toBe(sum);
+      if (rows.length > 1) expect(spanMs).not.toBe(sum);
+      else expect(spanMs).toBe(sum);
       const slowest = Math.max(...rows.map((request) => request["end_ms"] as number));
       expect(span["end_ms"]).toBe(slowest);
     }
@@ -7977,8 +7972,8 @@ describe("段の出力の上限の上書きの表（`--provider ollama` の v1.2
       const run = await runOf(execution);
       expect(run.run.code, `${execution}: exit ${String(run.run.code)}`).toBe(EXIT_OK);
       const c3 = requestsOf(run.structuredRequests, SEMANTIC_CHECK_SCHEMA_NAME);
-      // 1 回目の束 2 + 再点検の束 2（要求の数を等値で固定する）
-      expect(c3, execution).toHaveLength(4);
+      // 1 回目の束 2 + 再点検の部分（書き直した先頭の 1 要件）の束 1（要求の数を等値で固定する。Issue #805）
+      expect(c3, execution).toHaveLength(3);
       for (const request of c3) expect(limitOf(request), execution).toBe(32_768);
       // ほかの段（B1）は今の値のまま（上書きを外す変異で赤）
       for (const request of requestsOf(run.structuredRequests, WRITE_V11A_SCHEMA_NAME)) expect(limitOf(request), execution).toBe(maxOutputTokensForEffort("high", "write"));
