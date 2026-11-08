@@ -148,7 +148,8 @@ import { constraintIdsIn, ruleTexts, SHAPE_PROBLEMS_DATA_NAME } from "../stages/
 import { MAPPING_LEDGER_DATA_NAMES, MAPPING_REWRITE_MESSAGES, MAPPING_SCHEMA_NAME } from "../v12/stages/mapping.js";
 import { VOCABULARY_SCHEMA_NAMES } from "../v12/stages/vocabulary.js";
 import { structuralReadingText } from "../v12/structural-meanings.js";
-import { FIELD_REPAIR_DIAGNOSTIC_DATA_NAME, FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "../v12/stages/field-repair.js";
+import { FIELD_REPAIR_DIAGNOSTIC_DATA_NAME, FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS, mergeReplacements } from "../v12/stages/field-repair.js";
+import { canRepairFields, locateFailures } from "../v12/locate.js";
 import { natureQuestionName } from "../stages/test-suite.js";
 import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenarios } from "../__tests__/baseline-capture.js";
 import * as factoryModule from "../index.js";
@@ -3566,7 +3567,7 @@ describe("旗 v12.ids：ボードだけで見せる entity の項目は、規則
     expect(stage.result.verification).toMatchObject({ b3_misses: 0, c7_mismatches: 0, unresolved: 0, stop_reason: "completed", round_trips: 0 });
   });
 
-  it("直す前の挙動（規則を渡さない）：同じ宣言・同じ表で B3 の落ち 4（項目の数）・B4 の不一致 4。欄を足せないので同じ版を返して停滞する", async () => {
+  it("直す前の挙動（規則を渡さない）：同じ宣言・同じ表で B3 の落ち 4・B4 の項目 × 画面の不一致 4（missing-element）。欄だけの直しの追加は 0 で、何も返さなければ同じ版（停滞）", async () => {
     const app = await normalizedFixture(BOARD_RUN_YAML);
     const baseTable: NameTable = {
       rows: CARD_ROWS,
@@ -3583,8 +3584,93 @@ describe("旗 v12.ids：ボードだけで見せる entity の項目は、規則
     const base = checkNames({ app, table: baseTable, list: baseList });
     expect(base.misses).toHaveLength(4);
     expect(base.misses.every((miss) => miss.detail.includes("画面から辿れない"))).toBe(true);
+    // B4 の項目 × 画面：同じ 4 項目を、C4 が作るのと同じ形の試験で流すと、4 件が missing-element の不一致
+    const baseTests = CARD_FIELD_IDS.map((id, index) => ({
+      id: `base-field-screen-${String(index)}`,
+      target: { requirementId: "R6", kind: "field" as const, roleId: id },
+      kind: "normal" as const,
+      operation: "screen" as const,
+      clock: "2026-09-16T12:00:00+09:00",
+      input: {},
+      inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: [] as string[] },
+      referenceData: [],
+      expected: { kind: "ok" as const, value: null },
+    }));
+    const baseBound = bindTestsById(app, baseTable, { tests: baseTests });
+    const baseRun = runTestsStage.runTests({
+      app,
+      suite: { tests: baseTests },
+      correspondence: { entries: [], misses: [] },
+      bindings: { tests: baseBound.bindings, entityNames: baseBound.entityNames },
+    });
+    expect(baseRun.mismatches.map((entry) => entry.testId).sort()).toEqual(baseTests.map((entry) => entry.id).sort());
+    expect(baseRun.mismatches).toHaveLength(4);
+    expect(baseRun.mismatches.every((entry) => entry.detail.includes("画面から辿れない"))).toBe(true);
+    expect(baseRun.routes.filter((route) => route.route === "missing-element")).toHaveLength(4);
+    // 停滞（同じ版を返す）：欄だけの直しの段は 4 つの場所を持つが、追加の場所（宣言に無い検査）は 0。
+    // 何も返さない応答は同じ原文になり、同じ版・同じ落ちのまま（base のコードが木に無いので、直す段の関数で固定する）
+    const located = locateFailures({
+      source: BOARD_RUN_YAML,
+      table: baseTable,
+      suite: { tests: [] },
+      staticCheckPassed: true,
+      diagnostics: [],
+      correspondenceMisses: base.misses,
+      rejections: [],
+      unmarked: [],
+      mismatches: [],
+      unresolved: [],
+      ids: { observes: new Map(), requiredValidations: [] },
+    });
+    expect(canRepairFields(located)).toBe(true);
+    expect(located.unlocated).toEqual([]);
+    expect(located.locations).toHaveLength(4);
+    expect(located.additions).toEqual([]);
+    const returned = mergeReplacements(BOARD_RUN_YAML, [], located.spans, located.additions ?? []);
+    expect(returned.ok).toBe(true);
+    if (returned.ok) expect(returned.source).toBe(BOARD_RUN_YAML);
     // 規則を渡せば 0（同じ表・同じ宣言）
     expect(checkNames({ app, table: baseTable, list: baseList, reach: { board: true } }).misses).toEqual([]);
+  });
+
+  it("(7) 配線：持ち越しで評価口を作り直した後も、B3 の落ち 0・B4 の不一致 0 が続く", async () => {
+    // R3 の試験（case:3）の期待をわざと外して B4 の不一致を 1 件作り、B5' で棄却させると、網羅の単位を失って
+    // R3 が持ち越され、評価口が作り直される。作り直した評価口が規則を受け取っていなければ、次の版の B3 は
+    // ボードの 4 項目を落として B3' に届かない。
+    const wrongR3T2 = {
+      classifications: BOARD_T2.classifications,
+      tests: [...r1Tests(), ...r3Tests().map((test, index) => (index === 0 ? { ...test, expected: ok("false") } : test)), ...r4Tests()],
+    };
+    const headWithWrongR3 = (): RecordedCall[] => [
+      ...idsResponseList(idsResponsesOf(BOARD_LIST, BOARD_TABLE_IDS, PROPERTY_LEDGER_VIEW_IDS)).map((output) => structured(output)),
+      structured(acceptAll(BOARD_IDS)),
+      structured(renamed(casesResponseOf(wrongR3T2))),
+      structured({ declaration: BOARD_RUN_YAML }),
+    ];
+    const dispute = { testId: "case:4", quote: "金額が 0 より大きい項目だけ" };
+    const remaining = ["R1", "R2", "R4", "R6"];
+    const calls = [
+      ...headWithWrongR3(),
+      structured(acceptAll(BOARD_IDS)), // B3' 1 回目
+      repairDone(BOARD_RUN_YAML, [dispute]), // B5（B4 の不一致 1 件への主張）
+      structured({ decisions: [{ ...dispute, verdict: "overturn", reason: "期待が誤り" }] }), // B5'（棄却 → 持ち越し・作り直し）
+      structured(acceptAll(remaining)), // B3' 2 回目（作り直した後）
+    ];
+    const run = await runScenario(calls, overrides);
+    expect(run.result.stopped).toBeNull();
+    // 持ち越しと、評価口の作り直し（B3' と name-check が 2 回以上）が起きた
+    expect(carryEntriesOf(run.result.bundle).map((entry) => entry.requirementId)).toContain("R3");
+    const decls = run.recording.structured.filter((request) => request.schemaName === DECL_CHECK_SCHEMA_NAME);
+    expect(decls.length).toBeGreaterThanOrEqual(2);
+    expect(countStage(run.result, "name-check")).toBeGreaterThanOrEqual(2);
+    // 作り直した後も B3 0・B4 0（最終版の検証）
+    const verification = artifactOf(run.result.bundle, VERIFICATION_FILE);
+    expect(verification["correspondence_misses"]).toBe(0);
+    expect(verification["test_mismatches"]).toBe(0);
+    // 段の走りでも同じ値（同じ 2 つの実行口）
+    const stage = await runStageScenario(calls, overrides);
+    expect(stage.result.stopped).toBeNull();
+    expect(stage.result.verification).toMatchObject({ b3_misses: 0, c7_mismatches: 0, unresolved: 0, not_run: null });
   });
 });
 
