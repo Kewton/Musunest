@@ -2055,6 +2055,35 @@ describe("v1.2 の一気通貫の走りの checkpoint（`--pipeline v1.2 --plan-
     expect(Object.keys(run.record)).toEqual(["schema_version", "conditions", "plan_sha256", "source_sha256", "return_to_plan", "checkpoints"]);
   });
 
+  it("(R1) 一気通貫・段の走りの checkpoint の ledger・ledger_upstream が公開の関数に V12_PIPELINE_FLAGS を渡した値と等しく、off の走りは off の指紋のまま（直す前の挙動として、旗なしの呼び出しの値は ids の値と違う）", async () => {
+    const ids = await ledgerModule.ledgerVersionsOf(factory.V12_PIPELINE_FLAGS);
+    const off = { ledger: await ledgerModule.propertyLedgerSha256(), ledgerUpstream: await ledgerModule.upstreamLedgerSha256() };
+    // 直す前の挙動を残す：旗なし（off）の呼び出しの値は ids の checkpoint の値と違う
+    expect(off.ledger).not.toBe(ids.ledger);
+    expect(off.ledgerUpstream).not.toBe(ids.ledgerUpstream);
+    // 一気通貫の checkpoint（t1-t2・t2-b1）
+    const whole = await runV11aCli({ dir: `${directory}/v12-r1-whole`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    expect(whole.code).toBe(EXIT_OK);
+    for (const boundary of ["t1-t2", "t2-b1"] as const) {
+      const checkpoint = JSON.parse(await fs.readFile(`${directory}/v12-r1-whole/${stageCheckpointFile(boundary)}`, "utf8")) as Record<string, any>;
+      expect(checkpoint["versions"]["ledger"], boundary).toBe(ids.ledger);
+      expect(checkpoint["versions"]["ledger_upstream"], boundary).toBe(boundary === "t1-t2" ? ids.ledgerUpstream : null);
+    }
+    // 段の走りの checkpoint（t1-t2）
+    const stage = await runStageCli({ dir: `${directory}/v12-r1-stage`, args: ["--stage-end", "semantic-check"], calls: v12Head().slice(0, 5), pipeline: "v1.2" });
+    expect(stage.code).toBe(EXIT_OK);
+    const stageCheckpoint = JSON.parse(await fs.readFile(`${directory}/v12-r1-stage/${stageCheckpointFile("t1-t2")}`, "utf8")) as Record<string, any>;
+    expect(stageCheckpoint["versions"]["ledger"]).toBe(ids.ledger);
+    expect(stageCheckpoint["versions"]["ledger_upstream"]).toBe(ids.ledgerUpstream);
+    // off の走り（旗 ids が off）は off の指紋のまま
+    vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => ({ ledger: true, searchRepair: true, ids: false }));
+    const offStage = await runStageCli({ dir: `${directory}/v12-r1-off`, args: ["--stage-end", "semantic-check"], calls: [structured(v11aT1(true)), structured(v11aJudgments())], pipeline: "v1.2" });
+    expect(offStage.code).toBe(EXIT_OK);
+    const offCheckpoint = JSON.parse(await fs.readFile(`${directory}/v12-r1-off/${stageCheckpointFile("t1-t2")}`, "utf8")) as Record<string, any>;
+    expect(offCheckpoint["versions"]["ledger"]).toBe(off.ledger);
+    expect(offCheckpoint["versions"]["ledger_upstream"]).toBe(off.ledgerUpstream);
+  });
+
   it("段の入力の照合は Build だけの記録と checkpoint の組で ok を返し、壊した組は今までの符号で断る", async () => {
     const dir = `${directory}/v12-checkpoints-verify`;
     await runV11aCli({ dir, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
@@ -2205,6 +2234,41 @@ describe("v1.2 の一気通貫の走りの checkpoint（`--pipeline v1.2 --plan-
     expect(v11aSpy.mock.calls[0]?.[0]).not.toHaveProperty("collectBoundaries");
     expect(run.record).not.toHaveProperty("checkpoints");
     expect(run.written.filter((path) => path.startsWith("stage-checkpoint-"))).toEqual([]);
+  });
+
+  it("(3) 一気通貫と段の走りの ids の B1 の要求に、検査の式の行の新しい文があり、旧の文（名前と同じ名前の検査）が無い（Issue #816 の R3）", async () => {
+    const OLD_B1 =
+      "固定した試験のうち observes が validation-expression の試験は、対象の項目（field）の行ごとに、その項目の名前と同じ名前の検査を要求する（同じ entity の別の項目は別の検査の名前になる）。";
+    const NEW_B1 = ledgerModule.PROPERTY_LEDGER.find((row) => row.id === "validation-expression")?.rules.b1 ?? "";
+    const writeRulesOf = (requests: readonly unknown[]): readonly string[] => {
+      const request = requests.find((value) => (value as { schemaName?: string }).schemaName === WRITE_V11A_SCHEMA_NAME) as
+        | { readonly rules?: readonly string[] }
+        | undefined;
+      if (request === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+      return request.rules ?? [];
+    };
+    // 一気通貫
+    const whole = await runV11aCli({ dir: `${directory}/v12-b1-r3-whole`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    expect(whole.code).toBe(EXIT_OK);
+    const wholeRules = writeRulesOf(whole.recording.structured);
+    // 段の走り（一気通貫の t2-b1 から B1 を流す）
+    const stage = await runStageCli({
+      dir: `${directory}/v12-b1-r3-stage`,
+      args: ["--stage-start", "write", "--stage-input", `${directory}/v12-b1-r3-whole/${stageCheckpointFile("t2-b1")}`],
+      calls: [structured({ declaration: V11A_YAML }), structured(v11aJudgments())],
+      pipeline: "v1.2",
+    });
+    expect(stage.code).toBe(EXIT_OK);
+    const stageRules = writeRulesOf(stage.structuredRequests);
+    for (const [name, rules] of [
+      ["一気通貫", wholeRules],
+      ["段の走り", stageRules],
+    ] as const) {
+      expect(rules, name).toContain(NEW_B1);
+      expect(rules.some((text) => text.includes("名前と同じ名前の検査")), name).toBe(false);
+      expect(rules, name).not.toContain(OLD_B1);
+      expect(rules, name).toContain(WRITE_V11A_IDS_R07_DEFINITION.text);
+    }
   });
 });
 
@@ -2369,7 +2433,8 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     expect(await rejectedRun("run-flags", `${source}/${stageCheckpointFile("t1-t2")}`)).toEqual(version);
     vi.restoreAllMocks();
     // 上流の台帳の部分の指紋が今の走りと違えば断る（境界 t1-t2。Issue #713 で全体の指紋から部分の指紋に替えた）
-    vi.spyOn(ledgerModule, "upstreamLedgerSha256").mockImplementation(async () => "0".repeat(64));
+    const versions = ledgerModule.ledgerVersionsOf;
+    vi.spyOn(ledgerModule, "ledgerVersionsOf").mockImplementation(async (flags) => ({ ...(await versions(flags)), ledgerUpstream: "0".repeat(64) }));
     expect(await rejectedRun("run-ledger", `${source}/${stageCheckpointFile("t1-t2")}`)).toEqual(version);
     vi.restoreAllMocks();
     // 同じなら通る
@@ -2396,13 +2461,10 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
   /** 上流の見方に入る値（T1 の規則の文）を変えた台帳 */
   const upstreamLedger = (): readonly ledgerModule.PropertyRow[] =>
     ledgerModule.PROPERTY_LEDGER.map((row) => (row.rules.t1 === null ? row : { ...row, rules: { ...row.rules, t1: marked(row.rules.t1) } }));
-  /** 今の工場の台帳を差し替える（全体の指紋と部分の指紋を、差し替えた台帳から本物の関数で出す） */
+  /** 今の工場の台帳を差し替える（公開の関数 1 つを通す。差し替えた台帳から本物の関数で出す。Issue #816） */
   const asFactoryWith = (rows: readonly ledgerModule.PropertyRow[]) => {
-    const full = ledgerModule.propertyLedgerSha256;
-    const upstream = ledgerModule.upstreamLedgerSha256;
-    // 実効の旗を渡す（Issue #806。渡さないと ids の走りの版を off の値で組んでしまう）
-    vi.spyOn(ledgerModule, "propertyLedgerSha256").mockImplementation(async (_rows, flags) => full(rows, flags));
-    vi.spyOn(ledgerModule, "upstreamLedgerSha256").mockImplementation(async (_rows, flags) => upstream(rows, flags));
+    const versions = ledgerModule.ledgerVersionsOf;
+    vi.spyOn(ledgerModule, "ledgerVersionsOf").mockImplementation(async (flags) => versions(flags, rows));
   };
   /** 断る段の走り（クライアントを作らない・何も書かない） */
   const refusedStage = async (name: string, start: "test-spec" | "write", input: string) => {
@@ -2484,8 +2546,9 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
       expect(await refusedStage(`t1-${name}`, "test-spec", input), name).toEqual(versionRefusal);
     }
     // 今の工場の部分の指紋の値が取れない形なら、照合を省かずに断る
+    const versions = ledgerModule.ledgerVersionsOf;
     for (const [name, value] of [["empty", ""], ["short", "0".repeat(63)]] as const) {
-      vi.spyOn(ledgerModule, "upstreamLedgerSha256").mockImplementation(async () => value);
+      vi.spyOn(ledgerModule, "ledgerVersionsOf").mockImplementation(async (flags) => ({ ...(await versions(flags)), ledgerUpstream: value }));
       expect(await refusedStage(`t1-run-${name}`, "test-spec", `${source}/${stageCheckpointFile("t1-t2")}`), name).toEqual(versionRefusal);
       vi.restoreAllMocks();
     }
@@ -2524,7 +2587,8 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
       expect(await refusedStage(`b1-${name}`, "write", input), name).toEqual(versionRefusal);
     }
     // t2-b1 は今の工場の部分の指紋を受理の判断に使わない（値が取れない形でも、全体の指紋が同じなら通る）
-    vi.spyOn(ledgerModule, "upstreamLedgerSha256").mockImplementation(async () => "");
+    const versions = ledgerModule.ledgerVersionsOf;
+    vi.spyOn(ledgerModule, "ledgerVersionsOf").mockImplementation(async (flags) => ({ ...(await versions(flags)), ledgerUpstream: "" }));
     const run = await runStageCli({ dir: `${directory}/v12-upstream-b1-out-run`, args: ["--stage-start", "write", "--stage-input", `${source}/${stageCheckpointFile("t2-b1")}`], calls: calls.slice(6), pipeline: "v1.2" });
     expect(run.errors.filter((line) => line.startsWith("stage-input:"))).toEqual([]);
     expect(run.code).toBe(EXIT_OK);
@@ -2678,6 +2742,19 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     // その出力ダイジェストに戻した記録は、直す前（fa21c65）のバイト列と同じ
     const checkpoint = JSON.parse(await fs.readFile(`${dir}/${stageCheckpointFile("t1-t2")}`, "utf8")) as Record<string, any>;
     expect(checkpoint["versions"]["ledger_upstream"]).toBe(await ledgerModule.upstreamLedgerSha256(ledgerModule.PROPERTY_LEDGER, V12_IDS_FLAGS));
+    {
+      // Issue #816：この Issue の段（checkpoint の版の `ledger`・`ledger_upstream`）だけを #816 の前（#806）の ids の値に
+      // 戻した状態が、直す前の値に等しい。記録の output_digest は戻した checkpoint から計算し直す
+      const reverted = {
+        ...checkpoint,
+        versions: { ...checkpoint["versions"], ledger: "bfb08678980fa71aa03b1ad012a9a397ebcefa73b404c8fcb52943157eb86d5d", ledger_upstream: "22b8b846038207ed3acbcde92a7f64fbb3f3e843ebe2a11835fb9a9f8c275a71" },
+      };
+      const revertedRecord = await stageRecordOf(dir);
+      (revertedRecord["checkpoints"] as { output_digest: string }[])[0]!.output_digest = await stageOutputDigest(reverted);
+      expect([await sha256Hex(stageJsonText(revertedRecord)), await sha256Hex(stageJsonText(reverted))]).toEqual(
+        V12_STAGE_C1_RETRY_DIGESTS_BEFORE_816,
+      );
+    }
     // Issue #806：全体・上流の指紋は base の CLI が記録していた off の値に戻して、下の旧の定数と照らす
     checkpoint["versions"]["ledger"] = await ledgerModule.propertyLedgerSha256();
     checkpoint["versions"]["ledger_upstream"] = await ledgerModule.upstreamLedgerSha256();
@@ -2912,6 +2989,15 @@ const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
   // Issue #806 で取り直した（ids on の checkpoint の版が新しい全体・上流の指紋を持ち、記録の出力ダイジェストが変わるため。
   // 旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_806` に残し、checkpoint の `ledger`・`ledger_upstream` を off の値に戻せば一致する
   // ことを試験で確かめる。#735・#748 の 2 欄は戻さない）
+  // Issue #816 で取り直した（R2 で ids の上流の指紋、R3 で ids の全体の指紋が変わり、t1-t2 の checkpoint の版と、それを
+  // 入力の出力ダイジェストに持つ記録が変わるため。旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_816` に残し、checkpoint の
+  // `ledger`・`ledger_upstream` を #806 の ids の値に戻せば一致することを試験で確かめる）
+  "8ef7fba757a1fab987122c1a48b73a1049387ce4c6b7b17966ab36fb6cb13822",
+  "5ae7bf97d93262c003cda5c0dbc330f87a1b5d578ab8d8066d3195501eaf5138",
+];
+
+/** Issue #816 の前（#806 の後）の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値） */
+const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_816: readonly string[] = [
   "d16c2b0cbb5a2b76ab7fa9b148aa97fe40d2b8c9afb12e0eed0fc2d7bfa4b7fe",
   "ffc47708d7a482d0fa256aa4fb2b61a5b315bf7add60be29cfef4ae18746af7e",
 ];
@@ -5719,6 +5805,29 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const idsOnV12 = entry.pipeline === "v1.2" && (entry.flags === null || entry.flags.ids === true);
     const legacyLedger = idsOnV12 ? await ledgerModule.propertyLedgerSha256() : null;
     const legacyUpstream = idsOnV12 ? await ledgerModule.upstreamLedgerSha256() : null;
+    /**
+     * Issue #816：この Issue の段（checkpoint の版の 2 欄）を戻した出力ダイジェスト。checkpoint の版の `ledger`・
+     * `ledger_upstream` を #816 の前（#806）の ids の値に戻し、出力ダイジェストを計算し直す。記録や Build だけの記録が
+     * 埋め込む checkpoint の出力ダイジェスト（入力の checkpoint も含む）を、この値に戻して旧の値と照らす
+     */
+    const restore816Ledger = "bfb08678980fa71aa03b1ad012a9a397ebcefa73b404c8fcb52943157eb86d5d";
+    const restore816Upstream = "22b8b846038207ed3acbcde92a7f64fbb3f3e843ebe2a11835fb9a9f8c275a71";
+    const restored816 = new Map<string, string>();
+    /** 入力の checkpoint（`--stage-input` で受けた t2-b1）を #816 の前に戻した出力ダイジェスト */
+    let restoredInput816: string | null = null;
+    if (idsOnV12) {
+      const restore = async (checkpointPath: string): Promise<string> => {
+        const checkpoint = JSON.parse(await fs.readFile(checkpointPath, "utf8")) as Record<string, any>;
+        checkpoint["versions"]["ledger"] = restore816Ledger;
+        if (checkpoint["versions"]["ledger_upstream"] !== null) checkpoint["versions"]["ledger_upstream"] = restore816Upstream;
+        return stageOutputDigest(checkpoint);
+      };
+      for (const path of written.filter((name) => name.startsWith("stage-checkpoint-"))) {
+        restored816.set(path, await restore(`${dir}/${path}`));
+      }
+      // 既定の引数（`--stage-start write --stage-input checkpoint746`）の段の走りの入力は checkpoint746（t2-b1）
+      if (entry.kind === "stage" && entry.args === undefined) restoredInput816 = await restore(checkpoint746);
+    }
     /** 戻した checkpoint の出力ダイジェスト（記録の output_digest を旧の値に戻すのに使う） */
     const revertedCheckpoints = new Map<string, string>();
     /** 費用の印への置換に使う、ディレクトリを目印に置き換えた全ファイルの本文 */
@@ -5751,6 +5860,12 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
           const digest = revertedCheckpoints.get(entry.path);
           if (digest !== undefined) entry.output_digest = digest;
         }
+        // Issue #816：入力の checkpoint（この走りが書いたものではない）の出力ダイジェストを #816 の前に戻す
+        const input = record["input"] as { output_digest?: string } | null | undefined;
+        if (idsOnV12 && restoredInput816 !== null && input !== null && input !== undefined) {
+          input.output_digest = restoredInput816;
+          rawText = stageJsonText(record);
+        }
         if (idsOnV12 && reverted.some((entry) => revertedCheckpoints.has(entry.path))) rawText = stageJsonText(record);
         if (idsOnStage) {
           if (!keepSearch) delete record["search_repair"];
@@ -5765,13 +5880,13 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
           expect(stageJsonText(record), path).toBe(text);
         }
       }
-      // 一気通貫の Build だけの記録も checkpoint の出力ダイジェストを持つ（Issue #806）
+      // 一気通貫の Build だけの記録も checkpoint の出力ダイジェストを持つ（Issue #806。#816 の段を戻した値に直す）
       if (idsOnV12 && path === BUILD_CLI_RECORD_FILE) {
         const record = JSON.parse(raw) as Record<string, any>;
         const reverted = (record["checkpoints"] ?? []) as { path: string; output_digest: string }[];
         let changed = false;
         for (const entry of reverted) {
-          const digest = revertedCheckpoints.get(entry.path);
+          const digest = restored816.get(entry.path);
           if (digest !== undefined) {
             entry.output_digest = digest;
             changed = true;

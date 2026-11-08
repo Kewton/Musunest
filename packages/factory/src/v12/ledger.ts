@@ -31,6 +31,10 @@
 // 上流の見方には未対応の観測（登録済み・未対応の行の ID と固定文）も入れ、見方の版を 2 に上げた（#725。C2 がデータで受け、C2' が
 // unresolved の根拠の ID として受ける）。
 //
+// #816（wave 82 のレビュー R1・R2・R3）：上流の見方を **段が実際に受ける見方（`ledgerViewOf`）と同じ導出**の射影にし（R2。
+// ids の版を 2 に上げる）、checkpoint に書く全体・上流の指紋を公開の関数 `ledgerVersionsOf` 1 つにまとめ（R1。CLI の書き手も
+// 計測の道具の読み手もここを通す）、検査の式の行の B1 の文は R-w11-07 の例外に委ねる（R3。旧の文は試験の定数に残す）。
+//
 // 台帳は LLM を呼ばず、評価口を import しない（B4 の照合は名前で持ち、評価口が名前 → 関数の表を持つ）。
 import type { AggregateKind } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
@@ -960,7 +964,8 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       t2: "検査の式（validation-expression）の試験は、確かめ方が validation-expression の要件にだけ、対象の項目ごとに正常・異常・境界の 3 種類を作る。対象（target）はその要件の targets の項目（field）の行、operation は validate、observes は validation-expression、期待（expected）は今の評価器のとおり（validate の異常は誤りコード、正常は値）にする。確かめ方がこの種類でない要件の validate の試験に validation-expression を書かない。",
       t2Ids:
         "場合の観測する性質（observes）は、確かめ方が validation-expression の要件の項目・entity の行の場合だけ validation-expression と書き、対象（targetId）はその要件の targets の項目の行から選ぶ。確かめ方がこの種類でない要件の項目・entity の行の場合は validation-expression と書かない。",
-      b1: "固定した試験のうち observes が validation-expression の試験は、対象の項目（field）の行ごとに、その項目の名前と同じ名前の検査を要求する（同じ entity の別の項目は別の検査の名前になる）。",
+      // 契約の持ち主を R-w11-07 の例外に 1 つにする（#816 の R3。旧の文は試験の定数に残す）
+      b1: "固定した試験のうち observes が validation-expression の試験は、R-w11-07 の例外（データ「要る検査の骨組み」の件ごとに書く検査 1 つ）で確かめる。この性質のために、ほかの検査や名前を足さない。",
     },
   },
 ];
@@ -1345,10 +1350,12 @@ export interface UpstreamLedgerView {
 export const UPSTREAM_LEDGER_VIEW_VERSION = 2;
 
 /**
- * 旗 `v12.ids` の見方の版（Issue #806）。off の版（2・今の射影）は比較元として保ち、ids の見方は別の版で指紋化する。
- * 版を旧（2）に戻し `t1IdsRuleTexts` を射影から外すと、ids の見方の旧の値に戻る
+ * 旗 `v12.ids` の見方の版（Issue #806・#816）。off の版（2）は比較元として保つ。ids の見方は #816 で 2 に上げた：上流の
+ * 見方を **段が実際に受ける見方 `ledgerViewOf` と同じ導出**（`{ ...V12_FLAGS_OFF, ids }` の適用行）の射影にしたので、
+ * 検査の式の行が上流の見方にも入る。off の版と同じ 2 でも、ids の見方の材料には `t1IdsRuleTexts` の鍵があり、off の
+ * 射影にはその鍵が無いので、指紋は衝突しない。版を 1 に戻し、off の適用行から導き直すと、ids の見方の旧の値（#806）に戻る
  */
-export const UPSTREAM_LEDGER_VIEW_VERSION_IDS = 1;
+export const UPSTREAM_LEDGER_VIEW_VERSION_IDS = 2;
 
 /** 上流の台帳の見方の境界（部分の指紋の材料。境界 t2-b1 は全体の指紋で照らす） */
 export const UPSTREAM_LEDGER_BOUNDARY = "t1-t2" as const satisfies StageBoundary;
@@ -1368,15 +1375,13 @@ export function upstreamLedgerViewOf(view: UpstreamLedgerView): UpstreamLedgerVi
 }
 
 /**
- * 台帳の行から上流の見方を導く（全体の導出を通すので、不備のある台帳は例外で断る）。上流の段は旗 ids だけが要る行
- * （検査の式）を読まないので、off の適用行で今の射影を保ち、旗 ids のときだけ `t1IdsRuleTexts` を足す（Issue #806）
+ * 台帳の行から上流の見方を導く（全体の導出を通すので、不備のある台帳は例外で断る）。**段が実際に受ける見方と同じ導出**
+ * （`ledgerViewOf` の旗の組 `{ ...V12_FLAGS_OFF, ids }` の適用行）をそのまま上流の射影にする（Issue #816。R2）。だから旗 ids の
+ * ときは、検査の式の行（`requires: "ids"`）も上流の見方に入り、その行の T1・T1'' の文が部分の指紋に効く（#806 は off の適用行から
+ * 導いていたので、この行の文が指紋に届かなかった）。off の適用行と射影は変えない
  */
 export function deriveUpstreamLedgerView(rows: readonly PropertyRow[], flags: Partial<V12Flags> = V12_FLAGS_OFF): UpstreamLedgerView {
-  const baseRows = applicableRows(rows, V12_FLAGS_OFF);
-  const base = upstreamLedgerViewOf(deriveLedgerView(baseRows));
-  if (flags.ids !== true) return base;
-  const idsView = deriveLedgerView(baseRows, { ...V12_FLAGS_OFF, ids: true });
-  return { ...base, t1IdsRuleTexts: idsView.t1IdsRuleTexts ?? [] };
+  return upstreamLedgerViewOf(deriveLedgerView(rows, { ...V12_FLAGS_OFF, ids: flags.ids === true }));
 }
 
 /**
@@ -1407,6 +1412,25 @@ export async function upstreamLedgerSha256(
       },
     }),
   );
+}
+
+/** 走りが checkpoint に書く台帳の版（全体の指紋と上流の台帳の部分の指紋。Issue #816。R1） */
+export interface LedgerVersions {
+  readonly ledger: string;
+  readonly ledgerUpstream: string;
+}
+
+/**
+ * 走りが checkpoint に書く台帳の版の指紋（**公開の関数 1 つ**。Issue #816。R1）。引数は `V12_PIPELINE_FLAGS` と同じ公開の鍵の組で、
+ * 返り値は `{ ledger, ledgerUpstream }`。工場の CLI の書き手も、計測の道具の読み手も、この関数を通す——旗の組み立てを工場の外に
+ * 重複させず、段が実際に受ける見方（`ledgerViewOf` の旗）と、版に記録する見方を 1 つの導出に揃える
+ */
+export function ledgerVersionsOf(flags: Partial<V12PublicFlags>, rows: readonly PropertyRow[] = PROPERTY_LEDGER): Promise<LedgerVersions> {
+  const effective = fromPublicV12Flags(flags);
+  return Promise.all([propertyLedgerSha256(rows, effective), upstreamLedgerSha256(rows, effective)]).then(([ledger, ledgerUpstream]) => ({
+    ledger,
+    ledgerUpstream,
+  }));
 }
 
 /** 試験の型の必須に無い kind の、v1 の網羅の検査の固定文（`${kind} の試験が無い`。外す文） */

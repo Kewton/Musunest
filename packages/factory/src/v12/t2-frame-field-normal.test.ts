@@ -404,17 +404,25 @@ describe("(6) R-tsp-02 の ids の文：免除の事実に合わせ、上限の�
   });
 });
 
-// ── 台帳の指紋は変えない（受入条件「台帳の全体・上流の指紋（ids on を含む）が base と同じ」）──────
+// ── 台帳の指紋（off は #813 の受入条件「base と同じ」のまま。ids on は #816 で変わる）──────
 
-describe("台帳の全体・上流の指紋（ids on を含む）は base と同じ", () => {
-  it("off の全体・上流と、ids on の全体・上流の指紋を、直す前（base）の値と等値で照らす", async () => {
+describe("台帳の全体・上流の指紋（off は base と同じ。ids on は #816 で変わる）", () => {
+  it("off の全体・上流を直す前（base）の値と等値で照らす。ids on は #816 で変わり、#806 の値は `${...}_806` に残す", async () => {
     const off = fromPublicV12Flags({});
     const ids = fromPublicV12Flags({ ids: true });
     expect(await propertyLedgerSha256(PROPERTY_LEDGER, off)).toBe("fd0adc6ddc5bf82c48ff8be3930a74fe86f469b623359aedb64af5bdfe1e08f5");
     expect(await upstreamLedgerSha256(PROPERTY_LEDGER, off)).toBe("421d105d258f0d810cc44173edcad4720e391c63760348308f7a97187dd88d42");
-    // base（#806 の後）の ids on の値（この Issue で台帳を変えない）
-    expect(await propertyLedgerSha256(PROPERTY_LEDGER, ids)).toBe("bfb08678980fa71aa03b1ad012a9a397ebcefa73b404c8fcb52943157eb86d5d");
-    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, ids)).toBe("22b8b846038207ed3acbcde92a7f64fbb3f3e843ebe2a11835fb9a9f8c275a71");
+    // Issue #816：R2（ids の上流の指紋を段が受ける見方から組む）と R3（検査の式の行の B1 の文）で ids on の 2 つの値が変わる。
+    // 旧の値（#806 の後）は `_806` に残し、#816 の値と違うことを照らす
+    const base806 = {
+      ledger: "bfb08678980fa71aa03b1ad012a9a397ebcefa73b404c8fcb52943157eb86d5d",
+      upstream: "22b8b846038207ed3acbcde92a7f64fbb3f3e843ebe2a11835fb9a9f8c275a71",
+    };
+    expect(await propertyLedgerSha256(PROPERTY_LEDGER, ids)).not.toBe(base806.ledger);
+    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, ids)).not.toBe(base806.upstream);
+    // #816 の値（台帳の試験（ledger.test.ts）と CLI の試験（cli.test.ts）の定数と同じ）
+    expect(await propertyLedgerSha256(PROPERTY_LEDGER, ids)).toBe("fac851157c424650e597a3fe8c8e0b4156ec983c835d7f3e90b1f147284d27e4");
+    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, ids)).toBe("dc21dd0177557eec5af22eafe2355a41f99884ab4e063d6745e30ae9c554c110");
   });
 });
 

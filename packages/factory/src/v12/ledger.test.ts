@@ -48,6 +48,7 @@ import {
   PROPERTY_LEDGER_VIEW_IDS,
   PROPERTY_STATES,
   idsRuleCopyRows,
+  ledgerVersionsOf,
   propertyIdsRuleCopyCells,
   propertyLedgerSha256,
   upstreamLedgerSha256,
@@ -340,6 +341,23 @@ describe("台帳から導いたものが今の定数と同じ（旗 on の載せ
     // 公開の鍵はコードの内部の鍵としては読まない（resolveV12Flags は内部の鍵だけを読む）
     // ids は内部の鍵と公開の鍵が同じ名前なので、どちらで読んでも on（Issue #592）
     expect(resolveV12Flags(V12_PIPELINE_FLAGS as unknown as Partial<V12Flags>)).toEqual({ ledger: true, searchRepair: false, ids: true });
+  });
+
+  it("(R1) 公開の関数：公開の旗の組を受けて、その走りが checkpoint に書く全体・上流の指紋を返す", async () => {
+    // 公開の旗の組（`V12_PIPELINE_FLAGS` の形）を渡すと、その走りの全体・上流の指紋になる
+    expect(await ledgerVersionsOf(V12_PIPELINE_FLAGS)).toEqual({
+      ledger: await propertyLedgerSha256(PROPERTY_LEDGER, fromPublicV12Flags(V12_PIPELINE_FLAGS)),
+      ledgerUpstream: await upstreamLedgerSha256(PROPERTY_LEDGER, fromPublicV12Flags(V12_PIPELINE_FLAGS)),
+    });
+    // off の組は off の指紋のまま（旗を省いた呼び出しと同じ値）
+    const off = await ledgerVersionsOf({});
+    expect(off).toEqual({ ledger: await propertyLedgerSha256(), ledgerUpstream: await upstreamLedgerSha256() });
+    // ids の組は off の値と違う（旗が効いている）
+    const ids = await ledgerVersionsOf(V12_PIPELINE_FLAGS);
+    expect(ids.ledger).not.toBe(off.ledger);
+    expect(ids.ledgerUpstream).not.toBe(off.ledgerUpstream);
+    // 台帳を渡せば、その台帳の指紋になる（製品の正本は省いたときの既定）
+    expect(await ledgerVersionsOf({}, PROPERTY_LEDGER)).toEqual(off);
   });
 });
 
@@ -1426,6 +1444,56 @@ describe("旗 v12.ids の C2 への文（Issue #806）", () => {
   const BASE_OFF_WHOLE = "fd0adc6ddc5bf82c48ff8be3930a74fe86f469b623359aedb64af5bdfe1e08f5";
   const BASE_IDS_WHOLE = "a4ee52333a07cc5d87172fa10508a88af18192561a3c3731cd3f0124b8859f50";
   const BASE_OFF_UPSTREAM = "421d105d258f0d810cc44173edcad4720e391c63760348308f7a97187dd88d42";
+  /**
+   * #806 の時点（#816 の前）の ids の全体の指紋。`propertyLedgerSha256(PROPERTY_LEDGER, ids)` を base で測った値。
+   * #816 で変わるのは R3（検査の式の行の B1 の文）だけなので、B1 の文を旧の文に戻すとこの値に戻る
+   */
+  const BASE_IDS_WHOLE_806 = "bfb08678980fa71aa03b1ad012a9a397ebcefa73b404c8fcb52943157eb86d5d";
+  /**
+   * #806 の時点の ids の上流の部分の指紋（版 1・off の適用行から導いた射影）。`upstreamLedgerSha256(PROPERTY_LEDGER, ids)` を
+   * base（#806 の後・#816 の前）で測った値（Issue #816。R2 の復元の照合に使う）
+   */
+  const BASE_IDS_UPSTREAM_806 = "22b8b846038207ed3acbcde92a7f64fbb3f3e843ebe2a11835fb9a9f8c275a71";
+  /** Issue #816 の前の検査の式の行の B1 の文（R3。旧の文は消さずに試験の定数に残す） */
+  const OLD_VALIDATION_EXPRESSION_B1 =
+    "固定した試験のうち observes が validation-expression の試験は、対象の項目（field）の行ごとに、その項目の名前と同じ名前の検査を要求する（同じ entity の別の項目は別の検査の名前になる）。";
+
+  /** 検査の式の行の B1 の文を #816 の前の文に戻した台帳（R3 の復元） */
+  const withOldValidationExpressionB1 = (rows: readonly PropertyRow[] = PROPERTY_LEDGER): readonly PropertyRow[] =>
+    withRow("validation-expression", (row) => ({ ...row, rules: { ...row.rules, b1: OLD_VALIDATION_EXPRESSION_B1 } }), rows);
+
+  /**
+   * #806 の導出を再現した ids の上流の部分の指紋（版 1・off の適用行から導いた射影に、ids の見方の `t1IdsRuleTexts` を足す）。
+   * 直す前（#806）の挙動を試験に残すために、`ledger.ts` の `sortedJson` と同じ正規化をここに置く（製品はこの関数を持たない）
+   */
+  const legacyUpstreamSha806 = async (rows: readonly PropertyRow[] = PROPERTY_LEDGER): Promise<string> => {
+    const offRows = rows.filter((row) => row.requires === undefined);
+    const base = upstreamLedgerViewOf(deriveLedgerView(offRows));
+    const idsView = deriveLedgerView(offRows, { ...V12_FLAGS_OFF, ids: true });
+    const view = { ...base, t1IdsRuleTexts: idsView.t1IdsRuleTexts ?? [] };
+    const sortedJson = (value: unknown): string =>
+      JSON.stringify(value, (_key, inner: unknown) =>
+        inner === null || typeof inner !== "object" || Array.isArray(inner)
+          ? inner
+          : Object.fromEntries(Object.entries(inner as Record<string, unknown>).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))),
+      );
+    return sha256Hex(
+      sortedJson({
+        version: 1,
+        boundary: UPSTREAM_LEDGER_BOUNDARY,
+        view: {
+          t1RuleTexts: view.t1RuleTexts,
+          t1IdsRuleTexts: view.t1IdsRuleTexts,
+          t1AcceptanceTexts: view.t1AcceptanceTexts,
+          verificationKinds: view.verificationKinds,
+          rowByVerificationKind: [...view.rowByVerificationKind].map(([kind, entry]) => ({ kind, t1: entry.t1 })),
+          excludedWhenAcceptedKinds: view.excludedWhenAcceptedKinds,
+          aggregateKinds: view.aggregateKinds,
+          unsupportedObservations: view.unsupportedObservations,
+        },
+      }),
+    );
+  };
 
   it("(1) 導出：ids の見方だけが t1IdsRuleTexts を持ち、3 行の分だけ t1RuleTexts と違い、ほかの行は同じ文。off の見方に欄が無い", () => {
     expect("t1IdsRuleTexts" in PROPERTY_LEDGER_VIEW).toBe(false);
@@ -1439,9 +1507,20 @@ describe("旗 v12.ids の C2 への文（Issue #806）", () => {
     // 上流の見方も ids だけが欄を持ち、3 行の分だけ増える
     expect("t1IdsRuleTexts" in deriveUpstreamLedgerView(PROPERTY_LEDGER)).toBe(false);
     const idsUpstream = deriveUpstreamLedgerView(PROPERTY_LEDGER, { ...V12_FLAGS_OFF, ids: true });
-    // 上流の見方は off の射影（検査の式の行を読まない）に 3 文を足したもの
+    // Issue #816（R2）：上流の見方は段が受ける見方（`ledgerViewOf` の ids の組）と同じ導出の射影なので、検査の式の行の
+    // T1 の文も入る。off の射影（検査の式の行を読まない）に、その 1 文を足したものになる
     expect(idsUpstream.t1IdsRuleTexts).toEqual([...IDS_ROWS.map((id) => rowOf(id).rules.t1Ids?.text), ...idsUpstream.t1RuleTexts]);
-    expect(idsUpstream.t1RuleTexts).toEqual(deriveUpstreamLedgerView(PROPERTY_LEDGER).t1RuleTexts);
+    expect(idsUpstream.t1RuleTexts).toEqual([...deriveUpstreamLedgerView(PROPERTY_LEDGER).t1RuleTexts, rowOf("validation-expression").rules.t1]);
+  });
+
+  it("(R2) 深い等しさ：上流の見方は、段が受ける ids の見方（`ledgerViewOf`）の欄のうち上流の射影だけを取り出したものと等しい", () => {
+    const view = ledgerViewOf({ ledger: true, ids: true });
+    if (view === undefined) throw new Error("前提が壊れた：ids の見方が無い");
+    expect(deriveUpstreamLedgerView(PROPERTY_LEDGER, { ...V12_FLAGS_OFF, ids: true })).toEqual(upstreamLedgerViewOf(view));
+    // off も同じ（off の射影は off の見方の射影）
+    const offView = ledgerViewOf({ ledger: true, ids: false });
+    if (offView === undefined) throw new Error("前提が壊れた：off の見方が無い");
+    expect(deriveUpstreamLedgerView(PROPERTY_LEDGER, V12_FLAGS_OFF)).toEqual(upstreamLedgerViewOf(offView));
   });
 
   it("(1) 二点測定：3 行の t1Ids に文・why・since がそろい、欠けると台帳の点検が落ちる", () => {
@@ -1466,19 +1545,22 @@ describe("旗 v12.ids の C2 への文（Issue #806）", () => {
     expect(ledgerRowDefects(withoutIdsRuleTexts())).toEqual([]);
   });
 
-  it("(3) 指紋：off の全体・上流の指紋は base の定数と同じ。ids の全体の指紋は t1Ids を外すと旧の定数に戻り、ids の上流の指紋は版を旧に戻して t1IdsRuleTexts を射影から外すと旧の定数に戻る", async () => {
+  it("(3) 指紋：off の全体・上流の指紋は base の定数と同じ。ids の全体の指紋は t1Ids を外すと旧の定数に戻り、ids の上流の指紋は版を 1 に戻して off の適用行から導き直すと base（#806）の値に戻る", async () => {
     const ids = fromPublicV12Flags({ ids: true });
     const off = fromPublicV12Flags({});
     expect(await propertyLedgerSha256(PROPERTY_LEDGER, off)).toBe(BASE_OFF_WHOLE);
     expect(await upstreamLedgerSha256(PROPERTY_LEDGER, off)).toBe(BASE_OFF_UPSTREAM);
     const idsWhole = await propertyLedgerSha256(PROPERTY_LEDGER, ids);
     expect(idsWhole).not.toBe(BASE_IDS_WHOLE);
-    expect(await propertyLedgerSha256(withoutIdsRuleTexts(), ids)).toBe(BASE_IDS_WHOLE);
+    // R3 の B1 の文を旧の文に戻すと、ids の全体の指紋は base（#806 の後・#816 の前）の値に戻る（R3 の差がその 1 文だけであることの証跡）
+    expect(await propertyLedgerSha256(withOldValidationExpressionB1(), ids)).toBe(BASE_IDS_WHOLE_806);
+    // #806 で足した t1Ids も外すと、#800 の ids の全体の指紋に戻る（旧の値も消さずに照らす）
+    expect(await propertyLedgerSha256(withOldValidationExpressionB1(withoutIdsRuleTexts()), ids)).toBe(BASE_IDS_WHOLE);
     const idsUpstream = await upstreamLedgerSha256(PROPERTY_LEDGER, ids);
     expect(idsUpstream).not.toBe(BASE_OFF_UPSTREAM);
-    // 版を旧（2）に戻し、t1IdsRuleTexts を射影から外した復元（= off の射影）は旧の値に戻る
-    expect(await upstreamLedgerSha256(withoutIdsRuleTexts(), off)).toBe(BASE_OFF_UPSTREAM);
-    expect(UPSTREAM_LEDGER_VIEW_VERSION_IDS).toBe(1);
+    expect(UPSTREAM_LEDGER_VIEW_VERSION_IDS).toBe(2);
+    // R2 の復元：版を 1 に戻し、off の適用行から導き直すと、base（#806）の ids の上流の指紋に一致する
+    expect(await legacyUpstreamSha806()).toBe(BASE_IDS_UPSTREAM_806);
     // 二点測定：ids の見方で C2 の文を 1 文字変えると ids の上流の指紋が変わる（旧 checkpoint を区別できる）
     const changed = withRow("when", (row) =>
       row.rules.t1Ids === undefined ? row : { ...row, rules: { ...row.rules, t1Ids: { ...row.rules.t1Ids, text: `${row.rules.t1Ids.text}。` } } },
@@ -1486,6 +1568,50 @@ describe("旗 v12.ids の C2 への文（Issue #806）", () => {
     expect(await upstreamLedgerSha256(changed, ids)).not.toBe(idsUpstream);
     // off の上流の指紋は変わらない（ids の文は off の射影に入らない）
     expect(await upstreamLedgerSha256(changed, off)).toBe(BASE_OFF_UPSTREAM);
+  });
+
+  it("(R2) 上流の感度：検査の式の行の T1 の文・T1'' の受理条件の文を 1 字変えると ids の上流の指紋が変わり、off の上流の指紋は変わらない。直す前（#806）の導出では ids の上流の指紋が変わらなかった", async () => {
+    const ids = fromPublicV12Flags({ ids: true });
+    const off = fromPublicV12Flags({});
+    const idsUpstream = await upstreamLedgerSha256(PROPERTY_LEDGER, ids);
+    const changes: readonly { readonly name: string; readonly rows: readonly PropertyRow[] }[] = [
+      {
+        name: "T1 の文",
+        rows: withRow("validation-expression", (row) => ({ ...row, rules: { ...row.rules, t1: `${row.rules.t1 ?? ""}字` } })),
+      },
+      {
+        name: "T1'' の受理条件の文",
+        rows: withRow("validation-expression", (row) => ({ ...row, rules: { ...row.rules, t1Acceptance: `${row.rules.t1Acceptance ?? ""}字` } })),
+      },
+    ];
+    for (const { name, rows } of changes) {
+      expect(ledgerRowDefects(rows), name).toEqual([]);
+      // 直した後：ids の上流の指紋が変わる（検査の式の行が上流の見方に入る）
+      expect(await upstreamLedgerSha256(rows, ids), name).not.toBe(idsUpstream);
+      // off の上流の指紋は変わらない
+      expect(await upstreamLedgerSha256(rows, off), name).toBe(BASE_OFF_UPSTREAM);
+      // 直す前（#806 の導出）の挙動：同じ変更で ids の上流の指紋が変わらない
+      expect(await legacyUpstreamSha806(rows), name).toBe(BASE_IDS_UPSTREAM_806);
+    }
+  });
+
+  it("(R3) B1 の文：検査の式の行の B1 の文は R-w11-07 の例外に委ね、項目の名前と同じ名前の検査の旧の文を持たない。直す前の文に戻すと旧の要求に戻る", () => {
+    const b1 = rowOf("validation-expression").rules.b1 ?? "";
+    expect(b1).not.toBe(OLD_VALIDATION_EXPRESSION_B1);
+    expect(b1).not.toContain("名前と同じ名前の検査");
+    expect(b1).toContain("R-w11-07");
+    expect(b1).toContain("要る検査の骨組み");
+    // ほかの行の B1 の文は変えない（旧の文を持つのはこの行だけ）
+    for (const row of PROPERTY_LEDGER) {
+      if (row.id === "validation-expression") continue;
+      expect(row.rules.b1 ?? "", row.id).not.toContain("validation-expression の試験は、対象の項目（field）の行ごとに");
+    }
+    // 直す前の文に戻すと、B1 の文の並びは base（#806）に戻る
+    const restored = deriveLedgerView(withOldValidationExpressionB1(), { ...V12_FLAGS_OFF, ids: true });
+    expect(restored.b1RuleTexts).toContain(OLD_VALIDATION_EXPRESSION_B1);
+    expect(restored.b1RuleTexts).not.toContain(b1);
+    // 題材の言葉は無い
+    for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(b1).not.toContain(word);
   });
 
   it("(5) 写し：既存の表は base と同じで、ids の表に 3 行がある。行を消す・since を変えると落ちる", () => {
