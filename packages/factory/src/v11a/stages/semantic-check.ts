@@ -23,7 +23,8 @@
 // 変えない（束の外の要件の判定は今の束の形の検査で落ちる）。束が 1 つの要求は今とバイト列で同じ。
 //
 // 旗 `v12.ids` の C3 の 2 回目（`recheck` を渡したとき。Issue #805）は、対象を「再点検の部分」（C2 が書き直した要件と、表の項・
-// 所属の行の所属させる要件の集合・所属の行の定義が前回の表と違う要件。`recheckTargetsOf`）に限り、束ごとの参照のみの塊を
+// その要件を所属させる行（コードが導いた entity の所属を含む）の所属させる要件の集合・その行の定義が前回の表と違う要件。
+// `recheckTargetsOf`）に限り、束ごとの参照のみの塊を
 // 「2 回目の全対象からその束を除いた要件」にする。部分の外の要件は 1 回目の判定を保ち（R-sc-03 の例外。R-sc-07）、部分の判定と
 // 合成して採用する（`composeRecheckJudgments`）。部分が 0 件なら LLM を呼ばず、束 0・判定 0 を返す。1 回目・off・束が 1 つの
 // 要求は今とバイト列で同じ。
@@ -361,6 +362,13 @@ function sameIdSet(left: readonly string[], right: readonly string[]): boolean {
   return true;
 }
 
+/** 行の `id` ごとの所属（`ownersByRowId`）から、その要件を所属させる行の `id` を引く（導いた entity の所属を含む見方） */
+function rowIdsOwnedBy(owners: ReadonlyMap<string, readonly string[]>, requirementId: string): readonly string[] {
+  const ids: string[] = [];
+  for (const [rowId, ownersOfRow] of owners) if (ownersOfRow.includes(requirementId)) ids.push(rowId);
+  return ids;
+}
+
 /** 再点検の部分を導く入力（Issue #805） */
 export interface SemanticRecheckInput {
   readonly list: RequirementList;
@@ -377,8 +385,9 @@ export interface SemanticRecheckInput {
  * 確かめ方が unresolved の要件を除く）のうち、**一覧の順**で次のどれかに当たる要件を部分とする：
  *   (1) C2 が書き直した要件（2 回目の表で unresolved になったものは全対象にも部分にも無いので除く）
  *   (2) 書き直していない要件のうち、1 回目と 2 回目の表で、その要件の表の項（所属・確かめ方・分類）が違うもの、
- *       所属のどれかの行について「その行を所属させる要件の集合」（コードが導いた entity の所属を含む。順序は問わない）が
- *       違うもの、所属のどれかの行の定義（行そのもの）が違うもの
+ *       その要件を所属させる行（1 回目と 2 回目の表それぞれで `ownersByRowId` が導く行の和。コードが導いた entity の
+ *       所属を含む）のどれかについて「その行を所属させる要件の集合」（順序は問わない）が違うもの、その行の定義
+ *       （行そのもの）が違うもの
  * 書き直した要件は、2 回目の表で unresolved になっているものを除いて必ず部分に入る。0 件になりうる。
  */
 export function recheckTargetsOf(input: SemanticRecheckInput): readonly string[] {
@@ -402,10 +411,11 @@ export function recheckTargetsOf(input: SemanticRecheckInput): readonly string[]
     if (ownershipKey(previousOwner) !== ownershipKey(currentOwner)) return true;
     if (JSON.stringify(previousVerification.get(requirementId)) !== JSON.stringify(currentVerification.get(requirementId))) return true;
     if (JSON.stringify(previousClassification.get(requirementId)) !== JSON.stringify(currentClassification.get(requirementId))) return true;
-    // 所属のどれかの行（1 回目と 2 回目の和。手放した行も見る）の、所属させる要件の集合と定義
+    // その要件を所属させる行（1 回目と 2 回目の和。手放した行も見る。導いた entity の所属を含む）の、
+    // 所属させる要件の集合と定義。生の所属ではなく、行の集合を作る見方を `ownersByRowId` に揃える
     const rowIds = new Set([
-      ...(previousOwner?.roles ?? []).map((role) => role.id),
-      ...(currentOwner?.roles ?? []).map((role) => role.id),
+      ...rowIdsOwnedBy(previousOwners, requirementId),
+      ...rowIdsOwnedBy(currentOwners, requirementId),
     ]);
     for (const rowId of rowIds) {
       if (!sameIdSet(previousOwners.get(rowId) ?? [], currentOwners.get(rowId) ?? [])) return true;
