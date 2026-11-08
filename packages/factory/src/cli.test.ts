@@ -116,6 +116,8 @@ import { isGeneratedTestId } from "./v12/generated-tests.js";
 import { ruleTexts } from "./stages/prompt.js";
 import {
   TEST_SPEC_DATA_NAMES,
+  TEST_SPEC_CLOCK_DATA_NAME,
+  TEST_SPEC_CLOCK_RULE_TEXT,
   TEST_SPEC_FRAMES_DATA_NAME,
   TEST_SPEC_SCHEMA_NAME,
   testSpecRuleDefinitionsOf,
@@ -1498,6 +1500,10 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
           const framesBlock = new RegExp(`\\n<data name="${TEST_SPEC_FRAMES_DATA_NAME}">\\n[\\s\\S]*?\\n</data>`);
           expect(framesBlock.test(input)).toBe(true);
           input = input.replace(framesBlock, "");
+          // #794：所属の後ろ・枠の前の時計の塊も旗 ids の走りだけの塊（ちょうど 1 つ在ることを確かめてから除く）
+          const clockBlock = new RegExp(`\\n<data name="${TEST_SPEC_CLOCK_DATA_NAME}">\\n[\\s\\S]*?\\n</data>`, "g");
+          expect(input.match(clockBlock)).toHaveLength(1);
+          input = input.replace(clockBlock, "");
         }
         // 旗 ids の走りの規則のうち、場合の形に差し替えた欄の名前の文（R-tsp-07・09・11・12・13・14。#625）と、必要な試験の枠の
         // R-tsp-03（#653）は旗 ids off の文に戻す
@@ -5012,6 +5018,13 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    *   stage-recounts d78e5d53…／stage-stop-repair c6d4b2e4…／stage-stop-commit f95fbfa3…／whole-stagnation 78f47029…／
    *   whole-adopting 092a3533…／whole-sets e13e5689…／whole-recounts 2940a375…）。欄だけの直しを含む `stage-mixed`・`whole-mixed` は
    * 診断が残るので #761 の取り直しの値のまま
+   *
+   * **Issue #794 の取り直し（旧値と理由）**：旗 ids の T2 の要求（束の初回・中身のやり直し）に、コードが固定した時計の値の塊「時計」1 つ
+   * と R-tsp-13 の末尾の時計の文を足したので、T2 を通る ids on の経路の要求の列が変わった。T2 を通る次の 7 経路だけ取り直した（旧値：
+   *   stage-search-repair-off 5dc5994e…／whole-stagnation 248017e1…／whole-adopting ca3074eb…／whole-sets acd0d9b6…／
+   *   whole-mixed 2fb98ee3…／whole-recounts 0a657756…／whole-search-repair-off b54b883d…）。`t2-b1` から始める stage-* の走り・
+   * ids off・v1.1a は T2 を通らないので旧値のまま。時計の塊と時計の文を位置で外した指紋（`withoutDiagnostics`）は
+   * 下の BEFORE_761_RAW・BEFORE_761_REQUESTS・BEFORE_761_BUDGET（旧の指紋）と一致する
    */
   const BEFORE_746: Readonly<Record<string, string>> = {
     "stage-stagnation": "055ebe51378e8035e4ea152c509710fc84473c6d954be3d1168cb17b4ced9a1f",
@@ -5023,15 +5036,15 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "stage-stop-repair": "4e17820e9cd8415b24850f555bed05d332ce45a3c79eb1d6eedb93ee1a892dac",
     "stage-stop-first-eval": "fd323bfcc9d82f0f102dbf43d9ce14db17bc05cc9b8c0ff84c91939270710948",
     "stage-stop-commit": "ab11a902ec436a60193e2b2b4c5ab3bf4afd6ae88b338dbb74bc042944100909",
-    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
-    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
-    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
-    "whole-mixed": "2fb98ee37e8a4e2b3cab5b8a1dbdd723ffb5e87011b45f9019ad51c79feb062b",
-    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
+    "whole-stagnation": "f5adc99bd5ffe58c69001c2f475e4f62d59109110ced09207d26ce787525f6a5",
+    "whole-adopting": "a9652bde43e0d3b063be4cebaf188dc9d4890b24db0964b324f509f2b68f3106",
+    "whole-sets": "fca50c6ff352ff68283700e41e28dccad0f9902ba97eb19247448a349d9fa384",
+    "whole-mixed": "589712b169582b875c5b01af0173ea43510c1f5cc34ee2d00fe7c9dc18aa699b",
+    "whole-recounts": "2a3fe011135a60c99eeb3c716430571c1f7382344b9e2a889550d8247b2dccde",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
-    "stage-search-repair-off": "5dc5994e2dffc41aab246647e4b9b5d61d281194cf7cfff32d01525c95c311cd",
-    "whole-search-repair-off": "b54b883dcc61c988952fbce4d66ff2bc6cdd8174f24d797824d4bde1371875bb",
+    "stage-search-repair-off": "eca92253f67a9e086112c5f0cf5e6b47087d7ca55252f91f0eb70c96ce0dcbe5",
+    "whole-search-repair-off": "a335530bb32ea6f00021acd1d1485ed316596287aca051804973f03bb59f0083",
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
@@ -5144,12 +5157,54 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     return [...rules.slice(0, index), ...rules.slice(index + 1)];
   }
 
-  /** 要求 1 つ（JSON の文字列か写像）から、診断の塊と R-fr-08 を外す。形（文字列か写像か・欄の順）は変えない */
+  /**
+   * Issue #794：旗 ids の T2 の要求の時計の塊 1 つを、**塊の名前で決めた位置**だけ外す（「要件ごとの所属」の直後にあることを確かめる）。
+   * 塊が無ければそのまま
+   */
+  function withoutClockBlock(input: string): string {
+    const opener = `\n<data name="${TEST_SPEC_CLOCK_DATA_NAME}">`;
+    const start = input.indexOf(opener);
+    if (start < 0) return input;
+    expect(input.indexOf(opener, start + 1), "時計の塊は 1 つ").toBe(-1);
+    const [, , , , ownershipName] = TEST_SPEC_DATA_NAMES;
+    const close = "\n</data>";
+    expect(input.lastIndexOf(`<data name="${ownershipName}">`, start), "時計の塊は所属の後ろ").toBeGreaterThanOrEqual(0);
+    expect(input.slice(0, start).endsWith(close), "時計の塊は塊の直後").toBe(true);
+    const end = input.indexOf(close, start);
+    if (end < 0) throw new Error("前提が壊れた：時計の塊の終わりが無い");
+    return `${input.slice(0, start)}${input.slice(end + close.length)}`;
+  }
+
+  /** 旗 ids の R-tsp-13 の文（#794 の後。規則の id で引く）と、末尾の時計の文を外した文（#794 の前） */
+  const IDS_R13_TEXT = (() => {
+    const definitions = testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true);
+    const index = definitions.findIndex((definition) => definition.id === "R-tsp-13");
+    if (index < 0) throw new Error("前提が壊れた：R-tsp-13 が定義に無い");
+    const after = ruleTexts([definitions[index]!])[0] ?? "";
+    if (!after.endsWith(TEST_SPEC_CLOCK_RULE_TEXT)) throw new Error("前提が壊れた：旗 ids の R-tsp-13 が時計の文で終わらない");
+    return { after, before: after.slice(0, -TEST_SPEC_CLOCK_RULE_TEXT.length) };
+  })();
+
+  /** Issue #794：旗 ids の T2 の要求の規則から、R-tsp-13 の末尾の時計の文だけを外す（その文の規則が 1 つであることを確かめる） */
+  function withoutClockRule(rules: readonly string[]): readonly string[] {
+    const index = rules.indexOf(IDS_R13_TEXT.after);
+    if (index < 0) return rules;
+    expect(rules.filter((rule) => rule === IDS_R13_TEXT.after), "時計の文の R-tsp-13 は 1 つ").toHaveLength(1);
+    return [...rules.slice(0, index), IDS_R13_TEXT.before, ...rules.slice(index + 1)];
+  }
+
+  /**
+   * 要求 1 つ（JSON の文字列か写像）から、診断の塊と R-fr-08 を外す。Issue #794：旗 ids の T2 の時計の塊と R-tsp-13 の末尾の時計の文も
+   * 外す（どちらも在るか、どちらも無いか）。形（文字列か写像か・欄の順）は変えない
+   */
   function withoutDiagnostic(value: unknown): unknown {
     const object = typeof value === "string" ? (JSON.parse(value) as Record<string, unknown>) : { ...(value as Record<string, unknown>) };
     const next: Record<string, unknown> = { ...object };
-    if (Array.isArray(object["rules"])) next["rules"] = withoutR08(object["rules"] as readonly string[]);
-    if (typeof object["input"] === "string") next["input"] = withoutDiagnosticBlock(object["input"]);
+    if (Array.isArray(object["rules"])) next["rules"] = withoutClockRule(withoutR08(object["rules"] as readonly string[]));
+    if (typeof object["input"] === "string") next["input"] = withoutClockBlock(withoutDiagnosticBlock(object["input"]));
+    const hadClockRule = Array.isArray(object["rules"]) && (object["rules"] as readonly string[]).includes(IDS_R13_TEXT.after);
+    const hadClockBlock = typeof object["input"] === "string" && object["input"] !== withoutClockBlock(object["input"]);
+    expect(hadClockBlock, "時計の塊と時計の文は対").toBe(hadClockRule);
     return typeof value === "string" ? JSON.stringify(next) : next;
   }
 
@@ -5469,6 +5524,10 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    * stage-returned 4a3d8c40…／stage-recounts 25d652b0…／stage-stop-repair 1c991819…／stage-stop-commit 241ad6a1…／
    * whole-stagnation 78f47029…／whole-adopting 092a3533…／whole-sets e13e5689…／whole-recounts 2940a375…）。
    * `stage-mixed`・`whole-mixed` は欄だけの直しを含むので #761 の取り直しの値のまま
+   *
+   * **Issue #794 の取り直し（旧値と理由）**：BEFORE_746 の注と同じ理由で、T2 を通る ids on の 7 経路だけ取り直した（旧値：
+   *   stage-search-repair-off 5dc5994e…／whole-stagnation 248017e1…／whole-adopting ca3074eb…／whole-sets acd0d9b6…／
+   *   whole-mixed 2fb98ee3…／whole-recounts 0a657756…／whole-search-repair-off b54b883d…）。ほかは旧値のまま
    */
   const BEFORE_748_BASE: Readonly<Record<string, string>> = {
     "stage-stagnation": "0ef2fe8bc20c81f4a8dba870cdb2103f14ba42b0c064cccd68f01c3c163008f8",
@@ -5480,15 +5539,15 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "stage-stop-repair": "1bd073e2d94a519d53762e8e0b6fecb78f9731ff306e4422377288a9eee681bb",
     "stage-stop-first-eval": "df320daf50a2c3e343c582894f57af6874bee3bd02d881ad445e36734f8d490f",
     "stage-stop-commit": "1bbfcba658904ff0c2aa4fbe935e00cbcb427a466928b678b81c2017695a3373",
-    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
-    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
-    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
-    "whole-mixed": "2fb98ee37e8a4e2b3cab5b8a1dbdd723ffb5e87011b45f9019ad51c79feb062b",
-    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
+    "whole-stagnation": "f5adc99bd5ffe58c69001c2f475e4f62d59109110ced09207d26ce787525f6a5",
+    "whole-adopting": "a9652bde43e0d3b063be4cebaf188dc9d4890b24db0964b324f509f2b68f3106",
+    "whole-sets": "fca50c6ff352ff68283700e41e28dccad0f9902ba97eb19247448a349d9fa384",
+    "whole-mixed": "589712b169582b875c5b01af0173ea43510c1f5cc34ee2d00fe7c9dc18aa699b",
+    "whole-recounts": "2a3fe011135a60c99eeb3c716430571c1f7382344b9e2a889550d8247b2dccde",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
-    "stage-search-repair-off": "5dc5994e2dffc41aab246647e4b9b5d61d281194cf7cfff32d01525c95c311cd",
-    "whole-search-repair-off": "b54b883dcc61c988952fbce4d66ff2bc6cdd8174f24d797824d4bde1371875bb",
+    "stage-search-repair-off": "eca92253f67a9e086112c5f0cf5e6b47087d7ca55252f91f0eb70c96ce0dcbe5",
+    "whole-search-repair-off": "a335530bb32ea6f00021acd1d1485ed316596287aca051804973f03bb59f0083",
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };

@@ -120,7 +120,7 @@ import { DECL_CHECK_SCHEMA_NAME } from "./stages/decl-check.js";
 import { NAME_TABLE_PREVIOUS_DATA_NAMES, NAME_TABLE_SCHEMA_NAME } from "./stages/name-table.js";
 import * as semanticCheckStage from "./stages/semantic-check.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
-import { TEST_SPEC_DATA_NAMES, TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf, testSpecSchemaOf, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
+import { TEST_SPEC_CLOCK_DATA_NAME, TEST_SPEC_CLOCK_RULE_TEXT, TEST_SPEC_DATA_NAMES, TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf, testSpecSchemaOf, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
 import {
   WRITE_V11A_DATA_NAMES,
   WRITE_V11A_IDS_R07_DEFINITION,
@@ -180,13 +180,33 @@ const T2_IDS_LIMIT_TEXT = `要件ごとの試験は、コードが作った分�
 
 /**
  * 旗 ids on の T2 の要求の R-tsp-02 から、要件ごとの試験の上限の文（Issue #663 で足した）を外した要求（#663 の前の要求と照らす。
- * 外す前に、T2 の要求ごとに上限の文がちょうど 1 つ在ることを確かめる。ほかの段の要求はそのまま）
+ * 外す前に、T2 の要求ごとに上限の文がちょうど 1 つ在ることを確かめる。ほかの段の要求はそのまま）。
+ * Issue #794 の後は、先に `withoutIdsClock` で時計の塊と R-tsp-13 の時計の文を外す（#663・#732・C2 を外した照合が旧の値のまま通る）
  */
 function withoutIdsLimit(requests: readonly LlmStructuredRequest[]): readonly LlmStructuredRequest[] {
-  return requests.map((request) => {
+  return withoutIdsClock(requests).map((request) => {
     if (request.schemaName !== TEST_SPEC_SCHEMA_NAME) return request;
     expect((request.rules ?? []).filter((text) => text.endsWith(T2_IDS_LIMIT_TEXT))).toHaveLength(1);
     return { ...request, rules: (request.rules ?? []).map((text) => (text.endsWith(T2_IDS_LIMIT_TEXT) ? text.slice(0, text.length - T2_IDS_LIMIT_TEXT.length) : text)) };
+  });
+}
+
+/**
+ * Issue #794：旗 ids on の T2 の要求から、時計の塊 1 つ（塊の名前で決めた位置）と R-tsp-13 の末尾の時計の文を外す（#794 の前の要求と
+ * 照らす。外す前に、T2 の要求ごとに塊と文がちょうど 1 つずつ在ることを確かめる。ほかの段の要求はそのまま）
+ */
+function withoutIdsClock(requests: readonly LlmStructuredRequest[]): readonly LlmStructuredRequest[] {
+  return requests.map((request) => {
+    if (request.schemaName !== TEST_SPEC_SCHEMA_NAME) return request;
+    const opener = `\n<data name="${TEST_SPEC_CLOCK_DATA_NAME}">`;
+    const start = request.input.indexOf(opener);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(request.input.indexOf(opener, start + 1)).toBe(-1);
+    const close = "\n</data>";
+    const input = `${request.input.slice(0, start)}${request.input.slice(request.input.indexOf(close, start) + close.length)}`;
+    expect((request.rules ?? []).filter((text) => text.endsWith(TEST_SPEC_CLOCK_RULE_TEXT))).toHaveLength(1);
+    const rules = (request.rules ?? []).map((text) => (text.endsWith(TEST_SPEC_CLOCK_RULE_TEXT) ? text.slice(0, -TEST_SPEC_CLOCK_RULE_TEXT.length) : text));
+    return { ...request, input, rules };
   });
 }
 
@@ -1140,7 +1160,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #725 で取り直した（旗 ids と ledger が on の C2 のデータに台帳の未対応の観測の塊を足し、台帳版の R-map-03 の文を直したため。旧 a0e42ef4f3de48221fad469acf72b29e550d33ad7488101326d496a754a49ac6）
       // 要求の SHA-256 は Issue #732 で取り直した（旗 ids on の C3 の R-sc-02 に構造の検査の読み方の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_732_REQUESTS`。旧 75f57eff2d977c6b6c8b71930987722c5e26076cc8d5d0dae2a06a4868e911a4）
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 11ca852ea32e6f3085c5cf91987ba986e9561aea6a442458ea408d2ce851de80）
-      "23e96f59c9b15af3b01e23a7b81c879a139b7776c1e0e6a823739e637b1c0852",
+      // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 23e96f59c9b15af3b01e23a7b81c879a139b7776c1e0e6a823739e637b1c0852）
+      "b397d6409d7bb8fe3e8dd289563117390ec92c6ddf0210d7da840c3efc343f5f",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d3d46bd0bae1ed1bce66a419612e4d05b1d6d0cefa9b95072d2af39c8137d700）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 ef2dc4cd77f101896bc8c4c377efeabe8f621d092497fdef0ee93b69490e031f）
@@ -1157,7 +1178,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #725 で取り直した（旗 ids と ledger が on の C2 のデータに台帳の未対応の観測の塊を足し、台帳版の R-map-03 の文を直したため。旧 d6db3501d82e82b7dbe13920732e1c256b53866bca4f79a115719448695213d6）
       // 要求の SHA-256 は Issue #732 で取り直した（旗 ids on の C3 の R-sc-02 に構造の検査の読み方の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_732_REQUESTS`。旧 9e19ad5d99fa79745564a69adff2c76e4f54b63e940f2bede3a2a614824c775b）
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 a61b8eb44bff4d25b0770176166625d28060dfa421594be3033ff047f10b3634）
-      "fca5a4eeaad8ab62b049891ea21784f097cc9f715f7ffe27fdf3fa46f2f84179",
+      // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 fca5a4eeaad8ab62b049891ea21784f097cc9f715f7ffe27fdf3fa46f2f84179）
+      "5b18feeb728eda386d9523d6da712dc86522812b75c6cb8794f17f12487069d9",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 c479ec4fc3ac733a9b470499f5d8fc631583a94ca9e4169834ae571ea7499645）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 a3848402cdf1bbedbdbb51431bd971ccc94a351d6bfb88ae7a9f56054cdec635）
@@ -1176,7 +1198,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #725 で取り直した（旗 ids と ledger が on の C2 のデータに台帳の未対応の観測の塊を足し、台帳版の R-map-03 の文を直したため。旧 351709d5e31e65fc7e15cb2c289bfdb67db83c5d8d4aa1fdb8415153dad8bfd9）
       // 要求の SHA-256 は Issue #732 で取り直した（旗 ids on の C3 の R-sc-02 に構造の検査の読み方の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_732_REQUESTS`。旧 298a1512256d852b1a484e660db51a2d58e39922bc0e9d9a1dd1bbe7acb25f21）
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 37d215a03b3d1fb251479e18ff68b18cba8c3ba4bb473c2667e0bd44e480192c）
-      "c71bc450115d4e4bcefe329eac1ef6280b6f20fc155782ab881cda8368fe8b9d",
+      // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 c71bc450115d4e4bcefe329eac1ef6280b6f20fc155782ab881cda8368fe8b9d）
+      "70844607c361197004f0c489d2f446f717ddb340c855a02a3f21a2cd401e518c",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 2f032bbaf50ff8e7c6c0fbe9708107eb043cca23ae2bc5b6b25680e7c2f4151a）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 f039481b055d8d893ee5535d5b56acc5182d6e5b392c8c4f3a21c4632403f859）
@@ -1210,7 +1233,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #725 で取り直した（旗 ids と ledger が on の C2 のデータに台帳の未対応の観測の塊を足し、台帳版の R-map-03 の文を直したため。旧 d90c255d8438f58a29992f777751860ea34175f12bd2745be699ce7ee1fcba47）
       // 要求の SHA-256 は Issue #732 で取り直した（旗 ids on の C3 の R-sc-02 に構造の検査の読み方の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_732_REQUESTS`。旧 700a9fd50ba0cbe0641af1e0bbb175347a6fc7042917a733be759068ec318cae）
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 a8445592525ce05b953014bcc300b19b10bd6e4a8361d10c34ec79d20412452d）
-      "f194a77e72fc71d29fb2d45966a2934dd85d47c7f74c7ad597811208892ee273",
+      // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 f194a77e72fc71d29fb2d45966a2934dd85d47c7f74c7ad597811208892ee273）
+      "b63b9c2a1aa4d3b949b5ef26d2b5bdc1f4011806ec6226313a2443797d240d3c",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d762715a3037b44cbc202848f40b5fa2cd1551bba549bd418f56fefc0e9def0e）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 4a2626d7964d9f231142488d8151d75f3c36d8ef216d65f06c6fb63bc8a102ab）
@@ -1282,6 +1306,19 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     "(5) 形で 1 度も落ちない": ["14b868bfb4d6b944e2419cae0411c22b0f983c23a5ef1c7e47fc4424d7e6a298", "4a2626d7964d9f231142488d8151d75f3c36d8ef216d65f06c6fb63bc8a102ab"],
   };
 
+  /**
+   * Issue #794 の前の要求の SHA-256（旧の値。上の `BEFORE_DIGESTS` の 3 番目を #794 で取り直す前の値）。#794 の要求から T2 の時計の塊と
+   * R-tsp-13 の時計の文（`withoutIdsClock`）を外すとこの値に戻ることを照らす。T2 に届かない (4) の 2 台本は今の値と同じ
+   */
+  const BEFORE_794_REQUESTS: Readonly<Record<string, string>> = {
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "23e96f59c9b15af3b01e23a7b81c879a139b7776c1e0e6a823739e637b1c0852",
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "fca5a4eeaad8ab62b049891ea21784f097cc9f715f7ffe27fdf3fa46f2f84179",
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "c71bc450115d4e4bcefe329eac1ef6280b6f20fc155782ab881cda8368fe8b9d",
+    "(4) C2 が 2 回落ちて止まる": "f82fa77127b88ffcb12ca79f150cbe0d16438e055cc543503e8f44b8c83181f5",
+    "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+    "(5) 形で 1 度も落ちない": "f194a77e72fc71d29fb2d45966a2934dd85d47c7f74c7ad597811208892ee273",
+  };
+
   const BEFORE_MATERIALS_DIGESTS: Readonly<Record<string, string>> = {
     "(4) C2 が 2 回落ちて止まる": "a1c6f1158b66a23deb3a2fefe0b0ea6a0c315529a826a9d67b5fad4d8960cf27",
     "(4) C1 の束 2 が 2 回落ちて止まる": "2c99823924cadb18d40b4ee932938aa9349c60dbc058806d3d9fb1258b8a61c6",
@@ -1293,6 +1330,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const measuredWithoutMapping: Record<string, string> = {};
     const measuredWithoutReading: Record<string, string> = {};
     const measuredWithoutLimit: Record<string, string> = {};
+    const measuredWithoutClock: Record<string, string> = {};
     const measuredBefore735: Record<string, readonly string[]> = {};
     const rejectedSummaries: Record<string, readonly { attempt: number; problem_count: number; messages: readonly { message: string; count: number }[] }[]> = {};
     for (const script of beforeScripts()) {
@@ -1319,6 +1357,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       );
       // Issue #663：T2 の R-tsp-02 から要件ごとの試験の上限の文を外した要求は、#663 の前の要求の SHA-256 と同じ（差はその文だけ）
       measuredWithoutLimit[script.name] = await sha256Hex(JSON.stringify({ structured: withoutIdsLimit(recording.structured), tools: recording.tools }));
+      // Issue #794：T2 の時計の塊と R-tsp-13 の時計の文を位置で外した要求は、#794 の前の要求の SHA-256 と同じ（差はその塊と文だけ）
+      measuredWithoutClock[script.name] = await sha256Hex(JSON.stringify({ structured: withoutIdsClock(recording.structured), tools: recording.tools }));
       // Issue #735：C3 に届いた走りの要約は v12_calls に C3 の束の欄を持ち、それを外した要約・納品物は #735 の前と同じ
       const summary735 = structuredClone(result.summary) as unknown as Record<string, any>;
       if (summary735["v12_calls"]?.["semantic_check"] !== undefined) {
@@ -1341,6 +1381,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(measured).toEqual(BEFORE_DIGESTS);
     expect(measuredWithoutReading).toEqual(BEFORE_732_REQUESTS);
     expect(measuredWithoutLimit).toEqual(BEFORE_663_REQUESTS);
+    expect(measuredWithoutClock).toEqual(BEFORE_794_REQUESTS);
     expect(measuredBefore735).toEqual(BEFORE_735);
     expect(measuredMaterials).toEqual(BEFORE_MATERIALS_DIGESTS);
     expect(measuredWithoutMapping).toEqual(BEFORE_REQUESTS_WITHOUT_MAPPING);
