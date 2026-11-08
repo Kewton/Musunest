@@ -5671,6 +5671,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     readonly strippedRequests: string;
     /** Issue #815：復元の順に #801 の段も外した要求の列の指紋（戻した旧の値と照らす） */
     readonly oldStrippedRequests: string;
+    /** Issue #815：#813 の JSON.parse の経路に #806・#801 を重ねた要求の列の指紋（stage の走りだけ） */
+    readonly oldFrameRequests: string | undefined;
     readonly budgetNormalized: string;
     readonly budgetKeys: readonly string[];
     readonly budgetDerived: BudgetNormalizedFiles["derived"];
@@ -5805,6 +5807,18 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const oldRequests = restoreOld801(requests);
     const oldStrippedRequests = withoutDiagnostics(oldRequests);
     const oldStrippedRequestsDigest = await sha256Hex(JSON.stringify(oldStrippedRequests));
+    // Issue #815：#813 の JSON.parse の経路（`restoredStage` と同じ入口）に #806・#801 を重ねた要求の列の指紋。
+    // 文字列のままの経路では #813 の枠の塊（改行がエスケープされている）を戻せないが、この経路なら戻せる
+    const oldFrameRequests =
+      entry.kind === "stage" && Array.isArray(requests) && (requests as readonly unknown[]).every((text) => typeof text === "string")
+        ? (() => {
+            const restored = (requests as readonly string[]).map((text) =>
+              JSON.stringify(restoreOld801(withoutIdsC2Texts(withoutFrameFieldNormal(JSON.parse(text))))),
+            );
+            return withoutDiagnostics(restored);
+          })()
+        : undefined;
+    const oldFrameRequestsDigest = oldFrameRequests === undefined ? undefined : await sha256Hex(JSON.stringify(oldFrameRequests));
     // Issue #813：段の走りの要求列は `requestText` の JSON 文字列の並びで、枠の塊の改行がエスケープされている。本文に戻して
     // `withoutFrameFieldNormal` を掛け直すと（#794・#663 の文は元から含む）、診断と R-fr-08 を外した要求列・全出力・
     // 診断と R-fr-08 を外した全出力が旧値に戻る。取り直しの根拠を、注ではなく等値で照らす
@@ -5826,6 +5840,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       stripped,
       strippedRequests: strippedRequestsDigest,
       oldStrippedRequests: oldStrippedRequestsDigest,
+      oldFrameRequests: oldFrameRequestsDigest,
       budgetNormalized,
       budgetKeys: [...new Set(budgetFiles.keys)].sort(),
       budgetDerived: budgetFiles.derived,
@@ -6092,7 +6107,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "stage-stop-commit": "82c7ec61c4640598759923e670222bc60d7eabe41d165b86e1574979722b04b0",
     "stage-search-repair-off": "c064d53fe231a99982ec0ebc08e2948ca82a626d794f95e1b5a24be73300ae5d",
   };
-  /** Issue #815：値を #801 の前（db91af3）に戻した。区分：連鎖で照らす（`stage-search-repair-off` だけは #813 の経路の差。直接固定した Issue：#813）。#801 の値は `BEFORE_761_REQUESTS_801`。今の等値は `_801` で保つ */
+  /** Issue #815：値を #801 の前（db91af3）に戻した。区分：連鎖で照らす（`stage-search-repair-off` も #813 の JSON.parse の経路で復元する）。#801 の値は `BEFORE_761_REQUESTS_801`。今の等値は `_801` で保つ */
   const BEFORE_761_REQUESTS_800: Readonly<Record<string, string>> = {
     "stage-stagnation": "5c51234f156300cf85d282ff2cc32d78891e925da3fb0eddf5e7ae1edc01705a",
     "stage-adopting": "fe3d32ced7ac8e7137af99369c198d1f36789ca952f9627cc295677544abb21e",
@@ -6111,7 +6126,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "stage-search-repair-off": "3c21beb9077abd87a0234d6243ff7edac295f378142e72a63b37b42422c527f0",
     "whole-search-repair-off": "7b30f391f4c943a574d2242f9dc8f6e094139887b47d9e3ef4ea7bfca2bd3d55",
   };
-  /** Issue #801 の値（`BEFORE_761_REQUESTS_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす（`stage-search-repair-off` は #813。直接固定した Issue：#813） */
+  /** Issue #801 の値（`BEFORE_761_REQUESTS_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす */
   const BEFORE_761_REQUESTS_801: Readonly<Record<string, string>> = {
     "stage-stagnation": "39d709782210e6c637cc1515b14f03756bf46e8b33187061e8976de8080fcaef",
     "stage-adopting": "8202bae2f648a7c2851a04d365766faac7808ad42506b8c845489e52caa1e39b",
@@ -6188,6 +6203,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const budgetDigests: Record<string, string> = {};
     /** Issue #815：復元の順（#813 → #806 → #805 → #801 → #800）に #801 の段も外した要求の列。戻した旧の値と照らす */
     const oldStrippedRequestDigests: Record<string, string> = {};
+    /** Issue #815：#813 の JSON.parse の経路に #806・#801 を重ねた要求の列（stage の走りだけ） */
+    const oldFrameRequestDigests: Record<string, string> = {};
     const budgetKeySets: Record<string, readonly string[]> = {};
     const budgetDerivedSets: Record<string, BudgetNormalizedFiles["derived"]> = {};
     const searched: Record<string, boolean> = {};
@@ -6198,6 +6215,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
         stripped,
         strippedRequests,
         oldStrippedRequests,
+        oldFrameRequests,
         budgetNormalized,
         budgetKeys,
         budgetDerived,
@@ -6208,6 +6226,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       strippedDigests[entry.name] = stripped;
       strippedRequestDigests[entry.name] = strippedRequests;
       oldStrippedRequestDigests[entry.name] = oldStrippedRequests;
+      if (oldFrameRequests !== undefined) oldFrameRequestDigests[entry.name] = oldFrameRequests;
       budgetDigests[entry.name] = budgetNormalized;
       budgetKeySets[entry.name] = budgetKeys;
       budgetDerivedSets[entry.name] = budgetDerived;
@@ -6217,12 +6236,14 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     // 今の等値の期待は #801 の値（`_801`）で保つ（Issue #815）。`_800` は #801 の前（db91af3）に戻した値
     expect(digests).toEqual({ ...BEFORE_746, ...BEFORE_746_801, ...BEFORE_746_806, ...BEFORE_746_813 });
     // Issue #815：復元の順（#813 → #806 → #805 → #801 → #800）に #801 の段も外した要求の列が、戻した旧の値と等しい。
-    // `stage-search-repair-off` だけは #813 が経路を変えた台本で、文字列のままの枠の復元ができないので連鎖では照らさない
-    //（字どおり戻すだけ。直接固定した Issue：#813）。全出力の指紋は checkpoint の output_digest に #800 の経路の差を持つので
-    // 連鎖では照らさない（字どおり戻すだけ。直接固定した Issue：#800）
+    // 文字列のままの経路では #813 の枠の塊（改行がエスケープされている）を戻せないので `stage-search-repair-off` だけを除き、
+    // その 1 つは #813 の JSON.parse の経路（`restoredStage` と同じ入口）に #806・#801 を重ねて別に照らす（下）。
+    // 全出力の指紋は checkpoint の output_digest に #800 の経路の差を持つので連鎖では照らさない（字どおり戻すだけ。直接固定した Issue：#800）
     expect(withoutOne(oldStrippedRequestDigests, "stage-search-repair-off")).toEqual(
       withoutOne({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_800 }, "stage-search-repair-off"),
     );
+    // Issue #815：`stage-search-repair-off` の要求の列も、#813 の JSON.parse の経路に #806・#801 を重ねれば戻した旧の値に戻る
+    expect(oldFrameRequestDigests["stage-search-repair-off"]).toBe(BEFORE_761_REQUESTS_800["stage-search-repair-off"]);
     // 戻した旧の値は #801 の値と違う（字どおり戻すだけの値も、値の集合として木に残す。Issue #815）
     expect(BEFORE_761_RAW_800["stage-stagnation"]).not.toBe(BEFORE_761_RAW_801["stage-stagnation"]);
     expect(BEFORE_761_BUDGET_800["whole-stagnation"]).not.toBe(BEFORE_761_BUDGET_801["whole-stagnation"]);
@@ -6319,6 +6340,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const strippedRequestDigests: Record<string, string> = {};
     /** Issue #815：復元の順に #801 の段も外した要求の列の指紋（戻した旧の値と照らす） */
     const oldStrippedRequestDigests: Record<string, string> = {};
+    /** Issue #815：#813 の JSON.parse の経路に #806・#801 を重ねた要求の列（stage の走りだけ） */
+    const oldFrameRequestDigests: Record<string, string> = {};
     const budgetDigests: Record<string, string> = {};
     const budgetKeySets: Record<string, readonly string[]> = {};
     const budgetDerivedSets: Record<string, BudgetNormalizedFiles["derived"]> = {};
@@ -6336,22 +6359,26 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       const entry = INVARIANT_RUNS[index]!;
       current = `${entry.name}（${index + 1}/${INVARIANT_RUNS.length}）`;
       currentTiming = { ioMs: 0, runMs: 0, hashMs: 0 };
-      const { digest, stripped, strippedRequests, oldStrippedRequests, budgetNormalized, budgetKeys, budgetDerived, hasSearch } = await invariantDigest(entry, true, currentTiming);
+      const { digest, stripped, strippedRequests, oldStrippedRequests, oldFrameRequests, budgetNormalized, budgetKeys, budgetDerived, hasSearch } = await invariantDigest(entry, true, currentTiming);
       timings.push({ name: entry.name, ...currentTiming });
       digests[entry.name] = digest;
       strippedDigests[entry.name] = stripped;
       strippedRequestDigests[entry.name] = strippedRequests;
       oldStrippedRequestDigests[entry.name] = oldStrippedRequests;
+      if (oldFrameRequests !== undefined) oldFrameRequestDigests[entry.name] = oldFrameRequests;
       budgetDigests[entry.name] = budgetNormalized;
       budgetKeySets[entry.name] = budgetKeys;
       budgetDerivedSets[entry.name] = budgetDerived;
       searched[entry.name] = hasSearch;
     }
     expect(digests).toEqual({ ...BEFORE_748_BASE, ...BEFORE_748_BASE_801, ...BEFORE_748_BASE_806, ...BEFORE_748_BASE_813 });
-    // Issue #815：復元の順に #801 の段も外した要求の列が、戻した旧の値と等しい（`stage-search-repair-off` は #813 の経路の差）
+    // Issue #815：復元の順に #801 の段も外した要求の列が、戻した旧の値と等しい。`stage-search-repair-off` は
+    // #813 の JSON.parse の経路（`restoredStage` と同じ入口）に #806・#801 を重ねて別に照らす（下）
     expect(withoutOne(oldStrippedRequestDigests, "stage-search-repair-off")).toEqual(
       withoutOne({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_800 }, "stage-search-repair-off"),
     );
+    // Issue #815：`stage-search-repair-off` の要求の列も、#813 の JSON.parse の経路に #806・#801 を重ねれば戻した旧の値に戻る
+    expect(oldFrameRequestDigests["stage-search-repair-off"]).toBe(BEFORE_761_REQUESTS_800["stage-search-repair-off"]);
     // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと（search_repair・requests・stage_spans を残したまま）、直す前（f9bf3b3）の生出力とバイト列で同じ
     for (const entry of INVARIANT_RUNS) {
       if (WHOLE_COST_AFFECTED.has(entry.name)) continue;
