@@ -1194,9 +1194,13 @@ describe("(5'') 旗 v12.ids の C2 の初回は要件 5 件ごとの束（手 3b
   });
 
   it("どの要件にも所属しない行がある応答は、C2' の固定文で形のやり直し 1 回のあと段 mapping・unmet で止まる（C3 を呼ばない）", async () => {
-    const first = entries();
-    const orphan = { requirements: first.map((entry, index) => (index === 0 ? { ...entry, roles: first[1]?.["roles"] } : entry)) };
-    const run = await observe(materials, [...vocabulary(), structured(orphan), structured(orphan)], { flags: ALL_ON });
+    // 検査の式の要件は targets の項目と entity が、構造の要件は検査の対象がコードに足される（Issue #594・#808）。
+    // 足されない固定した試験の要件の所属を外して、孤立行の固定文を測る
+    const plain = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, ALL_ON);
+    const [, , , plainMapping] = plain.tableResponses() as readonly Record<string, readonly Record<string, unknown>[]>[];
+    const first = ((plainMapping?.["requirements"] ?? []) as readonly Entry[]).map((entry) => ({ ...entry }));
+    const orphan = { requirements: first.map((entry, index) => (index === 0 ? { ...entry, roles: [] } : entry)) };
+    const run = await observe(plain, [...plain.tableResponses().slice(0, 3).map(structured), structured(orphan), structured(orphan)], { flags: ALL_ON });
     expect(run.result.stopped).toMatchObject({ stage: "mapping", kind: "unmet" });
     expect(run.result.stopped?.problems?.map((problem) => problem.message)).toContain("どの要件にも所属しない行がある");
     // 初回の束 k と全体の作り直し 1（Issue #736）

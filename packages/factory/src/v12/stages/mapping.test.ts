@@ -14,6 +14,7 @@ import {
 import { expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
   FIXTURE_DOCUMENTS,
+  baseCheckValidationExpressionTargets,
   checkFieldsResponseOf,
   createCheckedRecordingClient,
   fixtureDefaultValueList,
@@ -39,6 +40,7 @@ import {
   CHECK_TARGET_MESSAGES,
   IDS_NO_SOURCE,
   checkMappedTable,
+  checkValidationExpressionTargets,
   nameTableSha256,
   ownersByRowId,
   type NameTable,
@@ -2502,5 +2504,122 @@ describe("台帳の未対応の観測を unresolved の根拠に足す（旗 ids
     expect(ledger?.id).toBe(plain?.id);
     expect(ledger?.why).toBe(plain?.why);
     expect(ledger?.since).toContain("#682 は空の並び 34/129 件を理由に 1 件以上とした。根拠を文書に縛る理由（怠慢の持ち越しを塞ぐ）は保ち、台帳の未対応を根拠に足した");
+  });
+});
+
+// ── Issue #808：検査の式の要件の所属を C2' の前の手が足す（#800 の欠陥）───────────────────────────
+//
+// 直す前は、所属に足してよいかの判定が固定文の組を渡さずに照合の関数を呼び、その関数が「正しくない」を返していた。
+// 今は固定文の組が無くても判定を返すので、C2 の応答が対象の項目と entity を書かなくても、C2' の前の手が両方を足す。
+
+describe("Issue #808：検査の式の要件の所属を C2' の前の手が足す（#800 の欠陥）", () => {
+  type Role808 = { readonly id: string; readonly basis: "stated" | "dependency"; readonly reason: string | null };
+  const row808 = (id: string, kind: NameTableRow["kind"], entity: string | null, name: string, type: NameTableRow["type"]): NameTableRow => ({
+    id,
+    kind,
+    entity,
+    name,
+    role: `${id} の役割`,
+    source: IDS_NO_SOURCE,
+    type,
+    options: null,
+    groupBy: null,
+    refEntity: null,
+  });
+  const ROWS: readonly NameTableRow[] = [row808("E1", "entity", null, "item", null), row808("E1.F1", "field", "E1", "alpha", "number")];
+  const TEXT = "要件 R1 の文。";
+  const LIST_808: RequirementList = { requirements: [{ id: "R1", text: TEXT, quote: TEXT, position: { start: 0, end: TEXT.length } }], decisions: [], unresolved: [] };
+  const TARGETS: readonly string[] = ["E1.F1"];
+  const targetMessages = PROPERTY_LEDGER_VIEW_IDS.rowByVerificationKind.get("validation-expression")?.t1?.targetMessages;
+  const role = (id: string): Role808 => ({ id, basis: "stated", reason: null });
+  const entryOf = (roles: readonly Role808[], targets: readonly string[] = TARGETS): Record<string, unknown> => ({
+    requirementId: "R1",
+    roles,
+    verification: { kind: "validation-expression", value: null, targets, reason: null, checks: null, constraintIds: [] },
+    nature: "ruled",
+  });
+  const responseOf = (roles: readonly Role808[], targets: readonly string[] = TARGETS): Record<string, unknown> => ({ requirements: [entryOf(roles, targets)] });
+  /** 直す前の同じ台本の表（前の手が所属を足さない。roles は応答のまま） */
+  const baseTableOf = (roles: readonly Role808[], targets: readonly string[] = TARGETS): NameTable => ({
+    rows: ROWS,
+    ownership: [{ requirementId: "R1", roles }],
+    verification: [{ requirementId: "R1", kind: "validation-expression", targets }],
+    classification: [{ requirementId: "R1", nature: "ruled" }],
+  });
+  const inspectedOf = (roles: readonly Role808[], targets: readonly string[] = TARGETS) =>
+    inspectMappingSourced(LIST_808, ROWS, responseOf(roles, targets), FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW_IDS);
+
+  it("(3) C2 の応答が対象の項目と entity を書かなくても、C2' の前の手が両方を所属に足し（basis dependency・reason は対象の項目）、表の検査を通る。直す前の同じ台本は足さず、悪い targets は固定文で落ちる", async () => {
+    const good = inspectedOf([]);
+    expect(good.ok).toBe(true);
+    if (!good.ok) return;
+    expect(good.table.ownership[0]?.roles).toEqual([
+      { id: "E1.F1", basis: "dependency", reason: "E1.F1" },
+      { id: "E1", basis: "dependency", reason: "E1.F1" },
+    ]);
+    // 直す前の同じ台本：所属は応答のまま（足さない）
+    const base = baseTableOf([]);
+    expect(base.ownership[0]?.roles).toEqual([]);
+    expect(await nameTableSha256(good.table)).not.toBe(await nameTableSha256(base));
+
+    // 悪い targets：前の手は足さず、表の検査が固定文で落とす（固定文は直す前の同じ呼び出しと同じ）
+    const bad: readonly string[] = ["E1.F1", "E1.UNKNOWN"];
+    const rejected = inspectedOf([], bad);
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) return;
+    const baseProblems: { field: string; message: string }[] = [];
+    baseCheckValidationExpressionTargets(ROWS, bad, "verification", targetMessages, baseProblems);
+    const messages = rejected.problems.map((problem) => problem.message);
+    for (const problem of baseProblems) expect(messages).toContain(problem.message);
+    // 判定も偽（前の手は所属を足さない）
+    expect(baseCheckValidationExpressionTargets(ROWS, bad, "", undefined, []).valid).toBe(false);
+  });
+
+  it("(4) #800 の試験 (3) と同じ正例を、照合の関数を直接呼ぶのではなく C2' の前の手を通して確かめる", () => {
+    const problems: { field: string; message: string }[] = [];
+    const direct = checkValidationExpressionTargets(ROWS, TARGETS, "verification", targetMessages, problems);
+    expect(direct.valid).toBe(true);
+    expect(problems).toEqual([]);
+    // 応答は対象の項目だけを所属に書き、entity を書かない
+    const through = inspectedOf([role("E1.F1")]);
+    expect(through.ok).toBe(true);
+    if (!through.ok) return;
+    const owned = new Set((through.table.ownership[0]?.roles ?? []).map((entry) => entry.id));
+    expect(owned).toEqual(direct.allowed);
+    expect(owned.has("E1")).toBe(true);
+    expect(owned.has("E1.F1")).toBe(true);
+  });
+
+  it("(5) 指紋：分岐が変わらない台本は旧の値と一致し、変わる台本は足された所属と表の SHA の差を示したうえで新しい値を等値で固定する", async () => {
+    // 分岐が変わらない台本（C2 が entity と対象の項目を書いている）：直す前と同じ表・同じ値
+    const unchanged = inspectedOf([role("E1"), role("E1.F1")]);
+    if (!unchanged.ok) throw new Error("前提が壊れた：変わらない台本が C2' を通らない");
+    expect(await nameTableSha256(unchanged.table)).toBe("63c6759fa6079609f859f14b3d0e8b44d9a51a3d42d6777812e2136875f54a8b");
+    expect(await nameTableSha256(baseTableOf([role("E1"), role("E1.F1")]))).toBe("63c6759fa6079609f859f14b3d0e8b44d9a51a3d42d6777812e2136875f54a8b");
+
+    // 変わる台本（C2 が entity を書かない）：足された所属と表の SHA の差を機械で示す。
+    // 旧の値は直す前の同じ台本の表（152dce10…）。新しい値は上の差のあとの表（理由：entity E1 が所属に足された）
+    const changed = inspectedOf([role("E1.F1")]);
+    if (!changed.ok) throw new Error("前提が壊れた：変わる台本が C2' を通らない");
+    const base = baseTableOf([role("E1.F1")]);
+    expect(changed.table.ownership[0]?.roles).toEqual([
+      { id: "E1.F1", basis: "stated", reason: null },
+      { id: "E1", basis: "dependency", reason: "E1.F1" },
+    ]);
+    expect(await nameTableSha256(base)).toBe("152dce1081d5dccd244faab5c4f1b24b51cb73d6e5247c9b4e679476b8ac8669");
+    expect(await nameTableSha256(changed.table)).not.toBe(await nameTableSha256(base));
+    expect(await nameTableSha256(changed.table)).toBe("2adba81202fbd904c95cf0a2b4d55a6d5c3836d81d7a42566a3f5e9f67cd1796");
+  });
+
+  it("題材：要求・試験・fixture のどこにも受入の題材の言葉が無い", () => {
+    expectNoAcceptanceMaterial([
+      TEXT,
+      ...ROWS.map((row) => `${row.id} ${row.name} ${row.role}`),
+      JSON.stringify(responseOf([])),
+      JSON.stringify(responseOf([role("E1.F1")])),
+      JSON.stringify(baseTableOf([])),
+      JSON.stringify(inspectedOf([])),
+      JSON.stringify(inspectedOf([], ["E1.F1", "E1.UNKNOWN"])),
+    ]);
   });
 });

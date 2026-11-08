@@ -1717,9 +1717,12 @@ export function checkValidationExpressionTargets(
   problems: Problem[],
 ): { readonly valid: boolean; readonly allowed: ReadonlySet<string> } {
   const allowed = new Set<string>();
-  if (messages === undefined) return { valid: false, allowed };
+  // 固定文の組が無いときは問題を足さず、判定だけを返す（Issue #808。直す前は組が無いだけで偽を返していた）
+  const report = (at: string, message: string | undefined): void => {
+    if (messages !== undefined && message !== undefined) problems.push({ field: at, message });
+  };
   if (targets.length === 0) {
-    problems.push({ field: `${field}.targets`, message: messages.missing });
+    report(`${field}.targets`, messages?.missing);
     return { valid: false, allowed };
   }
   const rowById = new Map(rows.map((row) => [row.id, row] as const));
@@ -1729,24 +1732,24 @@ export function checkValidationExpressionTargets(
   targets.forEach((id, index) => {
     const at = `${field}.targets[${index}]`;
     if (seen.has(id)) {
-      problems.push({ field: at, message: messages.overlap });
+      report(at, messages?.overlap);
       valid = false;
     }
     seen.add(id);
     const row = rowById.get(id);
     if (row === undefined) {
-      problems.push({ field: at, message: messages.unknown });
+      report(at, messages?.unknown);
       valid = false;
       return;
     }
     if (row.kind !== "field") {
-      problems.push({ field: at, message: messages.kind });
+      report(at, messages?.kind);
       valid = false;
       return;
     }
     if (entity === undefined) entity = row.entity;
     else if (row.entity !== entity) {
-      problems.push({ field: at, message: messages.entity });
+      report(at, messages?.entity);
       valid = false;
     }
     allowed.add(id);

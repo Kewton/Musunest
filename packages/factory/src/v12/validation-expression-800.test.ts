@@ -2,10 +2,10 @@
 import { describe, expect, it } from "vitest";
 import type { RequirementList } from "../pipeline.js";
 import { UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE, toV1 } from "../v11a/convert.js";
-import { CHECK_TARGET_MESSAGES, checkCheckTargets, checkValidationExpressionTargets, type NameTable, type NameTableRow } from "../v11a/names.js";
+import { CHECK_TARGET_MESSAGES, checkCheckTargets, checkValidationExpressionTargets, validationExpressionTargetsValid, type NameTable, type NameTableRow } from "../v11a/names.js";
 import { SEMANTIC_CHECK_LEDGER_RULE_ID, semanticCheckRuleDefinitionsOf } from "../v11a/stages/semantic-check.js";
 import { checkEvaluabilityByLedger, type TestObserves } from "../v11a/stages/test-spec.js";
-import { withoutValidationExpression } from "../v11a/__tests__/fixtures.js";
+import { baseCheckValidationExpressionTargets, withoutValidationExpression } from "../v11a/__tests__/fixtures.js";
 import { frameValueTargetIdsOf, normalOnlyOwnershipRequirementIds } from "./generated-tests.js";
 import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, PROPERTY_LEDGER_VIEW_IDS, fromPublicV12Flags, propertyLedgerSha256, type LedgerView } from "./ledger.js";
 
@@ -137,5 +137,66 @@ describe("Issue #800 の二点測定（(1)〜(9)）", () => {
     expect(await propertyLedgerSha256(PROPERTY_LEDGER, fromPublicV12Flags({ ids: true }))).not.toBe(off);
     expect(row800?.rules.t1).toBeTruthy();
     expect(withoutValidationExpression({ rules: [`前${row800?.rules.t1 ?? ""}後`] })).toEqual({ rules: ["前後"] });
+  });
+});
+
+// ── Issue #808：判定と固定文を分ける（#800 の欠陥。候補 ①）─────────────────────────────
+//
+// 直す前の照合の関数は、固定文の組を渡さない呼び出しに「正しくない」を返していた。判定の関数はその呼び出しだったので、
+// 製品の経路では所属の追加が一度も起きなかった。今は固定文の組が無いときも判定だけを返す。
+
+describe("Issue #808 の二点測定：判定と固定文を分ける", () => {
+  const ROWS: readonly NameTableRow[] = [
+    ...TABLE.rows,
+    rowOf({ id: "e.other", kind: "entity", entity: null, name: "other", type: null }),
+    rowOf({ id: "f.other.code", kind: "field", entity: "e.other", name: "code", type: "string" }),
+  ];
+  /** 固定文の組を渡さない判定の入力と、期待する判定 */
+  const CASES: readonly (readonly [readonly string[], boolean])[] = [
+    [["f.item.title"], true],
+    [["f.item.title", "f.item.amount"], true],
+    [[], false],
+    [["f.item.unknown"], false],
+    [["e.item"], false],
+    [["f.item.title", "f.other.code"], false],
+    [["f.item.title", "f.item.title"], false],
+  ];
+
+  it("(1) 判定の関数（固定文の組を渡さない）：正しい行と正しい targets は真、空・表に無い ID・項目でない行・別の entity・重なりは偽。直す前の同じ呼び出しはどれも偽", () => {
+    for (const [targets, expected] of CASES) {
+      const problems: { field: string; message: string }[] = [];
+      expect(checkValidationExpressionTargets(ROWS, targets, "", undefined, problems).valid, JSON.stringify(targets)).toBe(expected);
+      // 問題は足さない（判定と固定文を分けた）
+      expect(problems, JSON.stringify(targets)).toEqual([]);
+      expect(validationExpressionTargetsValid(ROWS, targets), JSON.stringify(targets)).toBe(expected);
+      // 直す前の同じ呼び出しは、正しい targets でも偽（欠陥を残す）
+      expect(baseCheckValidationExpressionTargets(ROWS, targets, "", undefined, []).valid, JSON.stringify(targets)).toBe(false);
+    }
+  });
+
+  it("(2) 照合の関数（固定文の組を渡す）：問題・判定・所属に足してよい ID は直す前と同じ（正例・負例の各場合）", () => {
+    for (const [targets] of CASES) {
+      const now: { field: string; message: string }[] = [];
+      const before: { field: string; message: string }[] = [];
+      const current = checkValidationExpressionTargets(ROWS, targets, "verification", targetMessages, now);
+      const base = baseCheckValidationExpressionTargets(ROWS, targets, "verification", targetMessages, before);
+      expect(current.valid, JSON.stringify(targets)).toBe(base.valid);
+      expect(now, JSON.stringify(targets)).toEqual(before);
+      expect([...current.allowed].sort(), JSON.stringify(targets)).toEqual([...base.allowed].sort());
+    }
+    // 正例：問題 0・対象の項目と entity を足してよい
+    const positive = checkValidationExpressionTargets(ROWS, ["f.item.title"], "verification", targetMessages, []);
+    expect(positive).toEqual({ valid: true, allowed: new Set(["f.item.title", "e.item"]) });
+    // 負例：空・表に無い ID・項目でない行・別の entity・重なりは、それぞれの固定文で落ちる
+    const messageOf = (targets: readonly string[]) => {
+      const problems: { field: string; message: string }[] = [];
+      checkValidationExpressionTargets(ROWS, targets, "verification", targetMessages, problems);
+      return problems.map((problem) => problem.message);
+    };
+    expect(messageOf([])).toEqual([targetMessages?.missing]);
+    expect(messageOf(["f.item.unknown"])).toEqual([targetMessages?.unknown]);
+    expect(messageOf(["e.item"])).toEqual([targetMessages?.kind]);
+    expect(messageOf(["f.item.title", "f.other.code"])).toEqual([targetMessages?.entity]);
+    expect(messageOf(["f.item.title", "f.item.title"])).toEqual([targetMessages?.overlap]);
   });
 });

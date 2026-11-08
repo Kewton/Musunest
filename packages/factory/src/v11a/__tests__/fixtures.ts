@@ -44,6 +44,55 @@ const requirement = (id: string, text: string): Requirement => ({
   quote: text,
   position: { start: 0, end: text.length },
 });
+/**
+ * 直す前（Issue #800）の検査の式の targets の照合の関数の写し（Issue #808 の二点測定用）。固定文の組が無いと最初に偽を返す
+ * ——直す前の挙動を残すためだけのもので、製品は使わない。固定文の組を渡したときの判定・問題・所属に足してよい ID は今と同じ
+ */
+export function baseCheckValidationExpressionTargets(
+  rows: readonly NameTableRow[],
+  targets: readonly string[],
+  field: string,
+  messages: { readonly missing: string; readonly unknown: string; readonly kind: string; readonly entity: string; readonly overlap: string } | undefined,
+  problems: { field: string; message: string }[],
+): { readonly valid: boolean; readonly allowed: ReadonlySet<string> } {
+  const allowed = new Set<string>();
+  if (messages === undefined) return { valid: false, allowed };
+  if (targets.length === 0) {
+    problems.push({ field: `${field}.targets`, message: messages.missing });
+    return { valid: false, allowed };
+  }
+  const rowById = new Map(rows.map((row) => [row.id, row] as const));
+  const seen = new Set<string>();
+  let valid = true;
+  let entity: string | null | undefined;
+  targets.forEach((id, index) => {
+    const at = `${field}.targets[${index}]`;
+    if (seen.has(id)) {
+      problems.push({ field: at, message: messages.overlap });
+      valid = false;
+    }
+    seen.add(id);
+    const row = rowById.get(id);
+    if (row === undefined) {
+      problems.push({ field: at, message: messages.unknown });
+      valid = false;
+      return;
+    }
+    if (row.kind !== "field") {
+      problems.push({ field: at, message: messages.kind });
+      valid = false;
+      return;
+    }
+    if (entity === undefined) entity = row.entity;
+    else if (row.entity !== entity) {
+      problems.push({ field: at, message: messages.entity });
+      valid = false;
+    }
+    allowed.add(id);
+    if (row.entity !== null) allowed.add(row.entity);
+  });
+  return { valid, allowed };
+}
 
 /** 要件の一覧（R1〜R5。R5 は書けない要件＝unresolved） */
 export function fixtureList(): RequirementList {
