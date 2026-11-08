@@ -43,7 +43,13 @@ import {
 import { REPAIR_ANSWER_SCHEMA, checkRepairAnswer } from "../../stages/repair.js";
 import { utf8ByteLength } from "../../stages/write.js";
 import { canonicalJson } from "../../v11a/names.js";
-import { declarationSpans, type DeclarationSpan, type FailureLocations, type RepairDiagnostic, type ValidationAddition } from "../locate.js";
+import {
+  referenceFieldNamesOf,
+  sameNameSet,
+  validationWorldOfDocument,
+  type ValidationWorld,
+} from "../../v11a/bind-by-id.js";
+import { declarationSpans, spanKey, type DeclarationSpan, type FailureLocations, type RepairDiagnostic, type ValidationAddition } from "../locate.js";
 
 /** この段の schema の名前（どの封筒にも登録しない。`text.format.name` にそのまま載る） */
 export const FIELD_REPAIR_SCHEMA_NAME = "field-repair";
@@ -125,9 +131,9 @@ export const FIELD_REPAIR_RULE_DEFINITIONS: readonly RuleDefinition[] = [
 /** 旗 `v12.ids` の走りだけ足す規則（追加の場所。Issue #667） */
 export const FIELD_REPAIR_IDS_R07_DEFINITION: RuleDefinition = {
   id: "R-fr-07",
-  text: "追加の場所には、その entity と名前の検査 1 つの本文を `-` で始まる行から書く。名前と entity は変えない。式は要件と固定した試験から書く。別の要素を書かない。",
-  why: "要求する検査が宣言に無い初版は、既存の欄の置換では直せず、場所なしとして全文の直しへ流れて段内の上限で止まった（#650 の原因 2。方法論 03 の H4）",
-  since: "Issue #667",
+  text: "追加の場所には、その entity に、式が示された項目をちょうど参照する検査 1 つの本文を `-` で始まる行から書く。名前は表の名前を奪わない。entity は変えない。式は要件と固定した試験から書く。別の要素を書かない。",
+  why: "要求する検査が宣言に無い初版は、既存の欄の置換では直せず、場所なしとして全文の直しへ流れて段内の上限で止まった（#650 の原因 2。方法論 03 の H4）。結び付けと同じく、名前に依らず式が参照する項目の集合で照らす（Issue #801）",
+  since: "Issue #667・#801（名前に依らず、式が参照する項目の集合で照らす）",
 };
 
 /** 旗 `v12.ids` の走りの規則（off の規則の後ろに R-fr-07 を足す。off の規則はそのまま） */
@@ -186,6 +192,8 @@ export const FIELD_REPAIR_PROBLEMS = {
   wrongKind: "要素の種類が場所と違う",
   wrongName: "要素の名前か所属する entity が場所と違う",
   notValidation: "検査の場所の本文は検査 1 つであること（持てる欄は name・entity・expression・message だけ）",
+  wrongReference: "追加の検査の式が、示された項目をちょうど参照していない",
+  takenName: "追加の検査の名前が、表にある名前を奪っている",
 } as const;
 
 /** 本文の前後の空行を除き、共通の字下げを外した行（空なら空の並び） */
@@ -228,6 +236,46 @@ function elementProblem(element: string, span: ElementTarget, validationOnly = f
   return item["name"] === span.name && entity === span.entity ? null : FIELD_REPAIR_PROBLEMS.wrongName;
 }
 
+/**
+ * 追加の場所の本文 1 つを、追加の場所の **entity と参照の集合**で照らす（Issue #801）。entity が違えば `wrongName`、表の
+ * 名前を奪えば `takenName`、式が示された項目をちょうど参照していなければ `wrongReference`。検査 1 つでない・読めないは
+ * 今までどおり。名前そのものは見ない（builder が決める）
+ */
+function additionProblem(
+  element: string,
+  addition: ValidationAddition,
+  world: ValidationWorld | undefined,
+  takenNames: ReadonlySet<string>,
+): string | null {
+  const lines = dedentElement(element);
+  if (lines.length === 0) return FIELD_REPAIR_PROBLEMS.emptyElement;
+  if (!/^-(\s|$)/.test(lines[0] ?? "")) return FIELD_REPAIR_PROBLEMS.wrongKind;
+  const read = readSpecDocument(["element:", ...lines.map((line) => (line === "" ? "" : `  ${line}`))].join("\n"));
+  if (!read.ok || !isRecord(read.document)) return FIELD_REPAIR_PROBLEMS.unreadable;
+  const value = read.document["element"];
+  if (!Array.isArray(value) || value.length !== 1) return FIELD_REPAIR_PROBLEMS.wrongKind;
+  const item: unknown = value[0];
+  if (!isRecord(item)) return FIELD_REPAIR_PROBLEMS.wrongKind;
+  if (Object.keys(item).some((key) => !(VALIDATION_ELEMENT_KEYS as readonly string[]).includes(key))) {
+    return FIELD_REPAIR_PROBLEMS.notValidation;
+  }
+  const entity = typeof item["entity"] === "string" ? item["entity"] : null;
+  if (entity !== addition.entity) return FIELD_REPAIR_PROBLEMS.wrongName;
+  const name = item["name"];
+  if (addition.name !== undefined) {
+    // 名前で結ぶ契約のままの種類（Issue #667）：要求する名前と一致する（表の名前は要求そのものなので奪ってはいない）
+    return name === addition.name ? null : FIELD_REPAIR_PROBLEMS.wrongName;
+  }
+  if (typeof name === "string" && takenNames.has(name)) return FIELD_REPAIR_PROBLEMS.takenName;
+  const expression = item["expression"];
+  if (world === undefined || typeof expression !== "string") return FIELD_REPAIR_PROBLEMS.wrongReference;
+  const references = referenceFieldNamesOf(world, addition.entity, expression);
+  if (references === null || !sameNameSet(references, new Set(addition.targets))) {
+    return FIELD_REPAIR_PROBLEMS.wrongReference;
+  }
+  return null;
+}
+
 /** 形の検査に渡す文脈 */
 export interface FieldRepairCheckContext {
   /** この往復の場所の選択肢 */
@@ -240,6 +288,10 @@ export interface FieldRepairCheckContext {
   readonly testIds: ReadonlySet<string>;
   /** 追加の場所（旗 `v12.ids` の走りだけ。渡せば検査の場所の本文が検査 1 つであることも照らす。Issue #667） */
   readonly additions?: readonly ValidationAddition[];
+  /** 一番良い版の宣言の写し（追加の本文の参照の集合を照らす。Issue #801） */
+  readonly world?: ValidationWorld;
+  /** 表にある名前（追加の検査の名前が奪ってはならない。Issue #801） */
+  readonly takenNames?: ReadonlySet<string>;
 }
 
 /**
@@ -269,12 +321,11 @@ export function checkFieldRepairAnswer(value: unknown, context: FieldRepairCheck
       }
       const location = item["location"];
       const addition = context.additions?.find((candidate) => candidate.key === location);
-      const span: ElementTarget | undefined = typeof location === "string" && context.locations.includes(location)
-        ? addition === undefined
+      const span: ElementTarget | undefined =
+        typeof location === "string" && context.locations.includes(location) && addition === undefined
           ? context.spans.find((candidate) => candidate.key === location)
-          : { kind: "validation", entity: addition.entity, name: addition.name }
-        : undefined;
-      if (typeof location !== "string" || span === undefined) {
+          : undefined;
+      if (typeof location !== "string" || !context.locations.includes(location) || (addition === undefined && span === undefined)) {
         problems.push({ field: `${field}.location`, message: FIELD_REPAIR_PROBLEMS.outsideChoices });
         return;
       }
@@ -288,7 +339,10 @@ export function checkFieldRepairAnswer(value: unknown, context: FieldRepairCheck
         problems.push({ field: `${field}.element`, message: FIELD_REPAIR_PROBLEMS.emptyElement });
         return;
       }
-      const problem = elementProblem(element, span, context.additions !== undefined && span.kind === "validation");
+      const problem =
+        addition === undefined
+          ? elementProblem(element, span as ElementTarget, context.additions !== undefined && (span as ElementTarget).kind === "validation")
+          : additionProblem(element, addition, context.world, context.takenNames ?? new Set<string>());
       if (problem !== null) {
         problems.push({ field: `${field}.element`, message: problem });
         return;
@@ -315,6 +369,8 @@ export interface FieldRepairInput {
   readonly declaration: string;
   /** 一番良い版の失敗の場所（場所なしが 0・場所が 1 つ以上のものだけを渡す） */
   readonly failures: FailureLocations;
+  /** 表にある名前（追加の検査の名前が奪ってはならない。旗 `v12.ids` の走りだけ。Issue #801） */
+  readonly takenNames?: readonly string[];
   /**
    * 一番良い版の失敗の診断（旗 `v12.ids` と探索がともに on の走りだけ。Issue #761）。渡したときだけ、既存の 4 つの塊の後に
    * 「診断」の塊を 1 つ足し、規則 R-fr-08 を 1 つ足す。省けば今の要求のまま
@@ -383,10 +439,21 @@ export async function runFieldRepair(input: FieldRepairInput): Promise<StageOutc
     maxOutputTokens: input.gateway.maxOutputTokens("repair"),
   });
   const testIds = new Set(input.suite.tests.map((test) => test.id));
+  const read = readSpecDocument(input.declaration);
+  const world = read.ok && isRecord(read.document) ? validationWorldOfDocument(read.document) : undefined;
+  const takenNames = new Set(input.takenNames ?? []);
   const outcome = await callStructuredChecked(input.gateway, {
     request,
     check: (output) =>
-      checkFieldRepairAnswer(output, { locations, spans, source: input.source, testIds, ...(additions === undefined ? {} : { additions }) }),
+      checkFieldRepairAnswer(output, {
+        locations,
+        spans,
+        source: input.source,
+        testIds,
+        ...(additions === undefined ? {} : { additions }),
+        ...(world === undefined ? {} : { world }),
+        ...(takenNames.size === 0 ? {} : { takenNames }),
+      }),
   });
   return outcome.ok ? { ok: true, value: outcome.value } : outcome;
 }
@@ -460,6 +527,15 @@ function insertionEdit(lines: readonly string[], bodies: readonly string[], span
   return { start: last + 1, remove: 0, lines: padded(itemIndent ?? fallbackIndent) };
 }
 
+/** 追加の本文（検査 1 つ）を単独で読み、その写像を返す（読めなければ null） */
+function validationItemOf(element: string): Record<string, unknown> | null {
+  const lines = dedentElement(element);
+  const read = readSpecDocument(["element:", ...lines.map((line) => (line === "" ? "" : `  ${line}`))].join("\n"));
+  if (!read.ok || !isRecord(read.document)) return null;
+  const value = read.document["element"];
+  return Array.isArray(value) && value.length === 1 && isRecord(value[0]) ? value[0] : null;
+}
+
 /** 読み取りの値の validations（無い・null は空の並び。並びでなければ null） */
 const validationsOf = (document: unknown): unknown[] | null => {
   if (!isRecord(document)) return null;
@@ -518,9 +594,17 @@ export function mergeReplacements(
       return { ok: false, refusal: MERGE_REFUSALS.added };
     }
     const tail = afterList.slice(beforeList.length);
+    // 追加した検査の照合は、名前ではなく **entity と参照の集合** で行う（Issue #801）
+    const mergedWorld = isRecord(after.document) ? validationWorldOfDocument(after.document) : undefined;
     const placed = inserted.every(({ addition }, index) => {
       const item: unknown = tail[index];
-      return isRecord(item) && item["name"] === addition.name && item["entity"] === addition.entity;
+      if (!isRecord(item) || item["entity"] !== addition.entity) return false;
+      // 名前で結ぶ契約のままの種類は、要求する名前と一致すること（Issue #667）
+      if (addition.name !== undefined) return item["name"] === addition.name;
+      const expression = item["expression"];
+      if (mergedWorld === undefined || typeof expression !== "string") return false;
+      const references = referenceFieldNamesOf(mergedWorld, addition.entity, expression);
+      return references !== null && sameNameSet(references, new Set(addition.targets));
     });
     if (!placed) return { ok: false, refusal: MERGE_REFUSALS.added };
     beforeValues = { ...(beforeValues as Record<string, unknown>), validations: beforeList };
@@ -535,7 +619,14 @@ export function mergeReplacements(
   if (!merged.ok) return { ok: false, refusal: MERGE_REFUSALS.unreadable };
   const beforeLines = declaration.split("\n");
   const replacedKeys = new Set(replaced.map((span) => span.key));
-  const addedKeys = new Set(inserted.map((entry) => entry.addition.key));
+  // 追加した検査の範囲の名前は、**検査の名前**（`validation:<entity>.<name>`）で引く。追加の場所の鍵は entity と
+  // 参照の集合なので、位置の照合には使えない（Issue #801）
+  const insertedSpanKeys = inserted.map(({ addition, element }) => {
+    const item = validationItemOf(element);
+    const name = item !== null && typeof item["name"] === "string" ? item["name"] : null;
+    return name === null ? null : spanKey("validation", addition.entity, name);
+  });
+  const addedKeys = new Set(insertedSpanKeys.filter((key): key is string => key !== null));
   const kept = merged.spans.filter((span) => !addedKeys.has(span.key));
   const same =
     kept.length === spans.length &&
@@ -547,8 +638,10 @@ export function mergeReplacements(
   if (!same) return { ok: false, refusal: MERGE_REFUSALS.outside };
   if (inserted.length > 0) {
     const count = validationsOf(after.document)?.length ?? 0;
-    const at = inserted.every(({ addition }, index) => {
-      const found = merged.spans.filter((span) => span.key === addition.key);
+    const at = inserted.every((_entry, index) => {
+      const key = insertedSpanKeys[index];
+      if (key === null) return false;
+      const found = merged.spans.filter((span) => span.key === key);
       const slot = found[0]?.slot;
       return found.length === 1 && slot?.section === "validations" && slot.index === count - inserted.length + index;
     });

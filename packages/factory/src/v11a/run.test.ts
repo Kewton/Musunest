@@ -50,6 +50,7 @@ import {
   ENUM_MEMBERSHIP_REQUIREMENT_TEXT,
   FIXTURE_DOCUMENTS,
   FIXTURE_YAML,
+  normalizedFixture,
   draftOf,
   NegativeOutput,
   negative,
@@ -246,6 +247,93 @@ function withoutLinkedValidationsOn(request: LlmStructuredRequest): LlmStructure
 /** Issue #795：旗 ids on の要求の列から、B3' の塊と R-dc-03 の ids の文を外す */
 function withoutLinkedValidations(requests: readonly LlmStructuredRequest[]): readonly LlmStructuredRequest[] {
   return requests.map(withoutLinkedValidationsOn);
+}
+
+/** Issue #800 の前の R-w11-07 の旗 ids の文（Issue #801 の復元に使う） */
+const OLD_WRITE_V11A_IDS_R07_TEXT =
+  "表に無い補助の要素（計算・検査など）は、要件に要るときだけ足してよい。ただし表の名前を奪わない（表にある名前を別の要素に使わない）。この禁止の唯一の例外は、データ「要る検査の骨組み」に競合なしで列挙された検査で、その entity と名前で validations に 1 つずつ書く（式は要件と固定した試験から書く）。競合の印の付いた件は書かない。骨組みに無い補助の要素には表の名前を使わない。";
+
+/**
+ * Issue #801 の復元：旗 ids の B1 の要求から、新しい形の骨組み（{requirementId, entity, targets, testIds, conflict}）を
+ * 直す前（#800）の形（{entity, name, rowId, rowKind, testIds, conflict}）に組み直し、R-w11-07 の ids の文を #800 の文へ戻す。
+ * 骨組みが選んだ試験（testIds）と名前の表から、直す前の関数（行ごとにまとめ、名前が重なれば競合）の値を再構成する。
+ */
+function restoreOldRequiredValidations<
+  T extends { readonly schemaName: string; readonly input: string; readonly rules?: readonly string[] },
+>(request: T): T {
+  if (request.schemaName !== WRITE_V11A_SCHEMA_NAME) return request;
+  const blockOf = (name: string): string | undefined => {
+    const after = request.input.split(`<data name="${name}">\n`)[1];
+    return after === undefined ? undefined : after.split("\n</data>")[0];
+  };
+  const skeletonText = blockOf(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME);
+  const rules =
+    request.rules === undefined
+      ? undefined
+      : request.rules.map((text) => (text === WRITE_V11A_IDS_R07_DEFINITION.text ? OLD_WRITE_V11A_IDS_R07_TEXT : text));
+  const withRules = rules === undefined ? request : { ...request, rules };
+  if (skeletonText === undefined) return withRules;
+  let skeleton: unknown;
+  let table: readonly Record<string, unknown>[];
+  let suite: { readonly tests?: readonly Record<string, unknown>[] };
+  try {
+    skeleton = JSON.parse(skeletonText);
+    table = JSON.parse(blockOf("名前の表") ?? "[]") as readonly Record<string, unknown>[];
+    suite = JSON.parse(blockOf(WRITE_V11A_DATA_NAMES[2]!) ?? "{}") as { readonly tests?: readonly Record<string, unknown>[] };
+  } catch {
+    return withRules;
+  }
+  if (!Array.isArray(skeleton) || skeleton.length === 0) return withRules;
+  const rowById = new Map<string, Record<string, unknown>>();
+  table.forEach((row) => {
+    if (typeof row["id"] === "string") rowById.set(row["id"], row);
+  });
+  const entityName = (id: unknown): string | null => {
+    if (typeof id !== "string") return null;
+    const row = rowById.get(id);
+    return row !== undefined && row["kind"] === "entity" && typeof row["name"] === "string" ? row["name"] : null;
+  };
+  const rowIndex = new Map<string, number>();
+  table.forEach((row, index) => {
+    if (typeof row["id"] === "string") rowIndex.set(row["id"], index);
+  });
+  const testById = new Map((suite.tests ?? []).flatMap((test) => (typeof test["id"] === "string" ? [[test["id"], test] as const] : [])));
+  const groups = new Map<string, { row: Record<string, unknown>; testIds: string[] }>();
+  for (const entry of skeleton as readonly { readonly testIds?: readonly unknown[] }[]) {
+    for (const testId of entry.testIds ?? []) {
+      const test = testById.get(String(testId));
+      const target = test?.["target"] as { readonly roleId?: unknown; readonly kind?: unknown } | undefined;
+      const id = target?.roleId;
+      if (typeof id !== "string") continue;
+      const row = rowById.get(id);
+      if (row === undefined || row["kind"] !== target?.kind) continue;
+      const group = groups.get(id) ?? { row, testIds: [] };
+      group.testIds.push(String(testId));
+      groups.set(id, group);
+    }
+  }
+  const ordered = [...groups.values()].sort(
+    (a, b) => (rowIndex.get(String(a.row["id"])) ?? 0) - (rowIndex.get(String(b.row["id"])) ?? 0),
+  );
+  const old = ordered.map((entry) => {
+    const row = entry.row;
+    const name = String(row["name"]);
+    const entity = row["kind"] === "entity" ? name : entityName(row["entity"]);
+    return {
+      entity,
+      name,
+      rowId: String(row["id"]),
+      rowKind: String(row["kind"]),
+      testIds: entry.testIds,
+      conflict: ordered.some((other) => other !== entry && String(other.row["name"]) === name),
+    };
+  });
+  const restored = JSON.stringify(old, null, 2);
+  const input = request.input.replace(
+    new RegExp(`(<data name="${WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME}">\\n)[\\s\\S]*?(\\n<\\/data>)`),
+    `$1${restored}$2`,
+  );
+  return { ...withRules, input } as T;
 }
 
 afterEach(() => {
@@ -1210,7 +1298,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 11ca852ea32e6f3085c5cf91987ba986e9561aea6a442458ea408d2ce851de80）
       // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 23e96f59c9b15af3b01e23a7b81c879a139b7776c1e0e6a823739e637b1c0852）
       // 要求の SHA-256 は Issue #795 で取り直した（旗 ids on の B3' のデータに塊「要件に結び付いた検査」を足し、R-dc-03 の ids の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutLinkedValidations`。旧 b397d6409d7bb8fe3e8dd289563117390ec92c6ddf0210d7da840c3efc343f5f）
-      "6a54106962fdd2d18044d4efa54e8bf7c6b517c4ffdae8674e1b0def1cd0bdd3",
+      "ecd221aeac1983c97d91a8f6dba7c2f05b4832909a13351fc1ceb1142ae1a0e5",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d3d46bd0bae1ed1bce66a419612e4d05b1d6d0cefa9b95072d2af39c8137d700）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 ef2dc4cd77f101896bc8c4c377efeabe8f621d092497fdef0ee93b69490e031f）
@@ -1229,7 +1317,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 a61b8eb44bff4d25b0770176166625d28060dfa421594be3033ff047f10b3634）
       // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 fca5a4eeaad8ab62b049891ea21784f097cc9f715f7ffe27fdf3fa46f2f84179）
       // 要求の SHA-256 は Issue #795 で取り直した（旗 ids on の B3' のデータに塊「要件に結び付いた検査」を足し、R-dc-03 の ids の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutLinkedValidations`。旧 5b18feeb728eda386d9523d6da712dc86522812b75c6cb8794f17f12487069d9）
-      "df6ae87c829452f506cb899f8b306726cb34a2520d7de6c22b180b0a10ed8f59",
+      "3d3e9be92aaa146a522d335d4a47539566b2e7487489f41dc6c6bf0086981e9e",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 c479ec4fc3ac733a9b470499f5d8fc631583a94ca9e4169834ae571ea7499645）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 a3848402cdf1bbedbdbb51431bd971ccc94a351d6bfb88ae7a9f56054cdec635）
@@ -1250,7 +1338,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 37d215a03b3d1fb251479e18ff68b18cba8c3ba4bb473c2667e0bd44e480192c）
       // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 c71bc450115d4e4bcefe329eac1ef6280b6f20fc155782ab881cda8368fe8b9d）
       // 要求の SHA-256 は Issue #795 で取り直した（旗 ids on の B3' のデータに塊「要件に結び付いた検査」を足し、R-dc-03 の ids の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutLinkedValidations`。旧 70844607c361197004f0c489d2f446f717ddb340c855a02a3f21a2cd401e518c）
-      "ce4170fb7d74694faf33c2f0a829481b2b49c9eb0a9d1270bfc009ccde40482e",
+      "01c5fbf9e5f0c2b1672383d757efc5f4d3738a4a8e3ed932178f4f14688e56bc",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 2f032bbaf50ff8e7c6c0fbe9708107eb043cca23ae2bc5b6b25680e7c2f4151a）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 f039481b055d8d893ee5535d5b56acc5182d6e5b392c8c4f3a21c4632403f859）
@@ -1286,7 +1374,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 a8445592525ce05b953014bcc300b19b10bd6e4a8361d10c34ec79d20412452d）
       // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 f194a77e72fc71d29fb2d45966a2934dd85d47c7f74c7ad597811208892ee273）
       // 要求の SHA-256 は Issue #795 で取り直した（旗 ids on の B3' のデータに塊「要件に結び付いた検査」を足し、R-dc-03 の ids の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutLinkedValidations`。旧 b63b9c2a1aa4d3b949b5ef26d2b5bdc1f4011806ec6226313a2443797d240d3c）
-      "1d0de0383e04aad02d6dce30ba4981fb62dc61e88d0878a6bfbfc6c7e5ca4e51",
+      "5233fb8c7ed42aedcf38a7cc4e6b4cfcfa6197af9a5b5f59a4c01a390b554b5b",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d762715a3037b44cbc202848f40b5fa2cd1551bba549bd418f56fefc0e9def0e）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 4a2626d7964d9f231142488d8151d75f3c36d8ef216d65f06c6fb63bc8a102ab）
@@ -1307,7 +1395,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
   // Issue #725 で取り直した（旗 ids と ledger が on の初回の C2 の要求のデータに台帳の未対応の観測の塊を足し、台帳版の R-map-03 の文を直したため。旧 f557b06dfea31a88264e5db7aacb66068a3f61398e4571fcd760ccfccfe8cb37）
   const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING = "b8760480b88790bfbe174c310a95b59f04edf06e0c921d47a7413a4ee0ce0397";
   /** Issue #800：上の値の 3 番目（要求の全体）を、T2 の枠の変更の分だけ取り直した値（旧値は残す） */
-  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_800 = "c49d34b1c8ae201dde1d90c864d532c9e500195827ae958b5d9b1d067b54abaa";
+  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_800 = "9255ece2150a91967e321cc70fac790209448064e090347b1fc52b33a5586e52";
   /**
    * 直す前の値：上の台本の要求から C2 の要求（schemaName が mapping のもの）を全部外した残りの SHA-256（base 2c514cf の mapping.ts・
    * names.ts・generated-tests.ts・fixtures.ts に戻した作業木で測った値。新しいコードの出力から作っていない。Issue #724）。#724 で要求の
@@ -1382,21 +1470,21 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": [
       "865511262ad4b1eec243d96a87d5716fa5dac5794bcc0967769bd9fda0974edc",
       "68ef6a89239bdc818759f7cac71e164122fe07351e47230cdaaa473bf22c9665",
-      "437b7e3eec5c592b33619504d1a7ef1a737a2c9766b738f1d19496cb3d035713",
+      "ecd221aeac1983c97d91a8f6dba7c2f05b4832909a13351fc1ceb1142ae1a0e5",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       "e575ee2943955e7458a1a6cc6270e8967300299f9af4df9db4e8f38785f494f1",
     ],
     "(2) C2 の試行 1 が形で落ちて試行 2 で通る": [
       "771d2acf15b3903ea4b81cd6e6fb4cd6d4600944a807484c985dacbb6128e7e6",
       "e3d7a7c0ddc54deec945cf292f2a0311b13f829390b9cdadc8b1022906e5107f",
-      "d0b722482dc42db8bbc1263b92810fc3a5d632f1795b961b66499fb723c19f8a",
+      "3d3e9be92aaa146a522d335d4a47539566b2e7487489f41dc6c6bf0086981e9e",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       "c8be607630dff4415097005dc4019066d50b3cc43426793be2d2dbbc925fb676",
     ],
     "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": [
       "c2a1c208a549dd9320f05ca078149cff2c691f163c9de1ef9a53da25426de89c",
       "4b521a13c9199048e8f1c4ea507c5e2fa114baf0a4df5fd74319790204f6796a",
-      "f7f796420633480a2d0f165a99fd29ea325c323b47fd2425374f6a35d50cf04b",
+      "01c5fbf9e5f0c2b1672383d757efc5f4d3738a4a8e3ed932178f4f14688e56bc",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       "5bb0dd43d3dfd24dff1251fb46f241b30ae10949a4a360e1b8a9ad5c92f81963",
     ],
@@ -1417,7 +1505,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     "(5) 形で 1 度も落ちない": [
       "8a7be5d0b40243e22114d434e400f45dc55ff41add9d357888593eaa4d460aea",
       "958e1dcb2de103b1d9358ed0e7af7bf6b7918a6478c15dfb0c9e5930d21f69ae",
-      "97c6d27229990c9d65388d05b799e9b68fdc38ee52d10a5918a0d32ecc5dda77",
+      "5233fb8c7ed42aedcf38a7cc4e6b4cfcfa6197af9a5b5f59a4c01a390b554b5b",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       "b9cdc24d6836b26f9d42b07c9185319786fc91c8d9b8eeef6704ad7982722a4e",
     ],
@@ -1501,6 +1589,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       const files = result.bundle === null ? [] : bundleFiles(result.bundle).map((file) => ({ path: file.path, text: file.text }));
       // Issue #800：台帳に足した行の文と C2 の schema の欄を外して、旧の指紋と照らす
       const restoredStructured = withoutValidationExpression(recording.structured);
+      // Issue #801：骨組みの新しい形と R-w11-07 の ids の文を、直す前（#800）の形・文に組み直す（旧の指紋と照らす）
+      const oldShapeStructured = restoredStructured.map(restoreOldRequiredValidations);
       // 止まる走りの診断の一覧（materials.json）は、断った候補の要約（rejected）の鍵を外した残りを照らす。rejected は下で期待を固定する
       const listing = result.diagnostics.find((artifact) => artifact.path === DIAGNOSTICS_LISTING_FILE);
       if (listing !== undefined) {
@@ -1510,7 +1600,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       }
       measuredWithoutMapping[script.name] = await sha256Hex(
         JSON.stringify({
-          structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(restoredStructured))).filter(
+          structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(oldShapeStructured))).filter(
             (request) => request.schemaName !== MAPPING_SCHEMA_NAME,
           ),
           tools: recording.tools,
@@ -1522,18 +1612,18 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         ),
       );
       // Issue #795：B3' の塊と R-dc-03 の ids の文を位置で外した要求は、#795 の前の要求の SHA-256 と同じ（差はその塊と文だけ）
-      measuredWithoutLinked[script.name] = await sha256Hex(JSON.stringify({ structured: withoutLinkedValidations(restoredStructured), tools: recording.tools }));
+      measuredWithoutLinked[script.name] = await sha256Hex(JSON.stringify({ structured: withoutLinkedValidations(oldShapeStructured), tools: recording.tools }));
       // Issue #732：C3 の R-sc-02 から構造の検査の読み方の文を外した要求は、#732 の前の要求の SHA-256 と同じ（差はその文だけ）
       measuredWithoutReading[script.name] = await sha256Hex(
-        JSON.stringify({ structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(restoredStructured))), tools: recording.tools }),
+        JSON.stringify({ structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(oldShapeStructured))), tools: recording.tools }),
       );
       // Issue #663：T2 の R-tsp-02 から要件ごとの試験の上限の文を外した要求は、#663 の前の要求の SHA-256 と同じ（差はその文だけ）
       measuredWithoutLimit[script.name] = await sha256Hex(
-        JSON.stringify({ structured: withoutIdsLimit(withoutLinkedValidations(restoredStructured)), tools: recording.tools }),
+        JSON.stringify({ structured: withoutIdsLimit(withoutLinkedValidations(oldShapeStructured)), tools: recording.tools }),
       );
       // Issue #794：T2 の時計の塊と R-tsp-13 の時計の文を位置で外した要求は、#794 の前の要求の SHA-256 と同じ（差はその塊と文だけ）
       measuredWithoutClock[script.name] = await sha256Hex(
-        JSON.stringify({ structured: withoutIdsClock(withoutLinkedValidations(restoredStructured)), tools: recording.tools }),
+        JSON.stringify({ structured: withoutIdsClock(withoutLinkedValidations(oldShapeStructured)), tools: recording.tools }),
       );
       // Issue #735：C3 に届いた走りの要約は v12_calls に C3 の束の欄を持ち、それを外した要約・納品物は #735 の前と同じ
       const summary735 = structuredClone(result.summary) as unknown as Record<string, any>;
@@ -3126,12 +3216,12 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
       text: match[2] as string,
     }));
   /** B1 の要求の「要る検査の骨組み」と「固定した試験」から、B3' に渡るはずの塊（同じ関数・同じ組で射影する） */
-  const expectedLinkedOf = (requests: readonly LlmStructuredRequest[]) => {
+  const expectedLinkedOf = async (requests: readonly LlmStructuredRequest[], source: string = RUN_YAML) => {
     const b1 = requests.find((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME);
     if (b1 === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
     const required = dataBlockOf(b1.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME) as readonly RequiredValidation[];
     const suite = dataBlockOf(b1.input, WRITE_V11A_DATA_NAMES[2]!) as TestSuite;
-    return linkedValidationsByRequirement(suite, required, [...IDS]);
+    return linkedValidationsByRequirement(suite, required, [...IDS], MAPPED_IDS, await normalizedFixture(source));
   };
   /** B3' の要求 1 つの塊「要件に結び付いた検査」（無ければ undefined） */
   const linkedBlockOf = (request: LlmStructuredRequest) => {
@@ -3149,7 +3239,7 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
    * その B3' の要求の時点の有効な試験（B1 の「固定した試験」）だけから、要件ごとの塊の期待を組む。
    * 対象の要件は要求の「要件の文と引用」の並び（その版の残る要件）を使う。Issue #795 の R1。
    */
-  const effectiveExpectedOf = (requests: readonly LlmStructuredRequest[], decl: LlmStructuredRequest) => {
+  const effectiveExpectedOf = async (requests: readonly LlmStructuredRequest[], decl: LlmStructuredRequest) => {
     const b1 = requests.find((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME);
     if (b1 === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
     const shown = dataBlockOf(b1.input, WRITE_V11A_DATA_NAMES[2]!) as {
@@ -3161,14 +3251,16 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
     const suite: TestSuite = { tests: shown.tests.filter((test) => targetIds.includes(test.target.requirementId)) };
     const observes = new Map(shown.tests.flatMap((test) => (typeof test.observes === "string" ? [[test.id, test.observes] as const] : [])));
     const required = requiredValidationsOf(MAPPED_IDS, suite, observes);
-    return linkedValidationsByRequirement(suite, required, targetIds);
+    return linkedValidationsByRequirement(suite, required, targetIds, MAPPED_IDS, await normalizedFixture(RUN_YAML));
   };
 
   it("B3' の塊は B1 の要る検査の骨組みを要件ごとに射影した値で、直す前（base）の要求には塊が無い", async () => {
     const { result, recording } = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS });
     expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
-    const expected = expectedLinkedOf(recording.structured);
-    expect(expected).toEqual([{ requirementId: "R1", validations: [{ entity: "item", name: "amount", conflict: false }] }]);
+    const expected = await expectedLinkedOf(recording.structured);
+    expect(expected).toEqual([
+      { requirementId: "R1", validations: [{ entity: "item", targets: ["amount"], name: "amount", conflict: false }] },
+    ]);
     expect(sentLinkedOf(recording.structured)).toEqual(expected);
     expect(recording.structured.find((request) => request.schemaName === DECL_CHECK_SCHEMA_NAME)?.rules).toEqual(declCheckRulesOf(true));
 
@@ -3200,7 +3292,7 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
     };
     const observes = new Map(suite.tests.map((entry) => [entry.id, "validation" as const]));
     const required = requiredValidationsOf(TABLE, suite, observes);
-    expect(required.map((entry) => [entry.entity, entry.name, entry.conflict])).toEqual([
+    expect(required.map((entry) => [entry.entity, entry.targets[0], entry.conflict])).toEqual([
       ["member", "title", true],
       ["item", "title", true],
       ["item", "amount", false],
@@ -3209,12 +3301,12 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
       {
         requirementId: "R1",
         validations: [
-          { entity: "item", name: "title", conflict: true },
-          { entity: "item", name: "amount", conflict: false },
+          { entity: "item", targets: ["title"], name: "title", conflict: true },
+          { entity: "item", targets: ["amount"], name: "amount", conflict: false },
         ],
       },
-      { requirementId: "R2", validations: [{ entity: "member", name: "title", conflict: true }] },
-      { requirementId: "R3", validations: [{ entity: "item", name: "amount", conflict: false }] },
+      { requirementId: "R2", validations: [{ entity: "member", targets: ["title"], name: "title", conflict: true }] },
+      { requirementId: "R3", validations: [{ entity: "item", targets: ["amount"], name: "amount", conflict: false }] },
     ]);
   });
 
@@ -3225,7 +3317,7 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
       [...idsHead(), structured(rejection), repairDone(RUN_YAML), structured(rejection)],
       { flags },
     );
-    expect(sentLinkedOf(rejected.recording.structured)).toEqual(expectedLinkedOf(rejected.recording.structured));
+    expect(sentLinkedOf(rejected.recording.structured)).toEqual(await expectedLinkedOf(rejected.recording.structured));
     expect(carryEntriesOf(rejected.result.bundle)).toEqual([
       { requirementId: "R3", reasons: [{ origin: "decl-check", reason: "mismatch" }] },
     ]);
@@ -3253,7 +3345,7 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
       [...idsHead({ t2: emptyT2, yaml: withoutValidation }), structured(emptyRejection), repairDone(withoutValidation), structured(emptyRejection)],
       { flags },
     );
-    expect(sentLinkedOf(empty.recording.structured)).toEqual(expectedLinkedOf(empty.recording.structured));
+    expect(sentLinkedOf(empty.recording.structured)).toEqual(await expectedLinkedOf(empty.recording.structured, withoutValidation));
     expect(carryEntriesOf(empty.result.bundle)).toEqual([
       { requirementId: "R3", reasons: [{ origin: "decl-check", reason: "empty-location" }] },
     ]);
@@ -3331,13 +3423,13 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
     ];
   };
   /** 2 回目以降の B3' の全要求が、その時点の有効な試験だけから求めた塊と一致することを照合する */
-  const expectEffectiveBlocks = (label: string, stopped: unknown, requests: readonly LlmStructuredRequest[]) => {
+  const expectEffectiveBlocks = async (label: string, stopped: unknown, requests: readonly LlmStructuredRequest[]) => {
     expect(stopped, label).toBeNull();
     const decls = requests.filter((request) => request.schemaName === DECL_CHECK_SCHEMA_NAME);
     expect(decls.length, label).toBeGreaterThanOrEqual(3);
     // 2 回目以降の B3' の全要求が、その時点の有効な試験だけから求めた塊と一致する
     for (const decl of decls.slice(1)) {
-      expect(linkedBlockOf(decl), label).toEqual(effectiveExpectedOf(requests, decl));
+      expect(linkedBlockOf(decl), label).toEqual(await effectiveExpectedOf(requests, decl));
     }
     // 組が変わったこと：1 回目は R3 の title の検査を含み、2 回目以降は R3 を持ち越して含まない
     expect(linkedBlockOf(decls[0]!), label).not.toEqual(linkedBlockOf(decls[1]!));
@@ -3348,8 +3440,8 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
       {
         requirementId: "R1",
         validations: [
-          { entity: "member", name: "title", conflict: false },
-          { entity: "item", name: "amount", conflict: false },
+          { entity: "member", targets: ["title"], name: null, conflict: false },
+          { entity: "item", targets: ["amount"], name: "amount", conflict: false },
         ],
       },
     ]);
@@ -3357,12 +3449,12 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
 
   it("R1（一気通貫）：棄却・持ち越しで有効な組が変わったあとの B3' は、その版の有効な試験だけから作った塊を送る", async () => {
     const run = await runScenario(r1Scenario(), { flags: { ledger: true, ids: true } });
-    expectEffectiveBlocks("一気通貫", run.result.stopped, run.recording.structured);
+    await expectEffectiveBlocks("一気通貫", run.result.stopped, run.recording.structured);
   });
 
   it("R1（段の走り）：棄却・持ち越しで有効な組が変わったあとの B3' は、その版の有効な試験だけから作った塊を送る", async () => {
     const run = await runStageScenario(r1Scenario(), { flags: { ledger: true, ids: true } });
-    expectEffectiveBlocks("段の走り", run.result.stopped, run.recording.structured);
+    await expectEffectiveBlocks("段の走り", run.result.stopped, run.recording.structured);
   });
 });
 
@@ -6706,7 +6798,13 @@ describe("旗 v12.ids：B1（初回・作り直し）と直す段に、その時
   const RENAMED_YAML = replaced(RUN_YAML, "  - name: amount\n    entity: item", "  - name: positive\n    entity: item");
   const R07 = WRITE_V11A_RULE_DEFINITIONS.find((definition) => definition.id === "R-w11-07");
   const writeOf = (requests: readonly LlmStructuredRequest[]) => requests.filter((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME);
-  type Entry = { readonly entity: string | null; readonly name: string; readonly rowId: string; readonly rowKind: string; readonly testIds: readonly string[]; readonly conflict: boolean };
+  type Entry = {
+    readonly requirementId: string;
+    readonly entity: string | null;
+    readonly targets: readonly string[];
+    readonly testIds: readonly string[];
+    readonly conflict: boolean;
+  };
   /** 納品物の試験の組（T2 で固定した組）の validate の試験 */
   /** B4 の結果（不一致・未解決の試験 ID）を版ごとに記録する（評価口はそのまま） */
   function spyRunTests() {
@@ -6742,7 +6840,9 @@ describe("旗 v12.ids：B1（初回・作り直し）と直す段に、その時
     const amountRow = MAPPED_IDS.rows.find((row) => row.kind === "field" && row.name === "amount");
     const validated = validateTestsOf(result.bundle).filter((test) => test.target.roleId === amountRow?.id);
     expect(validated.length).toBeGreaterThan(0);
-    expect(skeleton).toEqual([{ entity: "item", name: "amount", rowId: amountRow?.id, rowKind: "field", testIds: validated.map((test) => test.id), conflict: false }]);
+    expect(skeleton).toEqual([
+      { requirementId: "R1", entity: "item", targets: ["amount"], testIds: validated.map((test) => test.id), conflict: false },
+    ]);
     expect(write.rules).toContain(WRITE_V11A_IDS_R07_DEFINITION.text);
     expect(write.rules).not.toContain(R07?.text);
     // 初版の B4：validate の試験は不一致・未解決に無い
@@ -7720,8 +7820,8 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
    * `BB769D6_FULL_BODY_SHA`——診断の塊があるので一致しない（直す前の挙動）。
    */
   const F9BF3B3_FULL_BODY_SHA = [
-    "9fbb8ee3925cc507086726de650528f4ad2a9e2808267eecb77191c835a8e5f4",
-    "c68bff9ef2c2eb360703eeadcb2673bb7effeb794e1e603059905b59f653473e",
+    "fb00c84f0ceadee05f6b118cd32a2b660a274b26cbaf58a552622c526dd4bafe",
+    "a4ffb740ef37ceeb35f1354d3b3609206bea586964db9bde30e9b85dc5974400",
   ] as const;
   /** 直す前（bb769d6）の同じ台本の全文の直しの body の SHA-256（旧値。診断の塊の分だけ違う） */
   const BB769D6_FULL_BODY_SHA = [
@@ -7761,8 +7861,8 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
    * #764 の後も欄だけの直しの要求はこの値のまま（完了条件 (2)）。
    */
   const BB769D6_FIELD_BODY_SHA = [
-    "9984b5c0d3bf27316bfdfee8a8fe95d8e7a447547c9d2637624fffea21038389",
-    "fbe186d1e2de9e615527bcd9f114b0a3f990dd600a49bd7026051fb7fbfff97c",
+    "2a1dc261d02a675abcddd5d7aec07452ce938d52fe759b2a31f76bc2b85987c7",
+    "961b9f768ff6b4a3f14263af6dc017fda64397acaacbd36cc72c05ce0a67d64b",
   ] as const;
 
   it("(2) 欄だけの直しの要求の body は bb769d6 と同じ（診断の塊があり、往復の数と採否も同じ）", async () => {
@@ -7835,7 +7935,7 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
    * 消した。診断の塊を含む body なので #764 の後もこの値のまま。
    */
   const BB769D6_HANDOFF_FIELD_BODY_SHA = [
-    "2f938971e45be809c0a7e4f794e278286512b308fe7684be22aaff33b2df9f46",
+    "8f9c5be2c09fd9307897540b77010daee4ac67228619121a947f49bd5a89f01d",
   ] as const;
   /**
    * #761 の前（f9bf3b3）の、`HANDOFF_CALLS` と同じ台本の**同じ走りの中の**全文の直しの要求の body の SHA-256（**期待**）。
@@ -7847,7 +7947,7 @@ describe("修復へ渡す診断（旗 v12.ids と search-repair がともに on�
    * 取り除いて比べた値ではない。bb769d6 の同じ台本の全文の body は診断の塊があるので `ee74d20e…` で一致しない。
    */
   const F9BF3B3_HANDOFF_FULL_BODY_SHA = [
-    "6c62de47e0e97c6f20aeea9a0f8bfe7bc63cd6c0bb8e4c4e89e0b9e9d21ef23b",
+    "b507dfa3e4ee2678703dbbff8d3f47915a6cb97ba106f67206eb994eb66303af",
   ] as const;
   /** 同じ台本の版の (出所, 違反の数, 採ったか) の並び（bb769d6 の実測。修復 2 往復・全文→欄だけ・すべて採用） */
   const HANDOFF_TOTALS: readonly unknown[] = [
@@ -8199,13 +8299,13 @@ describe("最後の答えの枠を取っておく（旗 v12.ids の探索 on の
    * JSON の SHA が 7 番目の値と一致する（足されたのは道具を選ばせない指定だけ）。
    */
   const BEFORE_768_BODY_SHA = [
-    "9fbb8ee3925cc507086726de650528f4ad2a9e2808267eecb77191c835a8e5f4",
-    "8ec81b99f165db65ff99a68faf4f6b0935aaab6042f2bd2755feed6e28c7d204",
-    "2ca54844448e22349158a578990a0a16a3527a294f87d62e5740d3979b20ddb9",
-    "77609928f0c144ed23be4a0d3e511db17f624e4fb8527049d748506863e7d8ed",
-    "d8a749023ba59acbf609f3fca39ac44ed6552d13ae2cf0b452c3f7e76215bfdc",
-    "abb575b5ad9d3bd70187b674f57cce5f8395af2d07f4d708421e71e7af6a4a09",
-    "9f1d1d6217256db704c9f621bd17989d7e8e09633e5ee405d70f373472816f5d",
+    "fb00c84f0ceadee05f6b118cd32a2b660a274b26cbaf58a552622c526dd4bafe",
+    "f9f4cebde538d73a71ed05a3789906e5ded615fa822652af2a283db0cbba121a",
+    "9addddb269350f316b521d6bb4830c2a4f4770e9af24007aecaebbc5d09b51b0",
+    "78c24c95a097a67a23c09e258c823c86687238fb47dea6033195f4196f93b1f9",
+    "0b95c9832867a63fa951f5c675851b75f093f5d992fb77c987a2515b43da8b0f",
+    "5263faec73baedba7b88c5fa58cc2612d85fab271fd040ad161ce4cb76258f14",
+    "a6642c8c5ad71e305de17584f4f8a0b3f7cca9237c9573b24f3003eb302ad947",
   ] as const;
 
   /** 直す段の記録の 1 行（一気通貫は要約の v12_calls、段の走りは結果の v12Calls） */

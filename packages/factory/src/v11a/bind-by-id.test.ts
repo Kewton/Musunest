@@ -14,8 +14,12 @@ import {
   correspondenceFromTable,
   extraElementsOf,
   markRows,
+  normalizedTargetsKey,
+  referenceFieldNamesOf,
   requiredValidationLocation,
   requiredValidationsOf,
+  validationExpressionRequirementsOf,
+  validationWorldOf,
   type MarkReference,
 } from "./bind-by-id.js";
 import { identityMappings, toV1 } from "./convert.js";
@@ -299,7 +303,7 @@ const observesOf = (suite: TestSuite, overrides: Readonly<Record<string, TestObs
   new Map(suite.tests.map((test) => [test.id, overrides[test.id] ?? (test.operation === "validate" ? "validation" : "when")] as const));
 
 /** 鍵の集合（骨組みの 1 件が持つ欄。式・期待・分類・宣言・表の型の写しを持たない） */
-const SKELETON_KEYS = ["conflict", "entity", "name", "rowId", "rowKind", "testIds"];
+const SKELETON_KEYS = ["conflict", "entity", "requirementId", "targets", "testIds"];
 
 describe("validate の試験が要求する検査の場所（結び付けの契約。Issue #666）", () => {
   it("項目の行 → 所属 entity の名前・項目の名前。entity の行 → entity の名前・entity の名前。表に無い id・種類違い・所属 entity が引けない・validate でない → undefined", () => {
@@ -357,8 +361,8 @@ describe("要る検査の骨組み（純粋。Issue #666）", () => {
   it("(1) 同じ項目の validate 試験 2 件 → 1 件（entity・項目名・試験 ID 2）。(2) entity の行の validate → entity 名・entity 名", () => {
     const suite = suiteOf(validateTest("n", "normal"), validateTest("x", "abnormal"), validateTest("e", "normal", "e.item", "R1", "entity"));
     expect(requiredValidationsOf(table, suite, observesOf(suite))).toEqual([
-      { entity: "item", name: "item", rowId: "e.item", rowKind: "entity", testIds: ["e"], conflict: false },
-      { entity: "item", name: "amount", rowId: "f.item.amount", rowKind: "field", testIds: ["n", "x"], conflict: false },
+      { requirementId: "R1", entity: "item", targets: ["item"], testIds: ["e"], conflict: false },
+      { requirementId: "R1", entity: "item", targets: ["amount"], testIds: ["n", "x"], conflict: false },
     ]);
   });
 
@@ -378,8 +382,8 @@ describe("要る検査の骨組み（純粋。Issue #666）", () => {
   it("(4) 別 entity の同名の項目 → 2 件とも競合の印（entity で区別）。同じ entity の 2 試験なら競合にならない", () => {
     const suite = suiteOf(validateTest("mt", "normal", "f.member.title", "R2"), validateTest("it", "normal", "f.item.title", "R2"), validateTest("it2", "abnormal", "f.item.title", "R2"));
     expect(requiredValidationsOf(table, suite, observesOf(suite))).toEqual([
-      { entity: "member", name: "title", rowId: "f.member.title", rowKind: "field", testIds: ["mt"], conflict: true },
-      { entity: "item", name: "title", rowId: "f.item.title", rowKind: "field", testIds: ["it", "it2"], conflict: true },
+      { requirementId: "R2", entity: "member", targets: ["title"], testIds: ["mt"], conflict: true },
+      { requirementId: "R2", entity: "item", targets: ["title"], testIds: ["it", "it2"], conflict: true },
     ]);
     const same = suiteOf(validateTest("it", "normal", "f.item.title", "R2"), validateTest("it2", "abnormal", "f.item.title", "R2"));
     expect(requiredValidationsOf(table, same, observesOf(same)).map((entry) => entry.conflict)).toEqual([false]);
@@ -401,8 +405,8 @@ describe("要る検査の骨組み（純粋。Issue #666）", () => {
     expect(skeleton.filter((entry) => !entry.conflict)).toEqual([]);
     // (b) 行ごとに 1 件ずつ、両方に競合の印（表の行の順。どちらも選ばない）
     expect(skeleton).toEqual([
-      { entity: "item", name: "item", rowId: "e.item", rowKind: "entity", testIds: ["ee", "ee2"], conflict: true },
-      { entity: "item", name: "item", rowId: "f.item.item", rowKind: "field", testIds: ["ef"], conflict: true },
+      { requirementId: "R1", entity: "item", targets: ["item"], testIds: ["ee", "ee2"], conflict: true },
+      { requirementId: "R1", entity: "item", targets: ["item"], testIds: ["ef"], conflict: true },
     ]);
     // 片方の行の試験だけなら競合にならない
     const entityOnly = suiteOf(...suite.tests.filter((test) => test.target.roleId === "e.item"));
@@ -417,10 +421,10 @@ describe("要る検査の骨組み（純粋。Issue #666）", () => {
   it("(5) 棄却で外れた試験の分は入らない（呼ぶ側が評価の文脈と同じ組を渡す）。並びは表の行の順", () => {
     const suite = suiteOf(validateTest("x", "abnormal"), validateTest("t", "normal", "f.item.title", "R1"), validateTest("n", "normal"));
     const all = requiredValidationsOf(table, suite, observesOf(suite));
-    expect(all.map((entry) => entry.name)).toEqual(["title", "amount"]);
+    expect(all.map((entry) => entry.targets[0])).toEqual(["title", "amount"]);
     const afterOverturn = suiteOf(...suite.tests.filter((test) => test.id !== "t"));
     expect(requiredValidationsOf(table, afterOverturn, observesOf(suite))).toEqual([
-      { entity: "item", name: "amount", rowId: "f.item.amount", rowKind: "field", testIds: ["x", "n"], conflict: false },
+      { requirementId: "R1", entity: "item", targets: ["amount"], testIds: ["x", "n"], conflict: false },
     ]);
   });
 
@@ -441,7 +445,7 @@ describe("要る検査の骨組み（純粋。Issue #666）", () => {
     const skeleton = requiredValidationsOf(table, suite, observesOf(suite));
     const [entry] = skeleton;
     const withCheck = bindTestsById(await normalizedFixture(FIXTURE_YAML), table, suite).bindings;
-    expect(withCheck.get("n")).toEqual({ kind: "bound", testId: "n", location: { kind: "validation", entity: entry?.entity, name: entry?.name } });
+    expect(withCheck.get("n")).toEqual({ kind: "bound", testId: "n", location: { kind: "validation", entity: entry?.entity, name: entry?.targets[0] } });
     const withoutCheck = bindTestsById(await normalizedFixture(withValidations()), table, suite).bindings;
     expect(withoutCheck.get("n")).toMatchObject({ kind: "unbound", cause: "no-candidate" });
     expect(requiredValidationsOf(table, suite, observesOf(suite))).toEqual(skeleton);
@@ -468,7 +472,7 @@ describe("二点測定（原因 1 の台本）：骨組みの検査の場所と�
 
   it("骨組みは 1 件（item・amount・試験 2 件・競合なし）", () => {
     expect(requiredValidationsOf(table, suite, observes)).toEqual([
-      { entity: "item", name: "amount", rowId: "f.item.amount", rowKind: "field", testIds: ["f-normal", "f-abnormal"], conflict: false },
+      { requirementId: "R1", entity: "item", targets: ["amount"], testIds: ["f-normal", "f-abnormal"], conflict: false },
     ]);
   });
 
@@ -532,5 +536,108 @@ describe("二点測定（原因 1 の台本）：骨組みの検査の場所と�
       "./__tests__/fixtures.ts",
     ];
     expectNoAcceptanceMaterial(files.map((file) => fs.readFileSync(new URL(file, import.meta.url), "utf8")));
+  });
+});
+
+// ── 旗 v12.ids：検査の式が参照する項目の集合で結び付ける（Issue #801）──────────────────────────
+
+/** 検査の式の要件 R1（item の amount と rate）を持つ表（`conflict` なら同じ集合の R2 も足す） */
+const expressionTable = (conflict = false): NameTable =>
+  ({
+    rows: [
+      { id: "e.item", kind: "entity", entity: null, name: "item", role: "", source: null, type: null, options: null, groupBy: null, refEntity: null },
+      { id: "f.item.amount", kind: "field", entity: "e.item", name: "amount", role: "", source: null, type: "number", options: null, groupBy: null, refEntity: null },
+      { id: "f.item.rate", kind: "field", entity: "e.item", name: "rate", role: "", source: null, type: "number", options: null, groupBy: null, refEntity: null },
+    ],
+    ownership: [
+      {
+        requirementId: "R1",
+        roles: [
+          { id: "f.item.amount", basis: "stated", reason: null },
+          { id: "f.item.rate", basis: "stated", reason: null },
+        ],
+      },
+      ...(conflict
+        ? [
+            {
+              requirementId: "R2",
+              roles: [
+                { id: "f.item.amount", basis: "stated" as const, reason: null },
+                { id: "f.item.rate", basis: "stated" as const, reason: null },
+              ],
+            },
+          ]
+        : []),
+    ],
+    verification: [
+      { requirementId: "R1", kind: "validation-expression", targets: ["f.item.rate", "f.item.amount"] },
+      ...(conflict
+        ? [{ requirementId: "R2", kind: "validation-expression" as const, targets: ["f.item.amount", "f.item.rate"] }]
+        : []),
+    ],
+    classification: [{ requirementId: "R1", nature: "ruled" }, ...(conflict ? [{ requirementId: "R2", nature: "ruled" as const }] : [])],
+  }) as unknown as NameTable;
+
+const expressionApp = (
+  validations: readonly { readonly name: string; readonly expression: string }[],
+  extraComputed: readonly { readonly name: string; readonly expression: string }[] = [],
+): NormalizedAppSpec =>
+  ({
+    spec: {
+      entities: [
+        {
+          name: "item",
+          fields: { amount: { type: "number" }, rate: { type: "number" } },
+        },
+      ],
+      computed: [
+        { name: "double", entity: "item", expression: "amount * 2", type: "number" },
+        { name: "quad", entity: "item", expression: "double * 2", type: "number" },
+        ...extraComputed.map((entry) => ({ ...entry, entity: "item", type: "number" })),
+      ],
+      validations: validations.map((entry) => ({ ...entry, entity: "item" })),
+    },
+  }) as unknown as NormalizedAppSpec;
+
+describe("検査の式が参照する項目の集合と、名前によらない結び付け（Issue #801）", () => {
+  it("(1) 参照の集合：並びが逆でも同じ集合・重複は 1 つ・計算を 2 段辿って項目に写す。循環・解決できない名前・構文解析に失敗は null", () => {
+    const world = validationWorldOf(expressionApp([]));
+    expect([...referenceFieldNamesOf(world, "item", "amount + rate")!].sort()).toEqual(["amount", "rate"]);
+    expect([...referenceFieldNamesOf(world, "item", "rate + amount + amount")!].sort()).toEqual(["amount", "rate"]);
+    expect([...referenceFieldNamesOf(world, "item", "quad > 0")!]).toEqual(["amount"]);
+    const cyclic = validationWorldOf(expressionApp([], [{ name: "a", expression: "b * 2" }, { name: "b", expression: "a * 2" }]));
+    expect(referenceFieldNamesOf(cyclic, "item", "a > 0")).toBeNull();
+    expect(referenceFieldNamesOf(world, "item", "missing > 0")).toBeNull();
+    expect(referenceFieldNamesOf(world, "item", "amount >")).toBeNull();
+  });
+
+  it("(2) 名前が対象の行と違っても参照の集合が targets と等しい検査に結び付く（P7-r3 型）。候補 0 は no-candidate、2 つは ambiguous、競合は ambiguous", () => {
+    const table = expressionTable();
+    const suite = suiteOf(validateTest("v", "normal", "f.item.amount", "R1"));
+    // 名前は amount と違うが、参照の集合が {amount, rate} と等しい
+    const bound = bindTestsById(expressionApp([{ name: "positive", expression: "rate + amount > 0" }]), table, suite).bindings;
+    expect(bound.get("v")).toEqual({ kind: "bound", testId: "v", location: { kind: "validation", entity: "item", name: "positive" } });
+    // 候補 0（恒真式しか無い）は no-candidate
+    const none = bindTestsById(expressionApp([{ name: "tautology", expression: "1 > 0" }]), table, suite).bindings;
+    expect(none.get("v")).toMatchObject({ kind: "unbound", cause: "no-candidate" });
+    // 同じ参照の集合の検査が 2 つなら ambiguous
+    const two = bindTestsById(
+      expressionApp([
+        { name: "one", expression: "amount + rate > 0" },
+        { name: "two", expression: "rate + amount > 1" },
+      ]),
+      table,
+      suite,
+    ).bindings;
+    expect(two.get("v")).toMatchObject({ kind: "unbound", cause: "ambiguous" });
+    // 同じ entity で同じ対象の集合を持つ要件が 2 つなら、候補が 1 つでも ambiguous
+    const conflicting = expressionTable(true);
+    const conflict = bindTestsById(expressionApp([{ name: "positive", expression: "amount + rate > 0" }]), conflicting, suite).bindings;
+    expect(conflict.get("v")).toMatchObject({ kind: "unbound", cause: "ambiguous" });
+    const requirements = validationExpressionRequirementsOf(conflicting);
+    expect(requirements.get("R1")?.conflict).toBe(true);
+    expect(requirements.get("R2")?.conflict).toBe(true);
+    expect(requirements.get("R1")?.targets).toEqual(["amount", "rate"]);
+    expect(normalizedTargetsKey("item", ["rate", "amount"])).toBe(normalizedTargetsKey("item", ["amount", "rate"]));
   });
 });
