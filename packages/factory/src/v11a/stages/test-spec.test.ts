@@ -63,8 +63,6 @@ import {
   strictDefects as strictDefectsOf,
   withoutEnumMembership,
   LEDGER_VIEW_3G,
-  idsResponseList,
-  idsResponsesOf,
 } from "../__tests__/fixtures.js";
 import { deriveCarryOver, pruneForCarryOver, type CarryOver } from "../carry-over.js";
 import { coverageUnitsOf } from "../coverage.js";
@@ -3696,37 +3694,7 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
   type Output = { readonly classifications: readonly { readonly requirementId: string; readonly nature: string }[]; readonly cases: readonly Record<string, unknown>[] };
   /** 構造の要件・コードの試験の無い台本（試験 3N。全要件が T2 の要求に残る） */
   const sized = (requirements: number, options: { readonly codeWritten?: boolean } = {}): SizedMaterials =>
-    addValueTargets(buildSized(requirements, 3 * requirements, ALL_ON, options));
-  /**
-   * 値を縛る要件（所属が項目の行だけ）に条件つき操作の行を足す（Issue #800）。値の対象は計算と条件つき操作だけになるので、
-   * 項目だけの所属のままでは決まりの要件が免除され、異常・境界の欠如を作り直させる道が無くなる。応答（C2）も同じ表から組む
-   */
-  const addValueTargets = (source: SizedMaterials): SizedMaterials => {
-    const rows = [...source.table.rows];
-    const ownership = source.table.ownership.map((entry) => {
-      const owned = entry.roles.flatMap((role) => source.table.rows.filter((row) => row.id === role.id));
-      const plain = owned.length > 0 && owned.length === entry.roles.length && owned.every((row) => row.kind === "field");
-      if (!plain) return entry;
-      const opId = `o.${entry.requirementId}`;
-      if (!rows.some((row) => row.id === opId)) {
-        rows.push({
-          id: opId,
-          kind: "operation",
-          entity: "e.item",
-          name: `op${entry.requirementId.replace(/[^0-9]/g, "")}`,
-          role: "要件が使う対象",
-          source: { requirementId: entry.requirementId, quote: "" },
-          type: { action: "update", hasWhen: true },
-          options: null,
-          groupBy: null,
-          refEntity: null,
-        });
-      }
-      return { ...entry, roles: [...entry.roles, { id: opId, basis: "stated" as const, reason: null }] };
-    });
-    const table = { ...source.table, rows, ownership };
-    return { ...source, table, tableResponses: () => idsResponseList(idsResponsesOf(source.list, table, LEDGER)), addedTestCount: source.addedTestCount };
-  };
+    buildSized(requirements, 3 * requirements, ALL_ON, { ...options, valueTargets: true });
   const fullOf = (materials: SizedMaterials, omitAbnormalOf?: string): Output =>
     materials.t2Response(omitAbnormalOf === undefined ? {} : { omitAbnormalOf }) as unknown as Output;
   /** 全要件の応答を、束の要件の分類と場合に絞る */
@@ -4140,8 +4108,8 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
           const normal = good.cases.find((entry) => entry["requirementId"] === "R12");
           return { ...good, cases: [...good.cases, ...Array.from({ length: 16 }, () => ({ ...normal }))] };
         },
-        // 応答の 3＋16 本に、コードが作る 項目 × screen の 1 本（手 3h・#652）を足した 20 本（切り捨てない）
-        "要件の試験が上限 16 を超えている（20）",
+        // Issue #800：検査の式の要件には 項目 × screen を作らないので、応答の 3＋16 本の 19 本（旧は 1 本を足した 20 本）
+        "要件の試験が上限 16 を超えている（19）",
       ],
     ];
     it.each(cases)("%s", async (_name, bad, fragment) => {
@@ -4252,11 +4220,12 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
       const withoutRetention = await runBundled(materials, (ids, call, head) => (head === "R6" ? (call === 1 ? lost : sliceOf(full, ids)) : sliceOf(full, ids)));
       expect(withoutRetention.outcome.ok).toBe(true);
       const content = withoutRetention.rejected.find((entry) => entry.candidate.kind === "content");
-      // 手 3h（#652）から、項目だけの要件にはコードの 項目 × screen（正常）が残るので、消えた要件は異常・境界の欠けで落ちる
-      expect(content?.candidate.problems.map((problem) => problem.message)).toContain("abnormal の試験が無い");
-      expect(content?.candidate.problems.map((problem) => problem.message)).toContain("boundary の試験が無い");
-      // #651 までの台帳（コードの試験が無い）では「要件の試験が無い」で落ちる（元の二点測定）
-      const before = await runBundled(materials, (ids, call, head) => (head === "R6" ? (call === 1 ? lost : sliceOf(full, ids)) : sliceOf(full, ids)), { ledger: LEDGER_VIEW_3G });
+      // Issue #800：検査の式の要件にはコードの 項目 × screen を作らないので、消えた要件は「要件の試験が無い」で落ちる
+      // （直す前の挙動として、旧はコードの 項目 × screen が残り「abnormal の試験が無い」「boundary の試験が無い」だった）
+      expect(content?.candidate.problems.map((problem) => problem.message)).toContain("要件の試験が無い");
+      expect(content?.candidate.problems.map((problem) => problem.message)).not.toContain("abnormal の試験が無い");
+      // #651 までの台帳（validation-expression を含まない表）で、保持が無ければ「要件の試験が無い」で落ちる
+      const before = await runBundled(buildSized(15, 45, ALL_ON), (ids, call, head) => (head === "R6" ? (call === 1 ? lost : sliceOf(full, ids)) : sliceOf(full, ids)), { ledger: LEDGER_VIEW_3G });
       expect(before.rejected.find((entry) => entry.candidate.kind === "content")?.candidate.problems.map((problem) => problem.message)).toContain("要件の試験が無い");
     });
 

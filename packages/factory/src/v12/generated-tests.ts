@@ -395,16 +395,13 @@ export function generateTests(input: GeneratedTestsInput): GeneratedTests {
     // 順：ここ（LLM を呼ぶ前・種類に依らない）→ 分類は LLM が独立に書く → 分類の照合・J2 の採用 → 採った種類で絞るのは空の集計の
     // 試験だけ（項目の在ることの試験は種類に依らず残す）→ 検査を全部（中身のやり直しの合併後も同じ順）
     const roles = rolesById.get(requirement.id) ?? [];
-    // Issue #800：試験の台本が値の対象として足した行（名前が op + 数字の条件つき操作）は、代わりの対象（項目 × screen）の判定では数えない
-    const generationOwned = owned.filter((row) => !(isOperationWithWhenForFrame(row) && /^op\d+$/.test(row.name)));
-    const primary = ledger.ownershipRows.find((row) => ownedOfKind(generationOwned, row.t2.targetKinds).length > 0);
-    const fallbackOwned = generationOwned;
+    const primary = ledger.ownershipRows.find((row) => ownedOfKind(owned, row.t2.targetKinds).length > 0);
     const fallbackRow =
-      primary !== undefined || fallbackOwned.length === 0 || owned.length !== roles.length
+      primary !== undefined || owned.length === 0 || owned.length !== roles.length
         ? undefined
         : ledger.ownershipRows.find((row) => {
             const kinds = row.t2.fallback?.targetKinds ?? [];
-            return kinds.length > 0 && ownedOfKind(fallbackOwned, kinds).length === fallbackOwned.length;
+            return kinds.length > 0 && ownedOfKind(owned, kinds).length === owned.length;
           });
     const ownershipRow = primary ?? fallbackRow;
     if (ownershipRow !== undefined) {

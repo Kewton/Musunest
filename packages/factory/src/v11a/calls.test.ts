@@ -127,7 +127,16 @@ function createMouth(
   failFirst: boolean,
   bySchema?: Readonly<Record<string, readonly RecordedCall[]>>,
   home?: readonly (readonly [string, string])[],
+  byBundle?: readonly { readonly ids: readonly string[]; readonly calls: readonly RecordedCall[] }[],
 ) {
+  // `byBundle` を渡すと、T2 の要求の要件 ID が属する束の記録から順に返す（束ごとの配分を台本側で固定する。Issue #800）
+  const bundleClients =
+    byBundle === undefined
+      ? undefined
+      : byBundle.map((entry) => ({
+          ids: new Set(entry.ids),
+          client: bundledT2Client(createFakeLlmClient(entry.calls, { validateAgainstSchema: true }), home),
+        }));
   // `bySchema` を渡すと、要求の schema 名ごとの記録から順に返す（段の数が走りで変わる二点測定用。Issue #594）
   const routed =
     bySchema === undefined
@@ -167,6 +176,11 @@ function createMouth(
       const key = JSON.stringify(request);
       requests.push(key);
       enter(stageOf(request.schemaName), key);
+      const bundle =
+        bundleClients === undefined || request.schemaName !== TEST_SPEC_SCHEMA_NAME
+          ? undefined
+          : bundleClients.find((entry) => requestListedIds(request).some((id) => entry.ids.has(id)));
+      if (bundle !== undefined) return bundle.client.callStructured(request);
       return inner.callStructured(request);
     },
     async callWithTools(request) {
@@ -244,6 +258,8 @@ interface RunOptions {
   readonly wrapJudge?: (fake: Judge) => Judge;
   /** 要求の schema 名ごとの記録（渡せば構造化の要求はこちらから返す） */
   readonly bySchema?: Readonly<Record<string, readonly RecordedCall[]>>;
+  /** T2 の束ごとの記録（渡せばその束の要件を含む T2 の要求はこちらから返す。Issue #800） */
+  readonly byBundle?: readonly { readonly ids: readonly string[]; readonly calls: readonly RecordedCall[] }[];
   /** 旗 v12.ids の T2 の束の偽物で、どの束の要件でもない分類・場合を残す束（`[要件 ID, 束の先頭の要件 ID]`。Issue #626） */
   readonly home?: readonly (readonly [string, string])[];
   /** 予算（USD。省けば十分な 1,000） */
@@ -283,7 +299,7 @@ function generationInputOf(materials: SizedMaterials, client: LlmClient, judge: 
 }
 
 async function observe(materials: SizedMaterials, recorded: readonly RecordedCall[], options: RunOptions = {}) {
-  const mouth = createMouth(recorded, options.failFirst ?? false, options.bySchema, options.home);
+  const mouth = createMouth(recorded, options.failFirst ?? false, options.bySchema, options.home, options.byBundle);
   const judge = createCountingJudge(materials.adviceAnswers(), options.wrapJudge);
   const result = await runGenerationV11a(generationInputOf(materials, mouth.client, judge.judge, options));
   const stages = Object.fromEntries(COUNTED_STAGES.map((stage) => [stage, totalsOf(result.record.stages, stage)])) as Record<StageKey, StageTotals>;
@@ -303,6 +319,31 @@ async function observe(materials: SizedMaterials, recorded: readonly RecordedCal
     /** 旗 v12.ids の走りの門と枝（要約の `v12_calls`。旗 off の走りは undefined） */
     calls: (result.summary as unknown as { readonly v12_calls?: V12CallsSummary }).v12_calls,
   };
+}
+
+/**
+ * Issue #800：T2 の束ごとの応答。束 1 は形の落ち → 異常を全部抜いた中身の落ち → 通る、ほかの束は形の落ち → 通る。
+ * `validation-expression` 化でコードが作る数が変わり、束ごとの配分を台本側で明示する
+ */
+function bundleScriptOf(materials: SizedMaterials) {
+  const full = materials.t2Response() as { readonly classifications?: unknown; readonly cases: readonly { readonly kind?: string; readonly requirementId?: string }[] };
+  const omit = materials.table.verification.find((entry) => entry.kind === "validation-expression")?.requirementId;
+  const omitted = { ...full, cases: full.cases.filter((entry) => !(entry.requirementId === omit && entry.kind === "abnormal")) };
+  const shape = negative({ classifications: "x", cases: "x" }, "classifications・cases が並びでない応答。束ごとの形のやり直しを観測する負例");
+  return bundleRequirementIds(materials.ids, V12_T2_BUNDLE.size).map((ids, index) => ({
+    ids,
+    calls: [structured(shape), ...(index === 0 ? [structured(omitted)] : []), structured(full)],
+  }));
+}
+
+/** T2 以外の段の応答（表・T1''・宣言・B1） */
+function nonT2CallsOf(materials: SizedMaterials): RecordedCall[] {
+  return [
+    ...materials.tableResponses().map(structured),
+    structured(materials.judgments()),
+    structured({ declaration: materials.declaration() }),
+    structured(materials.judgments()),
+  ];
 }
 
 /** 要約の門と枝の欄（旗 v12.ids の走りだけ。Issue #592） */
@@ -1453,11 +1494,11 @@ describe("(7) 旗 v12.ids のコードが作る試験：既定値・選択肢の
     expect(() => buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, {}, { codeWritten: true })).toThrow(RangeError);
   });
 
-  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：ids on・ids off とも T2 の論理要求 3（初回 1・形 1・中身 1）・retries 形 1 中身 1 で full。組の数は M で同じ、ids on の応答は 4 少なく、作った試験 ID が 4 つ", async (size) => {
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：ids on・ids off とも T2 の論理要求 3（初回 1・形 1・中身 1）・retries 形 1 中身 1 で full。組の数は M で同じ、ids on の応答は 4 少なく、検査の式の要件には代わりの対象（項目 × screen）を作らない（旧は 4 つ）", async (size) => {
     const off = sizedTargets(size.requirements, size.tests, PRIOR, { codeWritten: true });
     const on = sizedTargets(size.requirements, size.tests, ALL_ON, { codeWritten: true });
     const offRun = await observe(off, t2RetryCalls(off), { flags: PRIOR });
-    const onRun = await observe(on, t2RetryCalls(on), { flags: ALL_ON });
+    const onRun = await observe(on, nonT2CallsOf(on), { flags: ALL_ON, byBundle: bundleScriptOf(on) });
     for (const run of [offRun, onRun]) {
       expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
       expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
@@ -1469,7 +1510,8 @@ describe("(7) 旗 v12.ids のコードが作る試験：既定値・選択肢の
       expect(suiteOf(run).suite.tests).toHaveLength(size.tests + (run === onRun ? on.addedTestCount : 0));
       expectNoAcceptanceMaterial(run.requests);
     }
-    expect(on.addedTestCount).toBeGreaterThan(0);
+    // Issue #800：検査の式の要件には代わりの対象（項目 × screen）を作らないので 0（旧は 4）
+    expect(on.addedTestCount).toBe(0);
     expect(off.addedTestCount).toBe(0);
     // ids on：作った試験は組の末尾（予約の接頭辞）。手 3d（#624）から構造の検査と在ることの確認を含む。ids off の成果物に欄は無い
     // 手 3h（#652）から項目だけの要件の 項目 × screen を含む
@@ -1647,7 +1689,7 @@ describe("(8) 旗 v12.ids の構造の検査と画面・在ることの構造の
     const off = sizedTargets(size.requirements, size.tests, PRIOR, OPTIONS);
     const on = sizedTargets(size.requirements, size.tests, ALL_ON, OPTIONS);
     const offRun = await observe(off, t2RetryCalls(off), { flags: PRIOR });
-    const onRun = await observe(on, t2RetryCalls(on), { flags: ALL_ON });
+    const onRun = await observe(on, nonT2CallsOf(on), { flags: ALL_ON, byBundle: bundleScriptOf(on) });
     for (const run of [offRun, onRun]) {
       expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
       expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
@@ -1678,16 +1720,6 @@ describe("(8) 旗 v12.ids の構造の検査と画面・在ることの構造の
 
 describe("(9) 旗 v12.ids の場合の形の T2：T2 の論理要求は初回 1・形 1・中身 1 のまま、応答の文字数は同じ N・M の手 3d の応答の 0.65 倍以下で、組の数は M", () => {
   const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
-  /** 表を組む段・T1''・T2（形の落ち → R1 の異常が欠けて中身の落ち → 通る）・B1・B3' */
-  const t2RetryCalls = (materials: SizedMaterials): RecordedCall[] => [
-    ...materials.tableResponses().map(structured),
-    structured(materials.judgments()),
-    structured(negative({ classifications: "x", cases: "x" }, "classifications・cases が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
-    structured(materials.t2Response({ omitAbnormalOf: "R1" })),
-    structured(materials.t2Response()),
-    structured({ declaration: materials.declaration() }),
-    structured(materials.judgments()),
-  ];
   const suiteOf = (run: Awaited<ReturnType<typeof observe>>) => {
     const artifact = run.result.bundle?.artifacts.find((entry) => entry.path === "artifacts/test-spec.json");
     if (artifact === undefined) throw new Error("前提が壊れた：T2 の成果物が無い");
@@ -1711,7 +1743,7 @@ describe("(9) 旗 v12.ids の場合の形の T2：T2 の論理要求は初回 1�
 
   it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：T2 の論理要求 3（初回 1・形 1・中身 1）で full、組の数は M。初回で通る走りは 1。呼び出しの合計は論理 80・実試行 144・判定 80 以下", async (size) => {
     const on = sizedTargets(size.requirements, size.tests, ALL_ON);
-    const retried = await observe(on, t2RetryCalls(on), { flags: ALL_ON });
+    const retried = await observe(on, nonT2CallsOf(on), { flags: ALL_ON, byBundle: bundleScriptOf(on) });
     expect(retried.result.stopped, JSON.stringify(retried.result.stopped)).toBeNull();
     expect(retried.result.outcome).toEqual({ result: "pass", verdict: "full" });
     // 束 k：初回 k・形 k・中身 1（R1 の束だけ。Issue #626）
@@ -1738,6 +1770,7 @@ describe("(9b) 旗 v12.ids の手 3h：所属が項目の行だけの在るこ�
   const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
   const PRIOR = { ledger: true, searchRepair: true } as const;
   const OPTIONS = { itemsOnly: true } as const;
+  /** ids off の T2 の台本（形の落ち → R1 の異常の落ち → 通る） */
   const t2RetryCalls = (materials: SizedMaterials): RecordedCall[] => [
     ...materials.tableResponses().map(structured),
     structured(materials.judgments()),
@@ -1774,7 +1807,7 @@ describe("(9b) 旗 v12.ids の手 3h：所属が項目の行だけの在るこ�
     const off = sizedTargets(size.requirements, size.tests, PRIOR, OPTIONS);
     const on = sizedTargets(size.requirements, size.tests, ALL_ON, OPTIONS);
     const offRun = await observe(off, t2RetryCalls(off), { flags: PRIOR });
-    const onRun = await observe(on, t2RetryCalls(on), { flags: ALL_ON });
+    const onRun = await observe(on, nonT2CallsOf(on), { flags: ALL_ON, byBundle: bundleScriptOf(on) });
     for (const run of [offRun, onRun]) {
       expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
       expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
@@ -1826,15 +1859,6 @@ describe("(9b) 旗 v12.ids の手 3h：所属が項目の行だけの在るこ�
 describe("(9c) 旗 v12.ids の手 3i：必要な試験の枠を要求に足しても、T2 の論理要求は束ごと初回 1・形 1・中身 1 のまま。枠の文字数は要件数に線形、応答は同じ N・M の手 3e 以下で、合計は論理 80・実試行 144・判定 80 以下（Issue #653）", () => {
   const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
   const OPTIONS = { screens: true, entityOnly: true } as const;
-  const t2RetryCalls = (materials: SizedMaterials): RecordedCall[] => [
-    ...materials.tableResponses().map(structured),
-    structured(materials.judgments()),
-    structured(negative({ classifications: "x", cases: "x" }, "classifications・cases が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
-    structured(materials.t2Response({ omitAbnormalOf: "R1" })),
-    structured(materials.t2Response()),
-    structured({ declaration: materials.declaration() }),
-    structured(materials.judgments()),
-  ];
   /** T2 の要求の必要な試験の枠の塊（文字列）と、その要件 ID の並び */
   const framesOf = (requests: readonly string[]) =>
     requests
@@ -1862,7 +1886,7 @@ describe("(9c) 旗 v12.ids の手 3i：必要な試験の枠を要求に足し�
 
   it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：T2 の論理要求は束 k で 2k＋1（初回 k・形 k・中身 1）で full。各束の枠はその束の要件の分だけ", async (size) => {
     const on = sizedTargets(size.requirements, size.tests, ALL_ON, OPTIONS);
-    const retried = await observe(on, t2RetryCalls(on), { flags: ALL_ON });
+    const retried = await observe(on, nonT2CallsOf(on), { flags: ALL_ON, byBundle: bundleScriptOf(on) });
     expect(retried.result.stopped, JSON.stringify(retried.result.stopped)).toBeNull();
     expect(retried.result.outcome).toEqual({ result: "pass", verdict: "full" });
     const k = t2BundlesOf(on);
@@ -2458,7 +2482,8 @@ describe("(13) 旗 v12.ids の C2 の初回は要件 5 件ごとの束に分け�
   }
 
   it.each([MEDIAN_SIZE, MAX_SIZE])("(6) 要件 $requirements：孤立行は 0 でも、ほかの要件の行まで抱え込んだ所属（#627 型）は C2' を通り、C3 が拒否し、書き直しでも拒否が残れば持ち越しになって full にならない", async (size) => {
-    const materials = sizedTargets(size.requirements, size.tests, ALL_ON);
+    // この台本は所属の抱え込みを見るので、値を縛る要件も fixed-test のまま（Issue #800 の valueTargets は使わない）
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
     const k = t2Bundles(size.requirements);
     const { vocabulary, entries, tailWithout } = partsOf(materials);
     // 2 つ目の束の要件 X に、ほかの要件が所属させた行を全部 dependency で足す（どの行もほかの要件にも所属するので孤立行は 0）

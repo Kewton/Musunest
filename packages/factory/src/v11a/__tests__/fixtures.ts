@@ -1052,7 +1052,9 @@ export function withCodeIds(table: NameTable, keepSource = false): NameTable {
       };
     }),
     ownership: table.ownership.map((entry) => ({ ...entry, roles: entry.roles.map((role) => ({ ...role, id: to(role.id) })) })),
-    verification: table.verification,
+    verification: table.verification.map((entry) =>
+      entry.kind === "validation-expression" ? { ...entry, targets: entry.targets.map(to) } : entry,
+    ),
     classification: table.classification,
   };
 }

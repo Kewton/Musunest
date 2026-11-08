@@ -247,16 +247,6 @@ export function buildSized(
     refEntity: null,
   });
   const rows: NameTableRow[] = [row({ id: "e.item", kind: "entity", entity: null, name: "item", type: null, from: "R1" })];
-  /**
-   * 旗 `v12.ids` と `valueTargets` の走りで、値を縛る要件に足す条件つき操作の行（`o.opN`。Issue #800）。値の対象は計算と
-   * 条件つき操作だけになるので、項目だけの所属のままでは決まりの要件が免除され、異常・境界の欠如を作り直させる道が無くなる。
-   * 台本が足した行は出典の引用を空にし、代わりの対象（項目 × screen）の判定では数えない（作る試験の数は変えない）
-   */
-  const retryOperationOf = (index: number): string | null => {
-    const lead = leadingOf(index);
-    if (options.valueTargets !== true || !resolvedFlags.ids || isStructural(index) || isItemsOnly(index) || isEntityOnly(index) || lead !== null) return null;
-    return `o.op${index + 1}`;
-  };
   ids.forEach((id, index) => {
     const n = index + 1;
     const lead = leadingOf(index);
@@ -283,13 +273,6 @@ export function buildSized(
     } else {
       rows.push(row({ id: `f.item.v${n}`, kind: "field", entity: "e.item", name: `v${n}`, type: "number", from: id }));
       if (index === screenRuledIndex) rows.push(row({ id: `s.view${n}`, kind: "screen", entity: "e.item", name: `view${n}`, type: { view: "table" }, from: id }));
-      const valueTarget = retryOperationOf(index);
-      if (valueTarget !== null) {
-        rows.push({
-          ...row({ id: valueTarget, kind: "operation", entity: "e.item", name: `op${n}`, type: { action: "update", hasWhen: true }, from: id }),
-          source: { requirementId: id, quote: "" },
-        });
-      }
     }
   });
   const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
@@ -309,14 +292,26 @@ export function buildSized(
           : isStructural(index)
           ? [`f.item.w${index + 1}`, `s.view${index + 1}`]
           : index === screenRuledIndex
-          ? [`f.item.v${index + 1}`, `s.view${index + 1}`, ...(retryOperationOf(index) === null ? [] : [retryOperationOf(index) as string])]
-          : [`f.item.v${index + 1}`, ...(retryOperationOf(index) === null ? [] : [retryOperationOf(index) as string])];
+          ? [`f.item.v${index + 1}`, `s.view${index + 1}`]
+          : [`f.item.v${index + 1}`];
       return { requirementId: id, roles: roles.map(stated) };
     }),
     verification: ids.map((id, index) => {
       const lead = leadingOf(index);
       if (lead === "default") return { requirementId: id, kind: "default-value" as const, value: "a1" };
       if (lead === "enum") return { requirementId: id, kind: "enum-membership" as const };
+      // Issue #800：値の対象は targets から入る。代わりの対象（項目 × screen）は fixed-test 以外では作られない
+      if (
+        options.valueTargets === true &&
+        resolvedFlags.ids &&
+        !isStructural(index) &&
+        !isItemsOnly(index) &&
+        !isEntityOnly(index) &&
+        index !== screenRuledIndex &&
+        lead === null
+      ) {
+        return { requirementId: id, kind: "validation-expression" as const, targets: [`f.item.v${index + 1}`] };
+      }
       return isStructural(index)
         ? {
             requirementId: id,
@@ -559,15 +554,7 @@ export function buildSized(
     }
     if (screenRuledIndex >= 0) lines.push(`  - name: view${screenRuledIndex + 1}`, "    type: table", "    entity: item", `    show: [v${screenRuledIndex + 1}]`);
     if (codeWritten) lines.push("  - name: totals", "    type: dashboard", "    widgets:", "      - type: number", "        value: total");
-    const operations = Array.from({ length: requirementCount }, (_, index) => index).filter((index) => retryOperationOf(index) !== null);
-    if (operations.length === 0) lines.push("actions: []");
-    else {
-      lines.push("actions:");
-      for (const index of operations) {
-        const n = index + 1;
-        lines.push(`  - name: op${n}`, "    entity: item", "    kind: update", "    set:", `      v${n}: 1`, `    when: v${n} > 0`);
-      }
-    }
+    lines.push("actions: []");
     const checks = Array.from({ length: requirementCount }, (_, index) => index).filter(
       (index) => !isStructural(index) && !isItemsOnly(index) && !isEntityOnly(index) && leadingOf(index) === null,
     );
@@ -588,7 +575,8 @@ export function buildSized(
     // 旗 ids の走りでコードが作る試験：構造の検査（checks の数）・台本 codeWritten の 4 件と R3 の在ることの確認・台本 screens の画面 1 件
     generatedTestCount: resolvedFlags.ids ? structuralCount + (screens ? 1 + 1 : 0) + (codeWritten ? 4 + 1 : 0) + itemsOnlyCount + entityOnlyCount : 0,
     // 値を縛る要件のうち所属が項目の行だけのもの（台本 screens の画面を所属に持つ要件を除く）の 項目 × screen（Issue #652）
-    addedTestCount: resolvedFlags.ids ? plainCount - (screens ? 1 : 0) : 0,
+    // Issue #800：valueTargets は検査の式にするので、代わりの対象（項目 × screen）を作らない
+    addedTestCount: resolvedFlags.ids && options.valueTargets !== true ? plainCount - (screens ? 1 : 0) : 0,
     itemsOnlyIds: ids.filter((_, index) => isItemsOnly(index)),
     entityOnlyIds: ids.filter((_, index) => isEntityOnly(index)),
     ids,
