@@ -107,7 +107,8 @@ import {
 } from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
 import { DEFAULT_VALUE_DETAILS, ENUM_MEMBERSHIP_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
-import { COMPUTATION_AGGREGATE_MESSAGES, nameTableSha256, ownersByRowId, type NameTable } from "./names.js";
+import { COMPUTATION_AGGREGATE_MESSAGES, nameTableSha256, ownersByRowId, type NameTable, type NameTableRow } from "./names.js";
+import { checkNames } from "./name-check.js";
 import {
   ALL_CARRIED_OR_NON_REQUIREMENT_PROBLEM,
   ALL_CARRIED_PROBLEM,
@@ -3455,6 +3456,135 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
   it("R1（段の走り）：棄却・持ち越しで有効な組が変わったあとの B3' は、その版の有効な試験だけから作った塊を送る", async () => {
     const run = await runStageScenario(r1Scenario(), { flags: { ledger: true, ids: true } });
     await expectEffectiveBlocks("段の走り", run.result.stopped, run.recording.structured);
+  });
+});
+
+// ── 旗 v12.ids：ボードだけで見せる entity の項目（Issue #804）────────────────────────────
+//
+// ホストのボードは、その entity の項目を全部カードに出す。旗 ids on の走りだけが到達の規則の選択を B3・B4 へ
+// 渡すので、ボードだけの entity の項目は B3・B4 で辿れる。**直す前の挙動**（規則を渡さない）は、同じ表・同じ
+// 宣言に対して B3 の落ち 4（項目の数）・B4 の不一致 4 で、パイプラインは欄を足せないので同じ版を返して停滞する
+// ——この試験では、その「前」を到達の関数（`checkNames`・`runTests`）で実測して残す。凍結した base のコードは
+// 木に無いので、パイプラインの停滞そのものは再実行しない（下の注）。
+
+describe("旗 v12.ids：ボードだけで見せる entity の項目は、規則を渡せば辿れる（Issue #804）", () => {
+  const R6_TEXT = "項目の四つの値を、ボードで見られる。";
+  const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
+  const boardRow = (row: Omit<NameTableRow, "role" | "source" | "options" | "groupBy" | "refEntity">): NameTableRow => ({
+    role: "要件 R6 が使う対象",
+    source: { requirementId: "R6", quote: "四つの値" },
+    options: null,
+    groupBy: null,
+    refEntity: null,
+    ...row,
+  });
+  /** ボードだけで見せる entity `card`（create は在るので entity 自身は辿れる。項目 4 つだけがボード頼り） */
+  const CARD_ROWS: readonly NameTableRow[] = [
+    boardRow({ id: "e.card", kind: "entity", entity: null, name: "card", type: null }),
+    boardRow({ id: "f.card.f1", kind: "field", entity: "e.card", name: "f1", type: "string" }),
+    boardRow({ id: "f.card.f2", kind: "field", entity: "e.card", name: "f2", type: "string" }),
+    boardRow({ id: "f.card.f3", kind: "field", entity: "e.card", name: "f3", type: "number" }),
+    { ...boardRow({ id: "f.card.f4", kind: "field", entity: "e.card", name: "f4", type: "enum" }), options: ["alpha", "beta"] },
+  ];
+  const CARD_FIELD_IDS = ["f.card.f1", "f.card.f2", "f.card.f3", "f.card.f4"] as const;
+  const BOARD_LIST: RequirementList = {
+    ...BASE_LIST,
+    requirements: [...BASE_LIST.requirements, { id: "R6", text: R6_TEXT, quote: R6_TEXT, position: { start: 0, end: R6_TEXT.length } }],
+  };
+  const BOARD_PLAN = planOf(BOARD_LIST);
+  const BOARD_SOURCE = BOARD_LIST.requirements.map((requirement) => requirement.text).join("");
+  const BOARD_IDS = [...IDS, "R6"];
+  const BOARD_TABLE_BASE: NameTable = {
+    rows: [...fixtureTable().rows, ...CARD_ROWS],
+    ownership: [...fixtureTable().ownership, { requirementId: "R6", roles: CARD_FIELD_IDS.map(stated) }],
+    verification: [...fixtureTable().verification, { requirementId: "R6", kind: "fixed-test" }],
+    classification: [...fixtureTable().classification, { requirementId: "R6", nature: "ruled" }],
+  };
+  const BOARD_TABLE_IDS = withCodeIds(withAggregates(BOARD_TABLE_BASE));
+  /** ボードだけの entity `card` を足した宣言（create は在る） */
+  const BOARD_RUN_YAML = (() => {
+    const withEntity = replaced(
+      RUN_YAML,
+      "computed:",
+      [
+        "  - name: card",
+        "    fields:",
+        "      f1: string",
+        "      f2: string",
+        "      f3: number",
+        "      f4:",
+        "        type: enum",
+        "        options:",
+        "          alpha: 甲",
+        "          beta: 乙",
+        "computed:",
+      ].join("\n"),
+    );
+    return replaced(
+      withEntity,
+      "actions:",
+      ["  - name: cardBoard", "    type: board", "    entity: card", "    columns: f4", "actions:", "  - name: addCard", "    entity: card", "    kind: create"].join("\n"),
+    );
+  })();
+  /** T2 の応答（R6 は分類だけ。試験は C4 が項目だけの所属に作る） */
+  const BOARD_T2 = {
+    // 構造で確かめる R2 は T2 の要求の一覧に無い（ids の走り。`idsT2Response` と同じ）
+    classifications: [...NATURES.filter((entry) => entry.requirementId !== "R2"), { requirementId: "R6", nature: "ruled" as const }],
+    tests: [...r1Tests(), ...r3Tests(), ...r4Tests()],
+  };
+  const BOARD_HEAD = (): RecordedCall[] => [
+    ...idsResponseList(idsResponsesOf(BOARD_LIST, BOARD_TABLE_IDS, PROPERTY_LEDGER_VIEW_IDS)).map((output) => structured(output)),
+    structured(acceptAll(BOARD_IDS)),
+    structured(renamed(casesResponseOf(BOARD_T2))),
+    structured({ declaration: BOARD_RUN_YAML }),
+  ];
+  const overrides = {
+    plan: BOARD_PLAN,
+    source: BOARD_SOURCE,
+    flags: { ledger: true, ids: true },
+  } as const;
+
+  it("完成：B3 の落ち 0・B4 の不一致 0・欄だけの直しの往復 0 で、B3' に届いて full（一気通貫と段の走りの両方）", async () => {
+    const calls = [...BOARD_HEAD(), structured(acceptAll(BOARD_IDS))];
+    const run = await runScenario(calls, overrides);
+    expect(run.result.stopped).toBeNull();
+    expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(run.result.summary.stop_reason).toBe("completed");
+    const verification = artifactOf(run.result.bundle, VERIFICATION_FILE);
+    expect(verification["correspondence_misses"]).toBe(0);
+    expect(verification["test_mismatches"]).toBe(0);
+    // 直しの往復（道具付き・欄だけの直し）を 1 回も呼ばない
+    expect(countStage(run.result, "repair")).toBe(0);
+    expect(run.recording.structured.some((request) => request.schemaName === FIELD_REPAIR_SCHEMA_NAME)).toBe(false);
+    expect(run.recording.tools).toEqual([]);
+    // B3'（宣言の点検）に届く
+    expect(schemaNames(run.recording.structured)).toContain(DECL_CHECK_SCHEMA_NAME);
+    // 段の走りでも同じ（同じ規則の配線）
+    const stage = await runStageScenario(calls, overrides);
+    expect(stage.result.stopped).toBeNull();
+    expect(stage.result.judgeVerdict).toBe("full");
+    expect(stage.result.verification).toMatchObject({ b3_misses: 0, c7_mismatches: 0, unresolved: 0, stop_reason: "completed", round_trips: 0 });
+  });
+
+  it("直す前の挙動（規則を渡さない）：同じ宣言・同じ表で B3 の落ち 4（項目の数）・B4 の不一致 4。欄を足せないので同じ版を返して停滞する", async () => {
+    const app = await normalizedFixture(BOARD_RUN_YAML);
+    const baseTable: NameTable = {
+      rows: CARD_ROWS,
+      ownership: [{ requirementId: "R6", roles: CARD_FIELD_IDS.map(stated) }],
+      verification: [{ requirementId: "R6", kind: "fixed-test" }],
+      classification: [{ requirementId: "R6", nature: "ruled" }],
+    };
+    const baseList: RequirementList = {
+      requirements: [{ id: "R6", text: R6_TEXT, quote: R6_TEXT, position: { start: 0, end: R6_TEXT.length } }],
+      decisions: [],
+      unresolved: [],
+    };
+    // 規則を渡さない B3：ボードの 4 項目は「画面から辿れない」（entity は create で辿れるので項目だけ）
+    const base = checkNames({ app, table: baseTable, list: baseList });
+    expect(base.misses).toHaveLength(4);
+    expect(base.misses.every((miss) => miss.detail.includes("画面から辿れない"))).toBe(true);
+    // 規則を渡せば 0（同じ表・同じ宣言）
+    expect(checkNames({ app, table: baseTable, list: baseList, reach: { board: true } }).misses).toEqual([]);
   });
 });
 

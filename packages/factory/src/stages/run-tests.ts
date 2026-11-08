@@ -81,6 +81,7 @@ import {
   fieldReachableFromScreen,
   findComputed,
   findEntity,
+  type ReachRules,
 } from "./correspondence.js";
 import { rowIdValueKeyReason } from "./test-suite.js";
 
@@ -103,6 +104,11 @@ export interface RunTestsInput {
    * 評価（`judgeOne` 以降）と行き先の振り分けは変えない。**省けば v1 の経路のまま**。
    */
   readonly bindings?: TestBindings;
+  /**
+   * 画面からの到達の規則の選択（旗 `v12.ids` の走りだけが渡す。**B3 と同じ値**。省けば今の判定。
+   * Issue #804）
+   */
+  readonly reach?: ReachRules;
 }
 
 /** 試験 ID で引く結び付けの表（v1.1α。D11）。外から差し込む（作るのは v1.1α の側） */
@@ -572,7 +578,11 @@ function judgeViewStructural(app: NormalizedAppSpec, location: DeclarationLocati
  * 対象の場所が載っている entity に create の操作があるか、一覧か表に出ていることを見る。操作（create）を
  * 対象にした試験も同じ——**評価器で操作を実行しようとしない**。
  */
-function judgeExistenceStructural(app: NormalizedAppSpec, location: DeclarationLocation): Verdict {
+function judgeExistenceStructural(
+  app: NormalizedAppSpec,
+  location: DeclarationLocation,
+  rules?: ReachRules,
+): Verdict {
   const entity = location.kind === "entity" ? location.name : location.entity;
   if (entity === null) {
     return { kind: "mismatch", detail: `場所 ${location.name} の entity が決まらない` };
@@ -582,7 +592,11 @@ function judgeExistenceStructural(app: NormalizedAppSpec, location: DeclarationL
   );
   const shown = app.spec.views.some(
     (view) =>
-      view.entity === entity && (view.type === undefined || view.type === "table" || view.type === "list"),
+      view.entity === entity &&
+      ((rules?.board === true && view.type === "board") ||
+        view.type === undefined ||
+        view.type === "table" ||
+        view.type === "list"),
   );
   if (hasCreate || shown) return { kind: "match" };
   return { kind: "mismatch", detail: `entity ${entity} に create の操作も、一覧か表の表示も無い` };
@@ -604,8 +618,12 @@ function isCreateOperation(app: NormalizedAppSpec, location: DeclarationLocation
  * （画面は計算しない）。実在は `checkLocation` が先に確かめる。辿れなければ**理由つきの不一致**にする
  * （未解決にしない）。
  */
-function judgeFieldScreen(app: NormalizedAppSpec, location: DeclarationLocation): Verdict {
-  if (fieldReachableFromScreen(app, location)) return { kind: "match" };
+function judgeFieldScreen(
+  app: NormalizedAppSpec,
+  location: DeclarationLocation,
+  rules?: ReachRules,
+): Verdict {
+  if (fieldReachableFromScreen(app, location, rules)) return { kind: "match" };
   return {
     kind: "mismatch",
     detail: `項目 ${location.name} は画面から辿れない（entity ${location.entity ?? ""} の一覧か表に出ていない）`,
@@ -739,7 +757,12 @@ function declarationHasFieldOrComputed(app: NormalizedAppSpec, name: string): bo
  * 一覧が、その名前（項目か計算）を表示するか（§1.3・Issue #387）。**`show` を省いた部品は、語彙の
  * 決まり（省略は、項目に続いて計算を全部並べる）どおりに扱う**。種類ごとに表示の仕方が決まる。
  */
-function viewShows(app: NormalizedAppSpec, view: View, name: string): boolean {
+function viewShows(
+  app: NormalizedAppSpec,
+  view: View,
+  name: string,
+  rules?: ReachRules,
+): boolean {
   if (view.show !== undefined) return view.show.includes(name);
   if (view.type === "dashboard") {
     return (view.widgets ?? []).some(
@@ -748,7 +771,16 @@ function viewShows(app: NormalizedAppSpec, view: View, name: string): boolean {
         (part.type === "ranking" && (part.by === name || part.show.includes(name))),
     );
   }
-  if (view.type === "board") return view.highlight === name || view.columns === name;
+  if (view.type === "board") {
+    // 規則の選択が渡されたときだけ、ボードはその entity の項目を全部出し、`highlight` の計算を表示する。
+    // `columns` は項目なので、下の項目の判定で数える（Issue #804）
+    if (rules?.board === true) {
+      const entity = findEntity(app, view.entity ?? null);
+      if (entity !== undefined && Object.hasOwn(entity.fields, name)) return true;
+      return view.highlight === name;
+    }
+    return view.highlight === name || view.columns === name;
+  }
   if (view.type === "settlement") return false;
   // 種類なし・table・list：`show` を省くと、項目（宣言の順）に続いて計算（宣言の順）を全部出す
   const entity = findEntity(app, view.entity ?? null);
@@ -781,7 +813,7 @@ function judgeViewShows(
   if (!declarationHasFieldOrComputed(input.app, name)) {
     return { kind: "unresolved", detail: `宣言に ${name} という項目も計算も無い` };
   }
-  if (viewShows(input.app, view, name)) return { kind: "match" };
+  if (viewShows(input.app, view, name, input.reach)) return { kind: "match" };
   return { kind: "mismatch", detail: `一覧 ${view.name} は ${name} を表示しない` };
 }
 
@@ -1010,11 +1042,11 @@ function judgeOne(
       return { verdict: judgeViewStructural(input.app, location), route: null };
     case "field-screen": {
       // 辿れなければ不一致 → ⑥ 直す（宣言に項目を出す）。未解決にはしない（Issue #324）
-      const verdict = judgeFieldScreen(input.app, location);
+      const verdict = judgeFieldScreen(input.app, location, input.reach);
       return { verdict, route: routeOf(verdict) };
     }
     case "existence":
-      return { verdict: judgeExistenceStructural(input.app, location), route: null };
+      return { verdict: judgeExistenceStructural(input.app, location, input.reach), route: null };
     case "structure": {
       const verdict = judgeStructure(test, location, input);
       return { verdict, route: routeOf(verdict) };

@@ -116,10 +116,41 @@ describe("Issue #800 の二点測定（(1)〜(9)）", () => {
     expect(checkEvaluabilityByLedger({ tests: [validateTest("f.item.amount")] }, observes, TABLE, PROPERTY_LEDGER_VIEW_IDS as LedgerView)).not.toEqual([]);
   });
 
-  it("(7) P5：view-shows の対象の画面がボードなら固定文で赤（直す前の挙動として、ボードを対象にできた）", () => {
+  // 直す前（Issue #800 の P5）の `checkCheckTargets` のうち、view-shows の対象の画面がボードなら固定文で落とす枝だけ。
+  // 二点測定の「前」を残すためだけのもので、製品は使わない（Issue #804）
+  const baseBoardViewProblem = (rows: readonly NameTableRow[], targetId: string): string | null => {
+    const row = rows.find((candidate) => candidate.id === targetId);
+    if (row === undefined || row.kind !== "screen") return null;
+    if (row.type === null || typeof row.type !== "object" || !("view" in row.type)) return null;
+    return row.type.view === "board" ? CHECK_TARGET_MESSAGES.boardView : null;
+  };
+
+  it("(7) P5：view-shows の対象の画面がボードでも通る（直す前の挙動として、ボードは固定文で落ちた。table・list も通る）", () => {
     const problems: { field: string; message: string }[] = [];
     checkCheckTargets(TABLE.rows, [{ check: "view-shows", targetId: "s.board", sourceId: "f.item.title" }], "verification", problems);
-    expect(problems.map((problem) => problem.message)).toContain(CHECK_TARGET_MESSAGES.boardView);
+    expect(problems).toEqual([]);
+    // 直す前の同じ写像は固定文で落ちる（Issue #800 の P5。直す前の挙動として残す）
+    expect(baseBoardViewProblem(TABLE.rows, "s.board")).toBe(CHECK_TARGET_MESSAGES.boardView);
+    // table・list の画面も、対象と出典の組が合えば通る（判定を変えない）
+    const rows: readonly NameTableRow[] = [
+      ...TABLE.rows,
+      rowOf({ id: "s.table", kind: "screen", entity: "e.item", name: "tableScreen", type: { view: "table" } }),
+      rowOf({ id: "s.list", kind: "screen", entity: "e.item", name: "listScreen", type: { view: "list" } }),
+      rowOf({ id: "f.other.title", kind: "field", entity: "e.other", name: "title", type: "string" }),
+    ];
+    for (const targetId of ["s.table", "s.list"]) {
+      const out: { field: string; message: string }[] = [];
+      checkCheckTargets(rows, [{ check: "view-shows", targetId, sourceId: "f.item.title" }], "verification", out);
+      expect(out, targetId).toEqual([]);
+    }
+    // 負例（対象が実在しない・別の entity・画面と出典の組が合わない）は base と同じく落ちる
+    const bad = (targetId: string, sourceId: string) => {
+      const out: { field: string; message: string }[] = [];
+      checkCheckTargets(rows, [{ check: "view-shows", targetId, sourceId }], "verification", out);
+      return out.map((problem) => problem.message);
+    };
+    expect(bad("s.none", "f.item.title")).toContain(CHECK_TARGET_MESSAGES.unknownTarget);
+    expect(bad("s.board", "f.other.title")).toContain(CHECK_TARGET_MESSAGES.sourcePair);
   });
 
   it("(8) 暫定の結び付け：targets の項目だけが結び付き、外の項目・entity は結び付かない（直す前の挙動として、どの項目も結び付いた）", () => {

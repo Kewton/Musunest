@@ -1674,11 +1674,6 @@ export function checkCheckTargets(
       return;
     }
     if (row === undefined || row.kind !== "screen") return;
-    // P5：ボードは show を持たないので、view-shows の対象の画面にしない（Issue #800）
-    if (isScreenType(row.type) && row.type.view === "board") {
-      problems.push({ field: `${at}.targetId`, message: CHECK_TARGET_MESSAGES.boardView });
-      return;
-    }
     if (!hasViewShowsPair([row, source])) problems.push({ field: `${at}.sourceId`, message: CHECK_TARGET_MESSAGES.sourcePair });
   });
 }
