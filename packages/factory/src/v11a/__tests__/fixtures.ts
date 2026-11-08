@@ -715,6 +715,54 @@ export function withoutValidationExpression<T>(value: T): T {
   return walk(value) as T;
 }
 
+/**
+ * Issue #813 の復元：旗 `v12.ids` の R-tsp-02 の新しい文を旧の文に戻し、枠の ruled の枝を base（免除は空と `ruledExempt`）に
+ * 戻す（#813 の前の指紋と照らす）。文字列の中の R-tsp-02 の 1 文を置き換え、枠の塊の `ifRuled` と（やり直しの枠の）最上位の
+ * `kinds`・`caseTargets`・`note` を戻す。新しい文の 2 つ（必要な試験の枠の文と上限の文）の順の復元で、上限の文の復元（#663）の前に挟む
+ */
+export function withoutFrameFieldNormal<T>(value: T): T {
+  const normalOnly = TEST_CASE_FRAME_TEXTS.ruledNormalOnly;
+  const noWritable = TEST_CASE_FRAME_TEXTS.ruledNoWritableTarget;
+  const exempt = TEST_CASE_FRAME_TEXTS.ruledExempt;
+  const newRule = "値の対象が無い要件は三種を求めない。そのうち枠に項目の行が示された要件は、その行に正常の場合を 1 本以上書く。";
+  const oldRule = "所属が画面・entity の行だけの要件は三種を求めない（枠が空）。";
+  const isObject = (inner: unknown): inner is Record<string, unknown> => typeof inner === "object" && inner !== null && !Array.isArray(inner);
+  /** 枝の `kinds`・`caseTargets`・`note` を base（免除は空）に戻す（#813 の 2 つの固定文だけ） */
+  const restoreBranch = (branch: unknown): unknown => {
+    if (!isObject(branch) || typeof branch["note"] !== "string") return branch;
+    const note = branch["note"];
+    if (note.startsWith(normalOnly)) return { ...branch, kinds: [], caseTargets: [], note: `${exempt}${note.slice(normalOnly.length)}` };
+    if (note.startsWith(noWritable)) return { ...branch, kinds: [], caseTargets: [], note: `${exempt}${note.slice(noWritable.length)}` };
+    return branch;
+  };
+  const restoreFrames = (text: string): string => {
+    if (!text.includes('<data name="必要な試験の枠">')) return text;
+    const match = /<data name="必要な試験の枠">\n([\s\S]*?)\n<\/data>/.exec(text);
+    if (match === null) return text;
+    let frames: unknown;
+    try {
+      frames = JSON.parse(match[1] ?? "[]");
+    } catch {
+      return text;
+    }
+    if (!Array.isArray(frames)) return text;
+    const restored = frames.map((frame) => {
+      if (!isObject(frame)) return frame;
+      const withRuled = Object.hasOwn(frame, "ifRuled") ? { ...frame, ifRuled: restoreBranch(frame["ifRuled"]) } : frame;
+      // やり直しの枠は採った種類の枝を最上位に持つ
+      return restoreBranch(withRuled);
+    });
+    return text.replace(/<data name="必要な試験の枠">\n[\s\S]*?\n<\/data>/, `<data name="必要な試験の枠">\n${JSON.stringify(restored, null, 2)}\n</data>`);
+  };
+  const walk = (inner: unknown): unknown => {
+    if (typeof inner === "string") return restoreFrames(inner).split(newRule).join(oldRule);
+    if (Array.isArray(inner)) return inner.map(walk);
+    if (!isObject(inner)) return inner;
+    return Object.fromEntries(Object.entries(inner).map(([key, entry]) => [key, walk(entry)]));
+  };
+  return walk(value) as T;
+}
+
 /** 2 つの JSON の値の違う場所（葉の位置。並びの長さが違えばその並びの位置）を、見つけた順に返す */
 export function jsonDiffPaths(left: unknown, right: unknown, path = "$"): readonly string[] {
   if (Array.isArray(left) && Array.isArray(right)) {

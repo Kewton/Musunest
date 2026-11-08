@@ -91,6 +91,7 @@ import {
   revertBundleFiles735,
   revertBundleFiles805,
   withoutValidationExpression,
+  withoutFrameFieldNormal,
 } from "./__tests__/fixtures.js";
 import {
   STAGE_RUN_RECORD_SCHEMA,
@@ -1606,8 +1607,9 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       const { result, recording } = await runScenario(script.calls, { flags: IDS_FLAGS });
       const files = result.bundle === null ? [] : bundleFiles(result.bundle).map((file) => ({ path: file.path, text: file.text }));
       // Issue #800：台帳に足した行の文と C2 の schema の欄を外して、旧の指紋と照らす
+      // Issue #813：T2 の R-tsp-02 の新しい文と枠の免除の枝を #813 の前に戻す（#663 の上限の文の復元より前）
       // Issue #806：旗 ids の C2 への 3 文も位置で外して、旧の指紋と照らす
-      const restoredStructured = withoutIdsC2Texts(withoutValidationExpression(recording.structured));
+      const restoredStructured = withoutIdsC2Texts(withoutFrameFieldNormal(withoutValidationExpression(recording.structured)));
       // Issue #801：骨組みの新しい形と R-w11-07 の ids の文を、直す前（#800）の形・文に組み直す（旧の指紋と照らす）
       const oldShapeStructured = restoredStructured.map(restoreOldRequiredValidations);
       // 止まる走りの診断の一覧（materials.json）は、断った候補の要約（rejected）の鍵を外した残りを照らす。rejected は下で期待を固定する
@@ -1683,7 +1685,9 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(thirdRun.recording.structured[5]?.schemaName).toBe("mapping");
     const thirdDigest = await sha256Hex(
       JSON.stringify({
-        structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(withoutIdsC2Texts(withoutValidationExpression(thirdRun.recording.structured))))).filter((_, index) => index !== 5),
+        structured: withoutIdsReading(
+          withoutIdsLimit(withoutLinkedValidations(withoutIdsC2Texts(withoutFrameFieldNormal(withoutValidationExpression(thirdRun.recording.structured))))),
+        ).filter((_, index) => index !== 5),
         tools: thirdRun.recording.tools,
       }),
     );

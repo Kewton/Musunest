@@ -743,7 +743,7 @@ describe("必要な試験の枠（純粋。旗 v12.ids の T2。Issue #653）", 
     expect(fieldOnly.ifRuled.kinds).toEqual([]);
   });
 
-  it("(6) 計算だけ・項目＋条件のある操作：値の対象は計算と条件つき操作だけで、existence-only の枝に normal 1 本まで（計算／操作）。項目＋条件の無い操作は免除し、分類を示唆する文が無い（Issue #800）", () => {
+  it("(6) 計算だけ・項目＋条件のある操作：値の対象は計算と条件つき操作だけで、existence-only の枝に normal 1 本まで（計算／操作）。項目＋条件の無い操作は免除し、項目の行に正常 1 本（Issue #800・#813）", () => {
     const computation = only({ X1: ["c.rate"] });
     expect(computation.valueTargets).toEqual(["c.rate"]);
     expect(computation.ifExistenceOnly).toEqual({ kinds: ["normal"], caseTargets: ["c.rate"], maxCases: 1, note: TEST_CASE_FRAME_TEXTS.existence, remaining: 16 });
@@ -756,8 +756,15 @@ describe("必要な試験の枠（純粋。旗 v12.ids の T2。Issue #653）", 
     expect(unsupported.valueTargets).toEqual([]);
     expect(unsupported.ifExistenceOnly).toEqual({ kinds: [], caseTargets: [], maxCases: 0, note: TEST_CASE_FRAME_TEXTS.unsupported, remaining: 16 });
     for (const word of ["ruled", "existence", "分類"]) expect(TEST_CASE_FRAME_TEXTS.unsupported).not.toContain(word);
-    // 値の対象が無いので ruled の枝も空（免除）
-    expect(unsupported.ifRuled.note).toBe(TEST_CASE_FRAME_TEXTS.ruledExempt);
+    // #813：値の対象もコードの試験も無いが、所属に項目の行があるので、ruled の枝はその項目の行に正常 1 本を求める。
+    // 旧（base, #800）：kinds []・caseTargets []・note ruledExempt（この直しで変わる）
+    expect(unsupported.ifRuled).toEqual({
+      kinds: ["normal"],
+      caseTargets: ["f.item.amount"],
+      note: TEST_CASE_FRAME_TEXTS.ruledNormalOnly,
+      codeIfTableRuled: [],
+      remaining: 16,
+    });
   });
 
   it("(7) 同じ入力から 2 回同じ。枠の鍵の集合は固定で、表の分類・期待・宣言・名前が無い", () => {
