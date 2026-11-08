@@ -5758,9 +5758,13 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
   };
   /**
    * Issue #813：T2 の R-tsp-02 の ids の文（と枠の免除の枝）が変わった。一気通貫の走りは要求の本文を復元して比べるので旧の値の
-   * まま。段の走りの `stage-search-repair-off` だけは、書いた checkpoint・段の記録と、要求の列を**本文でなく指紋**で比べるため、
-   * 復元の外に新しい値が残る（経路が変わる台本として新しい期待を直接固定する。旧値：全出力 a37acf94…・診断と R-fr-08 を
-   * 外した全出力 c064d53f…・要求の列 426ba93f…）
+   * まま。段の走りの `stage-search-repair-off` だけは、要求の列が `requestText` の JSON 文字列の並びで、枠の塊の改行がエスケープ
+   * されているため、文字列のままの復元では枠を戻せず、新しい値が残る（経路が変わる台本として新しい期待を直接固定する）。
+   * 旧値の書き分け：
+   *   - 全出力 a37acf94…（#813 の直前の値。＝ BEFORE_746_800 と BEFORE_748_BASE_800）
+   *   - 診断と R-fr-08 を外した全出力 c064d53f…（#813 の直前の値。＝ BEFORE_761_RAW_806）
+   *   - 要求の列 d953399…（#813 の直前の実効値。＝ BEFORE_761_REQUESTS_800）
+   *   - 要求の列 426ba93f…（f9bf3b3（#761 の基準）の値。BEFORE_761_REQUESTS の値で、#800 で上の d953399… に取り直されている）
    */
   const BEFORE_746_813: Readonly<Record<string, string>> = {
     "stage-search-repair-off": "4ad139d01a5490f3404f77c771eea9baded6e60786fddd16637498dd8a9adc68",
