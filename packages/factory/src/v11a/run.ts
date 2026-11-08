@@ -203,6 +203,7 @@ import {
 import { runTestSpec, type TestSpecRejectedBundle, type TestSpecValue } from "./stages/test-spec.js";
 import { runWriteV11a } from "./stages/write.js";
 import { ledgerViewOf, resolveV12Flags, toPublicV12Flags, type V12Flags } from "../v12/ledger.js";
+import { BOARD_REACH_RULES, type ReachRules } from "../stages/correspondence.js";
 import {
   countViolations,
   isStrictlyBetter,
@@ -898,6 +899,9 @@ async function runV11a(
   const flags = resolveV12Flags(input.flags);
   const ledger = ledgerViewOf(flags);
   const withLedger = ledger === undefined ? {} : { ledger };
+  // 画面からの到達の規則の選択（旗 `v12.ids` の走りだけ。B3 と B4 へ**同じ値**を渡す。Issue #804）
+  const reach: ReachRules | undefined = flags.ids ? BOARD_REACH_RULES : undefined;
+  const withReach = reach === undefined ? {} : { reach };
   const flagsRecord = input.recordV12Flags === true ? { v12_flags: toPublicV12Flags(flags) } : {};
   const limits = input.limits ?? AGENT_LIMITS;
   const meter = new UsageMeter();
@@ -1912,6 +1916,7 @@ async function runV11a(
       excludedRowIds: carry.excludedRowIds,
       observes: testSpec.observes,
       ...withLedger,
+      ...withReach,
     });
     /** いまの評価の文脈（棄却で外した後の組・持ち越しを除いた一覧と所属） */
     const contextNow = (): EvaluationContext => ({
@@ -1925,7 +1930,7 @@ async function runV11a(
       carry = await carryOverStep(() => composeCarryOver(list, table, baseCarry, addedCarry));
       if (carry.allCarried) stopAtCarryOver(allCarriedProblemOf(carry));
       pruned = await carryOverStep(() => pruneForCarryOver(list, table, carry, withoutOverturned()));
-      evaluator = createV11aEvaluator({ table, excludedRowIds: carry.excludedRowIds, observes: testSpec.observes, ...withLedger });
+      evaluator = createV11aEvaluator({ table, excludedRowIds: carry.excludedRowIds, observes: testSpec.observes, ...withLedger, ...withReach });
     };
     const addCarry = (requirementId: string, reason: CarryOverReason): void => {
       const listed = addedCarry.get(requirementId) ?? [];

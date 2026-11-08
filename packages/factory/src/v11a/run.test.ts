@@ -107,7 +107,8 @@ import {
 } from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
 import { DEFAULT_VALUE_DETAILS, ENUM_MEMBERSHIP_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
-import { COMPUTATION_AGGREGATE_MESSAGES, nameTableSha256, ownersByRowId, type NameTable } from "./names.js";
+import { COMPUTATION_AGGREGATE_MESSAGES, nameTableSha256, ownersByRowId, type NameTable, type NameTableRow } from "./names.js";
+import { checkNames } from "./name-check.js";
 import {
   ALL_CARRIED_OR_NON_REQUIREMENT_PROBLEM,
   ALL_CARRIED_PROBLEM,
@@ -147,7 +148,8 @@ import { constraintIdsIn, ruleTexts, SHAPE_PROBLEMS_DATA_NAME } from "../stages/
 import { MAPPING_LEDGER_DATA_NAMES, MAPPING_REWRITE_MESSAGES, MAPPING_SCHEMA_NAME } from "../v12/stages/mapping.js";
 import { VOCABULARY_SCHEMA_NAMES } from "../v12/stages/vocabulary.js";
 import { structuralReadingText } from "../v12/structural-meanings.js";
-import { FIELD_REPAIR_DIAGNOSTIC_DATA_NAME, FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "../v12/stages/field-repair.js";
+import { FIELD_REPAIR_DIAGNOSTIC_DATA_NAME, FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS, mergeReplacements } from "../v12/stages/field-repair.js";
+import { canRepairFields, locateFailures } from "../v12/locate.js";
 import { natureQuestionName } from "../stages/test-suite.js";
 import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenarios } from "../__tests__/baseline-capture.js";
 import * as factoryModule from "../index.js";
@@ -3455,6 +3457,220 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
   it("R1（段の走り）：棄却・持ち越しで有効な組が変わったあとの B3' は、その版の有効な試験だけから作った塊を送る", async () => {
     const run = await runStageScenario(r1Scenario(), { flags: { ledger: true, ids: true } });
     await expectEffectiveBlocks("段の走り", run.result.stopped, run.recording.structured);
+  });
+});
+
+// ── 旗 v12.ids：ボードだけで見せる entity の項目（Issue #804）────────────────────────────
+//
+// ホストのボードは、その entity の項目を全部カードに出す。旗 ids on の走りだけが到達の規則の選択を B3・B4 へ
+// 渡すので、ボードだけの entity の項目は B3・B4 で辿れる。**直す前の挙動**（規則を渡さない）は、同じ表・同じ
+// 宣言に対して B3 の落ち 4（項目の数）・B4 の不一致 4 で、パイプラインは欄を足せないので同じ版を返して停滞する
+// ——この試験では、その「前」を到達の関数（`checkNames`・`runTests`）で実測して残す。凍結した base のコードは
+// 木に無いので、パイプラインの停滞そのものは再実行しない（下の注）。
+
+describe("旗 v12.ids：ボードだけで見せる entity の項目は、規則を渡せば辿れる（Issue #804）", () => {
+  const R6_TEXT = "項目の四つの値を、ボードで見られる。";
+  const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
+  const boardRow = (row: Omit<NameTableRow, "role" | "source" | "options" | "groupBy" | "refEntity">): NameTableRow => ({
+    role: "要件 R6 が使う対象",
+    source: { requirementId: "R6", quote: "四つの値" },
+    options: null,
+    groupBy: null,
+    refEntity: null,
+    ...row,
+  });
+  /** ボードだけで見せる entity `card`（create は在るので entity 自身は辿れる。項目 4 つだけがボード頼り） */
+  const CARD_ROWS: readonly NameTableRow[] = [
+    boardRow({ id: "e.card", kind: "entity", entity: null, name: "card", type: null }),
+    boardRow({ id: "f.card.f1", kind: "field", entity: "e.card", name: "f1", type: "string" }),
+    boardRow({ id: "f.card.f2", kind: "field", entity: "e.card", name: "f2", type: "string" }),
+    boardRow({ id: "f.card.f3", kind: "field", entity: "e.card", name: "f3", type: "number" }),
+    { ...boardRow({ id: "f.card.f4", kind: "field", entity: "e.card", name: "f4", type: "enum" }), options: ["alpha", "beta"] },
+  ];
+  const CARD_FIELD_IDS = ["f.card.f1", "f.card.f2", "f.card.f3", "f.card.f4"] as const;
+  const BOARD_LIST: RequirementList = {
+    ...BASE_LIST,
+    requirements: [...BASE_LIST.requirements, { id: "R6", text: R6_TEXT, quote: R6_TEXT, position: { start: 0, end: R6_TEXT.length } }],
+  };
+  const BOARD_PLAN = planOf(BOARD_LIST);
+  const BOARD_SOURCE = BOARD_LIST.requirements.map((requirement) => requirement.text).join("");
+  const BOARD_IDS = [...IDS, "R6"];
+  const BOARD_TABLE_BASE: NameTable = {
+    rows: [...fixtureTable().rows, ...CARD_ROWS],
+    ownership: [...fixtureTable().ownership, { requirementId: "R6", roles: CARD_FIELD_IDS.map(stated) }],
+    verification: [...fixtureTable().verification, { requirementId: "R6", kind: "fixed-test" }],
+    classification: [...fixtureTable().classification, { requirementId: "R6", nature: "ruled" }],
+  };
+  const BOARD_TABLE_IDS = withCodeIds(withAggregates(BOARD_TABLE_BASE));
+  /** ボードだけの entity `card` を足した宣言（create は在る） */
+  const BOARD_RUN_YAML = (() => {
+    const withEntity = replaced(
+      RUN_YAML,
+      "computed:",
+      [
+        "  - name: card",
+        "    fields:",
+        "      f1: string",
+        "      f2: string",
+        "      f3: number",
+        "      f4:",
+        "        type: enum",
+        "        options:",
+        "          alpha: 甲",
+        "          beta: 乙",
+        "computed:",
+      ].join("\n"),
+    );
+    return replaced(
+      withEntity,
+      "actions:",
+      ["  - name: cardBoard", "    type: board", "    entity: card", "    columns: f4", "actions:", "  - name: addCard", "    entity: card", "    kind: create"].join("\n"),
+    );
+  })();
+  /** T2 の応答（R6 は分類だけ。試験は C4 が項目だけの所属に作る） */
+  const BOARD_T2 = {
+    // 構造で確かめる R2 は T2 の要求の一覧に無い（ids の走り。`idsT2Response` と同じ）
+    classifications: [...NATURES.filter((entry) => entry.requirementId !== "R2"), { requirementId: "R6", nature: "ruled" as const }],
+    tests: [...r1Tests(), ...r3Tests(), ...r4Tests()],
+  };
+  const BOARD_HEAD = (): RecordedCall[] => [
+    ...idsResponseList(idsResponsesOf(BOARD_LIST, BOARD_TABLE_IDS, PROPERTY_LEDGER_VIEW_IDS)).map((output) => structured(output)),
+    structured(acceptAll(BOARD_IDS)),
+    structured(renamed(casesResponseOf(BOARD_T2))),
+    structured({ declaration: BOARD_RUN_YAML }),
+  ];
+  const overrides = {
+    plan: BOARD_PLAN,
+    source: BOARD_SOURCE,
+    flags: { ledger: true, ids: true },
+  } as const;
+
+  it("完成：B3 の落ち 0・B4 の不一致 0・欄だけの直しの往復 0 で、B3' に届いて full（一気通貫と段の走りの両方）", async () => {
+    const calls = [...BOARD_HEAD(), structured(acceptAll(BOARD_IDS))];
+    const run = await runScenario(calls, overrides);
+    expect(run.result.stopped).toBeNull();
+    expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(run.result.summary.stop_reason).toBe("completed");
+    const verification = artifactOf(run.result.bundle, VERIFICATION_FILE);
+    expect(verification["correspondence_misses"]).toBe(0);
+    expect(verification["test_mismatches"]).toBe(0);
+    // 直しの往復（道具付き・欄だけの直し）を 1 回も呼ばない
+    expect(countStage(run.result, "repair")).toBe(0);
+    expect(run.recording.structured.some((request) => request.schemaName === FIELD_REPAIR_SCHEMA_NAME)).toBe(false);
+    expect(run.recording.tools).toEqual([]);
+    // B3'（宣言の点検）に届く
+    expect(schemaNames(run.recording.structured)).toContain(DECL_CHECK_SCHEMA_NAME);
+    // 段の走りでも同じ（同じ規則の配線）
+    const stage = await runStageScenario(calls, overrides);
+    expect(stage.result.stopped).toBeNull();
+    expect(stage.result.judgeVerdict).toBe("full");
+    expect(stage.result.verification).toMatchObject({ b3_misses: 0, c7_mismatches: 0, unresolved: 0, stop_reason: "completed", round_trips: 0 });
+  });
+
+  it("直す前の挙動（規則を渡さない）：同じ宣言・同じ表で B3 の落ち 4・B4 の項目 × 画面の不一致 4（missing-element）。欄だけの直しの追加は 0 で、何も返さなければ同じ版（停滞）", async () => {
+    const app = await normalizedFixture(BOARD_RUN_YAML);
+    const baseTable: NameTable = {
+      rows: CARD_ROWS,
+      ownership: [{ requirementId: "R6", roles: CARD_FIELD_IDS.map(stated) }],
+      verification: [{ requirementId: "R6", kind: "fixed-test" }],
+      classification: [{ requirementId: "R6", nature: "ruled" }],
+    };
+    const baseList: RequirementList = {
+      requirements: [{ id: "R6", text: R6_TEXT, quote: R6_TEXT, position: { start: 0, end: R6_TEXT.length } }],
+      decisions: [],
+      unresolved: [],
+    };
+    // 規則を渡さない B3：ボードの 4 項目は「画面から辿れない」（entity は create で辿れるので項目だけ）
+    const base = checkNames({ app, table: baseTable, list: baseList });
+    expect(base.misses).toHaveLength(4);
+    expect(base.misses.every((miss) => miss.detail.includes("画面から辿れない"))).toBe(true);
+    // B4 の項目 × 画面：同じ 4 項目を、C4 が作るのと同じ形の試験で流すと、4 件が missing-element の不一致
+    const baseTests = CARD_FIELD_IDS.map((id, index) => ({
+      id: `base-field-screen-${String(index)}`,
+      target: { requirementId: "R6", kind: "field" as const, roleId: id },
+      kind: "normal" as const,
+      operation: "screen" as const,
+      clock: "2026-09-16T12:00:00+09:00",
+      input: {},
+      inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: [] as string[] },
+      referenceData: [],
+      expected: { kind: "ok" as const, value: null },
+    }));
+    const baseBound = bindTestsById(app, baseTable, { tests: baseTests });
+    const baseRun = runTestsStage.runTests({
+      app,
+      suite: { tests: baseTests },
+      correspondence: { entries: [], misses: [] },
+      bindings: { tests: baseBound.bindings, entityNames: baseBound.entityNames },
+    });
+    expect(baseRun.mismatches.map((entry) => entry.testId).sort()).toEqual(baseTests.map((entry) => entry.id).sort());
+    expect(baseRun.mismatches).toHaveLength(4);
+    expect(baseRun.mismatches.every((entry) => entry.detail.includes("画面から辿れない"))).toBe(true);
+    expect(baseRun.routes.filter((route) => route.route === "missing-element")).toHaveLength(4);
+    // 停滞（同じ版を返す）：欄だけの直しの段は 4 つの場所を持つが、追加の場所（宣言に無い検査）は 0。
+    // 何も返さない応答は同じ原文になり、同じ版・同じ落ちのまま（base のコードが木に無いので、直す段の関数で固定する）
+    const located = locateFailures({
+      source: BOARD_RUN_YAML,
+      table: baseTable,
+      suite: { tests: [] },
+      staticCheckPassed: true,
+      diagnostics: [],
+      correspondenceMisses: base.misses,
+      rejections: [],
+      unmarked: [],
+      mismatches: [],
+      unresolved: [],
+      ids: { observes: new Map(), requiredValidations: [] },
+    });
+    expect(canRepairFields(located)).toBe(true);
+    expect(located.unlocated).toEqual([]);
+    expect(located.locations).toHaveLength(4);
+    expect(located.additions).toEqual([]);
+    const returned = mergeReplacements(BOARD_RUN_YAML, [], located.spans, located.additions ?? []);
+    expect(returned.ok).toBe(true);
+    if (returned.ok) expect(returned.source).toBe(BOARD_RUN_YAML);
+    // 規則を渡せば 0（同じ表・同じ宣言）
+    expect(checkNames({ app, table: baseTable, list: baseList, reach: { board: true } }).misses).toEqual([]);
+  });
+
+  it("(7) 配線：持ち越しで評価口を作り直した後も、B3 の落ち 0・B4 の不一致 0 が続く", async () => {
+    // R3 の試験（case:3）の期待をわざと外して B4 の不一致を 1 件作り、B5' で棄却させると、網羅の単位を失って
+    // R3 が持ち越され、評価口が作り直される。作り直した評価口が規則を受け取っていなければ、次の版の B3 は
+    // ボードの 4 項目を落として B3' に届かない。
+    const wrongR3T2 = {
+      classifications: BOARD_T2.classifications,
+      tests: [...r1Tests(), ...r3Tests().map((test, index) => (index === 0 ? { ...test, expected: ok("false") } : test)), ...r4Tests()],
+    };
+    const headWithWrongR3 = (): RecordedCall[] => [
+      ...idsResponseList(idsResponsesOf(BOARD_LIST, BOARD_TABLE_IDS, PROPERTY_LEDGER_VIEW_IDS)).map((output) => structured(output)),
+      structured(acceptAll(BOARD_IDS)),
+      structured(renamed(casesResponseOf(wrongR3T2))),
+      structured({ declaration: BOARD_RUN_YAML }),
+    ];
+    const dispute = { testId: "case:4", quote: "金額が 0 より大きい項目だけ" };
+    const remaining = ["R1", "R2", "R4", "R6"];
+    const calls = [
+      ...headWithWrongR3(),
+      structured(acceptAll(BOARD_IDS)), // B3' 1 回目
+      repairDone(BOARD_RUN_YAML, [dispute]), // B5（B4 の不一致 1 件への主張）
+      structured({ decisions: [{ ...dispute, verdict: "overturn", reason: "期待が誤り" }] }), // B5'（棄却 → 持ち越し・作り直し）
+      structured(acceptAll(remaining)), // B3' 2 回目（作り直した後）
+    ];
+    const run = await runScenario(calls, overrides);
+    expect(run.result.stopped).toBeNull();
+    // 持ち越しと、評価口の作り直し（B3' と name-check が 2 回以上）が起きた
+    expect(carryEntriesOf(run.result.bundle).map((entry) => entry.requirementId)).toContain("R3");
+    const decls = run.recording.structured.filter((request) => request.schemaName === DECL_CHECK_SCHEMA_NAME);
+    expect(decls.length).toBeGreaterThanOrEqual(2);
+    expect(countStage(run.result, "name-check")).toBeGreaterThanOrEqual(2);
+    // 作り直した後も B3 0・B4 0（最終版の検証）
+    const verification = artifactOf(run.result.bundle, VERIFICATION_FILE);
+    expect(verification["correspondence_misses"]).toBe(0);
+    expect(verification["test_mismatches"]).toBe(0);
+    // 段の走りでも同じ値（同じ 2 つの実行口）
+    const stage = await runStageScenario(calls, overrides);
+    expect(stage.result.stopped).toBeNull();
+    expect(stage.result.verification).toMatchObject({ b3_misses: 0, c7_mismatches: 0, unresolved: 0, not_run: null });
   });
 });
 

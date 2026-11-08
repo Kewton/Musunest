@@ -37,6 +37,7 @@
 import { enumDefault, enumKeys, isEnumField, type NormalizedAppSpec } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import type { CorrespondenceResult, Declaration } from "../pipeline.js";
+import type { ReachRules } from "../stages/correspondence.js";
 import type { VersionReport } from "../stages/repair.js";
 import { runTests, type TestRunReport } from "../stages/run-tests.js";
 import { runStaticCheck } from "../stages/static-check.js";
@@ -119,6 +120,11 @@ export interface V11aEvaluatorInput {
   readonly observes: ReadonlyMap<string, TestObserves>;
   /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の関数で振り分ける。Issue #547） */
   readonly ledger?: LedgerView;
+  /**
+   * 画面からの到達の規則の選択（旗 `v12.ids` の走りだけが渡す。**B3 と B4 へ同じ値**を渡す。省けば今の判定。
+   * Issue #804）
+   */
+  readonly reach?: ReachRules;
 }
 
 /** v1.1α の評価口（B3・B4 と、その組み合わせ） */
@@ -135,10 +141,12 @@ export interface V11aEvaluator {
 
 /** 評価口を作る。表と除いた行は閉包で持ち、組・一覧・所属は呼ぶたびに文脈から取る */
 export function createV11aEvaluator(input: V11aEvaluatorInput): V11aEvaluator {
-  const { table, observes, ledger } = input;
+  const { table, observes, ledger, reach } = input;
   const excludedRowIds = input.excludedRowIds ?? [];
   const mappings = identityMappings(table);
   const roles = toRoleEntries(table);
+  // B3 と B4 へ渡す規則の選択（同じ値。Issue #804）
+  const reachInput = reach === undefined ? {} : { reach };
 
   const nameCheck = (app: NormalizedAppSpec, context: EvaluationContext): NameCheckResult =>
     checkNames({
@@ -147,6 +155,7 @@ export function createV11aEvaluator(input: V11aEvaluatorInput): V11aEvaluator {
       list: context.list,
       ...(context.ownership === undefined ? {} : { ownership: context.ownership }),
       excludedRowIds,
+      ...reachInput,
     });
 
   const runTestsOf = (
@@ -166,6 +175,7 @@ export function createV11aEvaluator(input: V11aEvaluatorInput): V11aEvaluator {
       mappings,
       roles,
       bindings: { tests: bound.bindings, entityNames: bound.entityNames },
+      ...reachInput,
     });
     if (mapped.length === context.suite.tests.length) return report;
     return mergeReports(context.suite.tests, report, observes, (test) => judgeDefaultValue(app, table, test));
@@ -189,6 +199,7 @@ export function createV11aEvaluator(input: V11aEvaluatorInput): V11aEvaluator {
       mappings,
       roles,
       bindings: { tests: bound.bindings, entityNames: bound.entityNames },
+      ...reachInput,
     });
     if (mapped.length === context.suite.tests.length) return report;
     return mergeReportsByRoute(context.suite.tests, report, (test) => {
