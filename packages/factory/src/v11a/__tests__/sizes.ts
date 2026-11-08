@@ -47,7 +47,7 @@ import { AGENT_LIMITS } from "../../limits.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
 import type { JudgeAnswer } from "../../judge.js";
 import { casesResponseOf, codeIdRenameOf, draftOf, idsResponseList, idsResponsesOf, t1ResponseOf, withCodeIds } from "./fixtures.js";
-import type { NameTable, NameTableRow } from "../names.js";
+import { ownershipWithValidationTargets, type NameTable, type NameTableRow } from "../names.js";
 import { ledgerViewOf, resolveV12Flags, type V12Flags } from "../../v12/ledger.js";
 
 /** 中央値（要件 15・試験 39）と観測した最大（要件 25・試験 68）。Issue #546 */
@@ -588,7 +588,14 @@ export function buildSized(
     tableResponses: () => (resolvedFlags.ids ? idsResponseList(idsResponsesOf(list, table, ledger)) : [t1ResponseOf(draftOf(list, table), ledger)]),
     adviceAnswers: () => {
       const answers: Record<string, JudgeAnswer> = {};
-      for (const entry of table.ownership) {
+      // 検査の式の要件の所属は、C2' の前の手が targets の項目と entity を足したあとの形で問われる（Issue #808）
+      const ownership = table.ownership.map((entry) => {
+        const verification = table.verification.find((candidate) => candidate.requirementId === entry.requirementId);
+        return verification?.kind === "validation-expression"
+          ? { requirementId: entry.requirementId, roles: ownershipWithValidationTargets(entry.roles, table.rows, verification.targets) }
+          : entry;
+      });
+      for (const entry of ownership) {
         for (const role of entry.roles) answers[`need:${entry.requirementId}:${role.id}`] = { kind: "noul", noul: 0.9 };
       }
       return answers;
