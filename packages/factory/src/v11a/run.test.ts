@@ -118,7 +118,7 @@ import {
   v11aFailureSignature,
   type GenerationInputV11a,
 } from "./run.js";
-import { requiredValidationsOf, type RequiredValidation } from "./bind-by-id.js";
+import { bindTestsById, requiredValidationsOf, type RequiredValidation } from "./bind-by-id.js";
 import * as declCheckStage from "./stages/decl-check.js";
 import {
   DECL_CHECK_IDS_R03_DEFINITION,
@@ -9498,6 +9498,318 @@ describe("R2・R3（#783 レビュー）：C3/T2 の複数の束の計数と、a
         expect(rows.filter((row) => row.malformed_kind !== undefined), "stage rows").toHaveLength(1);
         expect(rows.find((row) => row.malformed_kind !== undefined)!.malformed_kind, "stage rows").toBe("schema");
       }
+    }
+  });
+});
+
+// ── 旗 v12.ids：検査の式（validation-expression）の配線を、走りの台本で固定する（Issue #801 完了条件 (8)）──────
+//
+// 要件 R1 は item の amount だけを対象にし、宣言の検査は `positive`（表の行の名前 `amount` と違う）で
+// 式 `amount > 0`。名前に依らない参照の集合でだけ結び付く（P7-r3 型）。B1 の骨組み・B4 の結び付け・
+// B3' の塊・欄だけの直しの追加の場所が、同じ組（entity・targets）から同じ値で届くことを、一気通貫と
+// 段の走りの両方で確かめる。題材は run.test.ts の中だけで組み、fixtures.ts・sizes.ts を触らない。
+
+describe("旗 v12.ids：検査の式の要件の配線 (a)〜(d) を、一気通貫と段の走りで固定する（Issue #801）", () => {
+  const FLAGS = { ledger: true, searchRepair: true, ids: true } as const;
+  const requirement = {
+    id: "R1",
+    text: "項目の金額は 0 より大きい。",
+    quote: "項目の金額は 0 より大きい。",
+    position: { start: 0, end: 12 },
+  };
+  const EXPR_LIST: RequirementList = { requirements: [requirement], decisions: [], unresolved: [] };
+  const EXPR_PLAN = planOf(EXPR_LIST);
+  const EXPR_SOURCE = requirement.text;
+  /** 局所の表（R1 の所属は空。C2 のコードが targets の項目と entity を足す） */
+  const EXPR_RAW: NameTable = {
+    rows: [
+      { id: "e.item", kind: "entity", entity: null, name: "item", role: "項目", source: { requirementId: "R1", quote: "項目" }, type: null, options: null, groupBy: null, refEntity: null },
+      { id: "f.item.amount", kind: "field", entity: "e.item", name: "amount", role: "金額", source: { requirementId: "R1", quote: "金額" }, type: "number", options: null, groupBy: null, refEntity: null },
+    ],
+    ownership: [
+      {
+        requirementId: "R1",
+        roles: [
+          { id: "f.item.amount", basis: "stated", reason: null },
+          { id: "e.item", basis: "stated", reason: null },
+        ],
+      },
+    ],
+    verification: [{ requirementId: "R1", kind: "validation-expression", targets: ["f.item.amount"] }],
+    classification: [{ requirementId: "R1", nature: "ruled" }],
+  };
+  const EXPR_TABLE: NameTable = withCodeIds(EXPR_RAW);
+  const AMOUNT_ID = EXPR_TABLE.rows.find((row) => row.kind === "field" && row.name === "amount")!.id;
+  const EXPR_YAML = [
+    "entities:",
+    "  - name: item",
+    "    fields:",
+    "      amount:",
+    "        type: number",
+    "computed: []",
+    "views:",
+    "  - name: screen",
+    "    type: table",
+    "    entity: item",
+    "    show: [amount]",
+    "actions: []",
+    "validations:",
+    "  - name: positive",
+    "    entity: item",
+    "    expression: amount > 0",
+    "permissions: []",
+    "minIdentity:",
+    "  mode: anonymous",
+    "",
+  ].join("\n");
+  const EXPR_YAML_NO_VALIDATION = EXPR_YAML.replace(
+    "validations:\n  - name: positive\n    entity: item\n    expression: amount > 0\n",
+    "validations: []\n",
+  );
+
+  /** R1 の validate の 3 種類（正常・異常・境界）の場合の応答（roleId はコードの形の ID） */
+  const exprCases = () =>
+    casesResponseOf(
+      t2Response(
+        KINDS.map((kind) =>
+          rawTest({
+            id: `expr-${kind}`,
+            requirementId: "R1",
+            targetKind: "field",
+            roleId: AMOUNT_ID,
+            kind,
+            operation: "validate",
+            observes: "validation-expression",
+            input: { [AMOUNT_ID]: kind === "abnormal" ? -1 : kind === "boundary" ? 1 : 5 },
+            expected: kind === "abnormal" ? { kind: "error", value: null, code: "E_INVALID" } : ok("true"),
+          }),
+        ),
+        ["R1"],
+      ),
+    );
+
+  const exprHead = (yaml: string): RecordedCall[] => [
+    ...idsResponseList(idsResponsesOf(EXPR_LIST, EXPR_TABLE, PROPERTY_LEDGER_VIEW_IDS)).map((output) => structured(output)),
+    structured(acceptAll(["R1"])),
+    structured(exprCases()),
+    structured({ declaration: yaml }),
+  ];
+
+  const runBoth = async (calls: readonly RecordedCall[]) => ({
+    generation: await runScenario(calls, { flags: FLAGS, plan: EXPR_PLAN, source: EXPR_SOURCE }),
+    stage: await runStageScenario(calls, { flags: FLAGS, plan: EXPR_PLAN, source: EXPR_SOURCE }),
+  });
+  const verdictOf = (result: unknown): string | null => {
+    const value = result as { readonly outcome?: { readonly verdict: string }; readonly judgeVerdict?: string | null };
+    return value.outcome?.verdict ?? value.judgeVerdict ?? null;
+  };
+  const b1Of = (requests: readonly LlmStructuredRequest[]) => {
+    const b1 = requests.find((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME);
+    if (b1 === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+    return b1;
+  };
+  const skeletonOf = (requests: readonly LlmStructuredRequest[]) =>
+    dataBlockOf(b1Of(requests).input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME) as readonly RequiredValidation[];
+  const suiteOf = (requests: readonly LlmStructuredRequest[]) =>
+    dataBlockOf(b1Of(requests).input, WRITE_V11A_DATA_NAMES[2]!) as TestSuite;
+  const linkedOf = (requests: readonly LlmStructuredRequest[]) => {
+    const decl = requests.find((request) => request.schemaName === DECL_CHECK_SCHEMA_NAME);
+    if (decl === undefined) throw new Error("前提が壊れた：B3' の要求が無い");
+    return dataBlockOf(decl.input, DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME);
+  };
+  it("(a)(b)(c) 骨組み・結び付け・B3' が、同じ組（entity item・targets amount）から同じ値で両実行口に届く", async () => {
+    const app = await normalizedFixture(EXPR_YAML);
+    const both = await runBoth([...exprHead(EXPR_YAML), structured(acceptAll(["R1"]))]);
+    for (const [execution, run] of Object.entries(both) as readonly [string, typeof both.generation][]) {
+      expect(run.result.stopped, execution).toBeNull();
+      expect(verdictOf(run.result), execution).toBe("full");
+      const requests = run.recording.structured;
+      const suite = suiteOf(requests);
+      const validateTests = suite.tests.filter((test) => test.operation === "validate");
+      expect(validateTests.length, execution).toBe(3);
+      // (a) 骨組み：名前を持たず、entity・targets・testIds・conflict を持つ
+      const skeleton = skeletonOf(requests);
+      expect(skeleton, execution).toEqual([
+        {
+          requirementId: "R1",
+          entity: "item",
+          targets: ["amount"],
+          testIds: validateTests.map((test) => test.id),
+          conflict: false,
+        },
+      ]);
+      expect(Object.keys(skeleton[0] as object).sort(), execution).toEqual(["conflict", "entity", "requirementId", "targets", "testIds"]);
+      // (b) 名前が表の行と違う `positive` に結び付き、no-candidate/ambiguous ではない
+      const bindings = bindTestsById(app, EXPR_TABLE, suite).bindings;
+      for (const test of validateTests) {
+        expect(bindings.get(test.id), `${execution} ${test.id}`).toEqual({
+          kind: "bound",
+          testId: test.id,
+          location: { kind: "validation", entity: "item", name: "positive" },
+        });
+      }
+      // (c) B3' の塊は、骨組みと宣言から導いた同じ値
+      const linked = linkedOf(requests);
+      expect(linked, execution).toEqual([
+        { requirementId: "R1", validations: [{ entity: "item", targets: ["amount"], name: "positive", conflict: false }] },
+      ]);
+      expect(linked, execution).toEqual(linkedValidationsByRequirement(suite, skeleton, ["R1"], EXPR_TABLE, app));
+      if (execution === "stage") {
+        const verification = (run.result as { readonly verification?: { readonly c7_mismatches: number | null } }).verification;
+        expect(verification?.c7_mismatches, execution).toBe(0);
+      }
+    }
+  });
+
+  it("(d) 検査を外した宣言は欄だけの直しへ回り、追加の場所の鍵が骨組みと同じ entity と正規化した集合になる", async () => {
+    const answer = structured({
+      replacements: [{ location: "validation:item.amount", element: "- name: positive\n  entity: item\n  expression: amount > 0" }],
+      disputes: [],
+    });
+    const calls = [...exprHead(EXPR_YAML_NO_VALIDATION), structured(acceptAll(["R1"])), answer, structured(acceptAll(["R1"]))];
+    const both = await runBoth(calls);
+    for (const [execution, run] of Object.entries(both) as readonly [string, typeof both.generation][]) {
+      expect(run.result.stopped, execution).toBeNull();
+      expect(verdictOf(run.result), execution).toBe("full");
+      const requests = run.recording.structured;
+      // 骨組みは検査の無い宣言でも同じ（表と組から導く）
+      const skeleton = skeletonOf(requests);
+      expect(skeleton.length, execution).toBe(1);
+      const entry = skeleton[0]!;
+      expect(entry.requirementId, execution).toBe("R1");
+      expect(entry.entity, execution).toBe("item");
+      expect(entry.targets, execution).toEqual(["amount"]);
+      expect(entry.conflict, execution).toBe(false);
+      expect(entry.testIds.length, execution).toBe(3);
+      const expectedKey = `validation:${entry.entity === null ? "" : entry.entity}.${entry.targets[0] ?? ""}`;
+      const fields = requests.filter((request) => request.schemaName === FIELD_REPAIR_SCHEMA_NAME);
+      expect(fields.length, execution).toBe(1);
+      const request = fields[0]!;
+      const locations = (request.schema as { properties: { replacements: { items: { properties: { location: { enum: unknown } } } } } })
+        .properties.replacements.items.properties.location.enum;
+      expect(locations, execution).toEqual([expectedKey]);
+      const failures = dataBlockOf(request.input, "失敗の一覧") as readonly { readonly locations: readonly { readonly location: string; readonly kind: string }[] }[];
+      expect(failures.flatMap((failure) => failure.locations), execution).toEqual(
+        failures.flatMap((failure) => failure.locations.map(() => ({ location: expectedKey, kind: "add" }))),
+      );
+      expect(failures.length, execution).toBeGreaterThan(0);
+    }
+  });
+
+  // 棄却・持ち越しで有効な組が変わる台本：R2 の唯一の試験を B5' で棄却すると R2 が持ち越され、
+  // 次の版の B3' に渡る組から R2 が消える。B3' に古い（棄却の前の）組を渡す変異で、この試験が赤になる。
+  const NOTE_RAW: NameTable = {
+    rows: [
+      ...EXPR_RAW.rows,
+      { id: "f.item.note", kind: "field", entity: "e.item", name: "note", role: "メモ", source: { requirementId: "R2", quote: "メモ" }, type: "string", options: null, groupBy: null, refEntity: null },
+    ],
+    ownership: [
+      { requirementId: "R1", roles: [{ id: "f.item.amount", basis: "stated", reason: null }, { id: "e.item", basis: "stated", reason: null }] },
+      { requirementId: "R2", roles: [{ id: "f.item.note", basis: "stated", reason: null }, { id: "e.item", basis: "stated", reason: null }] },
+    ],
+    verification: [...EXPR_RAW.verification, { requirementId: "R2", kind: "fixed-test" }],
+    classification: [...EXPR_RAW.classification, { requirementId: "R2", nature: "ruled" }],
+  };
+  const NOTE_TABLE: NameTable = withCodeIds(NOTE_RAW);
+  const NOTE_ID = NOTE_TABLE.rows.find((row) => row.kind === "field" && row.name === "note")!.id;
+  const NOTE_AMOUNT_ID = NOTE_TABLE.rows.find((row) => row.kind === "field" && row.name === "amount")!.id;
+  const NOTE_LIST: RequirementList = {
+    ...EXPR_LIST,
+    requirements: [...EXPR_LIST.requirements, { id: "R2", text: "項目にメモを残せる。", quote: "項目にメモを残せる。", position: { start: 0, end: 9 } }],
+  };
+  const NOTE_PLAN = planOf(NOTE_LIST);
+  const NOTE_SOURCE = NOTE_LIST.requirements.map((item) => item.text).join("");
+  const NOTE_YAML = EXPR_YAML.replace(
+    "      amount:\n        type: number\n",
+    "      amount:\n        type: number\n      note:\n        type: string\n",
+  ).replace("show: [amount]", "show: [amount, note]");
+  const R2_CASE = rawTest({
+    id: "r2-note",
+    requirementId: "R2",
+    targetKind: "field",
+    roleId: NOTE_ID,
+    kind: "normal",
+    operation: "validate",
+    observes: "validation",
+    input: { [NOTE_ID]: "memo" },
+    expected: ok("true"),
+  });
+  const noteCases = () =>
+    casesResponseOf(
+      t2Response(
+        [
+          R2_CASE,
+          ...KINDS.map((kind) =>
+            rawTest({
+              id: `note-${kind}`,
+              requirementId: "R1",
+              targetKind: "field",
+              roleId: NOTE_AMOUNT_ID,
+              kind,
+              operation: "validate",
+              observes: "validation-expression",
+              input: { [NOTE_AMOUNT_ID]: kind === "abnormal" ? -1 : kind === "boundary" ? 1 : 5 },
+              expected: kind === "abnormal" ? { kind: "error", value: null, code: "E_INVALID" } : ok("true"),
+            }),
+          ),
+        ],
+        ["R1", "R2"],
+      ),
+    );
+  const noteHead = (): RecordedCall[] => [
+    ...idsResponseList(idsResponsesOf(NOTE_LIST, NOTE_TABLE, PROPERTY_LEDGER_VIEW_IDS)).map((output) => structured(output)),
+    structured(acceptAll(["R1", "R2"])),
+    structured(noteCases()),
+    structured({ declaration: NOTE_YAML }),
+  ];
+
+  it("(8) 配線：棄却・持ち越しで有効な組が変わると、その後の B3' の塊から持ち越した要件が消える（古い組を渡す変異で赤）", async () => {
+    // R2 の LLM の試験（case:4）と、コードが作った存在の試験の両方を棄却すると、R2 の網羅の単位が失われて持ち越す
+    const disputes = [
+      { testId: "case:4", quote: "項目の金額は 0 より大きい。" },
+      { testId: "gen:existence:R2:E1:normal", quote: "項目の金額は 0 より大きい。" },
+    ];
+    const calls = [
+      ...noteHead(),
+      structured(acceptAll(["R1", "R2"])),
+      repairDone(NOTE_YAML, disputes),
+      structured({
+        decisions: disputes.map((dispute) => ({ ...dispute, verdict: "overturn", reason: "期待が誤り" })),
+      }),
+      structured(acceptAll(["R1"])),
+    ];
+    const noSearch = { ledger: true, ids: true } as const;
+    for (const run of [
+      await runScenario(calls, { flags: noSearch, plan: NOTE_PLAN, source: NOTE_SOURCE }),
+      await runStageScenario(calls, { flags: noSearch, plan: NOTE_PLAN, source: NOTE_SOURCE }),
+    ]) {
+      expect(run.result.stopped).toBeNull();
+      const decls = run.recording.structured.filter((request) => request.schemaName === DECL_CHECK_SCHEMA_NAME);
+      expect(decls.length).toBeGreaterThanOrEqual(2);
+      const blocks = decls.map((request) => dataBlockOf(request.input, DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME));
+      // 1 回目は R2 を持ち、棄却・持ち越しの後の回は持たない
+      expect(JSON.stringify(blocks[0])).toContain('"R2"');
+      expect(JSON.stringify(blocks.at(-1))).not.toContain('"R2"');
+      // 最後の塊は、その時点の有効な組（R1 だけ）から導いた値
+      const app = await normalizedFixture(NOTE_YAML);
+      const last = decls.at(-1)!;
+      const targetIds = (dataBlockOf(last.input, "要件の文と引用") as readonly { readonly requirementId: string }[]).map(
+        (entry) => entry.requirementId,
+      );
+      const shown = dataBlockOf(b1Of(run.recording.structured).input, WRITE_V11A_DATA_NAMES[2]!) as {
+        readonly tests: readonly (FixedTest & { readonly observes?: TestObserves | null })[];
+      };
+      const suite: TestSuite = { tests: shown.tests.filter((test) => targetIds.includes(test.target.requirementId)) };
+      const observes = new Map(shown.tests.flatMap((test) => (typeof test.observes === "string" ? [[test.id, test.observes] as const] : [])));
+      expect(blocks.at(-1)).toEqual(
+        linkedValidationsByRequirement(
+          suite,
+          requiredValidationsOf(NOTE_TABLE, suite, observes),
+          targetIds,
+          NOTE_TABLE,
+          app,
+        ),
+      );
     }
   });
 });
