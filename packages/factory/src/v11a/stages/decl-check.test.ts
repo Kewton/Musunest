@@ -13,15 +13,23 @@ import { describe, expect, it } from "vitest";
 import type { RequirementList } from "../../pipeline.js";
 import { ruleDefinitionDefects } from "../../stages/prompt.js";
 import { expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
+import type { TestSuite } from "../../fixed-test.js";
 import { createCheckedRecordingClient, recordedStructured, FIXTURE_DOCUMENTS, FIXTURE_YAML, fixtureList, fixtureTable, fixtureYaml, normalizedFixture } from "../__tests__/fixtures.js";
-import { extraElementsOf, markRows, type DeclarationMark } from "../bind-by-id.js";
+import { extraElementsOf, markRows, requiredValidationsOf, type DeclarationMark } from "../bind-by-id.js";
+import { linkedValidationsByRequirement } from "../run.js";
 import {
+  DECL_CHECK_IDS_R03_DEFINITION,
+  DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME,
+  DECL_CHECK_R03_IDS_SUFFIX,
   DECL_CHECK_RULE_DEFINITIONS,
   DECL_CHECK_RULES,
   DECL_CHECK_SCHEMA,
   DECL_CHECK_SCHEMA_NAME,
   DECL_REJECTION_KINDS,
+  declCheckRuleDefinitionsOf,
+  declCheckRulesOf,
   runDeclCheck,
+  type DeclLinkedValidations,
 } from "./decl-check.js";
 
 const structured = recordedStructured;
@@ -71,7 +79,12 @@ const withRealRate = (source: string): string =>
     "  - name: realRate\n    scope: app\n    expression: base * 2\n    type: number\n  - name: byKind\n",
   );
 
-async function run(source: string, outputs: readonly unknown[], list: RequirementList = LIST) {
+async function run(
+  source: string,
+  outputs: readonly unknown[],
+  list: RequirementList = LIST,
+  linkedValidations?: readonly DeclLinkedValidations[],
+) {
   const app = await normalizedFixture(source);
   const recording = createCheckedRecordingClient(outputs.map(structured));
   const outcome = await runDeclCheck({
@@ -82,6 +95,7 @@ async function run(source: string, outputs: readonly unknown[], list: Requiremen
     app,
     documents: FIXTURE_DOCUMENTS,
     gateway: makeGateway(recording.client),
+    ...(linkedValidations === undefined ? {} : { linkedValidations }),
   });
   return { outcome, requests: recording.structured, app };
 }
@@ -235,6 +249,155 @@ describe("B3' の要求", () => {
     const { outcome, requests } = await run(fixtureYaml({ closeItem: false }), [], only);
     expect(requests).toHaveLength(0);
     expect(outcome).toMatchObject({ ok: true, value: { targets: [], unmarked: ["R3"], judgments: [{ requirementId: "R3", verdict: "unmarked" }] } });
+  });
+});
+
+// ── 旗 v12.ids：要件に結び付いた検査（Issue #795）────────────────────────────
+
+const R1_LINKED: readonly DeclLinkedValidations[] = [
+  { requirementId: "R1", validations: [{ entity: "item", name: "amount", conflict: false }] },
+];
+
+/** 値の中の全部の鍵（深さ優先。塊に入ってよい欄を照らす） */
+function keysDeep(value: unknown): readonly string[] {
+  if (Array.isArray(value)) return value.flatMap(keysDeep);
+  if (value !== null && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>).flatMap(([key, inner]) => [key, ...keysDeep(inner)]);
+  }
+  return [];
+}
+
+/** 要素の試験 1 件（観測する性質は validation） */
+function validationSuite(id: string, requirementId: string, expected: TestSuite["tests"][number]["expected"]): TestSuite {
+  return {
+    tests: [
+      {
+        id,
+        target: { requirementId, kind: "field", roleId: "f.item.amount" },
+        kind: "normal",
+        operation: "validate",
+        clock: "2026-10-16T00:00:00+09:00",
+        input: {},
+        referenceData: [],
+        expected,
+      },
+    ],
+  };
+}
+
+/** 旗 ids の要求から、塊 1 つと R-dc-03 の ids の文を位置で外す（off の要求と比べる） */
+function withoutLinked(request: { readonly input: string; readonly rules?: readonly string[] }) {
+  const opener = `\n<data name="${DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME}">`;
+  const start = request.input.indexOf(opener);
+  const close = "\n</data>";
+  const input =
+    start < 0
+      ? request.input
+      : `${request.input.slice(0, start)}${request.input.slice(request.input.indexOf(close, start) + close.length)}`;
+  const offText = DECL_CHECK_RULE_DEFINITIONS.find((definition) => definition.id === DECL_CHECK_IDS_R03_DEFINITION.id)?.text ?? "";
+  const rules = (request.rules ?? []).map((text) => (text === DECL_CHECK_IDS_R03_DEFINITION.text ? offText : text));
+  return { ...request, input, rules };
+}
+
+describe("B3' の規則（旗 ids の版。Issue #795）", () => {
+  it("R-dc-03 の ids の文は今の文の後ろに足した文を持ち、ほかの規則の文は off と同じ", () => {
+    const on = declCheckRuleDefinitionsOf(true);
+    const off = DECL_CHECK_RULE_DEFINITIONS;
+    expect(ruleDefinitionDefects(on)).toEqual([]);
+    expect(on.map((definition) => definition.id)).toEqual(off.map((definition) => definition.id));
+    for (const definition of off) {
+      const ids = on.find((candidate) => candidate.id === definition.id);
+      if (ids === undefined) throw new Error("前提が壊れた：規則の ID が欠けた");
+      if (definition.id === "R-dc-03") {
+        expect(ids.text).toBe(`${definition.text}${DECL_CHECK_R03_IDS_SUFFIX}`);
+        expect(ids.text.startsWith(definition.text)).toBe(true);
+        expect(ids.text).toContain(DECL_CHECK_R03_IDS_SUFFIX);
+      } else {
+        expect(ids.text).toBe(definition.text);
+      }
+    }
+    expect(declCheckRuleDefinitionsOf(false)).toEqual(off);
+    expect(declCheckRulesOf(true)).toEqual(on.map((definition) => definition.text));
+    expect(declCheckRulesOf(false)).toEqual(DECL_CHECK_RULES);
+    expect(DECL_CHECK_IDS_R03_DEFINITION.since).toContain("Issue #795");
+    expect(DECL_CHECK_IDS_R03_DEFINITION.why.trim()).not.toBe("");
+  });
+});
+
+describe("B3' の要求の塊「要件に結び付いた検査」（Issue #795）", () => {
+  it("渡したときだけ、追加の要素の後に塊をちょうど 1 つ足す。省けば今の要求のまま", async () => {
+    const on = await run(FIXTURE_YAML, [{ judgments: TARGETS.map(accept) }], LIST, R1_LINKED);
+    const onBlocks = dataBlocks(on.requests[0]!.input);
+    expect(onBlocks.map((block) => block.name)).toEqual([
+      "要件の文と引用",
+      "所属の行",
+      "宣言",
+      "該当箇所の印",
+      "追加の要素",
+      DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME,
+    ]);
+    expect(onBlocks.filter((block) => block.name === DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME)).toHaveLength(1);
+    expect(JSON.parse(onBlocks[5]!.text)).toEqual(R1_LINKED);
+    expect(on.requests[0]!.rules).toEqual(declCheckRulesOf(true));
+    expect(declCheckRulesOf(true)).not.toEqual(declCheckRulesOf(false));
+
+    // 直す前（base）の振る舞い：欄を渡さなければ塊を足さず、規則も off のまま
+    const base = await run(FIXTURE_YAML, [{ judgments: TARGETS.map(accept) }]);
+    expect(dataBlocks(base.requests[0]!.input).map((block) => block.name)).toEqual([
+      "要件の文と引用",
+      "所属の行",
+      "宣言",
+      "該当箇所の印",
+      "追加の要素",
+    ]);
+    expect(base.requests[0]!.rules).toEqual(DECL_CHECK_RULES);
+  });
+
+  it("塊は点検の対象の要件のうち 1 つ以上あるものだけ、対象の順に並べる", async () => {
+    const linked: readonly DeclLinkedValidations[] = [
+      { requirementId: "R4", validations: [{ entity: "item", name: "month", conflict: false }] },
+      { requirementId: "R9", validations: [{ entity: "item", name: "outside", conflict: false }] },
+      { requirementId: "R1", validations: [{ entity: "item", name: "amount", conflict: false }] },
+    ];
+    const { requests } = await run(FIXTURE_YAML, [{ judgments: TARGETS.map(accept) }], LIST, linked);
+    const blocks = dataBlocks(requests[0]!.input);
+    expect(JSON.parse(blocks[5]!.text)).toEqual([linked[2], linked[0]]);
+  });
+
+  it("結び付いた検査が 0 なら塊を足さず、base との差は規則の文だけ（位置で外すと一致）", async () => {
+    const on = await run(FIXTURE_YAML, [{ judgments: TARGETS.map(accept) }], LIST, []);
+    const base = await run(FIXTURE_YAML, [{ judgments: TARGETS.map(accept) }]);
+    const onRequest = on.requests[0]!;
+    expect(dataBlocks(onRequest.input).map((block) => block.name)).toEqual(dataBlocks(base.requests[0]!.input).map((block) => block.name));
+    expect(onRequest.rules).toEqual(declCheckRulesOf(true));
+    expect(onRequest.rules).not.toEqual(base.requests[0]!.rules);
+    expect(withoutLinked(onRequest).input).toBe(base.requests[0]!.input);
+    expect(withoutLinked(onRequest).rules).toEqual(base.requests[0]!.rules);
+  });
+
+  it("塊に試験の ID・期待・入力・合否・観測する性質が入らない", async () => {
+    const { requests } = await run(FIXTURE_YAML, [{ judgments: TARGETS.map(accept) }], LIST, R1_LINKED);
+    const block = dataBlocks(requests[0]!.input).find((entry) => entry.name === DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME);
+    if (block === undefined) throw new Error("前提が壊れた：塊が無い");
+    expect(new Set(keysDeep(JSON.parse(block.text)))).toEqual(new Set(["requirementId", "validations", "entity", "name", "conflict"]));
+    for (const word of ["r1-normal", "expected", "observes", "verdict", "accept", "reject", "clock", "inputContract", "operation"]) {
+      expect(block.text, word).not.toContain(word);
+    }
+  });
+
+  it("試験の期待と合否を変えても、結び付きが同じなら B3' の要求はバイト列で同じ", async () => {
+    const requestOf = async (expected: TestSuite["tests"][number]["expected"]) => {
+      const suite = validationSuite("t-1", "R1", expected);
+      const required = requiredValidationsOf(TABLE, suite, new Map([["t-1", "validation" as const]]));
+      const linked = linkedValidationsByRequirement(suite, required, TARGETS);
+      expect(linked).toEqual(R1_LINKED);
+      const { requests } = await run(FIXTURE_YAML, [{ judgments: TARGETS.map(accept) }], LIST, linked);
+      return requests[0]!;
+    };
+    const ok = await requestOf({ kind: "ok", value: "true" });
+    const error = await requestOf({ kind: "error", code: "E_INVALID" });
+    expect(JSON.stringify(error)).toBe(JSON.stringify(ok));
+    expectNoAcceptanceMaterial([JSON.stringify(ok)]);
   });
 });
 
