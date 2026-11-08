@@ -577,6 +577,16 @@ async function runScenario(calls: readonly RecordedCall[], overrides: Partial<Ge
   return { result, recording };
 }
 
+/** 段の走りの口（`name-table`..`judge`）で同じ台本を流す（Issue #795 の R1。一気通貫と同じ `runV11a` を通る） */
+async function runStageScenario(calls: readonly RecordedCall[], overrides: Partial<GenerationInputV11a> = {}) {
+  const recording = createCheckedRecordingClient(calls, { bundledC3: overrides.flags?.ids === true, bundledC2: overrides.flags?.ids === true });
+  const result = await runStageRangeV11a({
+    ...inputOf(recording.client, overrides),
+    range: { start: "name-table", end: "judge" },
+  });
+  return { result, recording };
+}
+
 function artifactOf(bundle: AssembledBundle | null, path: string): Record<string, unknown> {
   const found = bundle?.artifacts.find((artifact) => artifact.path === path);
   if (found === undefined) throw new Error(`納品物に無い: ${path}`);
@@ -3021,13 +3031,35 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
     const suite = dataBlockOf(b1.input, WRITE_V11A_DATA_NAMES[2]!) as TestSuite;
     return linkedValidationsByRequirement(suite, required, [...IDS]);
   };
-  /** B3' の要求の塊「要件に結び付いた検査」（無ければ undefined） */
+  /** B3' の要求 1 つの塊「要件に結び付いた検査」（無ければ undefined） */
+  const linkedBlockOf = (request: LlmStructuredRequest) => {
+    const blocks = blocksOf(request.input).filter((block) => block.name === DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME);
+    expect(blocks.length, "塊は 1 つ").toBeLessThanOrEqual(1);
+    return blocks.length === 0 ? undefined : (JSON.parse(blocks[0]!.text) as unknown);
+  };
+  /** B3' の要求の塊「要件に結び付いた検査」（最初の要求。無ければ undefined） */
   const sentLinkedOf = (requests: readonly LlmStructuredRequest[]) => {
     const decl = requests.find((request) => request.schemaName === DECL_CHECK_SCHEMA_NAME);
     if (decl === undefined) throw new Error("前提が壊れた：B3' の要求が無い");
-    const blocks = blocksOf(decl.input).filter((block) => block.name === DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME);
-    expect(blocks.length, "塊は 1 つ").toBeLessThanOrEqual(1);
-    return blocks.length === 0 ? undefined : (JSON.parse(blocks[0]!.text) as unknown);
+    return linkedBlockOf(decl);
+  };
+  /**
+   * その B3' の要求の時点の有効な試験（B1 の「固定した試験」）だけから、要件ごとの塊の期待を組む。
+   * 対象の要件は要求の「要件の文と引用」の並び（その版の残る要件）を使う。Issue #795 の R1。
+   */
+  const effectiveExpectedOf = (requests: readonly LlmStructuredRequest[], decl: LlmStructuredRequest) => {
+    const b1 = requests.find((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME);
+    if (b1 === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+    const shown = dataBlockOf(b1.input, WRITE_V11A_DATA_NAMES[2]!) as {
+      readonly tests: readonly (FixedTest & { readonly observes?: TestObserves | null })[];
+    };
+    const targetIds = (dataBlockOf(decl.input, "要件の文と引用") as readonly { readonly requirementId: string }[]).map(
+      (entry) => entry.requirementId,
+    );
+    const suite: TestSuite = { tests: shown.tests.filter((test) => targetIds.includes(test.target.requirementId)) };
+    const observes = new Map(shown.tests.flatMap((test) => (typeof test.observes === "string" ? [[test.id, test.observes] as const] : [])));
+    const required = requiredValidationsOf(MAPPED_IDS, suite, observes);
+    return linkedValidationsByRequirement(suite, required, targetIds);
   };
 
   it("B3' の塊は B1 の要る検査の骨組みを要件ごとに射影した値で、直す前（base）の要求には塊が無い", async () => {
@@ -3142,6 +3174,93 @@ describe("旗 v12.ids：要件に結び付いた検査を B3' に渡す（Issue 
     expect(extra.map((element) => element.name)).toContain("realRate");
     expect(JSON.stringify(sentLinkedOf(on.recording.structured))).not.toContain("realRate");
     expect(carryEntriesOf(on.result.bundle)).toEqual(carryEntriesOf(base.result.bundle));
+  });
+
+  /**
+   * R1 の台本。R1 に f.member.title、R3 に f.item.title を求める検査を結び付ける（どちらも名前は title）。
+   * R3 の検査を B5' で棄却すると網羅の単位を失って R3 が持ち越され、次の版の有効な組から R3 の検査が消える。
+   */
+  const r1Scenario = (): RecordedCall[] => {
+    const r1Title = rawTest({
+      id: "r1-title",
+      requirementId: "R1",
+      targetKind: "field",
+      roleId: "f.member.title",
+      operation: "validate",
+      observes: "validation",
+      input: { "f.member.title": "題名" },
+      expected: ok("true"),
+    });
+    const r3Title = rawTest({
+      id: "r3-title",
+      requirementId: "R3",
+      targetKind: "field",
+      roleId: "f.item.title",
+      operation: "validate",
+      observes: "validation",
+      input: { "f.item.title": "題名" },
+      expected: ok("true"),
+    });
+    // 検査の対象を所属に持たせる（T2 は対象が所属にあることを求める）。R1 に f.member.title、
+    // R3 に f.item.title を足す。行そのものは変えない
+    const statedRole = (id: string) => ({ id, basis: "stated" as const, reason: null });
+    const table = withCodeIds({
+      ...TABLE_ON,
+      ownership: TABLE_ON.ownership.map((entry) =>
+        entry.requirementId === "R1"
+          ? { ...entry, roles: [...entry.roles, statedRole("f.member.title")] }
+          : entry.requirementId === "R3"
+            ? { ...entry, roles: [...entry.roles, statedRole("f.item.title")] }
+            : entry,
+      ),
+    });
+    // 場合の順の 5 番目が R3 の title の検査（`case:5`）
+    const tests = [...r1Tests(), r1Title, r3Title, ...r3Tests(), ...r4Tests()];
+    const t2 = casesResponseOf(t2Response(tests, ["R1", "R3", "R4"]));
+    const dispute = { testId: "case:5", quote: "金額が 0 より大きい項目だけ" };
+    return [
+      ...idsHead({ t2, table }),
+      structured(acceptAll()), // B3' 1 回目
+      repairDone(RUN_YAML, [dispute]), // B5（R3 の検査の期待を主張）
+      structured({ decisions: [{ ...dispute, verdict: "overturn", reason: "期待が誤り" }] }), // B5'（棄却）
+      structured(acceptAll(["R1", "R2", "R4"])), // B3' 2 回目（R3 を持ち越した後）
+      repairDone(RUN_YAML), // B5（2 回目。主張なし）
+      structured(acceptAll(["R1", "R2", "R4"])), // B3' 3 回目（同じ組。停滞で止まる）
+    ];
+  };
+  /** 2 回目以降の B3' の全要求が、その時点の有効な試験だけから求めた塊と一致することを照合する */
+  const expectEffectiveBlocks = (label: string, stopped: unknown, requests: readonly LlmStructuredRequest[]) => {
+    expect(stopped, label).toBeNull();
+    const decls = requests.filter((request) => request.schemaName === DECL_CHECK_SCHEMA_NAME);
+    expect(decls.length, label).toBeGreaterThanOrEqual(3);
+    // 2 回目以降の B3' の全要求が、その時点の有効な試験だけから求めた塊と一致する
+    for (const decl of decls.slice(1)) {
+      expect(linkedBlockOf(decl), label).toEqual(effectiveExpectedOf(requests, decl));
+    }
+    // 組が変わったこと：1 回目は R3 の title の検査を含み、2 回目以降は R3 を持ち越して含まない
+    expect(linkedBlockOf(decls[0]!), label).not.toEqual(linkedBlockOf(decls[1]!));
+    expect(JSON.stringify(linkedBlockOf(decls[0]!)), label).toContain("title");
+    expect(JSON.stringify(linkedBlockOf(decls[1]!)), label).not.toContain('"requirementId":"R3"');
+    // 2 回目以降は、R3 の検査が組から外れて R1 の title の競合が解ける
+    expect(linkedBlockOf(decls[1]!), label).toEqual([
+      {
+        requirementId: "R1",
+        validations: [
+          { entity: "member", name: "title", conflict: false },
+          { entity: "item", name: "amount", conflict: false },
+        ],
+      },
+    ]);
+  };
+
+  it("R1（一気通貫）：棄却・持ち越しで有効な組が変わったあとの B3' は、その版の有効な試験だけから作った塊を送る", async () => {
+    const run = await runScenario(r1Scenario(), { flags: { ledger: true, ids: true } });
+    expectEffectiveBlocks("一気通貫", run.result.stopped, run.recording.structured);
+  });
+
+  it("R1（段の走り）：棄却・持ち越しで有効な組が変わったあとの B3' は、その版の有効な試験だけから作った塊を送る", async () => {
+    const run = await runStageScenario(r1Scenario(), { flags: { ledger: true, ids: true } });
+    expectEffectiveBlocks("段の走り", run.result.stopped, run.recording.structured);
   });
 });
 
