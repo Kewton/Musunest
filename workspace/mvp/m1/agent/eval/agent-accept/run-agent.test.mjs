@@ -2885,15 +2885,22 @@ const fakeStageLib713 = fakeStageLib
 const fakeStageCli713 = fakeStageCli638
   .replace(
     "const v12 = idx === null ? null : { ledger: await idx.propertyLedgerSha256(), flags: idx.V12_PIPELINE_FLAGS };",
-    "let upstream; try { upstream = typeof idx?.upstreamLedgerSha256 === \"function\" ? await idx.upstreamLedgerSha256() : undefined; } catch { upstream = undefined; }\nconst v12 = idx === null ? null : { ledger: await idx.propertyLedgerSha256(), upstream, flags: idx.V12_PIPELINE_FLAGS };",
+    // #817：入口が公開の関数 ledgerVersionsOf を出すなら、工場の CLI の書き手（#816）と同じく旗の組を渡してその値で版を書く
+    "let lv; try { lv = typeof idx?.ledgerVersionsOf === \"function\" ? await idx.ledgerVersionsOf(idx.V12_PIPELINE_FLAGS) : undefined; } catch { lv = undefined; }\n" +
+      "let upstream; try { upstream = lv != null ? lv.ledgerUpstream : typeof idx?.upstreamLedgerSha256 === \"function\" ? await idx.upstreamLedgerSha256() : undefined; } catch { upstream = undefined; }\nconst v12 = idx === null ? null : { ledger: lv != null ? lv.ledger : await idx.propertyLedgerSha256(), upstream, flags: idx.V12_PIPELINE_FLAGS };",
   )
   .replace("{ ledger: v12.ledger, flags: v12.flags, call_limits: null }", "{ ledger: v12.ledger, ...(v12.upstream === undefined ? {} : { ledger_upstream: boundary === \"t1-t2\" ? v12.upstream : null }), flags: v12.flags, call_limits: null }");
-assert.ok(fakeStageLib713.includes("ledgerUpstream") && fakeStageCli713.includes("ledger_upstream") && fakeStageCli713.includes("upstreamLedgerSha256"), "偽物の差し替えが当たらない");
+assert.ok(fakeStageLib713.includes("ledgerUpstream") && fakeStageCli713.includes("ledger_upstream") && fakeStageCli713.includes("upstreamLedgerSha256") && fakeStageCli713.includes("ledgerVersionsOf"), "偽物の差し替えが当たらない");
 const UP713 = "e".repeat(64);
 /** package の入口：upstream が文字列なら部分の指紋の関数がそれを返し、null なら関数を出さず、"throw" なら例外、{ value } なら任意の値を返す */
-const v12Index713 = ({ flags = FLAGS638, ledger = "ledger-a", upstream = UP713 } = {}) =>
+/** versions（#817）：null なら公開の関数を出さず、"throw" なら例外、{ value } なら任意の値、ほかは { ledger, ledgerUpstream } を返す。FAKE_LV_LOG があれば受けた旗の組を 1 行ずつ書く */
+const v12Index713 = ({ flags = FLAGS638, ledger = "ledger-a", upstream = UP713, versions = null } = {}) =>
   v12Index638({ flags, ledger }) +
-  (upstream === null ? "" : upstream === "throw" ? 'export async function upstreamLedgerSha256() { throw new Error("x"); }\n' : `export async function upstreamLedgerSha256() { return ${JSON.stringify(typeof upstream === "object" ? upstream.value : upstream)}; }\n`);
+  (upstream === null ? "" : upstream === "throw" ? 'export async function upstreamLedgerSha256() { throw new Error("x"); }\n' : `export async function upstreamLedgerSha256() { return ${JSON.stringify(typeof upstream === "object" ? upstream.value : upstream)}; }\n`) +
+  (versions === null
+    ? ""
+    : 'import { appendFileSync as lvAppend } from "node:fs";\n' +
+      `export async function ledgerVersionsOf(f) { if (process.env.FAKE_LV_LOG) lvAppend(process.env.FAKE_LV_LOG, JSON.stringify(f) + "\\n"); ${versions === "throw" ? 'throw new Error("x");' : `return ${JSON.stringify(versions.value !== undefined && Object.keys(versions).length === 1 ? versions.value : versions)};`} }\n`);
 function makeStageRepo713(base, name = "stage713", index = {}) {
   const repo = makeStageRepo638(base, name);
   writeFileSync(join(repo, "packages/factory/dist/v11a/bundle-v11a.js"), fakeStageLib713);
@@ -3014,9 +3021,16 @@ test("#713 (d) 実の工場の dist の値の受け渡し：package の入口を
   const realIndex = resolve(here, "../../../../../../packages/factory/dist/index.js");
   assert.ok(existsSync(realIndex), "実の工場の dist が無い（先に pnpm build）");
   const real = await import(pathToFileURL(realIndex).href);
-  const realUpstream = await real.upstreamLedgerSha256(), realLedger = await real.propertyLedgerSha256();
+  // #817：実の dist は公開の関数 ledgerVersionsOf（#816）を出す。上流の走り（偽物の書き手）も読み手も、dist の V12_PIPELINE_FLAGS を渡したその値を使う
+  assert.equal(typeof real.ledgerVersionsOf, "function", "実の dist に公開の関数が無い");
+  const { ledger: realLedger, ledgerUpstream: realUpstream } = await real.ledgerVersionsOf(JSON.parse(JSON.stringify(real.V12_PIPELINE_FLAGS)));
   assert.match(realUpstream, /^[0-9a-f]{64}$/);
+  assert.match(realLedger, /^[0-9a-f]{64}$/);
   assert.notEqual(realUpstream, realLedger);
+  // 直す前の読み手が使った旗なしの値は、ids の版の値と違う（V12_PIPELINE_FLAGS は ids が真）
+  assert.equal(real.V12_PIPELINE_FLAGS.ids, true);
+  assert.notEqual(await real.propertyLedgerSha256(), realLedger);
+  assert.notEqual(await real.upstreamLedgerSha256(), realUpstream);
   await withRepo(async (base) => {
     const repo = makeStageRepo713(base, "real");
     writeFileSync(join(repo, "packages/factory/dist/index.js"), `export * from ${JSON.stringify(pathToFileURL(realIndex).href)};\n`);
@@ -3034,6 +3048,72 @@ test("#713 (d) 実の工場の dist の値の受け渡し：package の入口を
     const rb = runAgent(repo, join(base, "b1"), stageArgs638(fz, ["--stage-start", "write", "--stage-from", up]), { FAKE_SPAWN_LOG: log, FAKE_VERIFY_V12_LOG: vlogB });
     assert.equal(rb.status, 0, rb.stderr);
     for (const v of readLog(vlogB)) assert.deepEqual(v, { ledger: realLedger, flags });
+    assert.equal(readJson(join(up, "P6-r1", "bundle", "stage-checkpoint-t2-b1.json")).versions.ledger, realLedger);
+    // 直す前の挙動：同じ実の dist で公開の関数を隠す（読み手が旗なしの呼び出しに戻る）と、ids の版で書いた上流の入力を断る（子 0 本・何も書かない）
+    writeFileSync(join(repo, "packages/factory/dist/index.js"), `export * from ${JSON.stringify(pathToFileURL(realIndex).href)};\nexport const ledgerVersionsOf = undefined;\n`);
+    const n0 = spawnCount(log), o = join(base, "t2-flagless");
+    assertStageRefused(runAgent(repo, o, stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", up]), { FAKE_SPAWN_LOG: log }), "stage-from:stage-input:version", [IDS545[15]], log, n0, o, "flagless");
+  });
+});
+
+// ── #817：dist の入口が公開の関数 ledgerVersionsOf（#816）を出すなら、読み手はその dist の V12_PIPELINE_FLAGS を渡した値で照らす。無い dist は旗なしに戻る。README §10.8.5
+const IDS_WHOLE817 = "a".repeat(64), IDS_UP817 = "b".repeat(64);
+const VERSIONS817 = { ledger: IDS_WHOLE817, ledgerUpstream: IDS_UP817 };
+
+test("#817 (1)(2)(3) 公開の関数がある dist は旗の組を渡した値を照合に渡し（t1-t2 は部分も・t2-b1 は全体だけ）、旗なしの値では同じ上流の入力を断る。無い dist は今の旗なしの値で受ける。例外・64 桁の 16 進でない値は子を起こさず stage:dist-unreadable", async () => {
+  await withRepo(async (base) => {
+    // 上流の走り：公開の関数がある dist（ids の版の値。旗なしの関数は別の値 ledger-a・UP713 を返す）
+    const repo = makeStageRepo713(base, "stage817", { versions: VERSIONS817 }), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream638(repo, join(base, "up"), fz, log);
+    const upCp = (b) => readJson(join(up, "P6-r1", "bundle", `stage-checkpoint-${b}.json`));
+    assert.equal(upCp("t1-t2").versions.ledger, IDS_WHOLE817);
+    assert.equal(upCp("t1-t2").versions.ledger_upstream, IDS_UP817);
+    assert.equal(upCp("t2-b1").versions.ledger, IDS_WHOLE817);
+    const setT1 = makeStageSet640(join(base, "set-t1"), up, fz, { boundary: "t1-t2" }), setB1 = makeStageSet640(join(base, "set-b1"), up, fz);
+    // (1) 照合の関数に渡る値は公開の関数の値。公開の関数には dist の V12_PIPELINE_FLAGS がそのまま渡る
+    for (const [form, from, start, expected] of [
+      ["up-t2", up, "test-spec", { ledger: IDS_WHOLE817, ledgerUpstream: IDS_UP817, flags: FLAGS638 }],
+      ["set-t2", setT1, "test-spec", { ledger: IDS_WHOLE817, ledgerUpstream: IDS_UP817, flags: FLAGS638 }],
+      ["up-b1", up, "write", { ledger: IDS_WHOLE817, flags: FLAGS638 }],
+      ["set-b1", setB1, "write", { ledger: IDS_WHOLE817, flags: FLAGS638 }],
+    ]) {
+      const vlog = join(base, `v12-${form}.log`), lvlog = join(base, `lv-${form}.log`);
+      const r = runAgent(repo, join(base, `ok-${form}`), stageArgs638(fz, ["--stage-start", start, "--stage-from", from]), { FAKE_SPAWN_LOG: log, FAKE_VERIFY_V12_LOG: vlog, FAKE_LV_LOG: lvlog });
+      assert.equal(r.status, 0, `${form}: ${r.stderr}`);
+      const seen = readLog(vlog);
+      assert.ok(seen.length > 0, form);
+      for (const v of seen) assert.deepEqual(v, expected, form);
+      const lv = readLog(lvlog);
+      assert.ok(lv.length > 0, form);
+      for (const f of lv) assert.deepEqual(f, FLAGS638, `${form}: 公開の関数に dist の旗の組を渡す`);
+    }
+    // 直す前の挙動：同じ上流の入力を、公開の関数を出さない dist（旗なしの値）で読むと stage-from:stage-input:version（子 0 本・何も書かない）
+    setIndex713(repo, {});
+    const n0 = spawnCount(log);
+    for (const [form, from, start, ids] of [["up-t2", up, "test-spec", [IDS545[15]]], ["set-t2", setT1, "test-spec", ["P6"]], ["up-b1", up, "write", [IDS545[15]]], ["set-b1", setB1, "write", ["P6"]]]) {
+      const o = join(base, `flagless-${form}`);
+      assertStageRefused(runAgent(repo, o, stageArgs638(fz, ["--stage-start", start, "--stage-from", from]), { FAKE_SPAWN_LOG: log }), "stage-from:stage-input:version", ids, log, n0, o, `flagless-${form}`);
+    }
+    // (2) 公開の関数が無い dist：今の旗なしの値で照らし、旗なしの書き手の上流の入力を受ける
+    const old = makeStageRepo713(base, "old817"), fzOld = frozen545(base, old);
+    const upOld = runUpstream638(old, join(base, "up-old"), fzOld, log);
+    for (const [start, expected] of [["test-spec", { ledger: "ledger-a", ledgerUpstream: UP713, flags: FLAGS638 }], ["write", { ledger: "ledger-a", flags: FLAGS638 }]]) {
+      const vlog = join(base, `v12-old-${start}.log`);
+      const r = runAgent(old, join(base, `old-${start}`), stageArgs638(fzOld, ["--stage-start", start, "--stage-from", upOld]), { FAKE_SPAWN_LOG: log, FAKE_VERIFY_V12_LOG: vlog });
+      assert.equal(r.status, 0, `${start}: ${r.stderr}`);
+      for (const v of readLog(vlog)) assert.deepEqual(v, expected, start);
+    }
+    // (3) 公開の関数の例外・形の異常：開始 T2・B1 の両方で、子を起こす前に stage:dist-unreadable（旗なしの値に戻らない）
+    const n1 = spawnCount(log);
+    for (const [label, versions] of [["throw", "throw"], ["null", { value: null }], ["upper", { ledger: IDS_WHOLE817.toUpperCase(), ledgerUpstream: IDS_UP817 }], ["short-up", { ledger: IDS_WHOLE817, ledgerUpstream: "b".repeat(63) }], ["no-up", { ledger: IDS_WHOLE817 }], ["number", { ledger: 1, ledgerUpstream: IDS_UP817 }]]) {
+      setIndex713(repo, { versions });
+      for (const [start, from] of [["test-spec", up], ["write", up], ["test-spec", setT1]]) {
+        const o = join(base, `bad-${label}-${start}-${from === up ? "up" : "set"}`);
+        const r = runAgent(repo, o, stageArgs638(fz, ["--stage-start", start, "--stage-from", from]), { FAKE_SPAWN_LOG: log });
+        assertRefused(r, "stage:dist-unreadable", log, n1, `${label}-${start}`);
+        assertNothingWritten(o, `${label}-${start}`);
+      }
+    }
   });
 });
 
