@@ -2492,6 +2492,15 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     // Issue #806：全体・上流の指紋は base の CLI が記録していた off の値に戻して、下の旧の定数と照らす
     checkpoint["versions"]["ledger"] = await ledgerModule.propertyLedgerSha256();
     checkpoint["versions"]["ledger_upstream"] = await ledgerModule.upstreamLedgerSha256();
+    {
+      // Issue #806：checkpoint の `ledger`・`ledger_upstream` だけを off の値に戻した（#735・#748 は戻さない）状態が、
+      // #806 の直前の値に等しい。記録の output_digest は戻した checkpoint から計算し直す
+      const revertedRecord = await stageRecordOf(dir);
+      (revertedRecord["checkpoints"] as { output_digest: string }[])[0]!.output_digest = await stageOutputDigest(checkpoint);
+      expect([await sha256Hex(stageJsonText(revertedRecord)), await sha256Hex(stageJsonText(checkpoint))]).toEqual(
+        V12_STAGE_C1_RETRY_DIGESTS_BEFORE_806,
+      );
+    }
     // Issue #735 で取り直した差は、論理の枠の値（checkpoint の call_limits・条件の記録の v12_call_limits）と記録の v12_calls の C3 の束の欄、
     // それに由来する記録の出力ダイジェストだけ：欄を旧の値に戻すと #735 の前と同じ。以下の #725・#713 の照合は戻した値で続ける
     expect(checkpoint["versions"]["call_limits"]["logical_calls"]).toBe(80);
@@ -2712,9 +2721,16 @@ const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
   // checkpoint は変わらない。旧の値は c22cffe09c359a3e98eee0885efd47c9c3d2ab2c6158a731442e27f62572fc9b・
   // 3646122573cce8254ad727db2d194021b54e683dbf9f98166cbdd36faadbf92d で、`revert748` で 2 欄を外せば一致する）
   // Issue #806 で取り直した（ids on の checkpoint の版が新しい全体・上流の指紋を持ち、記録の出力ダイジェストが変わるため。
-  // 旧の値は上の #748 の値で、checkpoint の `ledger`・`ledger_upstream` を off の値に戻せば一致することを下の試験で確かめる）
+  // 旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_806` に残し、checkpoint の `ledger`・`ledger_upstream` を off の値に戻せば一致する
+  // ことを試験で確かめる。#735・#748 の 2 欄は戻さない）
   "d16c2b0cbb5a2b76ab7fa9b148aa97fe40d2b8c9afb12e0eed0fc2d7bfa4b7fe",
   "ffc47708d7a482d0fa256aa4fb2b61a5b315bf7add60be29cfef4ae18746af7e",
+];
+
+/** Issue #806 の前の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値。base 17f75fe） */
+const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_806: readonly string[] = [
+  "96fa815fe904db51703079e76135d2ef3ee420bdcd1049847acbf9cb816273af",
+  "3646122573cce8254ad727db2d194021b54e683dbf9f98166cbdd36faadbf92d",
 ];
 
 /** Issue #735 の前の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値。#725 で取り直した値） */
