@@ -380,6 +380,16 @@ export interface PropertyValidationT2 {
   };
 }
 
+/**
+ * 旗 `v12.ids` の走りの C2 への文（Issue #806）。行ごとの `t1Ids` が持つ文と、その履歴（`since`）・理由（`why`）。
+ * off の `t1`・`since`・`why` は変えず、ids だけの履歴をここに持つ
+ */
+export interface PropertyIdsRuleText {
+  readonly text: string;
+  readonly why: string;
+  readonly since: string;
+}
+
 /** 規則の文（段ごとに足す 1 文。無ければ null） */
 export interface PropertyRules {
   readonly t1: string | null;
@@ -391,6 +401,11 @@ export interface PropertyRules {
    */
   readonly t2Ids: string | null;
   readonly b1: string | null;
+  /**
+   * 旗 `v12.ids` の走りの C2 への文（省略できる。Issue #806）。ids の見方の `t1IdsRuleTexts` が、この文があればそれを、
+   * 無ければ `t1` を使う。off の見方にはこの欄を出さない
+   */
+  readonly t1Ids?: PropertyIdsRuleText;
 }
 
 /** 台帳の 1 行（性質 1 つ） */
@@ -522,6 +537,11 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       t2: "操作 × action の試験（observes は when）の期待（expected）は、操作の条件（when）が成り立つなら kind を ok・value を true、成り立たないなら kind を ok・value を false（か kind を error）にする。操作後の状態（写像・文字列・数）を期待に書かない。条件（when）の無い操作（表の type の hasWhen が false の行）に action の試験を作らない（その要件は構造の検査か別の対象で確かめる）。",
       t2Ids: null,
       b1: null,
+      t1Ids: {
+        text: "操作ができる条件（いつボタンを出すか・いつ実行できるか）だけを決める要件と、操作の実在・種類とその条件を決める要件は fixed-test にし、条件を持つ操作の行を所属させる。操作のあとの状態の値を求める部分を含む要件は、未対応の観測を根拠に unresolved にする。",
+        why: "条件だけ・操作の実在と種類だけを決める要件は、操作 × action の試験で確かめられる。操作後の状態の値を求める部分を含む要件は、分割されていなければ未対応のまま持ち越す（Issue #806）",
+        since: "Issue #806",
+      },
     },
   },
   {
@@ -532,6 +552,14 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       { targetKind: "computation", operation: "compute" },
       { targetKind: "computation", operation: "aggregate" },
     ],
+    rules: {
+      ...INHERITED.rules,
+      t1Ids: {
+        text: "計算・集計の値を見せる要件（人ごとの数・合計・回数など）は fixed-test にし、計算の行を所属させる。表示の構造（view-shows）だけで確かめない。画面からの到達は名前の照合が見る。",
+        why: "値を見せる要件は計算 × compute・aggregate の試験で確かめられる。表示の構造だけでは値を確かめられない（Issue #806）",
+        since: "Issue #806",
+      },
+    },
   },
   {
     ...INHERITED,
@@ -619,6 +647,11 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       t2: "操作に set を当てたあとの状態（state-after-set）は評価できないので、その試験は作らない。",
       t2Ids: null,
       b1: null,
+      t1Ids: {
+        text: "この未対応は、操作に set を当てたあとの状態の値そのものを確かめる試験である。条件だけ・操作の実在と種類だけを決める要件は未対応ではない（when の fixed-test・action-kind の構造）。変更後の値を求める部分を含む要件は、分割されていなければ unresolved のまま。",
+        why: "未対応なのは操作後に set を当てた状態の値そのものであり、条件だけ・操作の実在と種類だけを決める要件まで未対応にしない（Issue #806）",
+        since: "Issue #806",
+      },
     },
   },
   {
@@ -961,7 +994,16 @@ export function propertyLedgerSha256(
   rows: readonly PropertyRow[] = PROPERTY_LEDGER,
   flags: Partial<V12Flags> = V12_FLAGS_OFF,
 ): Promise<string> {
-  return sha256Hex(sortedJson(applicableRows(rows, flags)));
+  // off の正規形は旗 ids の C2 への文（`t1Ids`）を落として base と同じ値にする（Issue #806）。
+  // ids の正規形は `t1Ids` を含めて変わる（外した復元が旧の値になる）
+  const normal = applicableRows(rows, flags).map((row) => (flags.ids === true || row.rules.t1Ids === undefined ? row : withoutIdsRuleText(row)));
+  return sha256Hex(sortedJson(normal));
+}
+
+/** `rules.t1Ids` を落とした行（off の全体の指紋の正規形。Issue #806） */
+function withoutIdsRuleText(row: PropertyRow): PropertyRow {
+  const { t1Ids: _dropped, ...rules } = row.rules;
+  return { ...row, rules };
 }
 
 // ── 台帳の点検 ───────────────────────────────────────────────────
@@ -981,6 +1023,12 @@ export function ledgerRowDefects(rows: readonly PropertyRow[]): readonly string[
     seen.add(row.id);
     if (row.since.trim() === "") defects.push(`${at} の since が空である`);
     if (row.why.trim() === "") defects.push(`${at} の why が空である`);
+    // 旗 ids の C2 への文を持つ行は、文・why・since を欠かさない（Issue #806）
+    if (row.rules.t1Ids !== undefined) {
+      if (row.rules.t1Ids.text.trim() === "") defects.push(`${at} の旗 ids の C2 への文が空である`);
+      if (row.rules.t1Ids.why.trim() === "") defects.push(`${at} の旗 ids の C2 への文の why が空である`);
+      if (row.rules.t1Ids.since.trim() === "") defects.push(`${at} の旗 ids の C2 への文の since が空である`);
+    }
     if (!(PROPERTY_STATES as readonly string[]).includes(row.state)) defects.push(`${at} の状態が知らない値である`);
     if (row.state === "registered-unsupported") {
       if (row.unsupportedMessage === null) defects.push(`${at} は未対応なのに、落とす固定文が無い`);
@@ -1135,6 +1183,11 @@ export interface LedgerView {
   readonly combinations: readonly LedgerCombination[];
   /** T1 の規則に差し込む文（台帳の順） */
   readonly t1RuleTexts: readonly string[];
+  /**
+   * 旗 `v12.ids` の走りの C2 の台帳の文（行ごとに `t1Ids` の文があればそれ、無ければ `t1`。台帳の順。Issue #806）。
+   * **ids の見方だけが持ち**、off の見方には欄を置かない
+   */
+  readonly t1IdsRuleTexts?: readonly string[];
   /** T1'' の規則（R-sc-02 の (3) の末尾）に差し込む受理条件の文（台帳の順。#548） */
   readonly t1AcceptanceTexts: readonly string[];
   /** B1 の規則（R-w11 の末尾）に差し込む文（有効・削る候補の行。台帳の順。#548） */
@@ -1206,6 +1259,15 @@ export function deriveLedgerView(rowInput: readonly PropertyRow[] = PROPERTY_LED
       .map((row) => ({ id: row.id, message: row.unsupportedMessage ?? "" })),
     combinations: evaluable.flatMap((row) => row.combinations.map((entry) => ({ ...entry, observes: row.id }))),
     t1RuleTexts: rows.flatMap((row) => (row.rules.t1 === null ? [] : [row.rules.t1])),
+    // 旗 ids の見方だけが C2 への文を持ち、off の見方には欄を置かない（Issue #806）
+    ...(flags.ids === true
+      ? {
+          t1IdsRuleTexts: rows.flatMap((row) => {
+            const text = row.rules.t1Ids?.text ?? row.rules.t1;
+            return text === null || text === undefined ? [] : [text];
+          }),
+        }
+      : {}),
     t1AcceptanceTexts: rows.flatMap((row) => (row.rules.t1Acceptance === null ? [] : [row.rules.t1Acceptance])),
     b1RuleTexts: evaluable.flatMap((row) => (row.rules.b1 === null ? [] : [row.rules.b1])),
     t2FormTexts: evaluable.flatMap((row) => (row.rules.t2 === null ? [] : [row.rules.t2])),
@@ -1258,6 +1320,10 @@ export function ledgerViewOf(
 export interface UpstreamLedgerView {
   /** T1 の規則の文（全行の `rules.t1`。台帳の順） */
   readonly t1RuleTexts: LedgerView["t1RuleTexts"];
+  /**
+   * 旗 `v12.ids` の C2 の台帳の文（ids の見方だけが持つ。Issue #806）。off の見方には欄を置かない
+   */
+  readonly t1IdsRuleTexts?: LedgerView["t1IdsRuleTexts"];
   /** T1'' の受理条件の文（全行の `rules.t1Acceptance`。台帳の順） */
   readonly t1AcceptanceTexts: LedgerView["t1AcceptanceTexts"];
   /** 確かめ方の種類（台帳の外の種類＋T1 の記述子の種類。台帳の順） */
@@ -1278,6 +1344,12 @@ export interface UpstreamLedgerView {
  */
 export const UPSTREAM_LEDGER_VIEW_VERSION = 2;
 
+/**
+ * 旗 `v12.ids` の見方の版（Issue #806）。off の版（2・今の射影）は比較元として保ち、ids の見方は別の版で指紋化する。
+ * 版を旧（2）に戻し `t1IdsRuleTexts` を射影から外すと、ids の見方の旧の値に戻る
+ */
+export const UPSTREAM_LEDGER_VIEW_VERSION_IDS = 1;
+
 /** 上流の台帳の見方の境界（部分の指紋の材料。境界 t2-b1 は全体の指紋で照らす） */
 export const UPSTREAM_LEDGER_BOUNDARY = "t1-t2" as const satisfies StageBoundary;
 
@@ -1285,6 +1357,7 @@ export const UPSTREAM_LEDGER_BOUNDARY = "t1-t2" as const satisfies StageBoundary
 export function upstreamLedgerViewOf(view: UpstreamLedgerView): UpstreamLedgerView {
   return {
     t1RuleTexts: view.t1RuleTexts,
+    ...(view.t1IdsRuleTexts === undefined ? {} : { t1IdsRuleTexts: view.t1IdsRuleTexts }),
     t1AcceptanceTexts: view.t1AcceptanceTexts,
     verificationKinds: view.verificationKinds,
     rowByVerificationKind: new Map([...view.rowByVerificationKind].map(([kind, entry]) => [kind, { t1: entry.t1 }] as const)),
@@ -1294,9 +1367,16 @@ export function upstreamLedgerViewOf(view: UpstreamLedgerView): UpstreamLedgerVi
   };
 }
 
-/** 台帳の行から上流の見方を導く（全体の導出を通すので、不備のある台帳は例外で断る） */
-export function deriveUpstreamLedgerView(rows: readonly PropertyRow[]): UpstreamLedgerView {
-  return upstreamLedgerViewOf(deriveLedgerView(rows));
+/**
+ * 台帳の行から上流の見方を導く（全体の導出を通すので、不備のある台帳は例外で断る）。上流の段は旗 ids だけが要る行
+ * （検査の式）を読まないので、off の適用行で今の射影を保ち、旗 ids のときだけ `t1IdsRuleTexts` を足す（Issue #806）
+ */
+export function deriveUpstreamLedgerView(rows: readonly PropertyRow[], flags: Partial<V12Flags> = V12_FLAGS_OFF): UpstreamLedgerView {
+  const baseRows = applicableRows(rows, V12_FLAGS_OFF);
+  const base = upstreamLedgerViewOf(deriveLedgerView(baseRows));
+  if (flags.ids !== true) return base;
+  const idsView = deriveLedgerView(baseRows, { ...V12_FLAGS_OFF, ids: true });
+  return { ...base, t1IdsRuleTexts: idsView.t1IdsRuleTexts ?? [] };
 }
 
 /**
@@ -1308,13 +1388,16 @@ export async function upstreamLedgerSha256(
   rows: readonly PropertyRow[] = PROPERTY_LEDGER,
   flags: Partial<V12Flags> = V12_FLAGS_OFF,
 ): Promise<string> {
-  const view = deriveUpstreamLedgerView(applicableRows(rows, flags));
+  const ids = flags.ids === true;
+  const view = deriveUpstreamLedgerView(rows, flags);
   return sha256Hex(
     sortedJson({
-      version: UPSTREAM_LEDGER_VIEW_VERSION,
+      // off の版・射影は比較元として保ち、ids の見方は別の版で指紋化する（Issue #806）
+      version: ids ? UPSTREAM_LEDGER_VIEW_VERSION_IDS : UPSTREAM_LEDGER_VIEW_VERSION,
       boundary: UPSTREAM_LEDGER_BOUNDARY,
       view: {
         t1RuleTexts: view.t1RuleTexts,
+        ...(ids ? { t1IdsRuleTexts: view.t1IdsRuleTexts ?? [] } : {}),
         t1AcceptanceTexts: view.t1AcceptanceTexts,
         verificationKinds: view.verificationKinds,
         rowByVerificationKind: [...view.rowByVerificationKind].map(([kind, entry]) => ({ kind, t1: entry.t1 })),
@@ -1347,6 +1430,23 @@ export function aggregateStateValueOf(
 }
 
 // ── 人が読む写し（methodology/ledger/properties.md の表）─────────────
+
+/** 写しの「旗 ids だけの C2 への文」の表の見出し（1 行 1 要素。Issue #806） */
+export const PROPERTY_IDS_RULE_COPY_HEADER = ["id", "since", "文"] as const;
+
+/** 写しの「旗 ids だけの C2 への文」の表の 1 行（`t1Ids` を持たない行は null。Issue #806） */
+export function propertyIdsRuleCopyCells(row: PropertyRow): readonly string[] | null {
+  const rule = row.rules.t1Ids;
+  return rule === undefined ? null : [row.id, rule.since, rule.text];
+}
+
+/** 写しの「旗 ids だけの C2 への文」の表の行（台帳の順。Issue #806） */
+export function idsRuleCopyRows(rows: readonly PropertyRow[] = PROPERTY_LEDGER): readonly (readonly string[])[] {
+  return rows.flatMap((row) => {
+    const cells = propertyIdsRuleCopyCells(row);
+    return cells === null ? [] : [cells];
+  });
+}
 
 /** 写しの表の見出し（1 行 1 性質） */
 export const PROPERTY_COPY_HEADER = [

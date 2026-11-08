@@ -42,15 +42,20 @@ import { WRITE_V11A_RULE_DEFINITIONS, writeV11aRuleDefinitionsOf } from "../v11a
 import { LEDGER_ROWS_2C } from "../v11a/__tests__/fixtures.js";
 import {
   PROPERTY_COPY_HEADER,
+  PROPERTY_IDS_RULE_COPY_HEADER,
   PROPERTY_LEDGER,
   PROPERTY_LEDGER_VIEW,
+  PROPERTY_LEDGER_VIEW_IDS,
   PROPERTY_STATES,
+  idsRuleCopyRows,
+  propertyIdsRuleCopyCells,
   propertyLedgerSha256,
   upstreamLedgerSha256,
   upstreamLedgerViewOf,
   deriveUpstreamLedgerView,
   UPSTREAM_LEDGER_BOUNDARY,
   UPSTREAM_LEDGER_VIEW_VERSION,
+  UPSTREAM_LEDGER_VIEW_VERSION_IDS,
   OUTER_NOT_SCORED,
   V12_FLAGS_OFF,
   V12_FLAG_NAMES,
@@ -1388,5 +1393,134 @@ describe("部分の指紋（境界 t1-t2 の上流の台帳の見方。全体の
       expect(await propertyLedgerSha256(rows), name).not.toBe(whole);
       expect(await upstreamLedgerSha256(rows), name).toBe(fingerprint);
     }
+  });
+});
+
+// ── 旗 ids の C2 への文（Issue #806）────────────────────────────────
+
+/** `rules.t1Ids` を落とした台帳（off の全体の指紋・上流の指紋の復元に使う） */
+const withoutIdsRuleTexts = (rows: readonly PropertyRow[] = PROPERTY_LEDGER): readonly PropertyRow[] =>
+  rows.map((row) => {
+    if (row.rules.t1Ids === undefined) return row;
+    const { t1Ids: _dropped, ...rules } = row.rules;
+    return { ...row, rules };
+  });
+
+/** 写しの「旗 ids だけの C2 への文」の表を読む（見出しの行の次の区切りの行のあとの `|` で始まる行） */
+function idsCopyTableOf(markdown: string): { readonly header: readonly string[]; readonly rows: readonly (readonly string[])[] } {
+  const lines = markdown.split("\n");
+  const headerLine = `| ${PROPERTY_IDS_RULE_COPY_HEADER.join(" | ")} |`;
+  const at = lines.indexOf(headerLine);
+  if (at < 0) return { header: [], rows: [] };
+  const cells = (line: string) => line.slice(1, -1).split(" | ").map((cell) => cell.trim());
+  const rows: string[][] = [];
+  for (const line of lines.slice(at + 2)) {
+    if (!line.startsWith("|")) break;
+    rows.push(cells(line.trim()));
+  }
+  return { header: cells(headerLine), rows };
+}
+
+describe("旗 v12.ids の C2 への文（Issue #806）", () => {
+  const IDS_ROWS = ["when", "value", "state-after-set"] as const;
+  const BASE_OFF_WHOLE = "fd0adc6ddc5bf82c48ff8be3930a74fe86f469b623359aedb64af5bdfe1e08f5";
+  const BASE_IDS_WHOLE = "a4ee52333a07cc5d87172fa10508a88af18192561a3c3731cd3f0124b8859f50";
+  const BASE_OFF_UPSTREAM = "421d105d258f0d810cc44173edcad4720e391c63760348308f7a97187dd88d42";
+
+  it("(1) 導出：ids の見方だけが t1IdsRuleTexts を持ち、3 行の分だけ t1RuleTexts と違い、ほかの行は同じ文。off の見方に欄が無い", () => {
+    expect("t1IdsRuleTexts" in PROPERTY_LEDGER_VIEW).toBe(false);
+    expect(PROPERTY_LEDGER_VIEW_IDS.t1IdsRuleTexts).toBeDefined();
+    const idsTexts = PROPERTY_LEDGER_VIEW_IDS.t1IdsRuleTexts ?? [];
+    expect(idsTexts).toHaveLength(PROPERTY_LEDGER_VIEW_IDS.t1RuleTexts.length + 3);
+    expect(idsTexts.slice(0, 3)).toEqual(IDS_ROWS.map((id) => rowOf(id).rules.t1Ids?.text));
+    expect(idsTexts.slice(3)).toEqual([...PROPERTY_LEDGER_VIEW_IDS.t1RuleTexts]);
+    // off の見方の t1RuleTexts に、ids だけの 3 文は入らない
+    for (const id of IDS_ROWS) expect(PROPERTY_LEDGER_VIEW.t1RuleTexts).not.toContain(rowOf(id).rules.t1Ids?.text);
+    // 上流の見方も ids だけが欄を持ち、3 行の分だけ増える
+    expect("t1IdsRuleTexts" in deriveUpstreamLedgerView(PROPERTY_LEDGER)).toBe(false);
+    const idsUpstream = deriveUpstreamLedgerView(PROPERTY_LEDGER, { ...V12_FLAGS_OFF, ids: true });
+    // 上流の見方は off の射影（検査の式の行を読まない）に 3 文を足したもの
+    expect(idsUpstream.t1IdsRuleTexts).toEqual([...IDS_ROWS.map((id) => rowOf(id).rules.t1Ids?.text), ...idsUpstream.t1RuleTexts]);
+    expect(idsUpstream.t1RuleTexts).toEqual(deriveUpstreamLedgerView(PROPERTY_LEDGER).t1RuleTexts);
+  });
+
+  it("(1) 二点測定：3 行の t1Ids に文・why・since がそろい、欠けると台帳の点検が落ちる", () => {
+    for (const id of IDS_ROWS) {
+      const rule = rowOf(id).rules.t1Ids;
+      expect(rule, id).toBeDefined();
+      expect(rule?.text.trim(), id).not.toBe("");
+      expect(rule?.why.trim(), id).not.toBe("");
+      expect(rule?.since.trim(), id).not.toBe("");
+    }
+    const patched = (id: string, patch: (text: { text: string; why: string; since: string }) => { text: string; why: string; since: string }) =>
+      PROPERTY_LEDGER.map((row) => {
+        if (row.id !== id || row.rules.t1Ids === undefined) return row;
+        return { ...row, rules: { ...row.rules, t1Ids: patch(row.rules.t1Ids) } };
+      });
+    expect(ledgerRowDefects(patched("when", (text) => ({ ...text, text: " " })))).toEqual(["性質 when の旗 ids の C2 への文が空である"]);
+    expect(ledgerRowDefects(patched("value", (text) => ({ ...text, why: "" })))).toEqual(["性質 value の旗 ids の C2 への文の why が空である"]);
+    expect(ledgerRowDefects(patched("state-after-set", (text) => ({ ...text, since: " " })))).toEqual([
+      "性質 state-after-set の旗 ids の C2 への文の since が空である",
+    ]);
+    // 文を持たない行には不備を出さない（古い台帳の写しを不備にしない）
+    expect(ledgerRowDefects(withoutIdsRuleTexts())).toEqual([]);
+  });
+
+  it("(3) 指紋：off の全体・上流の指紋は base の定数と同じ。ids の全体の指紋は t1Ids を外すと旧の定数に戻り、ids の上流の指紋は版を旧に戻して t1IdsRuleTexts を射影から外すと旧の定数に戻る", async () => {
+    const ids = fromPublicV12Flags({ ids: true });
+    const off = fromPublicV12Flags({});
+    expect(await propertyLedgerSha256(PROPERTY_LEDGER, off)).toBe(BASE_OFF_WHOLE);
+    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, off)).toBe(BASE_OFF_UPSTREAM);
+    const idsWhole = await propertyLedgerSha256(PROPERTY_LEDGER, ids);
+    expect(idsWhole).not.toBe(BASE_IDS_WHOLE);
+    expect(await propertyLedgerSha256(withoutIdsRuleTexts(), ids)).toBe(BASE_IDS_WHOLE);
+    const idsUpstream = await upstreamLedgerSha256(PROPERTY_LEDGER, ids);
+    expect(idsUpstream).not.toBe(BASE_OFF_UPSTREAM);
+    // 版を旧（2）に戻し、t1IdsRuleTexts を射影から外した復元（= off の射影）は旧の値に戻る
+    expect(await upstreamLedgerSha256(withoutIdsRuleTexts(), off)).toBe(BASE_OFF_UPSTREAM);
+    expect(UPSTREAM_LEDGER_VIEW_VERSION_IDS).toBe(1);
+    // 二点測定：ids の見方で C2 の文を 1 文字変えると ids の上流の指紋が変わる（旧 checkpoint を区別できる）
+    const changed = withRow("when", (row) =>
+      row.rules.t1Ids === undefined ? row : { ...row, rules: { ...row.rules, t1Ids: { ...row.rules.t1Ids, text: `${row.rules.t1Ids.text}。` } } },
+    );
+    expect(await upstreamLedgerSha256(changed, ids)).not.toBe(idsUpstream);
+    // off の上流の指紋は変わらない（ids の文は off の射影に入らない）
+    expect(await upstreamLedgerSha256(changed, off)).toBe(BASE_OFF_UPSTREAM);
+  });
+
+  it("(5) 写し：既存の表は base と同じで、ids の表に 3 行がある。行を消す・since を変えると落ちる", () => {
+    expect(copyDefects(COPY_TEXT, PROPERTY_LEDGER)).toEqual([]);
+    const table = idsCopyTableOf(COPY_TEXT);
+    expect(table.header).toEqual([...PROPERTY_IDS_RULE_COPY_HEADER]);
+    expect(table.rows).toEqual(idsRuleCopyRows());
+    expect(idsRuleCopyRows()).toHaveLength(3);
+    expect(idsRuleCopyRows()).toEqual(IDS_ROWS.map((id) => propertyIdsRuleCopyCells(rowOf(id))));
+    const idsLine = COPY_TEXT.split("\n").find((line) => line.startsWith("| state-after-set | Issue #806 |"));
+    if (idsLine === undefined) throw new Error("前提が壊れた：ids の表に state-after-set が無い");
+    expect(idsCopyTableOf(COPY_TEXT.replace(`${idsLine}\n`, "")).rows).toHaveLength(2);
+    const changedSince = COPY_TEXT.replace("| when | Issue #806 |", "| when | Issue #999 |");
+    expect(idsCopyTableOf(changedSince).rows[0]).toEqual(["when", "Issue #999", rowOf("when").rules.t1Ids?.text]);
+    expect(idsCopyTableOf(changedSince).rows).not.toEqual(idsRuleCopyRows());
+  });
+
+  it("(7) 未対応の観測のデータの塊・T2' の固定文・C3 の受理条件の文は、t1Ids を足す前と同じ", () => {
+    const without = deriveLedgerView(withoutIdsRuleTexts(), { ...V12_FLAGS_OFF, ids: true });
+    expect(PROPERTY_LEDGER_VIEW_IDS.unsupportedObservations).toEqual(without.unsupportedObservations);
+    expect(PROPERTY_LEDGER_VIEW_IDS.t2FormTexts).toEqual(without.t2FormTexts);
+    expect(PROPERTY_LEDGER_VIEW_IDS.t2IdsFormTexts).toEqual(without.t2IdsFormTexts);
+    expect(PROPERTY_LEDGER_VIEW_IDS.t2UnsupportedTexts).toEqual(without.t2UnsupportedTexts);
+    expect(PROPERTY_LEDGER_VIEW_IDS.t1AcceptanceTexts).toEqual(without.t1AcceptanceTexts);
+    expect(PROPERTY_LEDGER_VIEW_IDS.b1RuleTexts).toEqual(without.b1RuleTexts);
+    expect(rowOf("state-after-set").unsupportedMessage).toBe(
+      "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態の試験は作らない）",
+    );
+  });
+
+  it("3 文のどこにも set の構造の検査への誘導が無く、題材の言葉が無い", () => {
+    const texts = IDS_ROWS.map((id) => rowOf(id).rules.t1Ids?.text ?? "");
+    const joined = texts.join("");
+    for (const phrase of ["set の構造", "構造の検査", "構造で確かめる"]) expect(joined).not.toContain(phrase);
+    for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(joined).not.toContain(word);
+    expect(COPY_TEXT).not.toContain("set の構造");
   });
 });

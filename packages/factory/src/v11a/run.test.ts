@@ -189,6 +189,21 @@ function withoutIdsReading(requests: readonly LlmStructuredRequest[]): readonly 
   );
 }
 
+/** Issue #806：旗 ids の C2 への 3 文（台帳の順。要求から位置で外して旧の指紋と照らす） */
+const IDS_C2_RULE_TEXTS: readonly string[] = PROPERTY_LEDGER.flatMap((row) =>
+  row.rules.t1Ids === undefined ? [] : [row.rules.t1Ids.text],
+);
+const IDS_C2_RULE_TEXT = IDS_C2_RULE_TEXTS.join("");
+
+/** Issue #806：旗 ids の C2 の R-map-03 から 3 文を位置で外す（#806 の前の要求と照らす） */
+function withoutIdsC2Texts(requests: readonly LlmStructuredRequest[]): readonly LlmStructuredRequest[] {
+  return requests.map((request) =>
+    request.schemaName === MAPPING_SCHEMA_NAME && request.rules !== undefined
+      ? { ...request, rules: request.rules.map((text) => text.split(IDS_C2_RULE_TEXT).join("")) }
+      : request,
+  );
+}
+
 /** Issue #663 で旗 ids の T2 の R-tsp-02 の末尾に足した、要件ごとの試験の上限の文（値は限度の表の定数から組む） */
 const T2_IDS_LIMIT_TEXT = `要件ごとの試験は、コードが作った分を含めて ${String(AGENT_LIMITS.testsPerRequirement)} 本まで。必要な試験の枠の残る本数（remaining）を超えて場合を書かない。`;
 
@@ -1591,7 +1606,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       const { result, recording } = await runScenario(script.calls, { flags: IDS_FLAGS });
       const files = result.bundle === null ? [] : bundleFiles(result.bundle).map((file) => ({ path: file.path, text: file.text }));
       // Issue #800：台帳に足した行の文と C2 の schema の欄を外して、旧の指紋と照らす
-      const restoredStructured = withoutValidationExpression(recording.structured);
+      // Issue #806：旗 ids の C2 への 3 文も位置で外して、旧の指紋と照らす
+      const restoredStructured = withoutIdsC2Texts(withoutValidationExpression(recording.structured));
       // Issue #801：骨組みの新しい形と R-w11-07 の ids の文を、直す前（#800）の形・文に組み直す（旧の指紋と照らす）
       const oldShapeStructured = restoredStructured.map(restoreOldRequiredValidations);
       // 止まる走りの診断の一覧（materials.json）は、断った候補の要約（rejected）の鍵を外した残りを照らす。rejected は下で期待を固定する
@@ -1667,7 +1683,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(thirdRun.recording.structured[5]?.schemaName).toBe("mapping");
     const thirdDigest = await sha256Hex(
       JSON.stringify({
-        structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(withoutValidationExpression(thirdRun.recording.structured)))).filter((_, index) => index !== 5),
+        structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(withoutIdsC2Texts(withoutValidationExpression(thirdRun.recording.structured))))).filter((_, index) => index !== 5),
         tools: thirdRun.recording.tools,
       }),
     );

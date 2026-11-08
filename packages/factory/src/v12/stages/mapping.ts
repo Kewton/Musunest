@@ -224,7 +224,8 @@ export function mappingRuleDefinitionsOf(ledger?: UpstreamLedgerView): readonly 
     definition.id === "R-map-03"
       ? {
           ...definition,
-          text: `${MAPPING_LEDGER_RULE_HEAD}${ledger.t1RuleTexts.join("")}${MAPPING_LEDGER_RULE_TAIL}`,
+          // 旗 ids の見方だけが `t1IdsRuleTexts` を持ち、C2 の R-map-03 をそこから組む（T1 は `t1RuleTexts` のまま。Issue #806）
+          text: `${MAPPING_LEDGER_RULE_HEAD}${(ledger.t1IdsRuleTexts ?? ledger.t1RuleTexts).join("")}${MAPPING_LEDGER_RULE_TAIL}`,
           since: `${definition.since}${MAPPING_LEDGER_RULE_SINCE_TAIL}`,
         }
       : definition,
