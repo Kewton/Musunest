@@ -5022,8 +5022,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    * **Issue #794 の取り直し（旧値と理由）**：旗 ids の T2 の要求（束の初回・中身のやり直し）に、コードが固定した時計の値の塊「時計」1 つ
    * と R-tsp-13 の末尾の時計の文を足したので、T2 を通る ids on の経路の要求の列が変わった。T2 を通る次の 7 経路だけ取り直した（旧値：
    *   stage-search-repair-off 5dc5994e…／whole-stagnation 248017e1…／whole-adopting ca3074eb…／whole-sets acd0d9b6…／
-   *   whole-mixed 2fb98ee3…／whole-recounts 0a657756…／whole-search-repair-off b54b883d…）。`t2-b1` の checkpoint から B1 を始める
-   * 段の走り（stage-*）・ids off・v1.1a は T2 を通らないので旧値のまま。時計の塊と時計の文を位置で外した指紋（`withoutDiagnostics`）は
+   *   whole-mixed 2fb98ee3…／whole-recounts 0a657756…／whole-search-repair-off b54b883d…）。`t2-b1` から始める stage-* の走り・
+   * ids off・v1.1a は T2 を通らないので旧値のまま。時計の塊と時計の文を位置で外した指紋（`withoutDiagnostics`）は
    * 下の BEFORE_761_RAW・BEFORE_761_REQUESTS・BEFORE_761_BUDGET（旧の指紋）と一致する
    */
   const BEFORE_746: Readonly<Record<string, string>> = {
