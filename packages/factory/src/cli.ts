@@ -133,10 +133,8 @@ import {
 import { runGenerationV11a, runStageRangeV11a, type GenerationResultV11a } from "./v11a/run.js";
 import {
   fromPublicV12Flags,
-  PROPERTY_LEDGER,
-  propertyLedgerSha256,
+  ledgerVersionsOf,
   toPublicV12Flags,
-  upstreamLedgerSha256,
   V12_PIPELINE_FLAGS,
   type V12Flags,
   type V12PublicFlags,
@@ -1170,12 +1168,9 @@ interface StageVersionsOfRun {
 async function stageVersionsOf(promptVersion: string, flags?: V12Flags): Promise<StageVersionsOfRun> {
   const versions = { vocabulary: VOCABULARY_VERSION, contract: CONTRACT_VERSION, prompt: promptVersion, factory: FACTORY_VERSION };
   if (flags === undefined) return { versions };
-  // 全体の指紋・上流の指紋の両方に実効の旗を渡す（off の走りの値は今と同じ、ids の走りは新しい値。Issue #806）
-  const v12 = {
-    ledger: await propertyLedgerSha256(PROPERTY_LEDGER, flags),
-    ledgerUpstream: await upstreamLedgerSha256(PROPERTY_LEDGER, flags),
-    flags: toPublicV12Flags(flags),
-  };
+  // 全体・上流の指紋は公開の関数 1 つを通す（`toPublicV12Flags(flags)` を渡す。旗の組み立てをここに重複させない。Issue #816）
+  const publicFlags = toPublicV12Flags(flags);
+  const v12 = { ...(await ledgerVersionsOf(publicFlags)), flags: publicFlags };
   return {
     versions: { ...versions, ledger: v12.ledger, flags: v12.flags, call_limits: flags.ids ? v12CallLimitsRecord() : null },
     v12,
