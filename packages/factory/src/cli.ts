@@ -133,6 +133,7 @@ import {
 import { runGenerationV11a, runStageRangeV11a, type GenerationResultV11a } from "./v11a/run.js";
 import {
   fromPublicV12Flags,
+  PROPERTY_LEDGER,
   propertyLedgerSha256,
   toPublicV12Flags,
   upstreamLedgerSha256,
@@ -1169,7 +1170,12 @@ interface StageVersionsOfRun {
 async function stageVersionsOf(promptVersion: string, flags?: V12Flags): Promise<StageVersionsOfRun> {
   const versions = { vocabulary: VOCABULARY_VERSION, contract: CONTRACT_VERSION, prompt: promptVersion, factory: FACTORY_VERSION };
   if (flags === undefined) return { versions };
-  const v12 = { ledger: await propertyLedgerSha256(), ledgerUpstream: await upstreamLedgerSha256(), flags: toPublicV12Flags(flags) };
+  // 全体の指紋・上流の指紋の両方に実効の旗を渡す（off の走りの値は今と同じ、ids の走りは新しい値。Issue #806）
+  const v12 = {
+    ledger: await propertyLedgerSha256(PROPERTY_LEDGER, flags),
+    ledgerUpstream: await upstreamLedgerSha256(PROPERTY_LEDGER, flags),
+    flags: toPublicV12Flags(flags),
+  };
   return {
     versions: { ...versions, ledger: v12.ledger, flags: v12.flags, call_limits: flags.ids ? v12CallLimitsRecord() : null },
     v12,

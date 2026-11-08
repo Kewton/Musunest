@@ -50,8 +50,9 @@ import {
 } from "../../v11a/names.js";
 import { generateTests } from "../generated-tests.js";
 import type { RequirementList } from "../../pipeline.js";
+import { nameTableRuleDefinitionsOf } from "../../v11a/stages/name-table.js";
 import { semanticCheckTargets } from "../../v11a/stages/semantic-check.js";
-import { PROPERTY_LEDGER_VIEW, PROPERTY_LEDGER_VIEW_IDS, type LedgerView, type UpstreamLedgerView } from "../ledger.js";
+import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, PROPERTY_LEDGER_VIEW_IDS, type LedgerView, type UpstreamLedgerView } from "../ledger.js";
 import type { ReferenceCounts } from "../ids.js";
 import {
   MAPPING_DATA_NAMES,
@@ -2621,5 +2622,110 @@ describe("Issue #808：検査の式の要件の所属を C2' の前の手が足�
       JSON.stringify(inspectedOf([])),
       JSON.stringify(inspectedOf([], ["E1.F1", "E1.UNKNOWN"])),
     ]);
+  });
+});
+
+// ── 旗 ids の C2 への文（Issue #806）────────────────────────────────
+
+describe("Issue #806：旗 ids の C2 への 3 文（when・value・state-after-set）", () => {
+  const IDS_TEXTS = [...(PROPERTY_LEDGER_VIEW_IDS.t1IdsRuleTexts ?? [])];
+  const THREE = IDS_TEXTS.slice(0, 3);
+  const r3Of = (definitions: readonly { readonly id: string; readonly text: string }[]): string =>
+    definitions.find((definition) => definition.id === "R-map-03")?.text ?? "";
+  const t1TextOf = (view: UpstreamLedgerView): string =>
+    nameTableRuleDefinitionsOf(view).find((definition) => definition.id === "R-nt-08")?.text ?? "";
+
+  it("(2) 規則：ids の C2 の R-map-03 に 3 文が台帳の順で含まれ、R-map-03 以外の規則は base と同じ。台帳だけ on（ids off）の T1 の規則の文は base と同じ", () => {
+    const ids = r3Of(mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW_IDS));
+    expect(THREE).toHaveLength(3);
+    for (const text of THREE) expect(ids).toContain(text);
+    const at = THREE.map((text) => ids.indexOf(text));
+    expect(at[0]!).toBeGreaterThanOrEqual(0);
+    expect(at[0]!).toBeLessThan(at[1]!);
+    expect(at[1]!).toBeLessThan(at[2]!);
+    // 3 行の文は台帳の順（when・value・state-after-set）
+    expect(THREE).toEqual(
+      ["when", "value", "state-after-set"].map((id) => PROPERTY_LEDGER.find((row) => row.id === id)?.rules.t1Ids?.text),
+    );
+    // R-map-03 以外は base（台帳版でも同じ）
+    expect(mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW_IDS).filter((definition) => definition.id !== "R-map-03")).toEqual(
+      MAPPING_RULE_DEFINITIONS.filter((definition) => definition.id !== "R-map-03"),
+    );
+    // 台帳だけ on（ids off）の T1 の規則の文は base と同じ（3 文を含まない）
+    const t1Off = t1TextOf(PROPERTY_LEDGER_VIEW);
+    for (const text of THREE) {
+      expect(t1Off).not.toContain(text);
+      expect(t1TextOf(PROPERTY_LEDGER_VIEW_IDS)).not.toContain(text);
+      expect(t1TextOf(PROPERTY_LEDGER_VIEW)).toBe(t1TextOf(PROPERTY_LEDGER_VIEW));
+    }
+    // 走査：3 文のどこにも set の構造の検査への誘導が無い
+    for (const phrase of ["set の構造", "構造の検査", "構造で確かめる"]) expect(THREE.join("")).not.toContain(phrase);
+    for (const text of THREE) expectNoAcceptanceMaterial([text]);
+  });
+
+  it("(6) 門：条件だけの要件・操作後の状態の値を求める部分を含む要件の unresolved（根拠は state-after-set）は、C2' の受理が base と同じ。計算の要件に structural を返す台本も同じ", () => {
+    const table = withCodeIds(fixtureTable());
+    const mapping = idsResponsesOf(LIST, table, PROPERTY_LEDGER_VIEW).mapping as { requirements: Entry[] };
+    const unresolvedAt = mapping.requirements.findIndex((entry) => (entry["verification"] as Entry)["kind"] === "unresolved");
+    expect(unresolvedAt).toBeGreaterThanOrEqual(0);
+    const withBasis = (constraintIds: readonly string[]) => ({
+      requirements: mapping.requirements.map((entry, index) =>
+        index === unresolvedAt ? { ...entry, verification: { ...(entry["verification"] as Entry), constraintIds } } : entry,
+      ),
+    });
+    // 条件だけ・操作後の状態の値を求める部分を含む要件：ids の C2' は未対応の観測を根拠に受理する（base の #725 の規律）
+    const idsAccepted = inspectMappingSourced(LIST, table.rows, withBasis(["state-after-set"]), FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW_IDS);
+    expect(idsAccepted.ok).toBe(true);
+    // 台帳を受けない C2'（ledger off）は base と同じく「制約 ID が文書に無い」で落ちる（文は選択を導くだけで根拠の規律を変えない）
+    const offRejected = inspectMappingSourced(LIST, table.rows, withBasis(["state-after-set"]), FIXTURE_DOCUMENTS);
+    expect(offRejected.ok).toBe(false);
+    if (!offRejected.ok) expect(offRejected.problems.map((problem) => problem.message)).toContain("制約 ID が文書に無い");
+
+    // 計算の要件に structural（aggregate-no-period の対象は計算の行 C2）を返す台本も、ids と base で同じ受理
+    const structural = {
+      requirements: mapping.requirements.map((entry, index) =>
+        index === 0
+          ? {
+              ...entry,
+              verification: {
+                kind: "structural",
+                value: null,
+                reason: "計算の値を構造で確かめる",
+                checks: fields({ "aggregate-no-period": { targetId: "C2" } }),
+                constraintIds: [],
+              },
+            }
+          : entry,
+      ),
+    };
+    const structuralIds = inspectMappingSourced(LIST, table.rows, structural, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW_IDS);
+    const structuralOff = inspectMappingSourced(LIST, table.rows, structural, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
+    expect(structuralIds.ok).toBe(structuralOff.ok);
+  });
+
+  it("(8) 指紋の取り直し：ids の C2 の要求は、3 文を位置で外した復元で旧の要求（ids の見方で t1RuleTexts を使う要求）と同じ", () => {
+    const { t1IdsRuleTexts: _dropped, ...oldIdsView } = PROPERTY_LEDGER_VIEW_IDS;
+    const requestOf = (ledger: UpstreamLedgerView) =>
+      mappingWholeRequestOf({
+        plan: planOf(LIST),
+        list: LIST,
+        documents: FIXTURE_DOCUMENTS,
+        gateway: makeGateway(createCheckedRecordingClient([]).client),
+        rows: TABLE.rows,
+        ledger,
+      });
+    const strip = <T extends { readonly rules?: readonly string[] }>(request: T): T => ({
+      ...request,
+      ...(request.rules === undefined ? {} : { rules: request.rules.map((text) => text.split(THREE.join("")).join("")) }),
+    });
+    const ids = requestOf(PROPERTY_LEDGER_VIEW_IDS);
+    const old = requestOf(oldIdsView);
+    expect(ids).not.toEqual(old);
+    expect(strip(ids)).toEqual(old);
+    // 書き直しの版の規則も同じ
+    const idsRewrite = ruleTexts(mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW_IDS));
+    const oldRewrite = ruleTexts(mappingRewriteRuleDefinitionsOf(oldIdsView));
+    expect(idsRewrite).not.toEqual(oldRewrite);
+    expect(idsRewrite.map((text) => text.split(THREE.join("")).join(""))).toEqual(oldRewrite);
   });
 });
