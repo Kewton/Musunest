@@ -862,6 +862,11 @@ export const TEST_CASE_FRAME_TEXTS = {
   ruled:
     "valueTargets のうち決まりの対象（要件の文から選ぶ）ごとに、正常・異常・境界の場合を書く。codeTests（コードが作る在ることの試験）は三種に数えない。",
   ruledExempt: "所属が画面・entity の行だけなので、三種の場合を求めない（枠は空）。",
+  /** 免除の要件で、値の対象もコードの試験も無いが、所属に項目の行がある（#813） */
+  ruledNormalOnly:
+    "値の対象もコードの試験も無いので、caseTargets の項目の行に正常（normal）の場合を 1 本以上書く。異常・境界は求めない。existence-only の枝ではなく、この枝で書く。",
+  /** 免除の要件で、値の対象もコードの試験も無く、所属に項目の行も無い（#813） */
+  ruledNoWritableTarget: "値の対象も、正常を書ける対象も無い。",
   conditional: "境界・異常は表の分類が ruled のときだけコードが作る。書かない。",
   existence:
     "codeTests の対象（コードが在ることの試験を作った対象）には場合を書かない。caseTargets の対象には正常（normal）の場合だけを書いてよい。検査（validate）・異常・境界の場合は書かない。",
@@ -910,6 +915,33 @@ function codeTestsOf(tests: GeneratedTests["tests"], observes: ReadonlyMap<strin
     .map((test) => ({ targetId: test.target.roleId ?? "", kind: test.kind, observes: observes.get(test.id) ?? "" }));
 }
 
+/** 所属の項目（kind が field）の行の ID（所属の順。#813） */
+function fieldTargetsOf(table: NameTable, requirementId: string): readonly string[] {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const roles = table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? [];
+  return roles.flatMap((role) => (rowById.get(role.id)?.kind === "field" ? [role.id] : []));
+}
+
+/**
+ * 免除の要件（値の対象が無い）の ruled の枝。確かめ方が fixed-test でコードの試験も 0 本のときだけ、注記を事実に合わせる：
+ * 所属に項目の行があれば、その行に正常 1 本を書かせる（#813）。無ければ、書ける対象も無い旨にする。それ以外は今までどおり
+ * `ruledExempt`（値の対象を持つ要件の枠・コードの試験が 1 本以上の免除の要件・fixed-test でない免除の要件は変えない）
+ */
+function exemptRuledBranchOf(
+  table: NameTable,
+  requirementId: string,
+  codeTests: readonly TestCaseFrameCodeTest[],
+): { readonly kinds: readonly TestKind[]; readonly caseTargets: readonly string[]; readonly note: string } {
+  const verification = table.verification.find((entry) => entry.requirementId === requirementId);
+  if (verification?.kind !== "fixed-test" || codeTests.length > 0) {
+    return { kinds: [], caseTargets: [], note: TEST_CASE_FRAME_TEXTS.ruledExempt };
+  }
+  const fieldTargets = fieldTargetsOf(table, requirementId);
+  return fieldTargets.length === 0
+    ? { kinds: [], caseTargets: [], note: TEST_CASE_FRAME_TEXTS.ruledNoWritableTarget }
+    : { kinds: ["normal"], caseTargets: fieldTargets, note: TEST_CASE_FRAME_TEXTS.ruledNormalOnly };
+}
+
 /** existence-only の枝（初回と採った種類が existence-only のやり直しで同じ） */
 function existenceBranchOf(codeTests: readonly TestCaseFrameCodeTest[], normalTargets: readonly string[]): TestCaseFrameExistenceBranch {
   const writable = normalTargets.length > 0;
@@ -943,15 +975,17 @@ export function initialTestCaseFramesOf(input: TestCaseFramesInput, requirementI
       conditional.set(roleId, [...(conditional.get(roleId) ?? []), test.kind]);
     }
     const isExempt = exempt.has(requirementId);
+    // 免除の要件でも、fixed-test でコードの試験が 0 本なら、所属の項目の行に正常 1 本を書ける（#813）
+    const ruledBranch = isExempt
+      ? exemptRuledBranchOf(table, requirementId, codeTests)
+      : { kinds: [...TEST_KINDS], caseTargets: valueTargets, note: TEST_CASE_FRAME_TEXTS.ruled };
     return {
       requirementId,
       codeTests,
       valueTargets,
       normalTargets,
       ifRuled: {
-        kinds: isExempt ? [] : [...TEST_KINDS],
-        caseTargets: isExempt ? [] : valueTargets,
-        note: isExempt ? TEST_CASE_FRAME_TEXTS.ruledExempt : TEST_CASE_FRAME_TEXTS.ruled,
+        ...ruledBranch,
         codeIfTableRuled: [...conditional].map(([targetId, kinds]) => ({ targetId, kinds, note: TEST_CASE_FRAME_TEXTS.conditional })),
         remaining: FRAME_LIMIT - codeTests.length,
       },
@@ -1020,12 +1054,19 @@ export function retryTestCaseFramesOf(
     const isExempt = exempt.has(requirementId);
     const branch =
       adopted === "ruled"
-        ? {
-            kinds: isExempt ? [] : [...TEST_KINDS],
-            caseTargets: isExempt ? [] : valueTargets,
-            maxCases: null,
-            note: `${isExempt ? TEST_CASE_FRAME_TEXTS.ruledExempt : TEST_CASE_FRAME_TEXTS.ruled}${missing.length > 0 ? TEST_CASE_FRAME_TEXTS.retryMissing : ""}`,
-          }
+        ? (() => {
+            // 採った種類が ruled なら初回と同じ枝（免除の要件でも、fixed-test でコードの試験が 0 本なら項目の行に正常 1 本。#813）
+            const ruled = isExempt
+              ? exemptRuledBranchOf(table, requirementId, codeTests)
+              : { kinds: [...TEST_KINDS], caseTargets: valueTargets, note: TEST_CASE_FRAME_TEXTS.ruled };
+            // 欄の並びは今までと同じ（kinds・caseTargets・maxCases・note。バイト列を変えない）
+            return {
+              kinds: ruled.kinds,
+              caseTargets: ruled.caseTargets,
+              maxCases: null,
+              note: `${ruled.note}${missing.length > 0 ? TEST_CASE_FRAME_TEXTS.retryMissing : ""}`,
+            };
+          })()
         : (({ kinds, caseTargets, maxCases, note }) => ({ kinds, caseTargets, maxCases, note }))(existenceBranchOf(codeTests, normalTargets));
     return {
       requirementId,

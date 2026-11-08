@@ -34,6 +34,7 @@ import {
   casesResponseOf,
   legacyCasesResponseOf,
   withoutIdAndClock,
+  withoutFrameFieldNormal,
   recordedStructured,
   EMPTY_AGGREGATE_REQUEST_DIFF,
   ENUM_MEMBERSHIP_REQUEST_DIFF,
@@ -4423,8 +4424,9 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     const off = testSpecRuleDefinitionsOf(ledger);
     const textOf = (definitions: readonly { readonly id: string; readonly text: string }[], id: string) => definitions.find((definition) => definition.id === id)?.text ?? "";
     // Issue #663：R-tsp-02 の末尾に要件ごとの試験の上限の文（値は限度の表の定数から）を足した
+    // Issue #813：免除の要件の事実に合わせ、枠に項目の行が示された要件はその行に正常 1 本を書く
     expect(textOf(on, "R-tsp-02")).toBe(
-      `確かめ方が structural・default-value・enum-membership の要件を除いて、ruled と分類した要件は、枠の値の対象のうち決まりの対象ごとに正常・異常・境界の場合を書く。コードが作る画面・entity・項目の在ることの試験は三種に数えない。所属が画面・entity の行だけの要件は三種を求めない（枠が空）。${frameLimitText()}`,
+      `確かめ方が structural・default-value・enum-membership の要件を除いて、ruled と分類した要件は、枠の値の対象のうち決まりの対象ごとに正常・異常・境界の場合を書く。コードが作る画面・entity・項目の在ることの試験は三種に数えない。値の対象が無い要件は三種を求めない。そのうち枠に項目の行が示された要件は、その行に正常の場合を 1 本以上書く。${frameLimitText()}`,
     );
     expect(textOf(on, "R-tsp-03")).toBe(
       "existence-only と分類した要件は、コードが在ることの試験を作った対象に場合を書かない。コードの試験が無い計算・条件のある操作の対象には正常（normal）の場合だけ書いてよい。検査（validate）・異常・境界の場合は書かない。",
@@ -4531,9 +4533,9 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     const limit = String(AGENT_LIMITS.testsPerRequirement);
     const r02 = on.find((definition) => definition.id === "R-tsp-02");
     expect(r02?.text.endsWith(frameLimitText())).toBe(true);
-    // 上限の文を除けば手 3i（#653）の文のまま
+    // 上限の文を除けば手 3i（#653）の文に #813 の免除の事実を足した文のまま
     expect(r02?.text.slice(0, (r02?.text.length ?? 0) - frameLimitText().length)).toBe(
-      "確かめ方が structural・default-value・enum-membership の要件を除いて、ruled と分類した要件は、枠の値の対象のうち決まりの対象ごとに正常・異常・境界の場合を書く。コードが作る画面・entity・項目の在ることの試験は三種に数えない。所属が画面・entity の行だけの要件は三種を求めない（枠が空）。",
+      "確かめ方が structural・default-value・enum-membership の要件を除いて、ruled と分類した要件は、枠の値の対象のうち決まりの対象ごとに正常・異常・境界の場合を書く。コードが作る画面・entity・項目の在ることの試験は三種に数えない。値の対象が無い要件は三種を求めない。そのうち枠に項目の行が示された要件は、その行に正常の場合を 1 本以上書く。",
     );
     // 文の中の数字は定数と同じで、旗 ids の規則の文のどこにも上限の数字の直書きはほかに無い
     const numbers = (text: string) => text.match(/\d+/g) ?? [];
@@ -4610,13 +4612,15 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
    * 広く消さない）。無ければそのまま（直す前のコードで測った値はこの関数を通しても変わらない）
    */
   const before794 = (request: LlmStructuredRequest): LlmStructuredRequest => {
+    // Issue #813：先に R-tsp-02 の新しい文と枠の ruled の枝を base に戻す（#794 の時計の復元の前）
+    const restored = withoutFrameFieldNormal(request);
     const opener = `\n<data name="${String(TEST_SPEC_CLOCK_DATA_NAME)}">`;
-    const start = request.input.indexOf(opener);
+    const start = restored.input.indexOf(opener);
     const close = "\n</data>";
-    const input = start < 0 ? request.input : `${request.input.slice(0, start)}${request.input.slice(request.input.indexOf(close, start) + close.length)}`;
+    const input = start < 0 ? restored.input : `${restored.input.slice(0, start)}${restored.input.slice(restored.input.indexOf(close, start) + close.length)}`;
     const sentence = typeof TEST_SPEC_CLOCK_RULE_TEXT === "string" ? TEST_SPEC_CLOCK_RULE_TEXT : undefined;
-    const rules = (request.rules ?? []).map((text) => (sentence !== undefined && text.endsWith(sentence) ? text.slice(0, -sentence.length) : text));
-    return { ...request, input, ...(request.rules === undefined ? {} : { rules }) };
+    const rules = (restored.rules ?? []).map((text) => (sentence !== undefined && text.endsWith(sentence) ? text.slice(0, -sentence.length) : text));
+    return { ...restored, input, ...(restored.rules === undefined ? {} : { rules }) };
   };
   const digestsOf = async (requests: readonly LlmStructuredRequest[]) =>
     Promise.all(requests.map(({ signal: _signal, ...rest }) => sha256Hex(JSON.stringify(before794(rest as LlmStructuredRequest)))));
