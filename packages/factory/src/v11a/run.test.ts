@@ -34,7 +34,7 @@ import { resolveStageEnvelope, type EnvelopeId } from "../schema-envelope.js";
 import { requirementsFromPlan, type RequirementList, type TestSuite } from "../pipeline.js";
 import * as bindModule from "../stages/bind.js";
 import * as correspondenceStage from "../stages/correspondence.js";
-import { expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
+import { expectNoAcceptanceMaterial, makeGateway } from "../stages/__tests__/prompt.js";
 import * as repairStage from "../stages/repair.js";
 import * as runTestsStage from "../stages/run-tests.js";
 import * as staticCheckStage from "../stages/static-check.js";
@@ -2129,6 +2129,107 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const r3Targets = r3?.kind === "structural" ? (r3.targets ?? []).reduce((sum, target) => sum + 1 + (target.sourceId === null ? 0 : 1), 0) : 0;
     expect(records[1]?.references).toEqual({ checked: 1 + r3Roles + r3Targets, unknown_ids: 0, duplicates: 0, cross_bundle_ids: 0 });
     expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+  });
+
+  /**
+   * Issue #805 の固定の SHA-256 の取り直しを、注ではなく機械で示す。同じ表・一覧・助言から、2 回目の C3 を
+   * 再点検の部分を渡さない旧の組立（`runSemanticCheck` を `recheck` なしで呼ぶ）で組み直し、旧の行を作る。
+   * 旧の行に入れ替えた納品物の SHA-256 が旧の値（107da3cb…・69aa0349…）に戻ること、新しい行との差が
+   * targets・judgments の部分への絞り込みと kept_requirement_ids の追加だけであることを等値で固定する。
+   */
+  it("(805 の差) 2 回目の行は旧の組立の行から targets・judgments を部分に絞り kept_requirement_ids を足しただけ。旧の行に入れ替えると納品物の SHA-256 は旧の値に戻る", async () => {
+    const { result } = await runScenario(rejectedRewriteScript(true), { flags: IDS_FLAGS });
+    const rounds = tableRoundsOf(result);
+    const second = rounds[1]?.semantic_check as Record<string, any> | null | undefined;
+    const table = rounds[1]?.table as Record<string, any> | null | undefined;
+    if (second === null || second === undefined || table === null || table === undefined) throw new Error("前提が壊れた：2 回目の行が無い");
+    const nameTable: NameTable = {
+      rows: table["rows"],
+      ownership: table["ownership"],
+      verification: table["verification"],
+      classification: table["classification"],
+    };
+    // 旧の組立：同じ表・一覧・助言で、再点検の部分を渡さずに 2 回目の点検を組み直す（同じ偽物の応答＝全受理）
+    const oldRequests: LlmStructuredRequest[] = [];
+    const oldClient: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        oldRequests.push(request);
+        return {
+          output: {
+            judgments: semanticRequestIds(request).map((requirementId) => ({ requirementId, verdict: "accept", kind: null, quote: null })),
+          } as T,
+          usage: undefined,
+        };
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    const old = await semanticCheckStage.runSemanticCheck({
+      plan: PLAN,
+      list: LIST,
+      table: nameTable,
+      advice: second["advice"],
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(oldClient),
+      ids: true,
+      round: 2,
+      bundleConcurrency: 1,
+    });
+    if (!old.ok) throw new Error("通るはず");
+    // 旧の行は全対象（4 件）を 1 要求で点検し、4 件の判定を記録する
+    expect(oldRequests).toHaveLength(1);
+    expect(old.value.targets).toEqual([...IDS]);
+    expect(old.value.judgments.map((judgment) => [judgment.requirementId, judgment.verdict])).toEqual(IDS.map((id) => [id, "accept"]));
+    const submitted = second["targets"] as readonly string[];
+    expect(submitted).toEqual(["R3"]);
+    // 差は targets・judgments の部分への絞り込みと kept_requirement_ids の追加だけ
+    const newWithoutKept = { ...second };
+    delete newWithoutKept["kept_requirement_ids"];
+    expect(newWithoutKept).toEqual({
+      table_sha256: old.value.tableSha256,
+      targets: submitted,
+      judgments: old.value.judgments.filter((judgment) => submitted.includes(judgment.requirementId)),
+      advice: second["advice"],
+    });
+    expect(second["kept_requirement_ids"]).toEqual(old.value.targets.filter((id) => !submitted.includes(id)));
+    // kept_requirement_ids を外すだけの復元では旧の行に戻らない（targets・judgments が部分のまま残る）
+    expect(newWithoutKept).not.toEqual({
+      table_sha256: old.value.tableSha256,
+      targets: old.value.targets,
+      judgments: old.value.judgments,
+      advice: second["advice"],
+    });
+    // 1 回目の行は kept を持たない（旧の形）
+    expect(rounds[0]?.semantic_check).not.toHaveProperty("kept_requirement_ids");
+    // 旧の行に入れ替えた納品物の SHA-256 を、旧の値（107da3cb…）と等値で固定する
+    const files = result.bundle === null ? [] : bundleFiles(result.bundle).map((file) => ({ path: file.path, text: file.text }));
+    const semanticFile = files.find((file) => file.path === V11A_ARTIFACT_NAMES.semanticCheck);
+    if (semanticFile === undefined) throw new Error("前提が壊れた：意味の点検の記録が無い");
+    const toJson = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+    const value = JSON.parse(semanticFile.text) as { rounds: Record<string, any>[] };
+    value.rounds[1] = { round: 2, table_sha256: old.value.tableSha256, targets: old.value.targets, judgments: old.value.judgments, advice: second["advice"] };
+    const restoredText = toJson(value);
+    const restoredSha = await sha256Hex(restoredText);
+    const restoredSize = new TextEncoder().encode(restoredText).length;
+    const restored = files.map((file) => {
+      if (file === semanticFile) return { ...file, text: restoredText };
+      if (file.path !== "bundle-manifest.json") return file;
+      const manifest = JSON.parse(file.text) as { files: { path: string; sha256: string; size_bytes: number }[] };
+      for (const entry of manifest.files) {
+        if (entry.path !== V11A_ARTIFACT_NAMES.semanticCheck) continue;
+        entry.sha256 = restoredSha;
+        entry.size_bytes = restoredSize;
+      }
+      return { ...file, text: toJson(manifest) };
+    });
+    expect(await sha256Hex(JSON.stringify(filesWithoutReferences(restored)))).toBe(
+      "107da3cb08b3c8442fff317c7e8e17103854c50573d7eb9079cd5c7e24d66cae",
+    );
+    // #735 の復元（要約の v12_calls.semantic_check を外して manifest を計算し直す）を重ねると旧の値（69aa0349…）に戻る
+    expect(await sha256Hex(JSON.stringify(filesWithoutReferences(await revertBundleFiles735(restored))))).toBe(
+      "69aa0349e676c5135e8707abb9d60f831d5c672a71adf496d48abdbe64284553",
+    );
   });
 
   // ── 回ごとの行（`diagnostics/table-rounds.json`。Issue #699）────────────────────────
