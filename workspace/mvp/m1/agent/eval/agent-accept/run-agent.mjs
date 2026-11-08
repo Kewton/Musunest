@@ -419,14 +419,25 @@ const codeOf = (lib, code) => (Array.isArray(lib.STAGE_INPUT_CODES) && lib.STAGE
 // #713：開始の段の直前の境界が、その dist の境界の表の最初（上流の段だけが前にある境界）なら、上流の台帳の部分の指紋（upstreamLedgerSha256）の
 // 今の値も渡す（照合の関数はその境界でこれを照らす）。関数が無い・例外・返りの値が 64 桁の 16 進でなければ dist の読み取りの失敗（子を起こす前）。
 // ほかの境界では部分の関数を取らず・呼ばない（部分の関数の無い今までの dist も、ほかの条件を満たせば受ける）
+// #817：dist の package の入口が公開の関数 ledgerVersionsOf（工場の CLI の書き手が checkpoint の版に書く { ledger, ledgerUpstream } を返す。#816）を
+// 出すなら、その dist の V12_PIPELINE_FLAGS をそのまま渡して全体と上流の指紋を読む（読み手で旗を組まない）。例外・どちらかが 64 桁の 16 進でなければ
+// dist の読み取りの失敗。公開の関数が無い dist（#816 の前）に限り、今までの旗なしの呼び出し（propertyLedgerSha256・upstreamLedgerSha256）に戻る
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const v12Of = async (entry, lib) => {
+  if (!isFlagMap(entry?.V12_PIPELINE_FLAGS)) refuseCode("stage:dist-unreadable");
+  const flags = JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS));
+  const first = stageBoundary === lib.STAGE_BOUNDARIES[0];
+  if (typeof entry?.ledgerVersionsOf === "function") {
+    let versions = null;
+    try { versions = await entry.ledgerVersionsOf(JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS))); } catch { versions = null; }
+    if (typeof versions?.ledger !== "string" || !SHA256_HEX.test(versions.ledger) || typeof versions.ledgerUpstream !== "string" || !SHA256_HEX.test(versions.ledgerUpstream)) refuseCode("stage:dist-unreadable");
+    return first ? { ledger: versions.ledger, ledgerUpstream: versions.ledgerUpstream, flags } : { ledger: versions.ledger, flags };
+  }
   if (typeof entry?.propertyLedgerSha256 !== "function") refuseCode("stage:dist-unreadable");
   let ledger = null;
   try { ledger = await entry.propertyLedgerSha256(); } catch { ledger = null; }
   if (typeof ledger !== "string") refuseCode("stage:dist-unreadable");
-  const flags = JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS));
-  if (stageBoundary !== lib.STAGE_BOUNDARIES[0]) return { ledger, flags };
+  if (!first) return { ledger, flags };
   if (typeof entry.upstreamLedgerSha256 !== "function") refuseCode("stage:dist-unreadable");
   let ledgerUpstream = null;
   try { ledgerUpstream = await entry.upstreamLedgerSha256(); } catch { ledgerUpstream = null; }

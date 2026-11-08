@@ -82,9 +82,14 @@ export async function validatePlanFile({ envelope, source, vocabularyVersion }) 
  * package の入口（旗の組・台帳の指紋・上流の台帳の部分の指紋の関数）。upstream が null なら部分の関数を出さない（今までの dist）、"throw" なら例外、
  * { value } なら任意の値を返す（#713）
  */
-const fakeIndex = (flags = FLAGS, { ledger = LEDGER, upstream = UPSTREAM } = {}) =>
+const fakeIndex = (flags = FLAGS, { ledger = LEDGER, upstream = UPSTREAM, versions = null } = {}) =>
   `export const V12_PIPELINE_FLAGS = ${JSON.stringify(flags)};\nexport async function propertyLedgerSha256() { return ${JSON.stringify(ledger)}; }\n` +
-  (upstream === null ? "" : upstream === "throw" ? 'export async function upstreamLedgerSha256() { throw new Error("x"); }\n' : `export async function upstreamLedgerSha256() { return ${JSON.stringify(typeof upstream === "object" ? upstream.value : upstream)}; }\n`);
+  (upstream === null ? "" : upstream === "throw" ? 'export async function upstreamLedgerSha256() { throw new Error("x"); }\n' : `export async function upstreamLedgerSha256() { return ${JSON.stringify(typeof upstream === "object" ? upstream.value : upstream)}; }\n`) +
+  // #817：公開の関数 ledgerVersionsOf（#816）。versions が null なら出さず、"throw" なら例外、ほかはその値を返す。FAKE_LV_LOG があれば受けた旗の組を書く
+  (versions === null
+    ? ""
+    : 'import { appendFileSync as lvAppend } from "node:fs";\n' +
+      `export async function ledgerVersionsOf(f) { if (process.env.FAKE_LV_LOG) lvAppend(process.env.FAKE_LV_LOG, JSON.stringify(f) + "\\n"); ${versions === "throw" ? 'throw new Error("x");' : `return ${JSON.stringify(versions)};`} }\n`);
 
 const PIDS = ["P1", "P2", "P3", "P4"];
 const RUNS = 3;
@@ -426,6 +431,63 @@ test("#713 境界 t1-t2 の凍結は dist の部分の指紋の関数の今の�
     assert.equal(runNode([repo, oldOut, oldScore, oldB1, "--id", "x", "--version", "1", "--boundary", "t2-b1"]).status, 0);
     assert.deepEqual(adoptedOf(oldB1), ADOPTED);
   });
+});
+
+test("#817 公開の関数がある dist の凍結は、その dist の V12_PIPELINE_FLAGS を渡した全体・部分の指紋で照らす（t1-t2・t2-b1 とも同じ本を採る）。旗なしの値では同じ checkpoint が照合に落ちる。無い dist は今の旗なしの値。例外・64 桁の 16 進でない値は freeze:dist-unreadable で何も書かない", async () => {
+  await withWorld(async ({ base, repo, fz }) => {
+    const IDS_WHOLE = "a".repeat(64), IDS_UP = "b".repeat(64), VERSIONS = { ledger: IDS_WHOLE, ledgerUpstream: IDS_UP };
+    const index = join(repo, "packages/factory/dist/index.js");
+    const setIndex = (opts) => writeFileSync(index, fakeIndex(FLAGS, opts));
+    // ids の版で書いた checkpoint（工場の書き手が公開の関数の値を書いた形）
+    const out = writeMeasurement(base, repo, fz, { name: "ref-817", versions: (v, boundary) => { v.ledger = IDS_WHOLE; v.ledger_upstream = boundary === "t1-t2" ? IDS_UP : null; } });
+    const score = writeScore(base, out, { name: "score-817.json" });
+    const at = (boundary, dest, env = {}) => runNode([repo, out, score, dest, "--id", "stage-set-817", "--version", "1", "--boundary", boundary], env);
+    const adoptedOf = (dest) => readJson(join(dest, FROZEN_STAGE_SET_FILE)).adopted.map((a) => a.run);
+    const ADOPTED = ["P1-r1", "P2-r2", "P4-r2"];
+    setIndex({ versions: VERSIONS });
+    for (const [boundary, expected] of [["t1-t2", { ledger: IDS_WHOLE, ledgerUpstream: IDS_UP, flags: FLAGS }], ["t2-b1", { ledger: IDS_WHOLE, flags: FLAGS }]]) {
+      const vlog = join(base, `v12-817-${boundary}.log`), lvlog = join(base, `lv-817-${boundary}.log`), dest = join(base, `set-817-${boundary}`);
+      const r = at(boundary, dest, { FAKE_VERIFY_V12_LOG: vlog, FAKE_LV_LOG: lvlog });
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(adoptedOf(dest), ADOPTED, boundary);
+      const seen = readFileSync(vlog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      assert.ok(seen.length > 0, boundary);
+      for (const v of seen) assert.deepEqual(v, expected, boundary);
+      const lv = readFileSync(lvlog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      assert.ok(lv.length > 0, boundary);
+      for (const f of lv) assert.deepEqual(f, FLAGS, `${boundary}: 公開の関数に dist の旗の組を渡す`);
+    }
+    const before = [treeOf(out), readFileSync(score).toString("base64")];
+    // 直す前の挙動：公開の関数を出さない dist（旗なしの値 LEDGER・UPSTREAM）では、同じ checkpoint が両方の境界で照合に落ちる
+    setIndex({});
+    for (const boundary of ["t1-t2", "t2-b1"]) assertRefused(at(boundary, join(base, `flagless-${boundary}`)), "freeze:none-adopted", { dest: join(base, `flagless-${boundary}`), label: `flagless-${boundary}` });
+    // 公開の関数の例外・形の異常：両方の境界で freeze:dist-unreadable（旗なしの値に戻らない・何も書かない・入力は不変）
+    for (const [label, versions] of [["throw", "throw"], ["null", null], ["upper", { ledger: IDS_WHOLE.toUpperCase(), ledgerUpstream: IDS_UP }], ["short-up", { ledger: IDS_WHOLE, ledgerUpstream: "b".repeat(63) }], ["no-up", { ledger: IDS_WHOLE }], ["number", { ledger: 1, ledgerUpstream: IDS_UP }]]) {
+      writeFileSync(index, fakeIndex(FLAGS, {}) + (versions === null ? "export async function ledgerVersionsOf() { return null; }\n" : "") );
+      if (versions !== null) setIndex({ versions });
+      for (const boundary of ["t1-t2", "t2-b1"]) {
+        const dest = join(base, `bad-${label}-${boundary}`);
+        assertRefused(at(boundary, dest), "freeze:dist-unreadable", { inputs: [out], before: [before[0]], dest, label: `${label}-${boundary}` });
+      }
+    }
+    assert.deepEqual([treeOf(out), readFileSync(score).toString("base64")], before, "入力は不変");
+  });
+});
+
+test("#817 README：§10.8.3 の末尾（§10.8.4 の前）に公開の関数で読む契約の語があり、題材の言葉と価格の表記が無く、§7 の先頭より前と §7.11 の先頭より前のバイト列は変わらない", () => {
+  const text = readFileSync(join(here, "../README.md"), "utf8");
+  const at = text.indexOf("\n#### 10.8.3 "), end = text.indexOf("\n#### 10.8.4 ");
+  assert.ok(at > 0 && end > at, "§10.8.3 は §10.8.4 の前");
+  const sec = text.slice(at, end);
+  const from = sec.indexOf("- **#817 工場**");
+  assert.ok(from > 0, "#817 の段落は §10.8.3 の中");
+  const part = sec.slice(from);
+  for (const w of ["公開の関数", "ledgerVersionsOf", "V12_PIPELINE_FLAGS", "旗なしに戻る条件", "無い", "propertyLedgerSha256", "upstreamLedgerSha256", "t1-t2", "stage:dist-unreadable", "freeze:dist-unreadable", "stage-input:version", "64 桁の 16 進"]) assert.ok(part.includes(w), w);
+  const words = [[0x6301, 0x3061, 0x5bc4, 0x308a], [0x5f53, 0x756a, 0x8868], [0x4f1a, 0x8cbb], [0x51fa, 0x6b20], [0x8cb8, 0x3057, 0x51fa, 0x3057]].map((cs) => String.fromCodePoint(...cs));
+  for (const w of words) assert.ok(!part.includes(w), w);
+  assert.doesNotMatch(part, /[\u00a5\uffe5]\s?\d|\d\s?\u5186|\$\d/);
+  assert.equal(sha256(text.slice(0, text.indexOf("## 7. 表の採点（正解の表との照合）") - 1)), "662d41ded93107ecd130dfa090b09df1280ec78277509d131bf21b253e82cba4");
+  assert.equal(sha256(text.slice(0, text.indexOf("### 7.11 断った候補の下書きの採点（読取元 (c)。#607）") - 1)), "1c21bdefca9e6e5373316f7ce143bdad580dea3d25ad5d1bbda1e8e64f9b2e1f");
 });
 
 test("#640 道具に工場の名前（境界・記録の名前・旗の名前）と題材の言葉を書かない。工場の package を import しない", () => {
