@@ -1,5 +1,6 @@
 // T2 の場合の形と展開の試験（v1.2 手 3e・Issue #625）。題材は v1.1α の共通の題材（担当者と項目の抽象的な題材）と、
 // 大きさの生成器の抽象的な題材だけを使う。LLM は呼ばない（展開は純粋な関数。評価は偽物の宣言で B4 を流す）。
+import { fixedClock, thisMonthRangeInTokyo, todayInTokyo } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import type { TestSuite } from "../fixed-test.js";
 import type { RequirementList } from "../pipeline.js";
@@ -37,6 +38,7 @@ import {
   checkTestCasesOutput,
   expandTestCases,
   retainedBundleOutput,
+  testCaseClockDataOf,
   testCasesSchemaOf,
   toCasePositions,
   type TestCase,
@@ -859,5 +861,62 @@ describe("やり直しの枠の不足の読み取り（固定文の定数と要�
         { field: "cases[0]", message: TEST_CASE_FRAME_MISSING_MESSAGES.abnormal },
       ]),
     ).toEqual([]);
+  });
+});
+
+// ── 旗 v12.ids の T2 の要求のデータの塊「時計」（Issue #794）──────────────────────────────
+
+describe("旗 v12.ids：T2 の要求に渡す時計の値は、コードの時計の定数から spec-engine の関数で組む（Issue #794）", () => {
+  /** 期待は spec-engine の公開の関数から導く（日付の文字列を二重に持たない） */
+  const expectedOf = (clock: string) => {
+    const fixed = fixedClock(clock);
+    const today = todayInTokyo(fixed);
+    const range = thisMonthRangeInTokyo(fixed);
+    return { clock, today, thisMonth: today.slice(0, 7), thisMonthRange: { from: range.from, to: range.to } };
+  };
+  /** `YYYY-MM` の翌月初の `YYYY-MM-DD`（暦の計算で独立に求める） */
+  const nextMonthStartOf = (month: string): string => new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 1)).toISOString().slice(0, 10);
+
+  it("(5) 既定値は場合の展開の時計（TEST_CASE_CLOCK）で、本番の呼び方（引数なし）と同じ値。欄の並びは clock・today・thisMonth・thisMonthRange", () => {
+    expect(testCaseClockDataOf()).toEqual(testCaseClockDataOf(TEST_CASE_CLOCK));
+    expect(testCaseClockDataOf()).toEqual(expectedOf(TEST_CASE_CLOCK));
+    expect(Object.keys(testCaseClockDataOf())).toEqual(["clock", "today", "thisMonth", "thisMonthRange"]);
+    expect(Object.keys(testCaseClockDataOf().thisMonthRange)).toEqual(["from", "to"]);
+  });
+
+  it("(5) 引数の時計：日本時間の月末・年末をまたぐ時計でも today・thisMonth・thisMonthRange は spec-engine の関数と一致し、to は翌月初（その日を含まない）", () => {
+    const clocks = [
+      "2026-12-31T15:00:00Z", // UTC の 12 月 31 日 15 時＝日本時間の翌年 1 月 1 日 0 時
+      "2026-12-31T14:59:59Z", // 日本時間の 12 月 31 日 23 時 59 分 59 秒（年末の手前）
+      "2026-01-31T15:00:00Z", // 日本時間の 2 月 1 日（月末をまたぐ）
+      "2026-02-28T23:30:00+09:00", // 日本時間の 2 月の月末
+      "2026-06-15T12:00:00-05:00", // オフセットが日本でない時計
+    ];
+    for (const clock of clocks) {
+      const data = testCaseClockDataOf(clock);
+      expect(data, clock).toEqual(expectedOf(clock));
+      expect(data.clock, clock).toBe(clock);
+      expect(data.thisMonth, clock).toBe(data.today.slice(0, 7));
+      expect(data.thisMonthRange.from, clock).toBe(`${data.thisMonth}-01`);
+      expect(data.thisMonthRange.to, clock).toBe(nextMonthStartOf(data.thisMonth));
+      // 半開区間：today は from 以上・to 未満
+      expect(data.thisMonthRange.from <= data.today && data.today < data.thisMonthRange.to, clock).toBe(true);
+    }
+    // 年末をまたぐ：UTC の 12 月 31 日 15 時は日本時間の翌年 1 月で、to は翌年 2 月初
+    const crossed = testCaseClockDataOf(clocks[0]!);
+    const before = testCaseClockDataOf(clocks[1]!);
+    expect(crossed.thisMonth).not.toBe(before.thisMonth);
+    expect(before.thisMonthRange.to).toBe(crossed.thisMonthRange.from);
+  });
+
+  it("(5) 負例：オフセットの無い時計・読めない時計は spec-engine の fixedClock と同じく例外（黙って別の時計で数えない）", () => {
+    for (const clock of ["2026-01-01T00:00:00", "not-a-clock"]) {
+      expect(() => fixedClock(clock)).toThrow();
+      expect(() => testCaseClockDataOf(clock)).toThrow();
+    }
+  });
+
+  it("題材の言葉は無い", () => {
+    expectNoAcceptanceMaterial([JSON.stringify(testCaseClockDataOf())]);
   });
 });
