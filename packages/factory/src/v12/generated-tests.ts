@@ -307,6 +307,20 @@ export function normalOnlyOwnershipRequirementIds(table: NameTable, ledger: Ledg
 }
 
 /**
+ * 表の確かめ方が検査の式（validation-expression）の要件 → その `targets` の項目の行の ID（Issue #800）。T2' が validate の
+ * 試験の対象をこの一覧に照らす。旗 `v12.ids` と台帳が on の走りの表だけが対象を持つ
+ */
+export function validationTargetsOf(table: NameTable, ledger: LedgerView): ReadonlyMap<string, readonly string[]> {
+  const targets = new Map<string, readonly string[]>();
+  for (const entry of table.verification) {
+    if (entry.kind !== "validation-expression") continue;
+    if (ledger.rowByVerificationKind.get(entry.kind)?.t1?.targets !== true) continue;
+    targets.set(entry.requirementId, entry.targets);
+  }
+  return targets;
+}
+
+/**
  * 台帳の型だけで値が決まる試験を作る（純粋。LLM を呼ばない）。同じ表・台帳・一覧からは同じ組を返す。持ち越しの要件は一覧と
  * 表から除いて渡す（作らない）。
  */

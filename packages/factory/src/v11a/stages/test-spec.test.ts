@@ -2641,7 +2641,8 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
       expect(on.find((definition) => definition.id === id)?.text, id).not.toBe(off.find((definition) => definition.id === id)?.text);
     }
     const text = on.find((definition) => definition.id === "R-tsp-16")?.text ?? "";
-    for (const row of PROPERTY_LEDGER) {
+    // off の導出は旗 ids だけが要る行（検査の式）を除く（Issue #800）
+    for (const row of ledger.rows) {
       if (row.rules.t2Ids !== null) expect(text, row.id).toContain(row.rules.t2Ids);
     }
     // 既定値・選択肢の集合の「作る」文は無く、空の集計の今の文（行ごと・月の見出しごとに使う）は残る。when の文は今のまま
@@ -3622,7 +3623,7 @@ describe("旗 v12.ids：所属が項目の行だけの fixed-test の要件に�
     ]);
   });
 
-  it("負例 (a)：項目だけの所属の ruled の要件に validate の normal だけを書いた応答は、今までどおり「abnormal の試験が無い」「boundary の試験が無い」で落ちる（免除の関数が返さない）", async () => {
+  it("負例 (a)：項目だけの所属の ruled の要件に validate の normal だけを書いた応答は、今までどおり「abnormal の試験が無い」「boundary の試験が無い」で落ちる（項目だけは免除の対象でない）", async () => {
     const { list, table } = withRequirement({ list: HLIST, table: HTABLE }, "R9", "項目の種類は決まった値だけをとる。", ["f.item.kind"], "ruled");
     expect(normalOnlyOwnershipRequirementIds(table, ledger, list)).not.toContain("R9");
     const natures = [...NATURES_H, { requirementId: "R9", nature: "ruled" as const }];
@@ -4354,7 +4355,7 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
 
   /**
    * 基本の台本（5 件・束 1）：R1 は画面＋項目の ruled、R2 は entity だけの existence-only、R3 は計算だけの existence-only、R4 は項目＋
-   * 条件のある操作の existence-only、R5 は 2 つの項目の ruled（一方だけ三種）
+   * 条件のある操作の existence-only、R5 は 2 つの項目の ruled（一方だけ三種）。R1・R5 は値の対象が無いので免除される（Issue #800）
    */
   const BASE: readonly Def[] = [
     ["R1", "項目の題名は空にできず、一覧の画面で見られる。", ["s.items", "f.item.title"], "ruled"],

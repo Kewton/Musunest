@@ -380,6 +380,7 @@ function valueKeysOf(text: string): readonly string[] {
  */
 export function expandTestCases(output: TestCasesOutput, table: NameTable, ledger: LedgerView): TestCasesExpansion {
   const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const verificationById = new Map(table.verification.map((entry) => [entry.requirementId, entry] as const));
   const isEntity = (id: string): boolean => rowById.get(id)?.kind === "entity";
   const problems: Problem[] = [];
   const tests: Record<string, unknown>[] = [];
@@ -421,7 +422,12 @@ export function expandTestCases(output: TestCasesOutput, table: NameTable, ledge
       } else if (entry.observes !== null) {
         problems.push({ field: `${at}.observes`, message: TEST_CASE_EXPAND_MESSAGES.observesLegacy });
       } else {
-        observes = derivedObservesOf(ledger, row.kind, caseOperationOf(row));
+        // 項目・entity の行は、要件の確かめ方が検査の式（validation-expression）ならその性質、そうでなければ今の一意の導出（Issue #800）
+        const verification = verificationById.get(entry.requirementId);
+        observes =
+          (row.kind === "field" || row.kind === "entity") && verification?.kind === "validation-expression"
+            ? verification.kind
+            : derivedObservesOf(ledger, row.kind, caseOperationOf(row));
         if (observes === undefined) problems.push({ field: `${at}.observes`, message: TEST_CASE_EXPAND_MESSAGES.observesUndetermined });
       }
     }
@@ -878,7 +884,9 @@ const FRAME_LIMIT = AGENT_LIMITS.testsPerRequirement;
 const isOperationWithWhen = (row: NameTableRow): boolean =>
   row.kind === "operation" && row.type !== null && typeof row.type === "object" && "hasWhen" in row.type && row.type.hasWhen === true;
 
-/** 値の対象の候補（表の所属の項目・entity・操作・計算の行。導いた親 entity・画面の行・表に無い行は入れない）と合法な正常の対象 */
+/**
+ * 値の対象の候補（表の所属の項目・entity・操作・計算の行。導いた親 entity・画面の行・表に無い行は入れない）と合法な正常の対象
+ */
 function frameTargetsOf(table: NameTable, requirementId: string): { readonly valueTargets: readonly string[]; readonly normalTargets: readonly string[] } {
   const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
   const roles = table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? [];

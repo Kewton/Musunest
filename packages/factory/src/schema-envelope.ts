@@ -204,6 +204,9 @@ export function stageEnvelopeEntriesV12Of(flags: Pick<V12Flags, "ledger"> & Part
 /** `--pipeline v1.2` の実効の旗（`V12_PIPELINE_FLAGS` から組む） */
 const PIPELINE_V12_FLAGS = fromPublicV12Flags(V12_PIPELINE_FLAGS);
 
+/** 識別子 `v1.2`（ids off）の枝を組む台帳の導出（`requires` を持つ行を除く。Issue #800） */
+const ENVELOPE_V12_OFF_LEDGER = ledgerViewOf({ ledger: true, ids: false });
+
 /**
  * 識別子 `v1.2` の封筒に入れる段の一覧（`--pipeline v1.2` の旗の組 `V12_PIPELINE_FLAGS` から導く。Issue #588）。
  *
@@ -211,13 +214,17 @@ const PIPELINE_V12_FLAGS = fromPublicV12Flags(V12_PIPELINE_FLAGS);
  * まま**にする——旗 ids off の v1.2 の走りが送る封筒のバイト列を変えないためだけに残す（旧の枝は段の要求には使わない）。ids on の
  * 走りは識別子 `v1.2-ids` の一覧（`STAGE_ENVELOPE_ENTRIES_V12_IDS`）を送る。T2 の枝も同じ理由で ids off の導出
  * （`testSpecSchemaOf(ledger, false)`）のままにする（ids on の場合の形は識別子 `v1.2-ids` の一覧だけに載る。#624・#625）。
+ * Issue #800 では、旗 ids だけが要る台帳の行（検査の式）を**全枝の導出から除く**——T1 の枝（`nameTableSchemaOf`）・T2 の枝・C2 の
+ * 旧の枝を off の導出で組み直し、ids off の封筒のバイト列を変えない。C1 の枝は台帳の集計の種類だけを読み、旗 ids の行に依らない。
  */
-export const STAGE_ENVELOPE_ENTRIES_V12: readonly StageEnvelopeEntry[] = stageEnvelopeEntriesV12Of(PIPELINE_V12_FLAGS).map((entry) =>
+export const STAGE_ENVELOPE_ENTRIES_V12: readonly StageEnvelopeEntry[] = stageEnvelopeEntriesV12Of({ ledger: true, ids: true }).map((entry) =>
   entry.stage === MAPPING_SCHEMA_NAME
-    ? { stage: entry.stage, schema: legacyMappingSchemaOf(ledgerViewOf(PIPELINE_V12_FLAGS)) }
+    ? { stage: entry.stage, schema: legacyMappingSchemaOf(ENVELOPE_V12_OFF_LEDGER) }
     : entry.stage === TEST_SPEC_SCHEMA_NAME
-      ? { stage: entry.stage, schema: testSpecSchemaOf(ledgerViewOf(PIPELINE_V12_FLAGS), false) }
-      : entry,
+      ? { stage: entry.stage, schema: testSpecSchemaOf(ENVELOPE_V12_OFF_LEDGER, false) }
+      : entry.stage === NAME_TABLE_SCHEMA_NAME
+        ? { stage: entry.stage, schema: nameTableSchemaOf(ENVELOPE_V12_OFF_LEDGER) }
+        : entry,
 );
 
 /** 識別子 `v1.2` の全段で送る封筒の schema（起動時に 1 度だけ組む。全段で**同じ実体**を使う） */

@@ -22,7 +22,7 @@ import { readSpecDocument } from "@musunest/spec-engine";
 import type { TestSuite } from "../fixed-test.js";
 import type { CorrespondenceMiss, DeclarationLocation, StructuralCheckOutcome } from "../pipeline.js";
 import type { RoutedFailure } from "../stages/run-tests.js";
-import { requiredValidationLocation, rowLocation, type RequiredValidation } from "../v11a/bind-by-id.js";
+import { VALIDATION_OBSERVES, requiredValidationLocation, rowLocation, type RequiredValidation } from "../v11a/bind-by-id.js";
 import { deriveOwnership, type NameTable, type NameTableGroupBy, type NameTableKind, type NameTableRowType } from "../v11a/names.js";
 import type { TestObserves } from "../v11a/stages/test-spec.js";
 import { NAMED_FAILURE_MESSAGES, type NamedFailure, type NamedFailureKind } from "./search-repair.js";
@@ -460,7 +460,7 @@ function additionCandidates(
   for (const testId of testIds) {
     if (candidates.has(testId)) continue;
     const test = input.suite.tests.find((candidate) => candidate.id === testId);
-    if (test === undefined || test.operation !== "validate" || ids.observes.get(testId) !== "validation") continue;
+    if (test === undefined || test.operation !== "validate" || !VALIDATION_OBSERVES.has(ids.observes.get(testId) ?? "")) continue;
     const required = requiredValidationLocation(input.table, test);
     if (required === undefined || required.entity === null) continue;
     const entry = ids.requiredValidations.find(

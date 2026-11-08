@@ -1186,7 +1186,7 @@ const V11A_TABLE_IDS: NameTable = withCodeIds(withAggregates(V11A_TABLE));
 const v11aRenamed = <T,>(value: T): T => renameIds(value, V11A_CODE_RENAME);
 
 /** v1.2 の走りの C1 の 3 束と C2 の記録（台帳を渡せば、その台帳の schema に合わせる。Issue #593） */
-const v12TableCalls = (ledger: LedgerView = ledgerModule.PROPERTY_LEDGER_VIEW): RecordedCall[] =>
+const v12TableCalls = (ledger: LedgerView = ledgerModule.PROPERTY_LEDGER_VIEW_IDS): RecordedCall[] =>
   idsResponseList(idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledger)).map((output) => structured(output));
 
 /**
@@ -1464,10 +1464,14 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
    * 「要る検査の骨組み」の塊を外し、R-w11-07 を旗 ids off の文に戻す（塊が在ることを確かめてから）
    */
   const withoutIdsGenerated = (requests: readonly unknown[], ledger: LedgerView = PROPERTY_LEDGER_VIEW, generated = true): unknown[] => {
-    const idsRules = ruleTexts(testSpecRuleDefinitionsOf(ledger, true));
+    // Issue #800：既定の呼び出しは ids と ledger が on の走り（検査の式の行を含む導出）を戻す。2B などの固有の台帳はそのまま使う
+    const idsLedger = ledger === PROPERTY_LEDGER_VIEW ? ledgerModule.PROPERTY_LEDGER_VIEW_IDS : ledger;
+    const idsRules = ruleTexts(testSpecRuleDefinitionsOf(idsLedger, true));
     const offRules = ruleTexts(testSpecRuleDefinitionsOf(ledger));
-    const idsSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(ledger, true));
+    const idsSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(idsLedger, true));
     const offSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(ledger));
+    // Issue #800：旗 ids on の B1 は台帳の検査の式の行の文（R-w11-13）を末尾に持つ。比べる相手には無いので外す
+    const newRowB1 = idsLedger === ledgerModule.PROPERTY_LEDGER_VIEW_IDS ? (ledgerModule.PROPERTY_LEDGER.find((row) => row.id === "validation-expression")?.rules.b1 ?? "") : "";
     const [, , testsName] = WRITE_V11A_DATA_NAMES;
     const testsBlock = new RegExp(`(<data name="${testsName}">\\n)([\\s\\S]*?)(\\n</data>)`);
     return requests.map((value) => {
@@ -1493,7 +1497,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
           expect(parsed.tests.some((test) => isGeneratedTestId(test.id))).toBe(generated);
           return `${head}${JSON.stringify({ ...parsed, tests: parsed.tests.filter((test) => !isGeneratedTestId(test.id)) }, null, 2)}${tail}`;
         });
-        return { ...restored, input };
+        // Issue #800：旗 ids on の B1 は台帳の検査の式の行の文を末尾に足す。比べる相手には無いので外す
+        return { ...restored, rules: (restored.rules ?? []).filter((text) => text !== newRowB1), input };
       }
       // Issue #795：旗 ids on の B3' は塊「要件に結び付いた検査」と R-dc-03 の ids の文を持つ。どちらも元に戻して比べる
       if (request.schemaName === DECL_CHECK_SCHEMA_NAME) return withoutLinkedValidationsOn(request);
@@ -1663,10 +1668,32 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     spy2C.mockRestore();
     const before2CRequests = withoutStructuralRequirement(withoutCheckTargets(laterRequests(v12Before2C.recording.structured)), LEDGER_VIEW_2C);
     const diffs2C = requestDiffsOf(onRequests, before2CRequests);
-    const when2C = withoutTableStage(WHEN_NON_REQUIREMENT_REQUEST_DIFF);
+    // Issue #800：ids on の B1 は台帳の検査の式の行の文（R-w11-13）を末尾に持つ。ids off（run.test の #550）の期待は変えず、
+    // ids on の比較にだけ差を足す
+    const when2C = withoutTableStage({ ...WHEN_NON_REQUIREMENT_REQUEST_DIFF, [WRITE_V11A_SCHEMA_NAME]: ["$.rules"] });
     for (const diff of diffs2C) expect(diff.paths, diff.schemaName).toEqual(when2C[diff.schemaName] ?? []);
     expect(diffs2C.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(when2C));
-    expect(JSON.stringify(withoutWhenAndNonRequirement(onRequests))).toBe(JSON.stringify(before2CRequests));
+    // Issue #800：ids on の要求から検査の式の行の文だけを外す（ほかの #595・#666・#795 の塊は 2C の走りにもあるので残す）
+    const fullT2Rules = ruleTexts(testSpecRuleDefinitionsOf(ledgerModule.PROPERTY_LEDGER_VIEW_IDS, true));
+    const noNewT2Rules = ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true));
+    const fullC3Rules = ruleTexts(semanticCheckRuleDefinitionsOf(ledgerModule.PROPERTY_LEDGER_VIEW_IDS, true));
+    const noNewC3Rules = ruleTexts(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true));
+    const newRowB1Rule = ledgerModule.PROPERTY_LEDGER.find((row) => row.id === "validation-expression")?.rules.b1 ?? "";
+    const stripValidationExpression = (requests: readonly unknown[]): unknown[] =>
+      requests.map((value) => {
+        const request = value as LlmStructuredRequest;
+        if (request.schemaName === TEST_SPEC_SCHEMA_NAME) {
+          return { ...request, rules: (request.rules ?? []).map((text) => { const at = fullT2Rules.indexOf(text); return at < 0 ? text : (noNewT2Rules[at] ?? text); }) };
+        }
+        if (request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME) {
+          return { ...request, rules: (request.rules ?? []).map((text) => { const at = fullC3Rules.indexOf(text); return at < 0 ? text : (noNewC3Rules[at] ?? text); }) };
+        }
+        if (request.schemaName === WRITE_V11A_SCHEMA_NAME) {
+          return { ...request, rules: (request.rules ?? []).filter((text) => text !== newRowB1Rule) };
+        }
+        return request;
+      });
+    expect(JSON.stringify(withoutWhenAndNonRequirement(stripValidationExpression(onRequests)))).toBe(JSON.stringify(before2CRequests));
     expect(v12Before2C.code).toBe(v12.code);
     expect(v12Before2C.summary).toEqual(v12.summary);
     expect(v12Before2C.record.conditions).toEqual(v12.record.conditions);
@@ -1973,7 +2000,7 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
   const segment0 = (): RecordedCall[] => v12Head().slice(0, 5);
   /** C2 が 2 回とも形で断られる応答（C1 の 3 束は通る） */
   const c2Broken = (): RecordedCall[] => {
-    const outputs = idsResponseList(idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW));
+    const outputs = idsResponseList(idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW_IDS));
     const mapping = outputs[3] as { readonly requirements: readonly unknown[] };
     return [...outputs.slice(0, 3).map((output) => structured(output)), structured({ requirements: mapping.requirements.slice(1) }), structured({ requirements: mapping.requirements.slice(0, -1) })];
   };
@@ -2344,7 +2371,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     vi.restoreAllMocks();
   });
 
-  const outputs = () => idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW);
+  const outputs = () => idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW_IDS);
   const raw = (): readonly Record<string, unknown>[] => idsResponseList(outputs());
   const rawFields = (): { readonly fields: readonly Record<string, unknown>[] } => raw()[1] as { readonly fields: readonly Record<string, unknown>[] };
   const fieldsWithEntity = (entity: string) => ({
@@ -2732,7 +2759,7 @@ describe("旗 v12.ids の C3 の構造の検査の読み方（Issue #732）：�
     expect(wholeRules).toHaveLength(1);
     expect(stageRules).toEqual(wholeRules);
     expect(wholeRules[0]).toContain(structuralReadingText());
-    expect(wholeRules[0]).toBe(ruleTexts(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true))[1]);
+    expect(wholeRules[0]).toBe(ruleTexts(semanticCheckRuleDefinitionsOf(ledgerModule.PROPERTY_LEDGER_VIEW_IDS, true))[1]);
     // ids off（台帳と探索は on）の走りは読み方の文を持たない
     const flags = { ledger: true, searchRepair: true, ids: false };
     vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => flags);
@@ -5073,24 +5100,25 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    *   下の BEFORE_761_RAW・BEFORE_761_REQUESTS・BEFORE_761_BUDGET（旧の指紋）と一致する
    */
   const BEFORE_746: Readonly<Record<string, string>> = {
-    "stage-stagnation": "7123faace1099eca54b188bcb571d27850bd9a06d9519822ba631e2811914832",
-    "stage-adopting": "66a368abcb50c8a6d620c9ce365a457fdb000e40f75af1309df4af8ae19442bd",
-    "stage-sets": "af5d0c06cb05d20bf20f02a7c8d64819c5d2acffdf75b33b0c9116173dab873f",
-    "stage-mixed": "6c7a8d4405afcfb946478234ddec16bba9b3325e8c7a29fe678868ea02b7fd42",
-    "stage-returned": "2c526069477d0913563cb7cfb123d5866564f212d970c40f79662a3ae2ae6261",
-    "stage-recounts": "71b516b950f98825c6769da2a9da74d04762aa6acf2dffff1c457acaa0df8e50",
-    "stage-stop-repair": "834ed3d14c64c85792a17267fd325d3e910e88530142e546356aaa561d16f331",
-    "stage-stop-first-eval": "ffd1c10c0086037dd583e3dffb1c65d426788341d3fbf96c8874fc776b00b225",
-    "stage-stop-commit": "798da084657d49892bc8543c867bc560da20559c0706faa411975527127e1450",
-    "whole-stagnation": "fba02b2acc1c51880303888c5975fdaf7710b4ba8898c1c318cf571156b60897",
-    "whole-adopting": "1c00d9e844350a7930a9f81e82be575c22545c1e2801ddd362ca9c296e9d8ad0",
-    "whole-sets": "6d85af64487108677d7f260b3520f78023c0dea2df54c37bd07f6156a50ac4e6",
-    "whole-mixed": "c17b8e6f10a4519353a92da2ac6f5e08ac66be6697cecffdef7458d5f255443e",
-    "whole-recounts": "d37a80c6bbdf58516957d82600e1651c91cff121c235e911b69e2f6e0c20b849",
+    // Issue #800：ids on の 16 経路は、台帳の検査の式の行の文（T1・T1''・T2・B1）と C2 の schema が要求に入るため取り直した
+    "stage-stagnation": "ca7539d9644f7707192db0722226c88ad1d7e7f56fb25ff00d5652fb652f8d29",
+    "stage-adopting": "fc5bf9e3cf46e35d28e08aadd158a8dfed51d2e5afe492e7ada71dcd6817303c",
+    "stage-sets": "2ec338effa2b26d9641cefeaa0e21309700d87dde6e4d39f9b7cd4632a865474",
+    "stage-mixed": "4242b1192b8c9b8b240ec2cb215f521b21b97cf03a726b3807234a735784ff62",
+    "stage-returned": "af78fc5a2535d54f800116d7bc88f0702c30dd88f8e158f940ddabbc32e16178",
+    "stage-recounts": "6097a18d5773b075729db51fbf7854434fab71bb6080ba01294546fd3775ce2d",
+    "stage-stop-repair": "4e7260c24bb3f5c103e6dcbf3c8b69d93712d471008c2e5d2f2323279938f70c",
+    "stage-stop-first-eval": "f99bb18accacd19d56516bf6bb56f9150a65102f8ab693a6bdb3ece9ba26e93b",
+    "stage-stop-commit": "692780c87fd29b472e4b11f54ccc91411dfd27027f7719e9019516b8b5e73279",
+    "whole-stagnation": "e6ab9faae97d3ba2c6ca696c75a37f12787604eb3b1b115db10204eb4b1e658a",
+    "whole-adopting": "4613a214043ed083d2781083782cf36847d3b36c4f027fcf753ddb27b16ebf01",
+    "whole-sets": "f9d7b1d0bb639b36c904849ee778e9e88a8c9883389ca1d54580044f1ac804c9",
+    "whole-mixed": "04a8336783b384e3e8e4eef3f346dd70a4c65acb248bc9f7e8365575dac3e851",
+    "whole-recounts": "c3c277bb35e220a0c82085fec60362d889a7b492ce99d21d00adc853c812acf2",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
-    "stage-search-repair-off": "52ffc1bff4ca7a45ef740c522e240e40472074ae502acb462f8aa02d8146d683",
-    "whole-search-repair-off": "df1fa5649b563bf458e8905dbfcc2c808f4611ba184047fda6ee670bcd17ba80",
+    "stage-search-repair-off": "84d37467f6c63c797ab52cb6e6c7ef6b61dd6505d7d145fab8b432482d32d0dd",
+    "whole-search-repair-off": "6c7cd44c0965e84dc87d166a2da04400380b5c6064b77dafb76e7a81f2a06e1c",
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
@@ -5100,24 +5128,24 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    * （f9bf3b3 は診断を持たないので、その出力がそのまま旧値）。BEFORE_746・BEFORE_748_BASE の 2 つの試験で同じ値。
    */
   const BEFORE_761_RAW: Readonly<Record<string, string>> = {
-    "stage-stagnation": "9881cad9402ddada5a41e32251ab276c3f8ea30e9f3995cb76ef9840d6570dc6",
-    "stage-adopting": "b5a003ecc6ed093a02658d2c7131c50a995e4071e668bfafe15e794bc3dd6fdd",
-    "stage-sets": "927605dd5db8f00b8d3c01d8dbc498db25c00ad98168d4f85949ad4983760c09",
-    "stage-mixed": "6c50138f61543037914fc0ad84010d6ab44ade09389e09ee83f3e925586ddf13",
-    "stage-returned": "b8cfd4984dc2d78ac70adbb2f1686c7c9d5feeed2ab2d593923e2acd5ac7caed",
-    "stage-recounts": "2ca966f9ad83f63022c7cc683b0b4c8223382ccd27c975b280fb8c6653f276f4",
-    "stage-stop-repair": "7712f4bcdc71c8d0b0a6db298fc5af17e8d487bb2aec7bd1722ba2df0122bcca",
-    "stage-stop-first-eval": "9d868b963803251c0d9509d03425b7bd1204a60c4f80d9b7612c2dad9168a2e9",
-    "stage-stop-commit": "217b9efd70d5b6490d9f152b510fd0ed7b09046d8691a2725adfe1c64628294a",
-    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
-    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
-    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
-    "whole-mixed": "175e38f8f70ca325904c33cad04d27aede2d8cd1005ebef141c9825ab4acf572",
-    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
+    "stage-stagnation": "0e842d732e779d02c52ff6d7c7ca34c0c85174f88ccca617b4a5a49643f434cc",
+    "stage-adopting": "2ba65bff52230824b574d69b9845b9fa5f6f201319b4172fdd7f56c07d766fa3",
+    "stage-sets": "57718d129aa7ab8bbd572c96b5661d27cdfe2fe527a044d33a3cd38a25f6e11d",
+    "stage-mixed": "90ee0d3558b7ca6b1fb897781228871464784b5c9f6e519bc5509ce3288dc6eb",
+    "stage-returned": "e22c8073328b6efc0f80d945fc1deaf800679544b127e11845c8a7b33f2e52fd",
+    "stage-recounts": "5faa1e468e3f06b58ed1e67895fabc58e44374be66cb815eb565023b893eb466",
+    "stage-stop-repair": "30e334e01c82e1777c316504937bf2b66ae0ad780d5a41dc26358f3b2c292a2d",
+    "stage-stop-first-eval": "c499f3d6cab4e805d5d2fb0ed6781e9f4447b4da671b6f5f3f2c9a0c75b3f6c4",
+    "stage-stop-commit": "50c15fef0eb3aaada6eb8130eaebb0a852b3ea2f11b2b66fe0c1d60fa9926f20",
+    "whole-stagnation": "6b66e6fa35b51241d1daa1a9f179b5f8e5ffb94d4c8f7231b88cc721d821ae82",
+    "whole-adopting": "d1ca08f7cd60746cdeb40debf9b1ef139d37c97ff5716e3878e70528c274a496",
+    "whole-sets": "cc84845a1a1dcfb367571888bb8a62b696a1e2cd6afabce390d93c82a9050acf",
+    "whole-mixed": "39bf4169502fc8a757e96f6a098945f588bbc6eb04b9b86ed75951d5c6b7074a",
+    "whole-recounts": "83f98877e451f3240b44a14cb6374d4fa189de92796682d13d0799298e7628f5",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
-    "stage-search-repair-off": "7058e57fd0e39a0ff8ffb1cd08a2812f9e25c015da58601838336b9b3157e8a9",
-    "whole-search-repair-off": "b54b883dcc61c988952fbce4d66ff2bc6cdd8174f24d797824d4bde1371875bb",
+    "stage-search-repair-off": "9163edc158070dd84b013afb658b5d4f87997b200ca127d817cb84cba0b510fa",
+    "whole-search-repair-off": "523e9734a0198c766470d85a4160a7759a399d2dc3f37919911e0d733a66966c",
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
@@ -5481,24 +5509,24 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    * 増やし、要約と manifest の費用（budget_*）が正当に変わるため、全出力の指紋は旧値に戻らない。その 4 経路はこの要求の列で裏付ける。
    */
   const BEFORE_761_REQUESTS: Readonly<Record<string, string>> = {
-    "stage-stagnation": "30e19d97f5066ddab1d8512109962e6b0cb3889c29d8fbd171e03b3c17d93ab5",
-    "stage-adopting": "598ba99a953db44e1124cb9cccd6027bf631072601353cad4c31d4d8b4eb103a",
-    "stage-sets": "84081b913792d90cdf7ae696fd9b99913b0e025d6c0d211adf86b1866dd25a19",
-    "stage-mixed": "1be16e63d074a603dda47b294fad4a63f327f8e1246e07f7c6e5a8b61cf3fd63",
-    "stage-returned": "e2c89fbd63b3ab60cf6583e2c071ed5e596296f01358d2f90a99e100540003ad",
-    "stage-recounts": "e0cd63d27922a7ca28659c2964442a13b646b4e0c129bfa2964db1069ef3cb89",
-    "stage-stop-repair": "950f5dda164cf2126eba360e4975858291cd6c3c1c0bf85fe0e6789a07374bba",
-    "stage-stop-first-eval": "d2df7b103f039a1ac320242f2672573f96842c5b6b286eac201d14f504b9af01",
-    "stage-stop-commit": "3e6bfc6011d8d5cc905ef744876c0a6ab0dda5acb849c13ee3783c3340d48c31",
-    "whole-stagnation": "592f2ccf14928c8e01a216f7d1e9687fca259e6c8e0b847a4e654a5d9ad0b6d5",
-    "whole-adopting": "4c5e0233fc60b399a834c78080d3e90ed9829405a57dee6dc65ffb7890fa97cb",
-    "whole-sets": "cb1f78a8f36d815ef008cf4d831575703f0931877488fa2c9b8c9a4e8617c319",
-    "whole-mixed": "115b25a31bb3e7adecc0adaa905f06643ac071cbf088289cbc1fc81798cd1a17",
-    "whole-recounts": "aa9716185ea3d1c1a7566fdeff01842e1c6b6ab24ecf0042721b7afbe4950c2f",
+    "stage-stagnation": "70549f23f316e4f1834e20a3818e11331054fe3d97ff44005a545d0a0ffabe40",
+    "stage-adopting": "6b7df8f2c831b358ba66decfc4115cca2390387ab9a9a9dea439183f1b50e895",
+    "stage-sets": "4e39a66290be54ee89b476d693d6c0a1da47488acfdd7e1a6c8f64a520f7d183",
+    "stage-mixed": "68f681db05581c1f93507d240b67b1a439f977fea9d7d61e788b0e9e1cc1f3f7",
+    "stage-returned": "6c1e9b13288ee4d68f34627d00c6e3009546d708e931f0742283469d6efcdc0c",
+    "stage-recounts": "c5723328882dc23f29517971e291cf8aa696075c756ee64837c39a057a5f08ac",
+    "stage-stop-repair": "8fea8cbc500d9d601b219c1c2f984497d6f46e3e0809f215e4ab559283ef9753",
+    "stage-stop-first-eval": "879b1244e00f01ec3184ef3a359bc6d32a3f1dd1288fd5c2a1b6a072b060b256",
+    "stage-stop-commit": "c2d72f7d50a67bff77b79207b1797aeba9c826af17db17edbd737cbe4b6e2f73",
+    "whole-stagnation": "c2a92be5fb0850252ab6d586ea6d17fd157dd99fa6d29bfb12104ebb8671e665",
+    "whole-adopting": "c2d8b40cd90915f1617f241891fd9c1a6b09c441370196e7c95dcd32d54cee8f",
+    "whole-sets": "ceb1e2179d7fce3c78fa539d3570ee323c01b6dc9691fefd1a0f2489071ffd1b",
+    "whole-mixed": "fd012114d444b181cddc830b87d1f65ff35b63c9283d81c06128c0c3b5411eef",
+    "whole-recounts": "d9842c39932d4a9801a6cbcd1fb0e6857e0b281e895da57c30ba1496b25d561e",
     "stage-ids-off": "4892a859e7834898007814a70cf19c148937300ece217f15f37cc3bcb0739897",
     "whole-ids-off": "275abc7af981338165bf13ee3c8fb33ad9d3d81954a058976210b701928c3e3d",
-    "stage-search-repair-off": "426ba93fc8932b6d2cfe586215e0ccf21909c154318b384951bc440cc95604b3",
-    "whole-search-repair-off": "71142383a847415393ac551d5a7f96e714701b9ee5f0e98ea4cccc8f02ceffd4",
+    "stage-search-repair-off": "f640b36ef3a6d7a532d80e7430ab98e2b12738c65d864e7bed20a81d2c16baf2",
+    "whole-search-repair-off": "e8f0109597b76e219fa5e268f63198e3c533c01a616680c05a9d9b965d234f7f",
     "stage-v11a": "b4e6ebe698f85d4b2015554d745099aacc12018207dbba2cbbe2bd40f60481eb",
     "whole-v11a": "d16eceeaa1148ff63334635e65a9ab9402262a1f280f505b92746ea9e6394444",
   };
@@ -5522,18 +5550,19 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    * （f9bf3b3 には診断が無いので取り除きは無い）。測った後に worktree は remove した。台本は下の INVARIANT_RUNS と同じ 4 経路。
    */
   const BEFORE_761_BUDGET: Readonly<Record<string, string>> = {
-    "whole-stagnation": "15a09455bcb63ed4ed3828cf4ea8115c288fcd186a8a60f52a0bda049bb0c6b0",
-    "whole-adopting": "f66f806648b8f86506dd2d1e5c0086c72567d1a15a5a0be2be700b73b4139d19",
-    "whole-sets": "afb63e0962c9ab0fd031b88cd71814c4042961bbebc44353c48d2dbcda3f834f",
-    "whole-recounts": "af26e804452f3d711e529a5c9671f6276341e70b03a39844847f7ee6344157d0",
+    "whole-stagnation": "9d4c47ffd0b069bb94a28f3d736daa1cef004df99cea80c9c8764f6dcb1f7f07",
+    "whole-adopting": "58d8365517ff4adce78f76e17589d0f060d03dd5c250816d2f733cb31d32f20a",
+    "whole-sets": "23bd7443eee8f91d2ed7969b1c5d19132f4a667bba134426c508d984cb30c41e",
+    "whole-recounts": "9e15ffa6c4b14d46599ddeef3ebbd8d0550ac914ee8f72f08b5fa758ec710d4e",
   };
   /**
    * Issue #795 の前の、**B3' の塊と R-dc-03 の ids の文を外し、budget_* の値だけを固定の印に替えた**全出力の指紋（期待）。
    * #795 で B3' の入力長が変わり、予約の端数の浮動小数の表れが変わる 2 経路。塊と文を外した要求は #795 の前と同じ
    */
   const BEFORE_795_BUDGET: Readonly<Record<string, string>> = {
-    "whole-mixed": "0c560b407f214f9115e3d366f7d1306da5b32e70c2e9050a19b789f83cd8d7c1",
-    "whole-search-repair-off": "8cf44cc06499042297ae53826453603f104c032e2e1b9e6d7d07253eb70c94a1",
+    // Issue #800：ids on の 2 経路は台帳の検査の式の行の文と C2 の schema が要求に入るため取り直した
+    "whole-mixed": "aa58cc96fb4f0da241cd7291f3cdde80806b46df1960ef78f0ff27757507612c",
+    "whole-search-repair-off": "0af9f5725fbaa7c699e63bdc30e95ac4a6ee0ea6c183ec86adc52036a22622f6",
   };
   /** 費用の印に替えた全出力の期待（#761 の 4 経路は #761 の値、#795 の 2 経路は #795 の値） */
   const budgetExpectedOf = (name: string): string | undefined => BEFORE_795_BUDGET[name] ?? BEFORE_761_BUDGET[name];
@@ -5630,24 +5659,25 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    *   ids off・v1.1a は旧値のまま
    */
   const BEFORE_748_BASE: Readonly<Record<string, string>> = {
-    "stage-stagnation": "dcd6cb24b804ae4d21e391b9d38632006827a9eb00dcc23aa5e3761aa92ae56e",
-    "stage-adopting": "bcc1e76c3b7a4d461940a26fa966539ab6ef9599c032f45df8a346cba7be49fe",
-    "stage-sets": "5a87741f7b3e6f1ddbd21404fd99f2877927247fdbf5a9d7e1f1b7f54181970f",
-    "stage-mixed": "1a364ed509595569c61329d4ec3fd6d0be956cd52fdc2ff1143c3b6ba1a8ac92",
-    "stage-returned": "1f572cbe4b5e36a4d60399699f3ad1a6317fe4b5ded39ae4b736474da76249bd",
-    "stage-recounts": "44156ab27997f88ce9b9dc3e4603754fda54471c2cbb9ba940c925898f16f086",
-    "stage-stop-repair": "f7bba3aa12f9ca4dad5ebf5c5319b66f3f440ed6a7ce6606a83a7b4803d19e73",
-    "stage-stop-first-eval": "0783975e0d141d2f4b05f27e4384eb524ef61f7fd282846e7e46b8f19ebb7a27",
-    "stage-stop-commit": "15f1385f99503285050f5a339ef380226fe3dec14476c1795b20ffcfd9dac21f",
-    "whole-stagnation": "fba02b2acc1c51880303888c5975fdaf7710b4ba8898c1c318cf571156b60897",
-    "whole-adopting": "1c00d9e844350a7930a9f81e82be575c22545c1e2801ddd362ca9c296e9d8ad0",
-    "whole-sets": "6d85af64487108677d7f260b3520f78023c0dea2df54c37bd07f6156a50ac4e6",
-    "whole-mixed": "c17b8e6f10a4519353a92da2ac6f5e08ac66be6697cecffdef7458d5f255443e",
-    "whole-recounts": "d37a80c6bbdf58516957d82600e1651c91cff121c235e911b69e2f6e0c20b849",
+    // Issue #800：ids on の 16 経路は、台帳の検査の式の行の文（T1・T1''・T2・B1）と C2 の schema が要求に入るため取り直した
+    "stage-stagnation": "97d173b368c6f4b945dac317b985d9bd7849c81c31e88c99c54b56e05e1baddf",
+    "stage-adopting": "2cddef52632095313698edcebcab0d6964fd1e6c3aa4c04d722b284d70309f6c",
+    "stage-sets": "222074e03faeef54ae5e31e2405f334cf6b058585da33fce42aec9307818421f",
+    "stage-mixed": "5f1176060c15662a688f489f5c33fb67fb76a8ccbb85de14ae8d0d3553d7efa3",
+    "stage-returned": "5d52d50218005964028d090e9c229e52cd5475a796cdd073134ed396423e884b",
+    "stage-recounts": "37e80f711bee08b0720eda4385c36f7e99c447b9e1896efb7116a4a56b9d3ad2",
+    "stage-stop-repair": "3927f8682e949fc088666d67b43299911410b6a0fdaa79a5a584d5ccd14578c8",
+    "stage-stop-first-eval": "6752089601421032a2d0cf50617a275c76ba15f7e9ada36905e999eb625c4093",
+    "stage-stop-commit": "2b9eb4fdff6646fe9120dfb34e933fb4ce0175b4009b5625d0aeee85b905cdd9",
+    "whole-stagnation": "e6ab9faae97d3ba2c6ca696c75a37f12787604eb3b1b115db10204eb4b1e658a",
+    "whole-adopting": "4613a214043ed083d2781083782cf36847d3b36c4f027fcf753ddb27b16ebf01",
+    "whole-sets": "f9d7b1d0bb639b36c904849ee778e9e88a8c9883389ca1d54580044f1ac804c9",
+    "whole-mixed": "04a8336783b384e3e8e4eef3f346dd70a4c65acb248bc9f7e8365575dac3e851",
+    "whole-recounts": "c3c277bb35e220a0c82085fec60362d889a7b492ce99d21d00adc853c812acf2",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
-    "stage-search-repair-off": "52ffc1bff4ca7a45ef740c522e240e40472074ae502acb462f8aa02d8146d683",
-    "whole-search-repair-off": "df1fa5649b563bf458e8905dbfcc2c808f4611ba184047fda6ee670bcd17ba80",
+    "stage-search-repair-off": "84d37467f6c63c797ab52cb6e6c7ef6b61dd6505d7d145fab8b432482d32d0dd",
+    "whole-search-repair-off": "6c7cd44c0965e84dc87d166a2da04400380b5c6064b77dafb76e7a81f2a06e1c",
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
@@ -6062,7 +6092,7 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     };
   }
 
-  const LARGE_TABLE_RESPONSES = idsResponsesOf(LARGE_LIST, LARGE_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW);
+  const LARGE_TABLE_RESPONSES = idsResponsesOf(LARGE_LIST, LARGE_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW_IDS);
   const LARGE_C1: readonly RecordedCall[] = [
     structured(LARGE_TABLE_RESPONSES.entities),
     structured(LARGE_TABLE_RESPONSES.fields),

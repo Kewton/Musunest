@@ -498,7 +498,9 @@ if (NON_REQUIREMENT_ROW === undefined) throw new Error("前提が壊れた：台
  * #549 の台帳の行＝今の台帳から non-requirement の行を除き、when の行を手 2d の前（v1.1α から引き継いだまま。要件の決まりの
  * 型・条件の試験の型・外の対応・規則の文が未定義）に戻したもの（Issue #550）。手 2a〜2c の導出はここから組む。
  */
-export const LEDGER_ROWS_2C: readonly PropertyRow[] = PROPERTY_LEDGER.filter((entry) => entry.id !== "non-requirement").map(
+export const LEDGER_ROWS_2C: readonly PropertyRow[] = PROPERTY_LEDGER.filter(
+  (entry) => entry.id !== "non-requirement" && entry.requires === undefined,
+).map(
   (entry): PropertyRow =>
     entry.id === "when"
       ? { ...entry, requirementRule: null, t2Condition: null, outer: null, rules: { t1: null, t1Acceptance: null, t2: null, t2Ids: null, b1: null } }
@@ -1031,11 +1033,21 @@ export function idsResponsesOf(list: RequirementList, table: NameTable, ledger?:
       verification.kind === "structural"
         ? checkFieldsResponseOf(verification.targets ?? checkTargetsOf(table, item.id, verification.checks))
         : null;
+    // 台帳が検査の式（validation-expression）の行を持つ走りだけ、C2 の schema が targets を要求する（Issue #800）
+    const withValidationTargets = ledger?.rowByVerificationKind.get("validation-expression")?.t1?.targets === true;
+    const validationTargets = verification.kind === "validation-expression" ? [...verification.targets] : null;
     const { targets: _targets, ...withoutTargets } = rest as typeof rest & { readonly targets?: unknown };
     return {
       requirementId: item.id,
       roles: ownership.roles,
-      verification: { value: null, reason: null, constraintIds: [], ...withoutTargets, checks },
+      verification: {
+        value: null,
+        reason: null,
+        constraintIds: [],
+        ...withoutTargets,
+        ...(withValidationTargets ? { targets: validationTargets } : {}),
+        checks,
+      },
       nature: classification.nature,
     };
   });

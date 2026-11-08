@@ -49,7 +49,7 @@ import {
 import { generateTests } from "../generated-tests.js";
 import type { RequirementList } from "../../pipeline.js";
 import { semanticCheckTargets } from "../../v11a/stages/semantic-check.js";
-import { PROPERTY_LEDGER_VIEW, type LedgerView, type UpstreamLedgerView } from "../ledger.js";
+import { PROPERTY_LEDGER_VIEW, PROPERTY_LEDGER_VIEW_IDS, type LedgerView, type UpstreamLedgerView } from "../ledger.js";
 import type { ReferenceCounts } from "../ids.js";
 import {
   MAPPING_DATA_NAMES,
@@ -1257,7 +1257,7 @@ describe("初回の形のやり直しを落ちた要件だけの書き直しに�
     /** 初回の束の数（要件 15 で 3。Issue #736）。書き直し・作り直しの要求は束のあとの k 番目 */
     const k = mappingBundlesOf(sized.list).length;
     /** 全要件の 1 回の要求（書き直し・作り直しの要求の頭。Issue #736 で初回は束になった） */
-    const wholeRequest = () => mappingWholeRequestOf({ plan: planOf(sized.list), list: sized.list, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(createCheckedRecordingClient([]).client), rows: sized.table.rows, ledger: PROPERTY_LEDGER_VIEW });
+    const wholeRequest = () => mappingWholeRequestOf({ plan: planOf(sized.list), list: sized.list, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(createCheckedRecordingClient([]).client), rows: sized.table.rows, ledger: PROPERTY_LEDGER_VIEW_IDS });
     /** 台帳 on の要件 15 の走り（`buildSized` の ids on の表は台帳の形。記録した応答は束ごとに読む。Issue #736） */
     const ledgerRun = async (outputs: readonly unknown[]) => {
       const recording = createCheckedRecordingClient(outputs.map(recordedStructured), { bundledC2: true });
@@ -1269,7 +1269,7 @@ describe("初回の形のやり直しを落ちた要件だけの書き直しに�
         documents: FIXTURE_DOCUMENTS,
         gateway,
         rows: sized.table.rows,
-        ledger: PROPERTY_LEDGER_VIEW,
+        ledger: PROPERTY_LEDGER_VIEW_IDS,
         onRejected: (candidate) => rejected.push(candidate),
       });
       return { outcome, recording, gateway, rejected };
@@ -1289,7 +1289,7 @@ describe("初回の形のやり直しを落ちた要件だけの書き直しに�
       expect(second?.schema).toEqual(first?.schema);
       expect(second?.schemaName).toBe(first?.schemaName);
       expect(second?.maxOutputTokens).toBe(first?.maxOutputTokens);
-      expect(second?.rules).toEqual(ruleTexts(mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)));
+      expect(second?.rules).toEqual(ruleTexts(mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW_IDS)));
       expect(second?.input.startsWith(`${first?.input ?? ""}\n<data name="${MAPPING_DATA_NAMES.response}">`)).toBe(true);
       expect(blockOf(second?.input, MAPPING_DATA_NAMES.response)).toEqual(bad);
       expect(blockOf(second?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual([X]);
@@ -1504,7 +1504,7 @@ describe("C3 の拒否のあとの 2 回目を拒否された要件だけの書�
       documents: FIXTURE_DOCUMENTS,
       gateway,
       rows: sized.table.rows,
-      ledger: PROPERTY_LEDGER_VIEW,
+      ledger: PROPERTY_LEDGER_VIEW_IDS,
       previous: options.previous ?? previousOf(),
       onRejected: (candidate) => rejected.push(candidate),
       ...(options.inspect === undefined ? {} : { inspect: options.inspect }),
@@ -1513,7 +1513,7 @@ describe("C3 の拒否のあとの 2 回目を拒否された要件だけの書�
   };
   /** 全要件の 1 回の要求（2 回目の要求の頭と照らす。要件 15 の初回は束になったので、束の前の全要件の要求。Issue #736） */
   const firstRequest = async () =>
-    mappingWholeRequestOf({ plan: planOf(sized.list), list: sized.list, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(createCheckedRecordingClient([]).client), rows: sized.table.rows, ledger: PROPERTY_LEDGER_VIEW });
+    mappingWholeRequestOf({ plan: planOf(sized.list), list: sized.list, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(createCheckedRecordingClient([]).client), rows: sized.table.rows, ledger: PROPERTY_LEDGER_VIEW_IDS });
 
   it("書き直す要件は C3 が拒否した要件 ID の集合（拒否の種類に依らず全部・重複なし・一覧の順）。同じ入力から同じ", () => {
     const rejections = [rejectionOf(Y, "unnecessary-ownership"), rejectionOf(X, "missing-target"), rejectionOf(Y, "weak-verification")] as unknown as MappingPrevious["rejections"];
@@ -1535,7 +1535,7 @@ describe("C3 の拒否のあとの 2 回目を拒否された要件だけの書�
     expect(second?.schema).toEqual(first?.schema);
     expect(second?.schemaName).toBe(first?.schemaName);
     expect(second?.maxOutputTokens).toBe(first?.maxOutputTokens);
-    expect(second?.rules).toEqual(ruleTexts(mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)));
+    expect(second?.rules).toEqual(ruleTexts(mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW_IDS)));
     expect(second?.input.startsWith(`${first?.input ?? ""}\n<data name="${MAPPING_DATA_NAMES.response}">`)).toBe(true);
     const names = [...(second?.input ?? "").matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
     expect(names.slice(-4)).toEqual([MAPPING_DATA_NAMES.response, MAPPING_DATA_NAMES.rejections, MAPPING_DATA_NAMES.advice, MAPPING_REWRITE_DATA_NAMES.requirements]);
@@ -1643,7 +1643,7 @@ describe("C3 の拒否のあとの 2 回目を拒否された要件だけの書�
   });
 
   it("(6) 書き直した要件が fixed-test から unresolved に変われば、採用した表で unresolved になる（C3 の対象は呼ぶ側がその表から導く）", async () => {
-    const unresolvedX = { ...entryOf(X), verification: { kind: "unresolved", value: null, reason: "宣言で書けない", checks: null, constraintIds: [...constraintIdsIn(FIXTURE_DOCUMENTS)].slice(0, 1) } };
+    const unresolvedX = { ...entryOf(X), verification: { kind: "unresolved", value: null, reason: "宣言で書けない", checks: null, targets: null, constraintIds: [...constraintIdsIn(FIXTURE_DOCUMENTS)].slice(0, 1) } };
     const { outcome } = await secondRun([partial(unresolvedX, entryOf(Y))]);
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
