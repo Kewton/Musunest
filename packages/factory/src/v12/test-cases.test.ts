@@ -697,11 +697,11 @@ describe("必要な試験の枠（純粋。旗 v12.ids の T2。Issue #653）", 
     return frame;
   };
 
-  it("(1) 画面＋項目：実値は画面の normal 1、ruled の枝は項目 × 三種、existence-only の枝は場合 0、残る本数は両枝 15", () => {
+  it("(1) 画面＋項目：項目と画面は値の対象に入れないので ruled の枝は空（免除）。実値は画面の normal 1、existence-only の枝は場合 0、残る本数は両枝 15（Issue #800）", () => {
     const frame = only({ X1: ["s.items", "f.item.title"] });
     expect(frame.codeTests).toEqual([{ targetId: "s.items", kind: "normal", observes: "view-structure" }]);
-    expect(frame.valueTargets).toEqual(["f.item.title"]);
-    expect(frame.ifRuled).toEqual({ kinds: ["normal", "abnormal", "boundary"], caseTargets: ["f.item.title"], note: TEST_CASE_FRAME_TEXTS.ruled, codeIfTableRuled: [], remaining: 15 });
+    expect(frame.valueTargets).toEqual([]);
+    expect(frame.ifRuled).toEqual({ kinds: [], caseTargets: [], note: TEST_CASE_FRAME_TEXTS.ruledExempt, codeIfTableRuled: [], remaining: 15 });
     expect(frame.ifExistenceOnly).toEqual({ kinds: [], caseTargets: [], maxCases: 0, note: TEST_CASE_FRAME_TEXTS.existence, remaining: 15 });
   });
 
@@ -715,10 +715,12 @@ describe("必要な試験の枠（純粋。旗 v12.ids の T2。Issue #653）", 
     }
   });
 
-  it("(3) entity＋項目：ruled の枝の候補は 2 行（どれが決まりの対象かは LLM が選ぶ。コードは推測しない）", () => {
+  it("(3) entity＋項目：どちらも値の対象に入れないので ruled の枝は空（免除。Issue #800）", () => {
     const frame = only({ X1: ["e.item", "f.item.amount"] });
-    expect(frame.ifRuled.caseTargets).toEqual(["e.item", "f.item.amount"]);
-    expect(frame.ifRuled.kinds).toEqual(["normal", "abnormal", "boundary"]);
+    expect(frame.valueTargets).toEqual([]);
+    expect(frame.ifRuled.caseTargets).toEqual([]);
+    expect(frame.ifRuled.kinds).toEqual([]);
+    expect(frame.ifRuled.note).toBe(TEST_CASE_FRAME_TEXTS.ruledExempt);
   });
 
   it("(4) 集計（選択肢の見出しごと）の行を持つ要件：ruled の枝に「表の分類が ruled のときだけコードが作る。書かない」があり、実値に空の集計が無い（表の分類に依らず同じ）", () => {
@@ -732,24 +734,30 @@ describe("必要な試験の枠（純粋。旗 v12.ids の T2。Issue #653）", 
     expect(only({ X1: ["c.itemCount", "c.byMonth"] }).ifRuled.codeIfTableRuled).toEqual([]);
   });
 
-  it("(5) 導いた親 entity は候補に出ない（所属は元の表の行だけ。画面の行も候補に入れない）", () => {
+  it("(5) 項目・導いた親 entity・画面は値の対象に入れない（所属は元の表の行だけ。項目だけの要件も免除。Issue #800）", () => {
     const frame = only({ X1: ["f.item.title", "s.items"] });
-    expect(frame.valueTargets).toEqual(["f.item.title"]);
-    expect(only({ X1: ["f.item.amount"] }).valueTargets).toEqual(["f.item.amount"]);
+    expect(frame.valueTargets).toEqual([]);
+    expect(frame.ifRuled.kinds).toEqual([]);
+    const fieldOnly = only({ X1: ["f.item.amount"] });
+    expect(fieldOnly.valueTargets).toEqual([]);
+    expect(fieldOnly.ifRuled.kinds).toEqual([]);
   });
 
-  it("(6) 計算だけ・項目＋条件のある操作：existence-only の枝に normal 1 本まで（計算／操作）。項目＋条件の無い操作：「未対応」の事実だけで分類を示唆する文が無い", () => {
+  it("(6) 計算だけ・項目＋条件のある操作：値の対象は計算と条件つき操作だけで、existence-only の枝に normal 1 本まで（計算／操作）。項目＋条件の無い操作は免除し、分類を示唆する文が無い（Issue #800）", () => {
     const computation = only({ X1: ["c.rate"] });
+    expect(computation.valueTargets).toEqual(["c.rate"]);
     expect(computation.ifExistenceOnly).toEqual({ kinds: ["normal"], caseTargets: ["c.rate"], maxCases: 1, note: TEST_CASE_FRAME_TEXTS.existence, remaining: 16 });
     const withWhen = only({ X1: ["f.item.amount", "o.closeItem"] });
+    expect(withWhen.valueTargets).toEqual(["o.closeItem"]);
     expect(withWhen.ifExistenceOnly).toEqual({ kinds: ["normal"], caseTargets: ["o.closeItem"], maxCases: 1, note: TEST_CASE_FRAME_TEXTS.existence, remaining: 16 });
     const unsupported = only({ X1: ["f.item.amount", "o.addItem"] });
     expect(unsupported.codeTests).toEqual([]);
     expect(unsupported.normalTargets).toEqual([]);
+    expect(unsupported.valueTargets).toEqual([]);
     expect(unsupported.ifExistenceOnly).toEqual({ kinds: [], caseTargets: [], maxCases: 0, note: TEST_CASE_FRAME_TEXTS.unsupported, remaining: 16 });
     for (const word of ["ruled", "existence", "分類"]) expect(TEST_CASE_FRAME_TEXTS.unsupported).not.toContain(word);
-    // ruled の枝は同じ文で並ぶ（どちらの枝も示唆しない）
-    expect(unsupported.ifRuled.note).toBe(TEST_CASE_FRAME_TEXTS.ruled);
+    // 値の対象が無いので ruled の枝も空（免除）
+    expect(unsupported.ifRuled.note).toBe(TEST_CASE_FRAME_TEXTS.ruledExempt);
   });
 
   it("(7) 同じ入力から 2 回同じ。枠の鍵の集合は固定で、表の分類・期待・宣言・名前が無い", () => {

@@ -63,6 +63,8 @@ import {
   strictDefects as strictDefectsOf,
   withoutEnumMembership,
   LEDGER_VIEW_3G,
+  idsResponseList,
+  idsResponsesOf,
 } from "../__tests__/fixtures.js";
 import { deriveCarryOver, pruneForCarryOver, type CarryOver } from "../carry-over.js";
 import { coverageUnitsOf } from "../coverage.js";
@@ -3228,11 +3230,10 @@ describe("旗 v12.ids：構造の検査と画面・在ることの構造の確�
     expect(after.recording.structured).toHaveLength(1);
   });
 
-  it("(4) 負例（免除が広がらない）：画面と項目を所属に持つ決まりの要件 R7 で項目の abnormal を省いた応答は今までどおり「abnormal の試験が無い」で落ちる（位置は要求の一覧の R7）", async () => {
+  it("(4) 画面と項目を所属に持つ決まりの要件 R7 は値の対象が無いので免除され、項目の abnormal を省いた応答でも通る（Issue #800）", async () => {
     const bad = response([...r1Validate(), ...r3When(), ...r4Compute(), ...r7Validate("abnormal")], NATURES_D);
     const { outcome } = await runD([bad, bad]);
-    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
-    expect(outcome.failure.problems).toEqual([{ field: "requirements[4]", message: "abnormal の試験が無い" }]);
+    expect(outcome.ok).toBe(true);
   });
 
   it("(4) 負例：在ることだけの要件に validate・所属に無い対象・評価の方法の表に無い組・16 本超は、コードの試験を足した組でも今までどおり固定文で落ちる", async () => {
@@ -3611,29 +3612,20 @@ describe("旗 v12.ids：所属が項目の行だけの fixed-test の要件に�
     expectNoAcceptanceMaterial(after.recording.structured.map(requestText));
   });
 
-  it("採った種類に依らない：J2 が ruled と決めた項目だけの要件も、項目の試験は採った種類で絞る段を通って残る（ruled なので異常・境界の不足は今までどおり落ちる）", async () => {
+  it("採った種類に依らない：J2 が ruled と決めた項目だけの要件は値の対象が無いので免除され、コードの正常 1 本で通る（Issue #800）", async () => {
     const judge = createFakeJudge({ [natureQuestionName("R6")]: choice("ruled", 0.95) });
     const discrepant = NATURES_H.map((entry) => (entry.requirementId === "R6" ? { ...entry, nature: "ruled" as const } : entry));
     const { outcome } = await runH([zeroCases(discrepant), zeroCases(discrepant)], { judge });
-    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
-    // R6 は ruled に採られ、コードの正常 1 本があるので「要件の試験が無い」ではなく異常・境界の不足
-    expect(outcome.failure.problems).toEqual([
-      { field: `requirements[${String(indexOf(HLIST, "R6"))}]`, message: "abnormal の試験が無い" },
-      { field: `requirements[${String(indexOf(HLIST, "R6"))}]`, message: "boundary の試験が無い" },
-    ]);
+    expect(outcome.ok).toBe(true);
   });
 
-  it("負例 (a)：項目だけの所属の ruled の要件に validate の normal だけを書いた応答は、今までどおり「abnormal の試験が無い」「boundary の試験が無い」で落ちる（項目だけは免除の対象でない）", async () => {
+  it("負例 (a)：項目だけの所属の ruled の要件は値の対象が無いので免除され、validate の normal だけで通る（Issue #800）", async () => {
     const { list, table } = withRequirement({ list: HLIST, table: HTABLE }, "R9", "項目の種類は決まった値だけをとる。", ["f.item.kind"], "ruled");
-    expect(normalOnlyOwnershipRequirementIds(table, ledger, list)).not.toContain("R9");
+    expect(normalOnlyOwnershipRequirementIds(table, ledger, list)).toContain("R9");
     const natures = [...NATURES_H, { requirementId: "R9", nature: "ruled" as const }];
     const normalOnly = zeroCases(natures, [rawTest({ id: "r9-normal", requirementId: "R9", targetKind: "field", roleId: "f.item.kind", operation: "validate", observes: "validation" })]);
     const { outcome } = await runH([normalOnly, normalOnly], { list, table });
-    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
-    expect(outcome.failure.problems).toEqual([
-      { field: `requirements[${String(indexOf(list, "R9"))}]`, message: "abnormal の試験が無い" },
-      { field: `requirements[${String(indexOf(list, "R9"))}]`, message: "boundary の試験が無い" },
-    ]);
+    expect(outcome.ok).toBe(true);
   });
 
   it("負例 (b)・(c)：在ることだけの項目だけの要件に validate を書けば固定文で落ち、項目を対象に view-structure を書けば（validate に展開され）評価の方法の表の固定文で落ちる", async () => {
@@ -3704,7 +3696,37 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
   type Output = { readonly classifications: readonly { readonly requirementId: string; readonly nature: string }[]; readonly cases: readonly Record<string, unknown>[] };
   /** 構造の要件・コードの試験の無い台本（試験 3N。全要件が T2 の要求に残る） */
   const sized = (requirements: number, options: { readonly codeWritten?: boolean } = {}): SizedMaterials =>
-    buildSized(requirements, 3 * requirements, ALL_ON, options);
+    addValueTargets(buildSized(requirements, 3 * requirements, ALL_ON, options));
+  /**
+   * 値を縛る要件（所属が項目の行だけ）に条件つき操作の行を足す（Issue #800）。値の対象は計算と条件つき操作だけになるので、
+   * 項目だけの所属のままでは決まりの要件が免除され、異常・境界の欠如を作り直させる道が無くなる。応答（C2）も同じ表から組む
+   */
+  const addValueTargets = (source: SizedMaterials): SizedMaterials => {
+    const rows = [...source.table.rows];
+    const ownership = source.table.ownership.map((entry) => {
+      const owned = entry.roles.flatMap((role) => source.table.rows.filter((row) => row.id === role.id));
+      const plain = owned.length > 0 && owned.length === entry.roles.length && owned.every((row) => row.kind === "field");
+      if (!plain) return entry;
+      const opId = `o.${entry.requirementId}`;
+      if (!rows.some((row) => row.id === opId)) {
+        rows.push({
+          id: opId,
+          kind: "operation",
+          entity: "e.item",
+          name: `op${entry.requirementId.replace(/[^0-9]/g, "")}`,
+          role: "要件が使う対象",
+          source: { requirementId: entry.requirementId, quote: "" },
+          type: { action: "update", hasWhen: true },
+          options: null,
+          groupBy: null,
+          refEntity: null,
+        });
+      }
+      return { ...entry, roles: [...entry.roles, { id: opId, basis: "stated" as const, reason: null }] };
+    });
+    const table = { ...source.table, rows, ownership };
+    return { ...source, table, tableResponses: () => idsResponseList(idsResponsesOf(source.list, table, LEDGER)), addedTestCount: source.addedTestCount };
+  };
   const fullOf = (materials: SizedMaterials, omitAbnormalOf?: string): Output =>
     materials.t2Response(omitAbnormalOf === undefined ? {} : { omitAbnormalOf }) as unknown as Output;
   /** 全要件の応答を、束の要件の分類と場合に絞る */
@@ -3928,12 +3950,10 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
       expect(run.outcome.failure.problems).toContainEqual({ field: "tests", message: "試験の集合が空である" });
       expect(callsOf(run)).toEqual({ R1: 1, R6: 1, R11: 1 });
       expect(run.gateway.retryCounts.content).toBe(0);
-      // 今の台帳：組にコードの 項目 × screen があり、問題は要件へ帰属する（異常・境界の欠け）。2 回目も場合が無ければ unmet
-      const now = await runBundled(materials, (ids) => ({ ...sliceOf(full, ids), cases: [] }));
-      expect(now.outcome.ok).toBe(false);
-      if (now.outcome.ok || now.outcome.failure.kind !== "unmet") throw new Error("前提が壊れた");
-      expect(now.outcome.failure.problems.map((problem) => problem.message)).toContain("abnormal の試験が無い");
-      expect(now.outcome.failure.problems.map((problem) => problem.message)).not.toContain("試験の集合が空である");
+      // 今の台帳：コードの在ることの試験があり、値の対象が無い要件の異常・境界は免除されるので、場合が無くても通る
+      // （直す前の挙動として、旧はコードの 項目 × screen が組にあり「abnormal の試験が無い」で unmet だった）
+      const now = await runBundled(buildSized(15, 45, ALL_ON), (ids) => ({ ...sliceOf(full, ids), cases: [] }));
+      expect(now.outcome.ok).toBe(true);
     });
 
     const shapeBad = negative({ classifications: "x", cases: "x" }, "classifications・cases が並びでない応答。束の形の落ちを観測する負例");
@@ -4365,6 +4385,14 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     ["R5", "金額は 0 より大きく、題名も持つ。", ["f.item.title", "f.item.amount"], "ruled"],
   ];
   const base = scenario(BASE);
+  /**
+   * 中身のやり直しを起こす台本（Issue #800）：R1 に計算の行を足し、値の対象を持つ（免除されない）ようにしたもの。
+   * R1 の validate の正常だけを書くと異常・境界が欠け、2 回目の要求になる
+   */
+  const RETRY_BASE: readonly Def[] = BASE.map(([id, text, roles, nature]) =>
+    id === "R1" ? [id, `${text}全体の率も見られる。`, [...roles, "c.rate"], nature] : [id, text, roles, nature],
+  );
+  const retryScenario = scenario(RETRY_BASE);
   const validate = (requirementId: string, roleId: string, kinds: readonly ("normal" | "abnormal" | "boundary")[] = KINDS, prefix = requirementId.toLowerCase()) =>
     kinds.map((kind) =>
       rawTest({ id: `${prefix}-${roleId}-${kind}`, requirementId, targetKind: "field", roleId, kind, operation: "validate", observes: "validation", input: { [roleId]: kind === "abnormal" ? -1 : 5 } }),
@@ -4488,18 +4516,17 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     expect(failed.outcome.failure.problems.map((problem) => problem.message)).toContain("在ることだけの要件なので、検査（validate）の試験を作らない");
   });
 
-  it("(14) 二点測定：画面＋項目の ruled に項目の三種を書いた応答は 1 回で通り、normal だけ・ゼロの応答は今までどおり「abnormal の試験が無い」「boundary の試験が無い」で落ちる", async () => {
+  it("(14) 二点測定：画面＋項目の ruled は値の対象が無いので免除され、normal だけでも通り、試験がゼロなら「要件の試験が無い」で止まる（Issue #800）", async () => {
     const passed = await runS(base, [baseOk()]);
     expect(passed.outcome.ok).toBe(true);
-    for (const r1 of [validate("R1", "f.item.title", ["normal"]), []]) {
-      const bad = baseOk(r1);
-      const { outcome } = await runS(base, [bad, bad]);
-      if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
-      expect(outcome.failure.problems).toEqual([
-        { field: "requirements[0]", message: "abnormal の試験が無い" },
-        { field: "requirements[0]", message: "boundary の試験が無い" },
-      ]);
-    }
+    const normalOnly = await runS(base, [baseOk(validate("R1", "f.item.title", ["normal"]))]);
+    expect(normalOnly.outcome.ok).toBe(true);
+    // 計算の要件 R3 の試験だけを省く（コードの試験が無いので「要件の試験が無い」で止まる）
+    const empty = response(baseTests().filter((test) => (test["target"] as { readonly requirementId: string }).requirementId !== "R3"), BASE_NATURES);
+    const { outcome } = await runS(base, [empty, empty]);
+    if (outcome.ok) throw new Error("通ってはいけない");
+    const problems = outcome.failure.kind === "unmet" || outcome.failure.kind === "malformed" ? outcome.failure.problems : [];
+    expect(problems.map((problem) => problem.message)).toContain("要件の試験が無い");
   });
 
   it("(16) 据置き：項目＋条件の無い操作の existence-only の場合ゼロは今までどおり「要件の試験が無い」。枠は「未対応」の事実だけ", async () => {
@@ -4654,7 +4681,7 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
   };
   /** 中身のやり直しを 1 回含む走り（R1 の異常・境界の欠けで 2 回目を呼ぶ） */
   const retryRequests = async () => {
-    const { outcome, recording } = await runS(base, [baseOk(validate("R1", "f.item.title", ["normal"])), baseOk()]);
+    const { outcome, recording } = await runS(retryScenario, [baseOk(validate("R1", "f.item.title", ["normal"])), baseOk()]);
     if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
     return recording.structured;
   };
@@ -4671,6 +4698,16 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     idsWithoutLedger: ["5cc08ee6359630ca3038e97da0c0984ff00d1511ecc2ee5f2ccb5a2eaecce781", "66c57de2d2d9e352adedaeb8a26e797558c34be0451075ec64df3fb6c4920b27"],
     v11a: ["5cc08ee6359630ca3038e97da0c0984ff00d1511ecc2ee5f2ccb5a2eaecce781", "66c57de2d2d9e352adedaeb8a26e797558c34be0451075ec64df3fb6c4920b27"],
   };
+  /**
+   * Issue #800：T2 の枠の変更で取り直した値。**上の `BEFORE_794` の旧値は残す**。retry は R1 に計算を足した台本
+   * （retryScenario）で起こす
+   */
+  const BEFORE_794_800: Readonly<Record<string, readonly string[]>> = {
+    initial: ["fd01bbf5b810c59824cc3ba5f1bbdf29c50dd7ddc3bc21ac668e7c94d55aee6d"],
+    retry: ["3412fa2d619a246284686ffea1a1b67a840d2e91c32c460a7ddd85517cf2cc94", "08697bca1526780c43fb3db22bb93d0f8858e93cf494815eda31b1c954cf5de3"],
+    seven: ["adef9a1e8afc31b33f1ddea7aa8dc4f4741e32c4f5e613fdad0197ee087518e5", "3ada073eef1c8fb6391761ed90c7707537131e726941f509124b4a0a37bb9513"],
+  };
+  const before794Of = (key: string): readonly string[] | undefined => BEFORE_794_800[key] ?? BEFORE_794[key];
 
   it("#794 (1) 実効の ids が真の T2 の初回の要求：時計の塊がちょうど 1 つ、所属の直後・枠の前にあり、中身は組む関数の既定値の結果（today は todayInTokyo、thisMonthRange は thisMonthRangeInTokyo）。塊と時計の文を位置で外すと直す前（2b68491）の要求と同じ（直す前は塊が無い）", async () => {
     const { outcome, recording } = await runS(base, [baseOk()]);
@@ -4681,7 +4718,7 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     // 直す前（2b68491）の挙動：同じ要求に時計の塊は無い（塊と時計の文だけを外した要求が、直す前に測った要求と同じ）
     const stripped = before794(request);
     expect(dataNamesOf(stripped.input)).not.toContain(TEST_SPEC_CLOCK_DATA_NAME);
-    expect(await digestsOf(recording.structured)).toEqual(BEFORE_794["initial"]);
+    expect(await digestsOf(recording.structured)).toEqual(before794Of("initial"));
     expectNoAcceptanceMaterial([requestText(request)]);
   });
 
@@ -4694,8 +4731,8 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     for (const request of [...retry, ...seven]) expectClockBlock(request);
     const contents = [...retry, ...seven].map((request) => JSON.stringify(dataBlockOf(request.input, TEST_SPEC_CLOCK_DATA_NAME)));
     expect(new Set(contents).size).toBe(1);
-    expect(await digestsOf(retry)).toEqual(BEFORE_794["retry"]);
-    expect(await digestsOf(seven)).toEqual(BEFORE_794["seven"]);
+    expect(await digestsOf(retry)).toEqual(before794Of("retry"));
+    expect(await digestsOf(seven)).toEqual(before794Of("seven"));
     expectNoAcceptanceMaterial([...retry, ...seven].map(requestText));
   });
 
@@ -4717,7 +4754,7 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
         const { signal: _signal, ...rest } = request;
         expect(JSON.stringify(before794(rest as LlmStructuredRequest)), name).toBe(JSON.stringify(rest));
       }
-      expect(await digestsOf(recording.structured), name).toEqual(BEFORE_794[name]);
+      expect(await digestsOf(recording.structured), name).toEqual(before794Of(name));
     }
   });
 
@@ -4909,10 +4946,10 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     );
     const rejected: RejectedCandidate[] = [];
     const { outcome, recording } = await run(asCases([legacy, baseOk(validate("R1", "f.item.title", ["normal"])), legacy]), {
-      plan: base.plan,
-      list: base.list,
-      table: base.table,
-      carryOver: await carryOf(base.list, base.table),
+      plan: retryScenario.plan,
+      list: retryScenario.list,
+      table: retryScenario.table,
+      carryOver: await carryOf(retryScenario.list, retryScenario.table),
       ledger,
       ids: true,
       onRejected: (candidate) => rejected.push(candidate),
@@ -4923,7 +4960,7 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     expect(outcome.failure.problems.map((problem) => problem.message)).toContain(CASE_OBSERVES_SHAPE_MESSAGE);
     expect(rejected.map((candidate) => candidate.kind)).toEqual(["shape", "content", "shape"]);
     // 対照：形のやり直しを使っていなければ、同じ 2 回目の形の落ちは malformed（その回の中で 1 回やり直して 2 回とも落ちた）
-    const fresh = await runS(base, [legacy, legacy]);
+    const fresh = await runS(retryScenario, [legacy, legacy]);
     if (fresh.outcome.ok) throw new Error("落ちるはず");
     expect(fresh.outcome.failure.kind).toBe("malformed");
   });

@@ -107,6 +107,7 @@ import {
   revert735,
   revertBundleFiles735,
   requestListedIds,
+  withoutValidationExpression,
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
 import * as callModule from "./call.js";
@@ -5100,25 +5101,24 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    *   下の BEFORE_761_RAW・BEFORE_761_REQUESTS・BEFORE_761_BUDGET（旧の指紋）と一致する
    */
   const BEFORE_746: Readonly<Record<string, string>> = {
-    // Issue #800：ids on の 16 経路は、台帳の検査の式の行の文（T1・T1''・T2・B1）と C2 の schema が要求に入るため取り直した
-    "stage-stagnation": "ca7539d9644f7707192db0722226c88ad1d7e7f56fb25ff00d5652fb652f8d29",
-    "stage-adopting": "fc5bf9e3cf46e35d28e08aadd158a8dfed51d2e5afe492e7ada71dcd6817303c",
-    "stage-sets": "2ec338effa2b26d9641cefeaa0e21309700d87dde6e4d39f9b7cd4632a865474",
-    "stage-mixed": "4242b1192b8c9b8b240ec2cb215f521b21b97cf03a726b3807234a735784ff62",
-    "stage-returned": "af78fc5a2535d54f800116d7bc88f0702c30dd88f8e158f940ddabbc32e16178",
-    "stage-recounts": "6097a18d5773b075729db51fbf7854434fab71bb6080ba01294546fd3775ce2d",
-    "stage-stop-repair": "4e7260c24bb3f5c103e6dcbf3c8b69d93712d471008c2e5d2f2323279938f70c",
-    "stage-stop-first-eval": "f99bb18accacd19d56516bf6bb56f9150a65102f8ab693a6bdb3ece9ba26e93b",
-    "stage-stop-commit": "692780c87fd29b472e4b11f54ccc91411dfd27027f7719e9019516b8b5e73279",
-    "whole-stagnation": "e6ab9faae97d3ba2c6ca696c75a37f12787604eb3b1b115db10204eb4b1e658a",
-    "whole-adopting": "4613a214043ed083d2781083782cf36847d3b36c4f027fcf753ddb27b16ebf01",
-    "whole-sets": "f9d7b1d0bb639b36c904849ee778e9e88a8c9883389ca1d54580044f1ac804c9",
-    "whole-mixed": "04a8336783b384e3e8e4eef3f346dd70a4c65acb248bc9f7e8365575dac3e851",
-    "whole-recounts": "c3c277bb35e220a0c82085fec60362d889a7b492ce99d21d00adc853c812acf2",
+    "stage-stagnation": "7123faace1099eca54b188bcb571d27850bd9a06d9519822ba631e2811914832",
+    "stage-adopting": "66a368abcb50c8a6d620c9ce365a457fdb000e40f75af1309df4af8ae19442bd",
+    "stage-sets": "af5d0c06cb05d20bf20f02a7c8d64819c5d2acffdf75b33b0c9116173dab873f",
+    "stage-mixed": "6c7a8d4405afcfb946478234ddec16bba9b3325e8c7a29fe678868ea02b7fd42",
+    "stage-returned": "2c526069477d0913563cb7cfb123d5866564f212d970c40f79662a3ae2ae6261",
+    "stage-recounts": "71b516b950f98825c6769da2a9da74d04762aa6acf2dffff1c457acaa0df8e50",
+    "stage-stop-repair": "834ed3d14c64c85792a17267fd325d3e910e88530142e546356aaa561d16f331",
+    "stage-stop-first-eval": "ffd1c10c0086037dd583e3dffb1c65d426788341d3fbf96c8874fc776b00b225",
+    "stage-stop-commit": "798da084657d49892bc8543c867bc560da20559c0706faa411975527127e1450",
+    "whole-stagnation": "fba02b2acc1c51880303888c5975fdaf7710b4ba8898c1c318cf571156b60897",
+    "whole-adopting": "1c00d9e844350a7930a9f81e82be575c22545c1e2801ddd362ca9c296e9d8ad0",
+    "whole-sets": "6d85af64487108677d7f260b3520f78023c0dea2df54c37bd07f6156a50ac4e6",
+    "whole-mixed": "c17b8e6f10a4519353a92da2ac6f5e08ac66be6697cecffdef7458d5f255443e",
+    "whole-recounts": "d37a80c6bbdf58516957d82600e1651c91cff121c235e911b69e2f6e0c20b849",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
-    "stage-search-repair-off": "84d37467f6c63c797ab52cb6e6c7ef6b61dd6505d7d145fab8b432482d32d0dd",
-    "whole-search-repair-off": "6c7cd44c0965e84dc87d166a2da04400380b5c6064b77dafb76e7a81f2a06e1c",
+    "stage-search-repair-off": "52ffc1bff4ca7a45ef740c522e240e40472074ae502acb462f8aa02d8146d683",
+    "whole-search-repair-off": "df1fa5649b563bf458e8905dbfcc2c808f4611ba184047fda6ee670bcd17ba80",
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
@@ -5128,24 +5128,24 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    * （f9bf3b3 は診断を持たないので、その出力がそのまま旧値）。BEFORE_746・BEFORE_748_BASE の 2 つの試験で同じ値。
    */
   const BEFORE_761_RAW: Readonly<Record<string, string>> = {
-    "stage-stagnation": "0e842d732e779d02c52ff6d7c7ca34c0c85174f88ccca617b4a5a49643f434cc",
-    "stage-adopting": "2ba65bff52230824b574d69b9845b9fa5f6f201319b4172fdd7f56c07d766fa3",
-    "stage-sets": "57718d129aa7ab8bbd572c96b5661d27cdfe2fe527a044d33a3cd38a25f6e11d",
-    "stage-mixed": "90ee0d3558b7ca6b1fb897781228871464784b5c9f6e519bc5509ce3288dc6eb",
-    "stage-returned": "e22c8073328b6efc0f80d945fc1deaf800679544b127e11845c8a7b33f2e52fd",
-    "stage-recounts": "5faa1e468e3f06b58ed1e67895fabc58e44374be66cb815eb565023b893eb466",
-    "stage-stop-repair": "30e334e01c82e1777c316504937bf2b66ae0ad780d5a41dc26358f3b2c292a2d",
-    "stage-stop-first-eval": "c499f3d6cab4e805d5d2fb0ed6781e9f4447b4da671b6f5f3f2c9a0c75b3f6c4",
-    "stage-stop-commit": "50c15fef0eb3aaada6eb8130eaebb0a852b3ea2f11b2b66fe0c1d60fa9926f20",
-    "whole-stagnation": "6b66e6fa35b51241d1daa1a9f179b5f8e5ffb94d4c8f7231b88cc721d821ae82",
-    "whole-adopting": "d1ca08f7cd60746cdeb40debf9b1ef139d37c97ff5716e3878e70528c274a496",
-    "whole-sets": "cc84845a1a1dcfb367571888bb8a62b696a1e2cd6afabce390d93c82a9050acf",
-    "whole-mixed": "39bf4169502fc8a757e96f6a098945f588bbc6eb04b9b86ed75951d5c6b7074a",
-    "whole-recounts": "83f98877e451f3240b44a14cb6374d4fa189de92796682d13d0799298e7628f5",
+    "stage-stagnation": "9881cad9402ddada5a41e32251ab276c3f8ea30e9f3995cb76ef9840d6570dc6",
+    "stage-adopting": "b5a003ecc6ed093a02658d2c7131c50a995e4071e668bfafe15e794bc3dd6fdd",
+    "stage-sets": "927605dd5db8f00b8d3c01d8dbc498db25c00ad98168d4f85949ad4983760c09",
+    "stage-mixed": "6c50138f61543037914fc0ad84010d6ab44ade09389e09ee83f3e925586ddf13",
+    "stage-returned": "b8cfd4984dc2d78ac70adbb2f1686c7c9d5feeed2ab2d593923e2acd5ac7caed",
+    "stage-recounts": "2ca966f9ad83f63022c7cc683b0b4c8223382ccd27c975b280fb8c6653f276f4",
+    "stage-stop-repair": "7712f4bcdc71c8d0b0a6db298fc5af17e8d487bb2aec7bd1722ba2df0122bcca",
+    "stage-stop-first-eval": "9d868b963803251c0d9509d03425b7bd1204a60c4f80d9b7612c2dad9168a2e9",
+    "stage-stop-commit": "217b9efd70d5b6490d9f152b510fd0ed7b09046d8691a2725adfe1c64628294a",
+    "whole-stagnation": "248017e1b10f1fb414fa90af7f715214a36d0f8c410c49b6d4778f7815673a3c",
+    "whole-adopting": "ca3074eb8a238a3337ed16b92892da26b9f5c05f972f84bb5b47244f350038fd",
+    "whole-sets": "acd0d9b65dfc66312aff6725add8b10f2af4e3eceed1ff71d499556dd416b499",
+    "whole-mixed": "175e38f8f70ca325904c33cad04d27aede2d8cd1005ebef141c9825ab4acf572",
+    "whole-recounts": "0a6577566da53468d0b342279fe02ff029c479c5e9a1a231cb55817c81519876",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
-    "stage-search-repair-off": "9163edc158070dd84b013afb658b5d4f87997b200ca127d817cb84cba0b510fa",
-    "whole-search-repair-off": "523e9734a0198c766470d85a4160a7759a399d2dc3f37919911e0d733a66966c",
+    "stage-search-repair-off": "7058e57fd0e39a0ff8ffb1cd08a2812f9e25c015da58601838336b9b3157e8a9",
+    "whole-search-repair-off": "b54b883dcc61c988952fbce4d66ff2bc6cdd8174f24d797824d4bde1371875bb",
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
@@ -5439,6 +5439,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       };
       line = JSON.stringify(run.summary);
     }
+    // Issue #800：台帳に足した行の文と C2 の schema の欄を外して、旧の指紋と照らす
+    requests = withoutValidationExpression(requests);
     if (timing !== undefined) timing.runMs += performance.now() - runStart;
     vi.restoreAllMocks();
     let hasSearch = false;
@@ -5509,24 +5511,24 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    * 増やし、要約と manifest の費用（budget_*）が正当に変わるため、全出力の指紋は旧値に戻らない。その 4 経路はこの要求の列で裏付ける。
    */
   const BEFORE_761_REQUESTS: Readonly<Record<string, string>> = {
-    "stage-stagnation": "70549f23f316e4f1834e20a3818e11331054fe3d97ff44005a545d0a0ffabe40",
-    "stage-adopting": "6b7df8f2c831b358ba66decfc4115cca2390387ab9a9a9dea439183f1b50e895",
-    "stage-sets": "4e39a66290be54ee89b476d693d6c0a1da47488acfdd7e1a6c8f64a520f7d183",
-    "stage-mixed": "68f681db05581c1f93507d240b67b1a439f977fea9d7d61e788b0e9e1cc1f3f7",
-    "stage-returned": "6c1e9b13288ee4d68f34627d00c6e3009546d708e931f0742283469d6efcdc0c",
-    "stage-recounts": "c5723328882dc23f29517971e291cf8aa696075c756ee64837c39a057a5f08ac",
-    "stage-stop-repair": "8fea8cbc500d9d601b219c1c2f984497d6f46e3e0809f215e4ab559283ef9753",
-    "stage-stop-first-eval": "879b1244e00f01ec3184ef3a359bc6d32a3f1dd1288fd5c2a1b6a072b060b256",
-    "stage-stop-commit": "c2d72f7d50a67bff77b79207b1797aeba9c826af17db17edbd737cbe4b6e2f73",
-    "whole-stagnation": "c2a92be5fb0850252ab6d586ea6d17fd157dd99fa6d29bfb12104ebb8671e665",
-    "whole-adopting": "c2d8b40cd90915f1617f241891fd9c1a6b09c441370196e7c95dcd32d54cee8f",
-    "whole-sets": "ceb1e2179d7fce3c78fa539d3570ee323c01b6dc9691fefd1a0f2489071ffd1b",
-    "whole-mixed": "fd012114d444b181cddc830b87d1f65ff35b63c9283d81c06128c0c3b5411eef",
-    "whole-recounts": "d9842c39932d4a9801a6cbcd1fb0e6857e0b281e895da57c30ba1496b25d561e",
+    "stage-stagnation": "30e19d97f5066ddab1d8512109962e6b0cb3889c29d8fbd171e03b3c17d93ab5",
+    "stage-adopting": "598ba99a953db44e1124cb9cccd6027bf631072601353cad4c31d4d8b4eb103a",
+    "stage-sets": "84081b913792d90cdf7ae696fd9b99913b0e025d6c0d211adf86b1866dd25a19",
+    "stage-mixed": "1be16e63d074a603dda47b294fad4a63f327f8e1246e07f7c6e5a8b61cf3fd63",
+    "stage-returned": "e2c89fbd63b3ab60cf6583e2c071ed5e596296f01358d2f90a99e100540003ad",
+    "stage-recounts": "e0cd63d27922a7ca28659c2964442a13b646b4e0c129bfa2964db1069ef3cb89",
+    "stage-stop-repair": "950f5dda164cf2126eba360e4975858291cd6c3c1c0bf85fe0e6789a07374bba",
+    "stage-stop-first-eval": "d2df7b103f039a1ac320242f2672573f96842c5b6b286eac201d14f504b9af01",
+    "stage-stop-commit": "3e6bfc6011d8d5cc905ef744876c0a6ab0dda5acb849c13ee3783c3340d48c31",
+    "whole-stagnation": "592f2ccf14928c8e01a216f7d1e9687fca259e6c8e0b847a4e654a5d9ad0b6d5",
+    "whole-adopting": "4c5e0233fc60b399a834c78080d3e90ed9829405a57dee6dc65ffb7890fa97cb",
+    "whole-sets": "cb1f78a8f36d815ef008cf4d831575703f0931877488fa2c9b8c9a4e8617c319",
+    "whole-mixed": "115b25a31bb3e7adecc0adaa905f06643ac071cbf088289cbc1fc81798cd1a17",
+    "whole-recounts": "aa9716185ea3d1c1a7566fdeff01842e1c6b6ab24ecf0042721b7afbe4950c2f",
     "stage-ids-off": "4892a859e7834898007814a70cf19c148937300ece217f15f37cc3bcb0739897",
     "whole-ids-off": "275abc7af981338165bf13ee3c8fb33ad9d3d81954a058976210b701928c3e3d",
-    "stage-search-repair-off": "f640b36ef3a6d7a532d80e7430ab98e2b12738c65d864e7bed20a81d2c16baf2",
-    "whole-search-repair-off": "e8f0109597b76e219fa5e268f63198e3c533c01a616680c05a9d9b965d234f7f",
+    "stage-search-repair-off": "426ba93fc8932b6d2cfe586215e0ccf21909c154318b384951bc440cc95604b3",
+    "whole-search-repair-off": "71142383a847415393ac551d5a7f96e714701b9ee5f0e98ea4cccc8f02ceffd4",
     "stage-v11a": "b4e6ebe698f85d4b2015554d745099aacc12018207dbba2cbbe2bd40f60481eb",
     "whole-v11a": "d16eceeaa1148ff63334635e65a9ab9402262a1f280f505b92746ea9e6394444",
   };
@@ -5550,20 +5552,102 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    * （f9bf3b3 には診断が無いので取り除きは無い）。測った後に worktree は remove した。台本は下の INVARIANT_RUNS と同じ 4 経路。
    */
   const BEFORE_761_BUDGET: Readonly<Record<string, string>> = {
-    "whole-stagnation": "9d4c47ffd0b069bb94a28f3d736daa1cef004df99cea80c9c8764f6dcb1f7f07",
-    "whole-adopting": "58d8365517ff4adce78f76e17589d0f060d03dd5c250816d2f733cb31d32f20a",
-    "whole-sets": "23bd7443eee8f91d2ed7969b1c5d19132f4a667bba134426c508d984cb30c41e",
-    "whole-recounts": "9e15ffa6c4b14d46599ddeef3ebbd8d0550ac914ee8f72f08b5fa758ec710d4e",
+    "whole-stagnation": "15a09455bcb63ed4ed3828cf4ea8115c288fcd186a8a60f52a0bda049bb0c6b0",
+    "whole-adopting": "f66f806648b8f86506dd2d1e5c0086c72567d1a15a5a0be2be700b73b4139d19",
+    "whole-sets": "afb63e0962c9ab0fd031b88cd71814c4042961bbebc44353c48d2dbcda3f834f",
+    "whole-recounts": "af26e804452f3d711e529a5c9671f6276341e70b03a39844847f7ee6344157d0",
   };
   /**
    * Issue #795 の前の、**B3' の塊と R-dc-03 の ids の文を外し、budget_* の値だけを固定の印に替えた**全出力の指紋（期待）。
    * #795 で B3' の入力長が変わり、予約の端数の浮動小数の表れが変わる 2 経路。塊と文を外した要求は #795 の前と同じ
    */
   const BEFORE_795_BUDGET: Readonly<Record<string, string>> = {
-    // Issue #800：ids on の 2 経路は台帳の検査の式の行の文と C2 の schema が要求に入るため取り直した
-    "whole-mixed": "aa58cc96fb4f0da241cd7291f3cdde80806b46df1960ef78f0ff27757507612c",
-    "whole-search-repair-off": "0af9f5725fbaa7c699e63bdc30e95ac4a6ee0ea6c183ec86adc52036a22622f6",
+    "whole-mixed": "0c560b407f214f9115e3d366f7d1306da5b32e70c2e9050a19b789f83cd8d7c1",
+    "whole-search-repair-off": "8cf44cc06499042297ae53826453603f104c032e2e1b9e6d7d07253eb70c94a1",
   };
+  /**
+   * Issue #800：台帳に足した行の文と C2 の schema の欄を `withoutValidationExpression` で外しても、T2 の枠（値の対象から項目・
+   * entity を外し、値の対象が無い要件を免除する）が変わる ids on の経路は、旧の指紋と合わない。**上の旧値は残したまま**、
+   * 経路が変わる台本として新しい期待を直接固定する（ids off・v1・v1.1a の値は変えない）
+   */
+  const BEFORE_746_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "11fbfca2b2afa7f3b85ff3d97ae231cc5ace2e82ae4ed216946db5f434a6c666",
+    "stage-adopting": "c83f6ba4c02599b6b7810ffade3e40ea8877a9b15f21366d9318bd4f6d103e07",
+    "stage-sets": "9698928e2cb48c22cf171fc6a2d6545581463a48ce0cb028398492e6e2e06aca",
+    "stage-mixed": "5240cefe691b1ce82c7fdfb5e472fcec02ecab99ae8cae8a3a1474018279c44a",
+    "stage-returned": "5f2e735e693e85882afaea2ab63ed514f70b805f81afac4fd3f2cc6c16066344",
+    "stage-recounts": "4e51e9d179cb1e49483154e0119832d9a12f1320bf8fb1c5cc9fea9b486c1d50",
+    "stage-stop-repair": "9f26df28b8a7518958f778cb432aafd949f3077ee2dedd796296158503108a60",
+    "stage-stop-first-eval": "fa508ed3f82e4fcbf680ad92345ee2263864efb3d186dcc00b6ed8a92328c20b",
+    "stage-stop-commit": "9ae79a30e1f5df2c4495ad0fc5437c23effb8a389115185558a972c644e2ed6a",
+    "whole-stagnation": "f3c552f06a6b34db62c6fddb3931413565a85fa059eedb65ab77ccc42bbfb2df",
+    "whole-adopting": "32cdac31366d76f94c211bc7b66118f1ff3ab09ac55c86f6998cf969ac3f23ff",
+    "whole-sets": "03000c2abba9e26a77473627f7dc5ea675ae0c40446572133794c631f7edff8b",
+    "whole-mixed": "f8f6bae44c7a4e18800c906ce5cfec7e106128f86fbf1371779fde91be345615",
+    "whole-recounts": "7013d30de1d3514958571c0538a4090f99ec2d453ee9a8302fc541490f7fc39a",
+    "stage-search-repair-off": "976cb9b83a8ea59333ce3eec02a8c861e4a3ffe49c32c41acb03b688f9e5ea7c",
+    "whole-search-repair-off": "0b3f93b1e83a8e971980a45528717865e8e0f25400b53f813346ab0875bb668a",
+  };
+  const BEFORE_748_BASE_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "cb1c9775fe1514e4e9e9e789402f91fabed20277d5b47a721677303bce4147ab",
+    "stage-adopting": "3a1f86d6abb08c472a3852c17350c6689fa9993dda16c0d21cc225d28b9fdec9",
+    "stage-sets": "017b26b7fabc144f595a8c4280ecb86e6a71f38297354fbbc94d3b6a5e07c8b6",
+    "stage-mixed": "6e691aaea07205938eb6bf62a48be69dee828a2233f0da7ad6028facde67c7a6",
+    "stage-returned": "07b41986d2f281c462a0375d4c3ecc4ffad7e4839b850437c8ce6325358b1b7e",
+    "stage-recounts": "2262479ff2c70c87e010b82f5a8627920026da2be5396578e035f029453a5e9b",
+    "stage-stop-repair": "c2528e34a3ca6623c62a5823a9df79951fd00199be4efebaee775452549a7633",
+    "stage-stop-first-eval": "32bde2e6e436c6315138c9ab6b4f9baad914bbbd65dbcca734d942a722f67e2e",
+    "stage-stop-commit": "6c021bb209e8188e1c04dcbf42e60618cdd46f5cbac6ace10c11eb2cbe27c226",
+    "whole-stagnation": "f3c552f06a6b34db62c6fddb3931413565a85fa059eedb65ab77ccc42bbfb2df",
+    "whole-adopting": "32cdac31366d76f94c211bc7b66118f1ff3ab09ac55c86f6998cf969ac3f23ff",
+    "whole-sets": "03000c2abba9e26a77473627f7dc5ea675ae0c40446572133794c631f7edff8b",
+    "whole-mixed": "f8f6bae44c7a4e18800c906ce5cfec7e106128f86fbf1371779fde91be345615",
+    "whole-recounts": "7013d30de1d3514958571c0538a4090f99ec2d453ee9a8302fc541490f7fc39a",
+    "stage-search-repair-off": "976cb9b83a8ea59333ce3eec02a8c861e4a3ffe49c32c41acb03b688f9e5ea7c",
+    "whole-search-repair-off": "0b3f93b1e83a8e971980a45528717865e8e0f25400b53f813346ab0875bb668a",
+  };
+  const BEFORE_761_RAW_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "b9fc8aa8162a3d4911f28f7cef093d93ba5cb9291d267302468c0c618cadc190",
+    "stage-adopting": "a6f70fad3e2f334e2d92be1154f8768b7b7fb0dea73836e0bc798cb5962db8bb",
+    "stage-sets": "cfc043d4d8de249f447948605833f9aff2a9f2a64d7931550e212ffca509e639",
+    "stage-mixed": "ba709dd49d9c8c13f4a78eeecf5770d95fd2400dc5a1202eb2fae4b3bdbf56b8",
+    "stage-returned": "a020ebe732c208c157b0abe4ab35a7c7fb7ffe0ba57282c69d6bb07fee3da253",
+    "stage-recounts": "dc63e55fbe6a87d5683fba40421ef0599e095c5808c5b798b1054201cdc50331",
+    "stage-stop-repair": "aa5fcfffb8b6db79b49fc9601cc6b35afc117a2a84f59789f11dabba81ad0484",
+    "stage-stop-first-eval": "16b14f116cfc47bc8f7f444ca0a9e6762c1923143564b56eab80ca8e6fd3bc61",
+    "stage-stop-commit": "d9528065b58971fbb7cca79c5f4b84f2c964733438bd3302c0067c1ba8653d35",
+    "stage-search-repair-off": "aa031822f2cf86e44a440c06dee29d5a1516dd44fa2f61146f20ab085a9dd836",
+  };
+  const BEFORE_761_REQUESTS_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "5c51234f156300cf85d282ff2cc32d78891e925da3fb0eddf5e7ae1edc01705a",
+    "stage-adopting": "fe3d32ced7ac8e7137af99369c198d1f36789ca952f9627cc295677544abb21e",
+    "stage-sets": "793a6df6db6e06e70fe12a0b73b7bbffe88df22aa2852d97cfc266c6a78ad590",
+    "stage-mixed": "516f8648cc4924f1e6bbb97b130ed6ea53a9aafd388c92123669880ab25ed68e",
+    "stage-returned": "f6de1db43d14d2f726e496fa55819c01a7e44cc222be1b448093b08d91fb2c37",
+    "stage-recounts": "97a224bd9c6626a5826d4562ef0092b83fa052a54125235f88bda5f9c135e976",
+    "stage-stop-repair": "c443fac0fadb5908f183ef34427f57848a8b62df79b8e05f344d47e94c5d6da7",
+    "stage-stop-first-eval": "dcb789bf2c1e0fbb4fced70f7fd069f33b3786f8fbfc6a1fb5a11652782c9adb",
+    "stage-stop-commit": "b6747a8c137ebe1ad9da7eda39e6100c3627fa5d109858e4b12a836b9ad54558",
+    "whole-stagnation": "1beafeade5f80b2970bf58765ed43c9a157d71e14f8b9aa01125863388269485",
+    "whole-adopting": "25054935f7daba9932ee930cf9fb2d3bc0f289da585b1fd64843aabd9938b4f7",
+    "whole-sets": "e08b138f04db2a038c132b68a290cc860bc1624f730d3f48c8e086228f2651ff",
+    "whole-mixed": "fa8156e6aeb50211a74c639905f25ca75acdfa698d5bee52d2bafed716118786",
+    "whole-recounts": "a0c5594483ab016dbc3147598609eac4a517644cd5abab978660caacab1e84e6",
+    "stage-search-repair-off": "3c21beb9077abd87a0234d6243ff7edac295f378142e72a63b37b42422c527f0",
+    "whole-search-repair-off": "7b30f391f4c943a574d2242f9dc8f6e094139887b47d9e3ef4ea7bfca2bd3d55",
+  };
+  const BEFORE_761_BUDGET_800: Readonly<Record<string, string>> = {
+    "whole-stagnation": "d36fa97a26ffea73d8df7bbff8133de338d4032786fbab10f032c30da7767c70",
+    "whole-adopting": "4f351dca100e00654905c20f17c5549c87d9506562f789f5786eec3db67b1269",
+    "whole-sets": "a8752a9c071c62a617d1fb6034ff34f3679ff5d9ce45ad7d29d47efb2478369a",
+    "whole-recounts": "4b663c7a7e19a2497f5ce2d3358d80ed46c0d312ead85144a96ba614cdc553fd",
+  };
+  const BEFORE_795_BUDGET_800: Readonly<Record<string, string>> = {
+    "whole-mixed": "5bcef53bb34d443f998f7418774a8ce9dc13f01ff24b46d1aefeb1f36cd4ee26",
+    "whole-search-repair-off": "c5a335c7042b951552fdd966e60c87222a5d7fd00493dc7c66c06cb0abd7b96d",
+  };
+  /** 費用の印に替えた全出力の期待（#800 で取り直した値を先に、旧値は残す） */
+  const budgetExpectedOf800 = (name: string): string | undefined => BEFORE_795_BUDGET_800[name] ?? BEFORE_761_BUDGET_800[name] ?? budgetExpectedOf(name);
   /** 費用の印に替えた全出力の期待（#761 の 4 経路は #761 の値、#795 の 2 経路は #795 の値） */
   const budgetExpectedOf = (name: string): string | undefined => BEFORE_795_BUDGET[name] ?? BEFORE_761_BUDGET[name];
   /** 費用の印に替えるキー（f9bf3b3 の 4 経路の出力に現れた budget_*。ほかのキーを替えていないことをこの集合で照らす） */
@@ -5604,19 +5688,19 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       budgetDerivedSets[entry.name] = budgetDerived;
       searched[entry.name] = hasSearch;
     }
-    expect(digests).toEqual(BEFORE_746);
+    expect(digests).toEqual({ ...BEFORE_746, ...BEFORE_746_800 });
     // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと（search_repair・requests・stage_spans を残したまま）、直す前（f9bf3b3）の生出力とバイト列で同じ
     for (const entry of INVARIANT_RUNS) {
       if (WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_RAW[entry.name]);
+      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_RAW_800[entry.name] ?? BEFORE_761_RAW[entry.name]);
     }
     // 費用が入力長で変わる 4 経路を含む全部の要求の列は、旧値（f9bf3b3）と一致する
-    expect(strippedRequestDigests).toEqual(BEFORE_761_REQUESTS);
+    expect(strippedRequestDigests).toEqual({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_800 });
     // 4 経路は、診断と R-fr-08 を外し budget_* の値だけを印に替えた全出力（記録・納品物・要約のほかの欄・終了コード・往復の数と
     // 採否の並び）が f9bf3b3 と一致する。印に替えたキーが budget_* だけであることも照らす
     for (const entry of INVARIANT_RUNS) {
       if (!WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf(entry.name));
+      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf800(entry.name));
       expect(budgetKeySets[entry.name], entry.name).toEqual(BUDGET_KEYS);
       // 印に替えたのは budget_* だけで、導出し直したのは manifest の要約の行（sha256・size_bytes）だけ
       expect(budgetDerivedSets[entry.name], entry.name).toEqual([{ path: "artifacts/summary.json", fields: ["sha256", "size_bytes"] }]);
@@ -5659,25 +5743,24 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
    *   ids off・v1.1a は旧値のまま
    */
   const BEFORE_748_BASE: Readonly<Record<string, string>> = {
-    // Issue #800：ids on の 16 経路は、台帳の検査の式の行の文（T1・T1''・T2・B1）と C2 の schema が要求に入るため取り直した
-    "stage-stagnation": "97d173b368c6f4b945dac317b985d9bd7849c81c31e88c99c54b56e05e1baddf",
-    "stage-adopting": "2cddef52632095313698edcebcab0d6964fd1e6c3aa4c04d722b284d70309f6c",
-    "stage-sets": "222074e03faeef54ae5e31e2405f334cf6b058585da33fce42aec9307818421f",
-    "stage-mixed": "5f1176060c15662a688f489f5c33fb67fb76a8ccbb85de14ae8d0d3553d7efa3",
-    "stage-returned": "5d52d50218005964028d090e9c229e52cd5475a796cdd073134ed396423e884b",
-    "stage-recounts": "37e80f711bee08b0720eda4385c36f7e99c447b9e1896efb7116a4a56b9d3ad2",
-    "stage-stop-repair": "3927f8682e949fc088666d67b43299911410b6a0fdaa79a5a584d5ccd14578c8",
-    "stage-stop-first-eval": "6752089601421032a2d0cf50617a275c76ba15f7e9ada36905e999eb625c4093",
-    "stage-stop-commit": "2b9eb4fdff6646fe9120dfb34e933fb4ce0175b4009b5625d0aeee85b905cdd9",
-    "whole-stagnation": "e6ab9faae97d3ba2c6ca696c75a37f12787604eb3b1b115db10204eb4b1e658a",
-    "whole-adopting": "4613a214043ed083d2781083782cf36847d3b36c4f027fcf753ddb27b16ebf01",
-    "whole-sets": "f9d7b1d0bb639b36c904849ee778e9e88a8c9883389ca1d54580044f1ac804c9",
-    "whole-mixed": "04a8336783b384e3e8e4eef3f346dd70a4c65acb248bc9f7e8365575dac3e851",
-    "whole-recounts": "c3c277bb35e220a0c82085fec60362d889a7b492ce99d21d00adc853c812acf2",
+    "stage-stagnation": "dcd6cb24b804ae4d21e391b9d38632006827a9eb00dcc23aa5e3761aa92ae56e",
+    "stage-adopting": "bcc1e76c3b7a4d461940a26fa966539ab6ef9599c032f45df8a346cba7be49fe",
+    "stage-sets": "5a87741f7b3e6f1ddbd21404fd99f2877927247fdbf5a9d7e1f1b7f54181970f",
+    "stage-mixed": "1a364ed509595569c61329d4ec3fd6d0be956cd52fdc2ff1143c3b6ba1a8ac92",
+    "stage-returned": "1f572cbe4b5e36a4d60399699f3ad1a6317fe4b5ded39ae4b736474da76249bd",
+    "stage-recounts": "44156ab27997f88ce9b9dc3e4603754fda54471c2cbb9ba940c925898f16f086",
+    "stage-stop-repair": "f7bba3aa12f9ca4dad5ebf5c5319b66f3f440ed6a7ce6606a83a7b4803d19e73",
+    "stage-stop-first-eval": "0783975e0d141d2f4b05f27e4384eb524ef61f7fd282846e7e46b8f19ebb7a27",
+    "stage-stop-commit": "15f1385f99503285050f5a339ef380226fe3dec14476c1795b20ffcfd9dac21f",
+    "whole-stagnation": "fba02b2acc1c51880303888c5975fdaf7710b4ba8898c1c318cf571156b60897",
+    "whole-adopting": "1c00d9e844350a7930a9f81e82be575c22545c1e2801ddd362ca9c296e9d8ad0",
+    "whole-sets": "6d85af64487108677d7f260b3520f78023c0dea2df54c37bd07f6156a50ac4e6",
+    "whole-mixed": "c17b8e6f10a4519353a92da2ac6f5e08ac66be6697cecffdef7458d5f255443e",
+    "whole-recounts": "d37a80c6bbdf58516957d82600e1651c91cff121c235e911b69e2f6e0c20b849",
     "stage-ids-off": "172356f1f7f84c2aeea7d6f47abe3b139a5871b6c6cbfd27d66ed3ac10f0f427",
     "whole-ids-off": "372c315e1984e65654ec20489ac4b2061feb561eb2d4bafef70c09f34adb5ee0",
-    "stage-search-repair-off": "84d37467f6c63c797ab52cb6e6c7ef6b61dd6505d7d145fab8b432482d32d0dd",
-    "whole-search-repair-off": "6c7cd44c0965e84dc87d166a2da04400380b5c6064b77dafb76e7a81f2a06e1c",
+    "stage-search-repair-off": "52ffc1bff4ca7a45ef740c522e240e40472074ae502acb462f8aa02d8146d683",
+    "whole-search-repair-off": "df1fa5649b563bf458e8905dbfcc2c808f4611ba184047fda6ee670bcd17ba80",
     "stage-v11a": "a9db8acf6308a96669bf63dba74981c54f99be372b949dee6a1a88da7a5df251",
     "whole-v11a": "fa7fab341848889ac397ac89263840c0618331179e12c35ae6ad63d1015cc7de",
   };
@@ -5712,18 +5795,18 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       budgetDerivedSets[entry.name] = budgetDerived;
       searched[entry.name] = hasSearch;
     }
-    expect(digests).toEqual(BEFORE_748_BASE);
+    expect(digests).toEqual({ ...BEFORE_748_BASE, ...BEFORE_748_BASE_800 });
     // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと（search_repair・requests・stage_spans を残したまま）、直す前（f9bf3b3）の生出力とバイト列で同じ
     for (const entry of INVARIANT_RUNS) {
       if (WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_RAW[entry.name]);
+      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_RAW_800[entry.name] ?? BEFORE_761_RAW[entry.name]);
     }
     // 費用が入力長で変わる 4 経路を含む全部の要求の列は、旧値（f9bf3b3）と一致する
-    expect(strippedRequestDigests).toEqual(BEFORE_761_REQUESTS);
+    expect(strippedRequestDigests).toEqual({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_800 });
     // 4 経路は、診断と R-fr-08 を外し budget_* の値だけを印に替えた全出力が f9bf3b3 と一致する（印のキーも budget_* だけ）
     for (const entry of INVARIANT_RUNS) {
       if (!WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf(entry.name));
+      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf800(entry.name));
       expect(budgetKeySets[entry.name], entry.name).toEqual(BUDGET_KEYS);
       expect(budgetDerivedSets[entry.name], entry.name).toEqual([{ path: "artifacts/summary.json", fields: ["sha256", "size_bytes"] }]);
     }

@@ -88,6 +88,7 @@ import {
   withoutRequiredValidations,
   revert735,
   revertBundleFiles735,
+  withoutValidationExpression,
 } from "./__tests__/fixtures.js";
 import {
   STAGE_RUN_RECORD_SCHEMA,
@@ -1209,8 +1210,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 11ca852ea32e6f3085c5cf91987ba986e9561aea6a442458ea408d2ce851de80）
       // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 23e96f59c9b15af3b01e23a7b81c879a139b7776c1e0e6a823739e637b1c0852）
       // 要求の SHA-256 は Issue #795 で取り直した（旗 ids on の B3' のデータに塊「要件に結び付いた検査」を足し、R-dc-03 の ids の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutLinkedValidations`。旧 b397d6409d7bb8fe3e8dd289563117390ec92c6ddf0210d7da840c3efc343f5f）
-      // 要求の SHA-256 は Issue #800 で取り直した（台帳の検査の式の行の T1・T1''・T2・B1 の文が ids on の要求に入るため）
-      "5617c8c5e3e840afbc76501e81722a4adcefd91d8deba4159a4d59a19523c383",
+      "6a54106962fdd2d18044d4efa54e8bf7c6b517c4ffdae8674e1b0def1cd0bdd3",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d3d46bd0bae1ed1bce66a419612e4d05b1d6d0cefa9b95072d2af39c8137d700）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 ef2dc4cd77f101896bc8c4c377efeabe8f621d092497fdef0ee93b69490e031f）
@@ -1229,7 +1229,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 a61b8eb44bff4d25b0770176166625d28060dfa421594be3033ff047f10b3634）
       // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 fca5a4eeaad8ab62b049891ea21784f097cc9f715f7ffe27fdf3fa46f2f84179）
       // 要求の SHA-256 は Issue #795 で取り直した（旗 ids on の B3' のデータに塊「要件に結び付いた検査」を足し、R-dc-03 の ids の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutLinkedValidations`。旧 5b18feeb728eda386d9523d6da712dc86522812b75c6cb8794f17f12487069d9）
-      "5be436d23558f235a23ac8484ed539989b5a1a6c190c41d470e9e7b9b784862d",
+      "df6ae87c829452f506cb899f8b306726cb34a2520d7de6c22b180b0a10ed8f59",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 c479ec4fc3ac733a9b470499f5d8fc631583a94ca9e4169834ae571ea7499645）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 a3848402cdf1bbedbdbb51431bd971ccc94a351d6bfb88ae7a9f56054cdec635）
@@ -1250,7 +1250,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 37d215a03b3d1fb251479e18ff68b18cba8c3ba4bb473c2667e0bd44e480192c）
       // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 c71bc450115d4e4bcefe329eac1ef6280b6f20fc155782ab881cda8368fe8b9d）
       // 要求の SHA-256 は Issue #795 で取り直した（旗 ids on の B3' のデータに塊「要件に結び付いた検査」を足し、R-dc-03 の ids の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutLinkedValidations`。旧 70844607c361197004f0c489d2f446f717ddb340c855a02a3f21a2cd401e518c）
-      "debab636153b1448d9a05d6041f2d91fb6a197be63ade0dab7f73d350a7e128f",
+      "ce4170fb7d74694faf33c2f0a829481b2b49c9eb0a9d1270bfc009ccde40482e",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 2f032bbaf50ff8e7c6c0fbe9708107eb043cca23ae2bc5b6b25680e7c2f4151a）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 f039481b055d8d893ee5535d5b56acc5182d6e5b392c8c4f3a21c4632403f859）
@@ -1262,7 +1262,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 efcc74edb8bc0ab3a4c540f0d6fe4074f5299cd5cb144f5576c54621df7863a2、#682 の前 0ed4f413a0be74f4140a5d04d48728660796a4de535442589ae78af2b53120ff）
       // 要求の SHA-256 は Issue #724 で取り直した（C2 の checks の欄を対象の並びにし R-map-03 の文を直したため。旧 2c5b83f0e36a0e8c094b261f4b27b11de51a3ff4b7b97c9e1eac0eccfc65bd9f）
       // 要求の SHA-256 は Issue #725 で取り直した（旗 ids と ledger が on の C2 のデータに台帳の未対応の観測の塊を足し、台帳版の R-map-03 の文を直したため。旧 17aea3149d429ba13dc0352224871fe191084f6459d9a83cc6d355534d6e24bc）
-      "0a774d46430d4b93ce180002678298714cbbc90ed2be5e4dd112b3c6fdd50c57",
+      "f82fa77127b88ffcb12ca79f150cbe0d16438e055cc543503e8f44b8c83181f5",
       "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
       "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     ],
@@ -1286,7 +1286,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // 要求の SHA-256 は Issue #663 で取り直した（旗 ids on の T2 の R-tsp-02 に要件ごとの試験の上限の文を足したため。その文を外すと旧の値に戻る＝`BEFORE_663_REQUESTS`。旧 a8445592525ce05b953014bcc300b19b10bd6e4a8361d10c34ec79d20412452d）
       // 要求の SHA-256 は Issue #794 で取り直した（旗 ids on の T2 のデータに時計の塊を足し、R-tsp-13 の ids の文に時計の読み方の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutIdsClock`。旧 f194a77e72fc71d29fb2d45966a2934dd85d47c7f74c7ad597811208892ee273）
       // 要求の SHA-256 は Issue #795 で取り直した（旗 ids on の B3' のデータに塊「要件に結び付いた検査」を足し、R-dc-03 の ids の文を足したため。その塊と文を外すと旧の値に戻る＝`withoutLinkedValidations`。旧 b63b9c2a1aa4d3b949b5ef26d2b5bdc1f4011806ec6226313a2443797d240d3c）
-      "19a54dc9c589c8b108e015ba0807df7180e224c1904c4e13948b354dc9302611",
+      "1d0de0383e04aad02d6dce30ba4981fb62dc61e88d0878a6bfbfc6c7e5ca4e51",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       // 納品物の SHA-256 は #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（旧 d762715a3037b44cbc202848f40b5fa2cd1551bba549bd418f56fefc0e9def0e）
       // 納品物の SHA-256 は Issue #735 で取り直した（要約のファイルと manifest が変わるため。要約の欄を外して manifest を計算し直すと旧の値に戻る＝`BEFORE_735`。旧 4a2626d7964d9f231142488d8151d75f3c36d8ef216d65f06c6fb63bc8a102ab）
@@ -1305,20 +1305,21 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
   // #650 の T2 の手（v12-h3e で main b018140 に合流）で取り直した（T2 と B1 の要求が変わるため。v12-h3e の作業木で測った値。旧 cc800c696c72a5ba2708099d2be1125c0238c95dce8fc9d2255975e9c2960f1c）
   // Issue #724 で取り直した（初回の C2 の要求の規則と schema が変わるため。旧 865603b1b7822c4a8a1e5f9ce348fa1d2ae57f6a29a00270b3893f7740d5cb95）
   // Issue #725 で取り直した（旗 ids と ledger が on の初回の C2 の要求のデータに台帳の未対応の観測の塊を足し、台帳版の R-map-03 の文を直したため。旧 f557b06dfea31a88264e5db7aacb66068a3f61398e4571fcd760ccfccfe8cb37）
-  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING = "35437dfcde46db3ff47146b21ae0b3db55ec73ec7385c0f7864a168da14e6d53";
+  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING = "b8760480b88790bfbe174c310a95b59f04edf06e0c921d47a7413a4ee0ce0397";
+  /** Issue #800：上の値の 3 番目（要求の全体）を、T2 の枠の変更の分だけ取り直した値（旧値は残す） */
+  const BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_800 = "c49d34b1c8ae201dde1d90c864d532c9e500195827ae958b5d9b1d067b54abaa";
   /**
    * 直す前の値：上の台本の要求から C2 の要求（schemaName が mapping のもの）を全部外した残りの SHA-256（base 2c514cf の mapping.ts・
    * names.ts・generated-tests.ts・fixtures.ts に戻した作業木で測った値。新しいコードの出力から作っていない。Issue #724）。#724 で要求の
    * SHA-256 を取り直した差が C2 の要求だけ（C1・C3・T2・B1 の要求は同じ）であることを照らす
    */
   const BEFORE_REQUESTS_WITHOUT_MAPPING: Readonly<Record<string, string>> = {
-    // Issue #800：台帳の検査の式の行（T1・T1''・T2・B1 の文と C2・T1 の schema）が ids on の要求に入るため取り直した
-    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "874bee90ffdd77fd7d8f11067fe708663b990a9559544e9e42e1522913f4ca45",
-    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "5da57a27df299e7a0a25fc5026fab1c5164c847f5caa5e3f48df4c3db71431c2",
-    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "1b9b0039aaf29bd9c26ff1ff0dbf823aa9bf3b9b9cf2451fb0534329464bf9a5",
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "fc5c8e4b4cf75e0c6a368d5ca88d06d391d6497c7ae4260c5afb5acb79cbadde",
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "bcaf58d13fede8b1dde00b5f8665c75a4fc4a713f016ccbeb243f476cd997fee",
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "ac126b65830f0b1d24d2321bb83a1201e8cf4856f2494fd5026934cb73d3a22f",
     "(4) C2 が 2 回落ちて止まる": "20058692a49f3b735bbc0bbfb63590e41c9eb4f522d84ec5943238632d4ac8e5",
     "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
-    "(5) 形で 1 度も落ちない": "5da57a27df299e7a0a25fc5026fab1c5164c847f5caa5e3f48df4c3db71431c2",
+    "(5) 形で 1 度も落ちない": "bcaf58d13fede8b1dde00b5f8665c75a4fc4a713f016ccbeb243f476cd997fee",
   };
 
   /**
@@ -1326,13 +1327,12 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
    * #732 の要求から C3 の R-sc-02 の構造の検査の読み方の文（`withoutIdsReading`）を外すとこの値に戻ることを照らす
    */
   const BEFORE_732_REQUESTS: Readonly<Record<string, string>> = {
-    // Issue #800：台帳の検査の式の行（T1・T1''・T2・B1 の文と C2・T1 の schema）が ids on の要求に入るため取り直した
-    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "e9a00f7f66d5f30358f3e1a09f7f1554c4e31abb8c9136bf30d929616c239822",
-    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "f758fa5c74d39af6cf7a82f6ab8be4350362aa9a2c1294c2e39e19357f73d4a6",
-    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "1267829bc4cc6d41cd8b3f554addbc9b196f9bf152bae0e294be7bbb0c1b55ca",
-    "(4) C2 が 2 回落ちて止まる": "0a774d46430d4b93ce180002678298714cbbc90ed2be5e4dd112b3c6fdd50c57",
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "75f57eff2d977c6b6c8b71930987722c5e26076cc8d5d0dae2a06a4868e911a4",
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "9e19ad5d99fa79745564a69adff2c76e4f54b63e940f2bede3a2a614824c775b",
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "298a1512256d852b1a484e660db51a2d58e39922bc0e9d9a1dd1bbe7acb25f21",
+    "(4) C2 が 2 回落ちて止まる": "f82fa77127b88ffcb12ca79f150cbe0d16438e055cc543503e8f44b8c83181f5",
     "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
-    "(5) 形で 1 度も落ちない": "1aa31746851f61c23a8e544b1928e0a864b621069e3735b9157ad3509cb1258e",
+    "(5) 形で 1 度も落ちない": "700a9fd50ba0cbe0641af1e0bbb175347a6fc7042917a733be759068ec318cae",
   };
 
   /**
@@ -1340,13 +1340,12 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
    * （`withoutIdsLimit`）を外すとこの値に戻ることを照らす。T2 に届かない (4) の 2 台本は今の値と同じ
    */
   const BEFORE_663_REQUESTS: Readonly<Record<string, string>> = {
-    // Issue #800：台帳の検査の式の行（T1・T1''・T2・B1 の文と C2・T1 の schema）が ids on の要求に入るため取り直した
-    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "3872158398b01d22b524cc5349a79bf84888917eaa4088207ce627d05bd28261",
-    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "4cd6bb4effed3dc41002d73056db47a98bbdc19f18f4f247048b22982bb68e95",
-    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "0c774465c4236deb0fddcfa34807331f9f79c01ea2cf5ed995274a7c4fa7836d",
-    "(4) C2 が 2 回落ちて止まる": "0a774d46430d4b93ce180002678298714cbbc90ed2be5e4dd112b3c6fdd50c57",
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "11ca852ea32e6f3085c5cf91987ba986e9561aea6a442458ea408d2ce851de80",
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "a61b8eb44bff4d25b0770176166625d28060dfa421594be3033ff047f10b3634",
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "37d215a03b3d1fb251479e18ff68b18cba8c3ba4bb473c2667e0bd44e480192c",
+    "(4) C2 が 2 回落ちて止まる": "f82fa77127b88ffcb12ca79f150cbe0d16438e055cc543503e8f44b8c83181f5",
     "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
-    "(5) 形で 1 度も落ちない": "5bb7657364e4f184f7520e8dc8c69d6930b72783f29cb1ff45ea47845b2a5053",
+    "(5) 形で 1 度も落ちない": "a8445592525ce05b953014bcc300b19b10bd6e4a8361d10c34ec79d20412452d",
   };
 
   /**
@@ -1366,27 +1365,120 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
    * R-tsp-13 の時計の文（`withoutIdsClock`）を外すとこの値に戻ることを照らす。T2 に届かない (4) の 2 台本は今の値と同じ
    */
   const BEFORE_794_REQUESTS: Readonly<Record<string, string>> = {
-    // Issue #800：台帳の検査の式の行（T1・T1''・T2・B1 の文と C2・T1 の schema）が ids on の要求に入るため取り直した
-    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "65cb4eed7e3bb03e7cc87740f5403a65c1f5ab8203f202d6a6d0331d5f3a5904",
-    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "9afb0a137db249ec437449dfbea63b4255c388db0cdd77144fd8e2d0856347e8",
-    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "9b2743fc250a65fddf8d938da94fd98ff2547699c351261050b899a4eac778f2",
-    "(4) C2 が 2 回落ちて止まる": "0a774d46430d4b93ce180002678298714cbbc90ed2be5e4dd112b3c6fdd50c57",
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "23e96f59c9b15af3b01e23a7b81c879a139b7776c1e0e6a823739e637b1c0852",
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "fca5a4eeaad8ab62b049891ea21784f097cc9f715f7ffe27fdf3fa46f2f84179",
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "c71bc450115d4e4bcefe329eac1ef6280b6f20fc155782ab881cda8368fe8b9d",
+    "(4) C2 が 2 回落ちて止まる": "f82fa77127b88ffcb12ca79f150cbe0d16438e055cc543503e8f44b8c83181f5",
     "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
-    "(5) 形で 1 度も落ちない": "128dc4dd2a0c2ae423f41c0c218ceaf4cb149ddc5d820065608782e112b2b041",
+    "(5) 形で 1 度も落ちない": "f194a77e72fc71d29fb2d45966a2934dd85d47c7f74c7ad597811208892ee273",
   };
 
+  /**
+   * Issue #800：`BEFORE_DIGESTS` の 3 番目（要求の全体）だけを、T2 の枠の変更（値の対象から項目・entity を外し、値の対象が無い要件を
+   * 免除する）の分だけ取り直した値。**上の `BEFORE_DIGESTS` の旧値は残す**。`withoutValidationExpression` で台帳に足した行の文と
+   * schema の欄を外しても、枠の値そのものが変わる台本（経路が変わる台本）なので、許可した差分として新しい期待を直接固定する
+   */
+  const BEFORE_DIGESTS_800: Readonly<Record<string, readonly string[]>> = {
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": [
+      "865511262ad4b1eec243d96a87d5716fa5dac5794bcc0967769bd9fda0974edc",
+      "68ef6a89239bdc818759f7cac71e164122fe07351e47230cdaaa473bf22c9665",
+      "437b7e3eec5c592b33619504d1a7ef1a737a2c9766b738f1d19496cb3d035713",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "e575ee2943955e7458a1a6cc6270e8967300299f9af4df9db4e8f38785f494f1",
+    ],
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": [
+      "771d2acf15b3903ea4b81cd6e6fb4cd6d4600944a807484c985dacbb6128e7e6",
+      "e3d7a7c0ddc54deec945cf292f2a0311b13f829390b9cdadc8b1022906e5107f",
+      "d0b722482dc42db8bbc1263b92810fc3a5d632f1795b961b66499fb723c19f8a",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "c8be607630dff4415097005dc4019066d50b3cc43426793be2d2dbbc925fb676",
+    ],
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": [
+      "c2a1c208a549dd9320f05ca078149cff2c691f163c9de1ef9a53da25426de89c",
+      "4b521a13c9199048e8f1c4ea507c5e2fa114baf0a4df5fd74319790204f6796a",
+      "f7f796420633480a2d0f165a99fd29ea325c323b47fd2425374f6a35d50cf04b",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "5bb0dd43d3dfd24dff1251fb46f241b30ae10949a4a360e1b8a9ad5c92f81963",
+    ],
+    "(4) C2 が 2 回落ちて止まる": [
+      "14927cf4ff8e5b827eb9f11391b5c422f6b789ccb1ff6878608c6cc351fa25c1",
+      "62a0d8984a6a06d59674e2a3daf142cbf34425567d43c37c53461d94613f8a8e",
+      "47d5c641aab1ceaa36389a297ccc3e85aeffed4900dbf02f89ce563616102536",
+      "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ],
+    "(4) C1 の束 2 が 2 回落ちて止まる": [
+      "191c0f74c9fc3a2b07234379b3c6f2e9f99e36f7300804c0325cd1f126763e58",
+      "e56ba79e38dfcd5bfdde73a5eb04a9477d643dbba57c5cffc1d6194da3d8944d",
+      "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+      "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ],
+    "(5) 形で 1 度も落ちない": [
+      "8a7be5d0b40243e22114d434e400f45dc55ff41add9d357888593eaa4d460aea",
+      "958e1dcb2de103b1d9358ed0e7af7bf6b7918a6478c15dfb0c9e5930d21f69ae",
+      "97c6d27229990c9d65388d05b799e9b68fdc38ee52d10a5918a0d32ecc5dda77",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "b9cdc24d6836b26f9d42b07c9185319786fc91c8d9b8eeef6704ad7982722a4e",
+    ],
+  };
+  /**
+   * Issue #800：各復元（#795・#732・#663・#794・地図を外す）の後に残る T2 の枠の差だけを取り直した値。旧の値は各
+   * `BEFORE_*` に残したまま、経路が変わる台本として新しい期待を直接固定する
+   */
+  const BEFORE_REQUESTS_800: Readonly<Record<"linked" | "reading" | "limit" | "clock" | "mapping", Readonly<Record<string, string>>>> = {
+    linked: {
+      "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "08dfe9aebc2261046e6ad59436008caf9de90a5777bd9a8dbf898952c639f3ce",
+      "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "bccf32eba3e4d528a4b7fd32f3d6f3718ffe5ee3b43fe275cf278b6fcd8930c4",
+      "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "5cb477a4ace9a8e19f6e1a14f23639bd28ff9f37076a7414d986ac14585d86b4",
+      "(4) C2 が 2 回落ちて止まる": "47d5c641aab1ceaa36389a297ccc3e85aeffed4900dbf02f89ce563616102536",
+      "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+      "(5) 形で 1 度も落ちない": "6595979298932beeddef3c49f44e925d63edb1256c655c557d44efaa2b93bb9f",
+    },
+    reading: {
+      "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "2f9d29c94f8cc95b71b6b99fc3666cf9bdb1c4a1b0ba6a96c11de6defc4c259f",
+      "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "f7f4518a06ab2f66b50b938f7d1c8d0b6bee7abac082b47277ced4a2649d979a",
+      "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "42246069be58c39dad9886293196fb4b870ec5ecb002084512f6e767e6251660",
+      "(4) C2 が 2 回落ちて止まる": "47d5c641aab1ceaa36389a297ccc3e85aeffed4900dbf02f89ce563616102536",
+      "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+      "(5) 形で 1 度も落ちない": "71ebfb4eb24256085bc3a4032fc2e9960beb04cd4954fa7d75d144aab699e688",
+    },
+    limit: {
+      "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "1709f96dda3cc65f76aaea1da74db035785f685f222abfb492fb47c8cb378b17",
+      "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "3fd2e0eef211d269bdde2b87d605ea54d551dd3f20cb6afbc3a4723d1eb2b2f3",
+      "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "c274850073b6fcc487acf237b1fdd24207a4d87562994469030aa4b0bbfa95fe",
+      "(4) C2 が 2 回落ちて止まる": "47d5c641aab1ceaa36389a297ccc3e85aeffed4900dbf02f89ce563616102536",
+      "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+      "(5) 形で 1 度も落ちない": "e1ef944488e22b46c026c5171741d139378ed2de0d8cff44fadc54337985bee6",
+    },
+    clock: {
+      "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "602accc0acce232baf7a3169c2097a7f7a7a7515b39089c2270d96a2fd489385",
+      "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "ad02a842847ae30b2bf4072fdbccc2c816c00b0cf16ad5fe8774ed75263c184b",
+      "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "d139a09e4825678e73ee10e1d583c53f01ff3e3b781774950e7cb75f74d363d2",
+      "(4) C2 が 2 回落ちて止まる": "47d5c641aab1ceaa36389a297ccc3e85aeffed4900dbf02f89ce563616102536",
+      "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+      "(5) 形で 1 度も落ちない": "61152e96b974b39d4593a97091f650f17eae7e10fa26e74d3934da3d6085d7aa",
+    },
+    mapping: {
+      "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "1404c1238de16089d8202ea6ed8aa178c4c88b58fa856759cae0210d245cc821",
+      "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "3467318d2337c3079c9bc7ccd5e06026ec56841e5f6868481a98c60620a14d36",
+      "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "bece408cb7e45d41b6181c254c7d11c186972b43a1cd364acc91d54c843fcadb",
+      "(4) C2 が 2 回落ちて止まる": "20058692a49f3b735bbc0bbfb63590e41c9eb4f522d84ec5943238632d4ac8e5",
+      "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+      "(5) 形で 1 度も落ちない": "3467318d2337c3079c9bc7ccd5e06026ec56841e5f6868481a98c60620a14d36",
+    },
+  };
   /**
    * Issue #795 の前の要求の SHA-256（旧の値。上の `BEFORE_DIGESTS` の 3 番目を #795 で取り直す前の値）。#795 の要求から B3' の塊
    * 「要件に結び付いた検査」と R-dc-03 の ids の文（`withoutLinkedValidations`）を位置で外すとこの値に戻ることを照らす
    */
   const BEFORE_795_REQUESTS: Readonly<Record<string, string>> = {
-    // Issue #800：台帳の検査の式の行（T1・T1''・T2・B1 の文と C2・T1 の schema）が ids on の要求に入るため取り直した
-    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "ecff648652114e029bc27688e3a1fdeba34bbe76d78fc3829212ddca8fe88378",
-    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "caca1f14a435b077cc03e17f8b0ae029db4db4bd79f2fb85e80e15e892658622",
-    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "4251b3c7e9dd668774692cfdb654f58449412c83d5fe7f31b26f7615138eb341",
-    "(4) C2 が 2 回落ちて止まる": "0a774d46430d4b93ce180002678298714cbbc90ed2be5e4dd112b3c6fdd50c57",
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": "b397d6409d7bb8fe3e8dd289563117390ec92c6ddf0210d7da840c3efc343f5f",
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": "5b18feeb728eda386d9523d6da712dc86522812b75c6cb8794f17f12487069d9",
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": "70844607c361197004f0c489d2f446f717ddb340c855a02a3f21a2cd401e518c",
+    "(4) C2 が 2 回落ちて止まる": "f82fa77127b88ffcb12ca79f150cbe0d16438e055cc543503e8f44b8c83181f5",
     "(4) C1 の束 2 が 2 回落ちて止まる": "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
-    "(5) 形で 1 度も落ちない": "92a9519d5a8c023a28a34caf0340f8b5ee25b37dab6e276f5c98c412c0afb698",
+    "(5) 形で 1 度も落ちない": "b63b9c2a1aa4d3b949b5ef26d2b5bdc1f4011806ec6226313a2443797d240d3c",
   };
 
   const BEFORE_MATERIALS_DIGESTS: Readonly<Record<string, string>> = {
@@ -1407,6 +1499,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     for (const script of beforeScripts()) {
       const { result, recording } = await runScenario(script.calls, { flags: IDS_FLAGS });
       const files = result.bundle === null ? [] : bundleFiles(result.bundle).map((file) => ({ path: file.path, text: file.text }));
+      // Issue #800：台帳に足した行の文と C2 の schema の欄を外して、旧の指紋と照らす
+      const restoredStructured = withoutValidationExpression(recording.structured);
       // 止まる走りの診断の一覧（materials.json）は、断った候補の要約（rejected）の鍵を外した残りを照らす。rejected は下で期待を固定する
       const listing = result.diagnostics.find((artifact) => artifact.path === DIAGNOSTICS_LISTING_FILE);
       if (listing !== undefined) {
@@ -1416,30 +1510,30 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       }
       measuredWithoutMapping[script.name] = await sha256Hex(
         JSON.stringify({
-          structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(recording.structured))).filter(
+          structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(restoredStructured))).filter(
             (request) => request.schemaName !== MAPPING_SCHEMA_NAME,
           ),
           tools: recording.tools,
         }),
       );
       measured[script.name] = await Promise.all(
-        [result.record, result.summary, { structured: recording.structured, tools: recording.tools }, result.summary.exit_code, files].map((value) =>
+        [result.record, result.summary, { structured: restoredStructured, tools: recording.tools }, result.summary.exit_code, files].map((value) =>
           sha256Hex(JSON.stringify(value)),
         ),
       );
       // Issue #795：B3' の塊と R-dc-03 の ids の文を位置で外した要求は、#795 の前の要求の SHA-256 と同じ（差はその塊と文だけ）
-      measuredWithoutLinked[script.name] = await sha256Hex(JSON.stringify({ structured: withoutLinkedValidations(recording.structured), tools: recording.tools }));
+      measuredWithoutLinked[script.name] = await sha256Hex(JSON.stringify({ structured: withoutLinkedValidations(restoredStructured), tools: recording.tools }));
       // Issue #732：C3 の R-sc-02 から構造の検査の読み方の文を外した要求は、#732 の前の要求の SHA-256 と同じ（差はその文だけ）
       measuredWithoutReading[script.name] = await sha256Hex(
-        JSON.stringify({ structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(recording.structured))), tools: recording.tools }),
+        JSON.stringify({ structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(restoredStructured))), tools: recording.tools }),
       );
       // Issue #663：T2 の R-tsp-02 から要件ごとの試験の上限の文を外した要求は、#663 の前の要求の SHA-256 と同じ（差はその文だけ）
       measuredWithoutLimit[script.name] = await sha256Hex(
-        JSON.stringify({ structured: withoutIdsLimit(withoutLinkedValidations(recording.structured)), tools: recording.tools }),
+        JSON.stringify({ structured: withoutIdsLimit(withoutLinkedValidations(restoredStructured)), tools: recording.tools }),
       );
       // Issue #794：T2 の時計の塊と R-tsp-13 の時計の文を位置で外した要求は、#794 の前の要求の SHA-256 と同じ（差はその塊と文だけ）
       measuredWithoutClock[script.name] = await sha256Hex(
-        JSON.stringify({ structured: withoutIdsClock(withoutLinkedValidations(recording.structured)), tools: recording.tools }),
+        JSON.stringify({ structured: withoutIdsClock(withoutLinkedValidations(restoredStructured)), tools: recording.tools }),
       );
       // Issue #735：C3 に届いた走りの要約は v12_calls に C3 の束の欄を持ち、それを外した要約・納品物は #735 の前と同じ
       const summary735 = structuredClone(result.summary) as unknown as Record<string, any>;
@@ -1460,14 +1554,14 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         ).toBe(true);
       }
     }
-    expect(measured).toEqual(BEFORE_DIGESTS);
-    expect(measuredWithoutLinked).toEqual(BEFORE_795_REQUESTS);
-    expect(measuredWithoutReading).toEqual(BEFORE_732_REQUESTS);
-    expect(measuredWithoutLimit).toEqual(BEFORE_663_REQUESTS);
-    expect(measuredWithoutClock).toEqual(BEFORE_794_REQUESTS);
+    expect(measured).toEqual({ ...BEFORE_DIGESTS, ...BEFORE_DIGESTS_800 });
+    expect(measuredWithoutLinked).toEqual({ ...BEFORE_795_REQUESTS, ...BEFORE_REQUESTS_800.linked });
+    expect(measuredWithoutReading).toEqual({ ...BEFORE_732_REQUESTS, ...BEFORE_REQUESTS_800.reading });
+    expect(measuredWithoutLimit).toEqual({ ...BEFORE_663_REQUESTS, ...BEFORE_REQUESTS_800.limit });
+    expect(measuredWithoutClock).toEqual({ ...BEFORE_794_REQUESTS, ...BEFORE_REQUESTS_800.clock });
     expect(measuredBefore735).toEqual(BEFORE_735);
     expect(measuredMaterials).toEqual(BEFORE_MATERIALS_DIGESTS);
-    expect(measuredWithoutMapping).toEqual(BEFORE_REQUESTS_WITHOUT_MAPPING);
+    expect(measuredWithoutMapping).toEqual({ ...BEFORE_REQUESTS_WITHOUT_MAPPING, ...BEFORE_REQUESTS_800.mapping });
     // Issue #725 で取り直した要求の差は、旗 ids と ledger が on の C2 の要求のデータの台帳の未対応の観測の塊（文書の塊の直後）と規則の文
     const fifth = await runScenario(beforeScripts().find((script) => script.name === "(5) 形で 1 度も落ちない")?.calls ?? [], { flags: IDS_FLAGS });
     const mapping = fifth.recording.structured.filter((request) => request.schemaName === MAPPING_SCHEMA_NAME);
@@ -1478,14 +1572,15 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const third = beforeScripts().find((script) => script.name === "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す");
     const thirdRun = await runScenario(third?.calls ?? [], { flags: IDS_FLAGS });
     expect(thirdRun.recording.structured[5]?.schemaName).toBe("mapping");
-    expect(
-      await sha256Hex(
-        JSON.stringify({
-          structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(thirdRun.recording.structured))).filter((_, index) => index !== 5),
-          tools: thirdRun.recording.tools,
-        }),
-      ),
-    ).toBe(BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING);
+    const thirdDigest = await sha256Hex(
+      JSON.stringify({
+        structured: withoutIdsReading(withoutIdsLimit(withoutLinkedValidations(withoutValidationExpression(thirdRun.recording.structured)))).filter((_, index) => index !== 5),
+        tools: thirdRun.recording.tools,
+      }),
+    );
+    expect(thirdDigest).toBe(BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_800);
+    // 旧値は残す（T2 の枠の変更で取れなくなった値）。新しい値と違うことを照らす
+    expect(BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING).not.toBe(BEFORE_THIRD_REQUESTS_WITHOUT_SECOND_MAPPING_800);
     // rejected は、形の試行ごとの候補 2 件（attempt 1・2 の順）で、それぞれ問題の一覧（problem_count と固定文）を持つ
     expect(Object.keys(rejectedSummaries)).toEqual(Object.keys(BEFORE_MATERIALS_DIGESTS));
     for (const [name, rejected] of Object.entries(rejectedSummaries)) {

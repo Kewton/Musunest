@@ -70,6 +70,11 @@ export interface SizedOptions {
   readonly itemsOnly?: boolean;
   /** 値を縛る要件のうち台本 itemsOnly の前の 1 件を、所属が entity の行だけの在ることだけの要件にする（Issue #653） */
   readonly entityOnly?: boolean;
+  /**
+   * 旗 `v12.ids` の走りで、値を縛る要件に条件つき操作の行を足す（Issue #800。値の対象を持つので免除されない）。
+   * 代わりの対象（項目 × screen）の生成は条件つき操作を数えないので、作る試験の数は変えない
+   */
+  readonly valueTargets?: boolean;
 }
 
 /** 台本 `itemsOnly` の要件の数（Issue #652） */
@@ -242,6 +247,16 @@ export function buildSized(
     refEntity: null,
   });
   const rows: NameTableRow[] = [row({ id: "e.item", kind: "entity", entity: null, name: "item", type: null, from: "R1" })];
+  /**
+   * 旗 `v12.ids` と `valueTargets` の走りで、値を縛る要件に足す条件つき操作の行（`o.opN`。Issue #800）。値の対象は計算と
+   * 条件つき操作だけになるので、項目だけの所属のままでは決まりの要件が免除され、異常・境界の欠如を作り直させる道が無くなる。
+   * 台本が足した行は出典の引用を空にし、代わりの対象（項目 × screen）の判定では数えない（作る試験の数は変えない）
+   */
+  const retryOperationOf = (index: number): string | null => {
+    const lead = leadingOf(index);
+    if (options.valueTargets !== true || !resolvedFlags.ids || isStructural(index) || isItemsOnly(index) || isEntityOnly(index) || lead !== null) return null;
+    return `o.op${index + 1}`;
+  };
   ids.forEach((id, index) => {
     const n = index + 1;
     const lead = leadingOf(index);
@@ -268,6 +283,13 @@ export function buildSized(
     } else {
       rows.push(row({ id: `f.item.v${n}`, kind: "field", entity: "e.item", name: `v${n}`, type: "number", from: id }));
       if (index === screenRuledIndex) rows.push(row({ id: `s.view${n}`, kind: "screen", entity: "e.item", name: `view${n}`, type: { view: "table" }, from: id }));
+      const valueTarget = retryOperationOf(index);
+      if (valueTarget !== null) {
+        rows.push({
+          ...row({ id: valueTarget, kind: "operation", entity: "e.item", name: `op${n}`, type: { action: "update", hasWhen: true }, from: id }),
+          source: { requirementId: id, quote: "" },
+        });
+      }
     }
   });
   const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
@@ -287,8 +309,8 @@ export function buildSized(
           : isStructural(index)
           ? [`f.item.w${index + 1}`, `s.view${index + 1}`]
           : index === screenRuledIndex
-          ? [`f.item.v${index + 1}`, `s.view${index + 1}`]
-          : [`f.item.v${index + 1}`];
+          ? [`f.item.v${index + 1}`, `s.view${index + 1}`, ...(retryOperationOf(index) === null ? [] : [retryOperationOf(index) as string])]
+          : [`f.item.v${index + 1}`, ...(retryOperationOf(index) === null ? [] : [retryOperationOf(index) as string])];
       return { requirementId: id, roles: roles.map(stated) };
     }),
     verification: ids.map((id, index) => {
@@ -537,7 +559,15 @@ export function buildSized(
     }
     if (screenRuledIndex >= 0) lines.push(`  - name: view${screenRuledIndex + 1}`, "    type: table", "    entity: item", `    show: [v${screenRuledIndex + 1}]`);
     if (codeWritten) lines.push("  - name: totals", "    type: dashboard", "    widgets:", "      - type: number", "        value: total");
-    lines.push("actions: []");
+    const operations = Array.from({ length: requirementCount }, (_, index) => index).filter((index) => retryOperationOf(index) !== null);
+    if (operations.length === 0) lines.push("actions: []");
+    else {
+      lines.push("actions:");
+      for (const index of operations) {
+        const n = index + 1;
+        lines.push(`  - name: op${n}`, "    entity: item", "    kind: update", "    set:", `      v${n}: 1`, `    when: v${n} > 0`);
+      }
+    }
     const checks = Array.from({ length: requirementCount }, (_, index) => index).filter(
       (index) => !isStructural(index) && !isItemsOnly(index) && !isEntityOnly(index) && leadingOf(index) === null,
     );

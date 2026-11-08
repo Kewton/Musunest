@@ -25,6 +25,7 @@ import {
 } from "../names.js";
 import { STRUCTURAL_ASSERTIONS, STRUCTURAL_TARGET_KINDS, type StructuralAssertionKind } from "../../fixed-test.js";
 import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
+import { TEST_CASE_FRAME_TEXTS } from "../../v12/test-cases.js";
 import { V12_CALL_LIMITS } from "../../v12/limits.js";
 import { MAPPING_SCHEMA_NAME } from "../../v12/stages/mapping.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
@@ -565,6 +566,104 @@ export function withoutRequiredValidations<T extends { readonly input: string; r
       ? {}
       : { rules: request.rules.map((text) => (text === WRITE_V11A_IDS_R07_DEFINITION.text ? original : text)) }),
   };
+}
+
+/**
+ * Issue #800 の復元：台帳に足した行（validation-expression）の文と schema の欄を、要求・記録から外す。
+ * 台帳の行から取った T1・T1''・T2・B1 の文を文字列から外し、B1 の行を並びから外し、C2 の schema の `targets` と
+ * 確かめ方の種類の enum の `validation-expression` を外す。`withoutIdsClock`・`withoutLinkedValidations` と同じ作法で、
+ * 既存の照合の前に掛ける
+ */
+export function withoutValidationExpression<T>(value: T): T {
+  const row = PROPERTY_LEDGER.find((entry) => entry.id === "validation-expression");
+  const texts = row === undefined ? [] : [row.rules.t1, row.rules.t2Ids, row.rules.t1Acceptance, row.rules.b1].filter((text): text is string => text !== null);
+  const b1 = row?.rules.b1 ?? null;
+  const strip = (text: string): string => texts.reduce((result, fragment) => result.split(fragment).join(""), text);
+  const isObject = (inner: unknown): inner is Record<string, unknown> => typeof inner === "object" && inner !== null && !Array.isArray(inner);
+  /** #800 の前の枠（値の対象＝画面以外の所属、免除＝画面・entity の行だけ）へ戻した入力。枠の塊が無ければそのまま */
+  const restoreFrames = (text: string): string => {
+    if (!text.includes('<data name="必要な試験の枠">')) return text;
+    const blocks = [...text.matchAll(/<data name="([^"]+)">\n([\s\S]*?)\n<\/data>/g)];
+    const parsed = new Map<string, unknown>();
+    for (const block of blocks) {
+      try {
+        parsed.set(block[1] ?? "", JSON.parse(block[2] ?? ""));
+      } catch {
+        // JSON でない塊は触らない
+      }
+    }
+    const table = parsed.get("対象の表");
+    const ownership = parsed.get("要件ごとの所属");
+    const frames = parsed.get("必要な試験の枠");
+    if (!isObject(table) || !Array.isArray(table["rows"]) || !Array.isArray(ownership) || !Array.isArray(frames)) return text;
+    const rowById = new Map<string, Record<string, unknown>>();
+    for (const entry of table["rows"]) if (isObject(entry) && typeof entry["id"] === "string") rowById.set(entry["id"], entry);
+    const rolesById = new Map<string, readonly { readonly id: string }[]>();
+    for (const entry of ownership) {
+      if (isObject(entry) && typeof entry["requirementId"] === "string" && Array.isArray(entry["roles"])) {
+        rolesById.set(entry["requirementId"], entry["roles"].filter((role): role is { readonly id: string } => isObject(role) && typeof role["id"] === "string"));
+      }
+    }
+    const restored = frames.map((frame) => {
+      if (!isObject(frame) || typeof frame["requirementId"] !== "string") return frame;
+      const roles = rolesById.get(frame["requirementId"]) ?? [];
+      const owned = roles.flatMap((role) => rowById.get(role.id) ?? []) as Record<string, unknown>[];
+      const valueTargets = owned.filter((entry) => entry["kind"] !== "screen").map((entry) => entry["id"]);
+      const normalTargets = owned
+        .filter((entry) => entry["kind"] === "computation" || (entry["kind"] === "operation" && isObject(entry["type"]) && entry["type"]["hasWhen"] === true))
+        .map((entry) => entry["id"]);
+      const exempt = owned.length > 0 && owned.length === roles.length && owned.every((entry) => entry["kind"] === "screen" || entry["kind"] === "entity");
+      const ifRuled = isObject(frame["ifRuled"]) ? frame["ifRuled"] : undefined;
+      const ifExistenceOnly = isObject(frame["ifExistenceOnly"]) ? frame["ifExistenceOnly"] : undefined;
+      const codeTests = Array.isArray(frame["codeTests"]) ? frame["codeTests"].length : 0;
+      const writable = valueTargets.length > 0;
+      return {
+        ...frame,
+        valueTargets,
+        normalTargets,
+        ifRuled:
+          ifRuled === undefined
+            ? undefined
+            : {
+                ...ifRuled,
+                kinds: exempt ? [] : ["normal", "abnormal", "boundary"],
+                caseTargets: exempt ? [] : valueTargets,
+                note: exempt ? TEST_CASE_FRAME_TEXTS.ruledExempt : TEST_CASE_FRAME_TEXTS.ruled,
+              },
+        ifExistenceOnly:
+          ifExistenceOnly === undefined
+            ? undefined
+            : {
+                ...ifExistenceOnly,
+                note: codeTests === 0 && !writable ? TEST_CASE_FRAME_TEXTS.unsupported : TEST_CASE_FRAME_TEXTS.existence,
+              },
+      };
+    });
+    return text.replace(
+      /<data name="必要な試験の枠">\n[\s\S]*?\n<\/data>/,
+      `<data name="必要な試験の枠">\n${JSON.stringify(restored, null, 2)}\n</data>`,
+    );
+  };
+  const walk = (inner: unknown): unknown => {
+    if (typeof inner === "string") return strip(restoreFrames(inner));
+    if (Array.isArray(inner)) return inner.filter((entry) => entry !== b1).map(walk);
+    if (!isObject(inner)) return inner;
+    const properties = inner["properties"];
+    const required = inner["required"];
+    if (isObject(properties) && Array.isArray(required) && required.includes("targets") && Object.hasOwn(properties, "targets")) {
+      const { targets: _targets, ...rest } = properties;
+      return walk({ ...inner, required: required.filter((key) => key !== "targets"), properties: rest });
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(inner)) {
+      out[key] =
+        key === "enum" && Array.isArray(entry) && entry.includes("validation-expression")
+          ? entry.filter((candidate) => candidate !== "validation-expression")
+          : walk(entry);
+    }
+    return out;
+  };
+  return walk(value) as T;
 }
 
 /** 2 つの JSON の値の違う場所（葉の位置。並びの長さが違えばその並びの位置）を、見つけた順に返す */
