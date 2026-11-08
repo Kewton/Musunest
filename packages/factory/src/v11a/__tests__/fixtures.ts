@@ -29,7 +29,7 @@ import { TEST_CASE_FRAME_TEXTS } from "../../v12/test-cases.js";
 import { V12_CALL_LIMITS } from "../../v12/limits.js";
 import { MAPPING_SCHEMA_NAME } from "../../v12/stages/mapping.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
-import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
+import { SEMANTIC_CHECK_REFERENCE_DATA_NAME, SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
 import { TEST_SPEC_RETAINED_DATA_NAME, TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
 import {
   WRITE_V11A_IDS_R07_DEFINITION,
@@ -1485,6 +1485,15 @@ export function semanticRequestIds(request: LlmStructuredRequest): readonly stri
   return (JSON.parse(block) as readonly { readonly requirementId: string }[]).map((entry) => entry.requirementId);
 }
 
+/** C3 の要求のデータの塊「参照のみ」にある要件 ID（無ければ空。判定の対象ではない。Issue #805 の再点検の部分） */
+function semanticReferenceIds(request: LlmStructuredRequest): readonly string[] {
+  const block = request.input.split(`<data name="${SEMANTIC_CHECK_REFERENCE_DATA_NAME}">\n`)[1]?.split("\n</data>")[0];
+  if (block === undefined) return [];
+  return ((JSON.parse(block) as { readonly 要件の文と引用?: readonly { readonly requirementId: string }[] }).要件の文と引用 ?? []).map(
+    (entry) => entry.requirementId,
+  );
+}
+
 /**
  * 旗 `v12.ids` の C3 の束（Issue #735）の偽物の口。記録した C3 の応答（全対象を書いた 1 本）を「点検の回の位置」の台本として持つ。
  * 回の中では、束（要求の「要件の文と引用」の先頭の要件 ID で見分ける）ごとの n 回目の呼び出しが、その回の先頭から n 番目の記録を
@@ -1513,6 +1522,7 @@ export function bundledC3Client(inner: LlmClient, home: readonly (readonly [stri
         return inner.callStructured<T>(request);
       }
       const ids = semanticRequestIds(request);
+      const referenceIds = new Set(semanticReferenceIds(request));
       const head = ids[0] ?? "";
       for (const id of ids) roundIds.add(id);
       const depth = depths.get(head) ?? 0;
@@ -1536,6 +1546,8 @@ export function bundledC3Client(inner: LlmClient, home: readonly (readonly [stri
       const keep = (item: unknown): boolean => {
         const id = typeof item === "object" && item !== null ? (item as { requirementId?: unknown }).requirementId : undefined;
         if (typeof id !== "string" || ids.includes(id)) return true;
+        // 参照のみの塊の要件（再点検の部分の外で 1 回目の判定を保つ要件）は、判定の対象ではない（Issue #805）
+        if (referenceIds.has(id)) return false;
         const homeHead = homes.get(id);
         if (homeHead !== undefined) return homeHead === head;
         return !roundIds.has(id);
@@ -1660,6 +1672,43 @@ export async function revertBundleFiles735<T extends { readonly path: string; re
       if (entry.path !== "artifacts/summary.json") continue;
       entry.sha256 = summarySha256;
       entry.size_bytes = summaryBytes;
+    }
+    return { ...file, text: toJson(manifest) };
+  });
+}
+
+/**
+ * Issue #805 で足した欄を旧の値に戻す：`semantic-check.json` の `rounds` の各行から `kept_requirement_ids` を外す
+ * （1 回目と off の行には元から無いので変わらない）
+ */
+export function revert805(value: Record<string, any>): void {
+  if (!Array.isArray(value["rounds"])) return;
+  for (const round of value["rounds"] as Record<string, unknown>[]) delete round["kept_requirement_ids"];
+}
+
+/**
+ * 納品物のファイルの `artifacts/semantic-check.json` を `revert805` で戻し（字下げ 2・末尾の改行 1 つの形で書き戻す）、
+ * `bundle-manifest.json` のそのファイルの SHA-256 と大きさを戻した本文から計算し直す（Issue #805）。ほかのファイルはそのまま
+ */
+export async function revertBundleFiles805<T extends { readonly path: string; readonly text: string }>(files: readonly T[]): Promise<readonly T[]> {
+  const toJson = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+  const target = files.find((file) => file.path === "artifacts/semantic-check.json");
+  if (target === undefined) return files;
+  const value = JSON.parse(target.text) as Record<string, any>;
+  if (toJson(value) !== target.text) throw new Error("前提が壊れた：意味の点検の記録の形");
+  revert805(value);
+  const text = toJson(value);
+  const sha256 = await sha256Hex(text);
+  const size = new TextEncoder().encode(text).length;
+  return files.map((file) => {
+    if (file === target) return { ...file, text };
+    if (file.path !== "bundle-manifest.json") return file;
+    const manifest = JSON.parse(file.text) as { files: { path: string; sha256: string; size_bytes: number }[] };
+    if (toJson(manifest) !== file.text) throw new Error("前提が壊れた：manifest の形");
+    for (const entry of manifest.files) {
+      if (entry.path !== "artifacts/semantic-check.json") continue;
+      entry.sha256 = sha256;
+      entry.size_bytes = size;
     }
     return { ...file, text: toJson(manifest) };
   });
