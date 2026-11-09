@@ -2703,10 +2703,13 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
     if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
     expect(recording.structured).toHaveLength(1);
     const made = await generated();
+    // #826：条件の無い操作とその entity の項目だけの fixed-test の項目 × screen は、採った種類が existence-only のときだけ組に残る。
+    // NATURES は R1 を ruled とするので、ここでは組に入らない
+    const keptTests = made.tests.filter((test) => !made.existenceOnlyTestIds.has(test.id));
     const ids = outcome.value.suite.tests.map((test) => test.id);
-    expect(ids.slice(LLM_TESTS)).toEqual(made.tests.map((test) => test.id));
+    expect(ids.slice(LLM_TESTS)).toEqual(keptTests.map((test) => test.id));
     expect(ids.slice(0, LLM_TESTS).some(isGeneratedTestId)).toBe(false);
-    expect(outcome.value.suite.tests.slice(LLM_TESTS)).toEqual(made.tests);
+    expect(outcome.value.suite.tests.slice(LLM_TESTS)).toEqual(keptTests);
     const units = outcome.value.coverage.map((unit) => JSON.parse(unit.key) as Record<string, unknown>);
     const has = (requirementId: string, targetId: string, kind: string, observes: string) =>
       units.some((unit) => unit["requirementId"] === requirementId && unit["targetId"] === targetId && unit["kind"] === kind && unit["observes"] === observes);
@@ -2821,7 +2824,9 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
     expect(outcome.value.sha256).toBe(await testSuiteSha256(suite, observes));
     expect(outcome.value.coverage).toEqual(coverageUnitsOf({ suite, observes, natures: outcome.value.natures }));
     const made = await generated();
-    for (const [id, observed] of made.observes) expect(observes.get(id)).toBe(observed);
+    for (const [id, observed] of made.observes) if (!made.existenceOnlyTestIds.has(id)) expect(observes.get(id)).toBe(observed);
+    // #826：採った種類が existence-only のときだけ残す試験は、NATURES が R1 を ruled とするこの走りでは組に無い
+    for (const id of made.existenceOnlyTestIds) expect(observes.has(id)).toBe(false);
     const llmOnly = { ...suite, tests: suite.tests.filter((test) => !isGeneratedTestId(test.id)) };
     expect(await testSuiteSha256(llmOnly, observes)).not.toBe(outcome.value.sha256);
     // 免除：全部の一覧の v1 の検査で R6・R7 の abnormal・boundary の不足だけが出て、外したあとは 0
@@ -4500,17 +4505,28 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     expect(problems.map((problem) => problem.message)).toContain("要件の試験が無い");
   });
 
-  it("(16) 据置き：項目＋条件の無い操作の existence-only の場合ゼロは今までどおり「要件の試験が無い」。枠は「未対応」の事実だけ", async () => {
+  it("(16) 項目＋条件の無い操作の existence-only の場合は、コードが項目の在ることの試験を作り、場合ゼロでも T2' を通る（Issue #826。直す前は「要件の試験が無い」で落ちた）", async () => {
     // 組全体が空だと帰属できない問題になるので、ほかの要件（R2）の試験を置く
     const unsupported = scenario([
       ["R1", "金額のある項目を登録できる。", ["f.item.amount", "o.addItem"], "existence-only"],
       ["R2", "金額は 0 より大きい。", ["f.item.amount"], "ruled"],
     ]);
     const zero = response(validate("R2", "f.item.amount"), [{ requirementId: "R1", nature: "existence-only" }, { requirementId: "R2", nature: "ruled" }]);
-    const { outcome, recording } = await runS(unsupported, [zero, zero]);
-    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
-    expect(outcome.failure.problems).toEqual([{ field: "requirements[0]", message: "要件の試験が無い" }]);
-    expect(framesIn(recording.structured[0]!)[0]?.ifExistenceOnly).toEqual({ kinds: [], caseTargets: [], maxCases: 0, note: TEST_CASE_FRAME_TEXTS.unsupported, remaining: 16 });
+    const { outcome, recording } = await runS(unsupported, [zero]);
+    if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
+    // 条件の無い操作とその entity の項目だけなので、項目 × screen を項目ごとに 1 本コードが作る
+    expect(outcome.value.suite.tests.filter((test) => test.target.requirementId === "R1").map((test) => test.id)).toEqual([
+      "gen:whenless-field-screen:R1:f.item.amount:normal",
+    ]);
+    // 初回の枠は、existence-only の枝にだけ条件つきの試験の欄を置く（Issue #826）
+    expect(framesIn(recording.structured[0]!)[0]?.ifExistenceOnly).toEqual({
+      kinds: [],
+      caseTargets: [],
+      maxCases: 0,
+      note: TEST_CASE_FRAME_TEXTS.existenceConditional,
+      remaining: 16,
+      codeIfExistenceOnly: [{ targetId: "f.item.amount", kind: "normal", observes: "view-structure" }],
+    });
   });
 
   it("(17) 負例：生成 3＋LLM 14 の組は「上限 16 を超えている」で落ち、切り捨てない（枠の残る本数は 13）", async () => {

@@ -92,6 +92,7 @@ import {
   revertBundleFiles805,
   withoutValidationExpression,
   withoutFrameFieldNormal,
+  withoutWhenlessFrameField,
 } from "./__tests__/fixtures.js";
 import {
   STAGE_RUN_RECORD_SCHEMA,
@@ -1819,7 +1820,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       // Issue #800：台帳に足した行の文と C2 の schema の欄を外して、旧の指紋と照らす
       // Issue #813：T2 の R-tsp-02 の新しい文と枠の免除の枝を #813 の前に戻す（#663 の上限の文の復元より前）
       // Issue #806：旗 ids の C2 への 3 文も位置で外して、旧の指紋と照らす
-      const restoredStructured = withoutIdsC2Texts(withoutFrameFieldNormal(withoutValidationExpression(recording.structured)));
+      const restoredStructured = withoutWhenlessFrameField(withoutIdsC2Texts(withoutFrameFieldNormal(withoutValidationExpression(recording.structured))));
       // Issue #801：骨組みの新しい形と R-w11-07 の ids の文を、直す前（#800）の形・文に組み直す（旧の指紋と照らす）。
       // #805 は台本 (1)〜(5) の経路を変えないので、この復元の順（#813 → #806 → #805 → #801 → #800）の #805 の段は空
       const oldShapeStructured = restoredStructured.map(restoreOldRequiredValidations);
@@ -1908,7 +1909,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const thirdDigest = await sha256Hex(
       JSON.stringify({
         structured: withoutIdsReading(
-          withoutIdsLimit(withoutLinkedValidations(withoutIdsC2Texts(withoutFrameFieldNormal(withoutValidationExpression(thirdRun.recording.structured))))),
+          withoutIdsLimit(withoutLinkedValidations(withoutIdsC2Texts(withoutWhenlessFrameField(withoutFrameFieldNormal(withoutValidationExpression(thirdRun.recording.structured)))))),
         ).filter((_, index) => index !== 5),
         tools: thirdRun.recording.tools,
       }),
@@ -1921,7 +1922,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         structured: withoutIdsReading(
           withoutIdsLimit(
             withoutLinkedValidations(
-              withoutIdsC2Texts(withoutFrameFieldNormal(withoutValidationExpression(thirdRun.recording.structured).map(restoreOldRequiredValidations))),
+              withoutIdsC2Texts(withoutWhenlessFrameField(withoutFrameFieldNormal(withoutValidationExpression(thirdRun.recording.structured).map(restoreOldRequiredValidations)))),
             ),
           ),
         ).filter((_, index) => index !== 5),
@@ -6670,12 +6671,16 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     // 組・B1 の要求をそろえる（off は予約の接頭辞を見ない）
     const made = generateTests({ table: MAPPED_IDS, ledger: PROPERTY_LEDGER_VIEW, list: LIST });
     expect(made.tests.length).toBeGreaterThan(0);
+    // #826：条件の無い操作とその entity の項目だけの fixed-test の項目 × screen は、採った種類が existence-only のときだけ組に残る。
+    // この走りの R1 は ruled なので、off の応答にも同じく組に残る試験だけを写す
+    const madeTests = made.tests.filter((test) => !made.existenceOnlyTestIds.has(test.id));
+    expect(madeTests.length).toBeGreaterThan(0);
     // 手 3d（#624）：R2 の構造の検査もコードが作るので、off の応答の R2 の試験は作った試験だけにする（分類は off の一覧にあるので書く）
     const offT2 = renamed(t2Response([...r1Tests(), ...r3Tests(), ...r4Tests()]));
     const offCalls = [
       structured(t1Of(LIST, offTable)),
       structured(acceptAll()),
-      structured({ ...offT2, tests: [...offT2.tests, ...made.tests.map((test) => rawOfFixed(test, made.observes.get(test.id) ?? ""))] }),
+      structured({ ...offT2, tests: [...offT2.tests, ...madeTests.map((test) => rawOfFixed(test, made.observes.get(test.id) ?? ""))] }),
       structured({ declaration: RUN_YAML }),
       structured(acceptAll()),
     ];

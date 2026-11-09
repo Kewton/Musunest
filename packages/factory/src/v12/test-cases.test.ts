@@ -754,8 +754,15 @@ describe("必要な試験の枠（純粋。旗 v12.ids の T2。Issue #653）", 
     expect(unsupported.codeTests).toEqual([]);
     expect(unsupported.normalTargets).toEqual([]);
     expect(unsupported.valueTargets).toEqual([]);
-    expect(unsupported.ifExistenceOnly).toEqual({ kinds: [], caseTargets: [], maxCases: 0, note: TEST_CASE_FRAME_TEXTS.unsupported, remaining: 16 });
-    for (const word of ["ruled", "existence", "分類"]) expect(TEST_CASE_FRAME_TEXTS.unsupported).not.toContain(word);
+    expect(unsupported.ifExistenceOnly).toEqual({
+      kinds: [],
+      caseTargets: [],
+      maxCases: 0,
+      note: TEST_CASE_FRAME_TEXTS.existenceConditional,
+      remaining: 16,
+      codeIfExistenceOnly: [{ targetId: "f.item.amount", kind: "normal", observes: "view-structure" }],
+    });
+    for (const word of ["ruled", "existence", "分類"]) expect(TEST_CASE_FRAME_TEXTS.existenceConditional).not.toContain(word);
     // #813：値の対象もコードの試験も無いが、所属に項目の行があるので、ruled の枝はその項目の行に正常 1 本を求める。
     // 旧（base, #800）：kinds []・caseTargets []・note ruledExempt（この直しで変わる）
     expect(unsupported.ifRuled).toEqual({
@@ -774,7 +781,12 @@ describe("必要な試験の枠（純粋。旗 v12.ids の T2。Issue #653）", 
     for (const frame of frames) {
       expect(Object.keys(frame)).toEqual(["requirementId", "codeTests", "valueTargets", "normalTargets", "ifRuled", "ifExistenceOnly"]);
       expect(Object.keys(frame.ifRuled)).toEqual(["kinds", "caseTargets", "note", "codeIfTableRuled", "remaining"]);
-      expect(Object.keys(frame.ifExistenceOnly)).toEqual(["kinds", "caseTargets", "maxCases", "note", "remaining"]);
+      // 条件の無い操作とその entity の項目だけの X3 だけ、existence-only の枝に条件つきの試験の欄が付く（#826）
+      expect(Object.keys(frame.ifExistenceOnly)).toEqual(
+        frame.requirementId === "X3"
+          ? ["kinds", "caseTargets", "maxCases", "note", "remaining", "codeIfExistenceOnly"]
+          : ["kinds", "caseTargets", "maxCases", "note", "remaining"],
+      );
       for (const test of frame.codeTests) expect(Object.keys(test)).toEqual(["targetId", "kind", "observes"]);
     }
     // 値の文字列に、表の名前・分類の値・期待の値が無い

@@ -476,10 +476,17 @@ export type MappingOutcome =
 // ── 整える手（Issue #723）──────────────────────────────────────────
 
 /** 整える手の ID */
-export type MappingNormalizationRuleId = "N-map-01" | "N-map-02";
+export type MappingNormalizationRuleId = "N-map-01" | "N-map-02" | "N-map-03";
 
 /** 手 1 で structural にした要件の reason（固定文） */
 export const MAPPING_NORMALIZATION_REASON = "参照の項目 1 つの種類と参照先を構造の検査で確かめる（コードが整えた）";
+
+/**
+ * 手 3 で structural にした要件の reason（固定文。Issue #826）。条件の無い操作は表の action × when の型にも
+ * #652 の項目 × screen の型にも書けず、fixed-test のままでは試験の行き止まりになる。操作の種類（action-kind）は
+ * 行から決定的に導けるので、C2 の整える手で構造の検査にする
+ */
+export const MAPPING_NORMALIZATION_OPERATION_REASON = "条件の無い操作を操作ごとの種類で構造の検査として確かめる（コードが整えた）";
 
 /**
  * 整える手の定義（LLM には送らない。コードが守ること。`ruleDefinitionDefects` で不備を照らす）。手は表の行（kind・type・
@@ -497,6 +504,12 @@ export const MAPPING_NORMALIZATION_DEFINITIONS: readonly (RuleDefinition & { rea
     text: "確かめ方が fixed-test で basis stated の行が 1 つ以上ある要件から、basis dependency・kind operation・hasWhen false の行を外す。その要件の所属に同じ行 ID の重複か表に無い ID があれば当てない。候補の全部を外した表で所属の無い行が新たに出るなら、その行とその行を entity に持つ候補を残して計算し直す。外して 0 行になる要件・全部 dependency の要件は変えない。所属を足さない。",
     why: "台帳の when の行は when の無い操作に action の試験を作らないので、fixed-test の要件が when の無い操作を dependency で所属させても固定した試験の対象にならず、余計な生成試験と網羅の免除に効く（U1 の 30 本の過剰 75 要件のうち 71 件が fixed-test、余計な行は全部ほかの要件が所属させる行）。門の落ち（重複・表に無い ID・孤立行）は消さない（#627：コードで所属を足さない）",
     since: "Issue #723",
+  },
+  {
+    id: "N-map-03",
+    text: "確かめ方が fixed-test で、所属（応答の roles に検査の対象を足したもの。導いた entity は含めない。手 2 の後）の全部が kind operation・type.hasWhen false の行（1 つ以上）だけの要件を、kind structural・checks は所属の順の操作ごとに action-kind 1 件・targets は各操作（sourceId null）・reason は固定文にする。所属と分類は変えない。basis は問わない。所属に同じ行 ID の重複か表に無い ID があれば当てない。",
+    why: "条件の無い操作は、表の action × when の型にも #652 の項目 × screen の型にも書けず、コードの試験も無いので、fixed-test のままでは試験の行き止まりになる（T2 の「要件の試験が無い」）。操作の種類（action-kind）は行から決定的に導ける（コードが作る構造の検査と同じ導き）。C3 は整えた表を見るので、決まりを含む操作だけの要件の拒否は消えない（Issue #826）",
+    since: "Issue #826",
   },
 ];
 
@@ -537,9 +550,26 @@ function referenceFieldOf(roles: NameTableOwnership["roles"], rowById: ReadonlyM
 }
 
 /**
- * C2 が組んだ表を整える（純粋。Issue #723）。手 1（N-map-01）→ 手 2（N-map-02）の順に**1 回だけ**当てる（整えた表に再適用しない。
- * 2 手の合成は冪等でない）。表の行・所属の並びは変えず、所属を足さない。手 2 の結果は候補の集合で決まり、要件・行の順に依らない。
- * 当たる要件が無ければ同じ表を返す
+ * 手 3（N-map-03）の対象（所属が条件の無い操作の行だけのとき、所属の順の操作の行。当たらなければ undefined）。
+ * 重複・表に無い ID・操作でない行が混じれば当てない（fail-closed）
+ */
+function whenlessOperationRowsOf(roles: NameTableOwnership["roles"], rowById: ReadonlyMap<string, NameTableRow>): readonly NameTableRow[] | undefined {
+  if (roles.length === 0) return undefined;
+  const ids = roles.map((role) => role.id);
+  if (new Set(ids).size !== ids.length) return undefined;
+  const rows: NameTableRow[] = [];
+  for (const id of ids) {
+    const row = rowById.get(id);
+    if (row === undefined || !isWhenlessOperation(row)) return undefined;
+    rows.push(row);
+  }
+  return rows;
+}
+
+/**
+ * C2 が組んだ表を整える（純粋。Issue #723・#826）。手 1（N-map-01）→ 手 2（N-map-02）→ 手 3（N-map-03）の順に**1 回だけ**当てる
+ * （整えた表に再適用しない。手の合成は冪等でない）。表の行・所属の並びは変えず、所属を足さない。手 2 の結果は候補の集合で決まり、
+ * 要件・行の順に依らない。当たる要件が無ければ同じ表を返す
  */
 export function normalizeMappedTable(table: NameTable): { readonly table: NameTable; readonly normalized: readonly MappingNormalization[] } {
   const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
@@ -596,18 +626,48 @@ export function normalizeMappedTable(table: NameTable): { readonly table: NameTa
     active = after < before ? next : new Map();
   }
   const normalized: MappingNormalization[] = [];
-  afterFirst.verification.forEach((entry, index) => {
+  const afterSecond = active.size === 0 ? afterFirst : without(active);
+  // 手 3：所属が条件の無い操作の行だけの fixed-test → 操作ごとの action-kind の structural（所属は変えない。Issue #826）
+  const operationTargets = new Map<number, readonly NameTableRow[]>();
+  const thirdVerification: NameTableVerification[] = afterSecond.verification.map((entry, index) => {
+    const roles = pairedRoles(afterSecond, index);
+    if (entry.kind !== "fixed-test" || roles === undefined) return entry;
+    const operations = whenlessOperationRowsOf(roles, rowById);
+    if (operations === undefined) return entry;
+    operationTargets.set(index, operations);
+    return {
+      requirementId: entry.requirementId,
+      kind: "structural",
+      reason: MAPPING_NORMALIZATION_OPERATION_REASON,
+      checks: operations.map(() => "action-kind" as const),
+      targets: operations.map((operation) => ({ check: "action-kind" as const, targetId: operation.id, sourceId: null })),
+    };
+  });
+  const afterThird: NameTable = operationTargets.size === 0 ? afterSecond : { ...afterSecond, verification: thirdVerification };
+  afterSecond.verification.forEach((entry, index) => {
     const target = firstTargets.get(index);
     if (target !== undefined) {
       normalized.push({ requirementId: entry.requirementId, rule: "N-map-01", targetId: target, removedRowIds: [] });
       return;
     }
     const removed = active.get(index);
+    const operations = operationTargets.get(index);
+    if (operations !== undefined) {
+      // 手 2 で外した行があれば、その行も最終の差分として同じ件に載せる（手 3 が表の確かめ方を変える）
+      const roles = afterFirst.ownership[index]?.roles ?? [];
+      normalized.push({
+        requirementId: entry.requirementId,
+        rule: "N-map-03",
+        targetId: null,
+        removedRowIds: removed === undefined ? [] : roles.filter((role) => removed.has(role.id)).map((role) => role.id),
+      });
+      return;
+    }
     if (removed === undefined) return;
     const roles = afterFirst.ownership[index]?.roles ?? [];
     normalized.push({ requirementId: entry.requirementId, rule: "N-map-02", targetId: null, removedRowIds: roles.filter((role) => removed.has(role.id)).map((role) => role.id) });
   });
-  return { table: active.size === 0 ? afterFirst : without(active), normalized };
+  return { table: afterThird, normalized };
 }
 
 /** 骨組み（写像・`requirements` が写像の並び） */

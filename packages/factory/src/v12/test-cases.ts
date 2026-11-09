@@ -23,6 +23,7 @@ import {
   GENERATED_TEST_CLOCK,
   aggregateTargetsOf,
   emptyAggregateCodeTestsOf,
+  existenceOnlyConditionalTestsOf,
   frameValueTargetIdsOf,
   normalOnlyOwnershipRequirementIds,
   type GeneratedTests,
@@ -823,6 +824,11 @@ export interface TestCaseFrameExistenceBranch {
   readonly maxCases: number;
   readonly note: string;
   readonly remaining: number;
+  /**
+   * 対象の要件だけ（条件の無い操作とその entity の項目だけの fixed-test。Issue #826）：採った種類が existence-only のときだけ
+   * コードが作る項目 × screen の在ることの試験（`codeIfTableRuled` と同じ作法。ruled の枝・codeTests・remaining には混ぜない）
+   */
+  readonly codeIfExistenceOnly?: readonly TestCaseFrameCodeTest[];
 }
 
 /** 初回の枠 1 つ（要件ごと） */
@@ -871,6 +877,9 @@ export const TEST_CASE_FRAME_TEXTS = {
   existence:
     "codeTests の対象（コードが在ることの試験を作った対象）には場合を書かない。caseTargets の対象には正常（normal）の場合だけを書いてよい。検査（validate）・異常・境界の場合は書かない。",
   unsupported: "未対応：コードの在ることの試験も、正常を書ける対象（計算の行・条件のある操作の行）も無い。",
+  /** 条件の無い操作とその entity の項目だけの fixed-test（Issue #826。existence-only の枝の注記） */
+  existenceConditional:
+    "未対応：コードの在ることの試験も、正常を書ける対象（計算の行・条件のある操作の行）も無い。codeIfExistenceOnly の項目の在ることの試験は、採った種類が在ることだけのときだけコードが作る。",
   retryMissing:
     "missing は門が報告した不足の種類。emptyAggregate の行は、集計元を空と明示した境界（empty）か集計元に触れない異常（unread）の場合をその行に書く（期待は集計の種類とデータ状態で決まる値）。",
 } as const;
@@ -909,9 +918,15 @@ function frameTargetsOf(
 }
 
 /** コードの試験の写し（対象・種類・観測する性質。並びは組の順） */
-function codeTestsOf(tests: GeneratedTests["tests"], observes: ReadonlyMap<string, string>, requirementId: string, skip: ReadonlySet<string>): readonly TestCaseFrameCodeTest[] {
+function codeTestsOf(
+  tests: GeneratedTests["tests"],
+  observes: ReadonlyMap<string, string>,
+  requirementId: string,
+  skip: ReadonlySet<string>,
+  skipIds: ReadonlySet<string> = new Set(),
+): readonly TestCaseFrameCodeTest[] {
   return tests
-    .filter((test) => test.target.requirementId === requirementId && !skip.has(observes.get(test.id) ?? ""))
+    .filter((test) => test.target.requirementId === requirementId && !skip.has(observes.get(test.id) ?? "") && !skipIds.has(test.id))
     .map((test) => ({ targetId: test.target.roleId ?? "", kind: test.kind, observes: observes.get(test.id) ?? "" }));
 }
 
@@ -966,7 +981,7 @@ export function initialTestCaseFramesOf(input: TestCaseFramesInput, requirementI
   );
   const aggregateTargets = aggregateTargetsOf(table);
   return requirementIds.map((requirementId) => {
-    const codeTests = codeTestsOf(generated.tests, generated.observes, requirementId, aggregateIds);
+    const codeTests = codeTestsOf(generated.tests, generated.observes, requirementId, aggregateIds, generated.existenceOnlyTestIds);
     const { valueTargets, normalTargets } = frameTargetsOf(table, ledger, requirementId);
     const roles = table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? [];
     const conditional = new Map<string, TestKind[]>();
@@ -979,6 +994,9 @@ export function initialTestCaseFramesOf(input: TestCaseFramesInput, requirementI
     const ruledBranch = isExempt
       ? exemptRuledBranchOf(table, requirementId, codeTests)
       : { kinds: [...TEST_KINDS], caseTargets: valueTargets, note: TEST_CASE_FRAME_TEXTS.ruled };
+    // 条件の無い操作とその entity の項目だけの要件は、existence-only の枝にだけ条件つきの試験を載せる（Issue #826）
+    const existenceBranch = existenceBranchOf(codeTests, normalTargets);
+    const existenceConditional = existenceOnlyConditionalTestsOf(generated, requirementId);
     return {
       requirementId,
       codeTests,
@@ -989,7 +1007,14 @@ export function initialTestCaseFramesOf(input: TestCaseFramesInput, requirementI
         codeIfTableRuled: [...conditional].map(([targetId, kinds]) => ({ targetId, kinds, note: TEST_CASE_FRAME_TEXTS.conditional })),
         remaining: FRAME_LIMIT - codeTests.length,
       },
-      ifExistenceOnly: existenceBranchOf(codeTests, normalTargets),
+      ifExistenceOnly:
+        existenceConditional.length === 0
+          ? existenceBranch
+          : {
+              ...existenceBranch,
+              note: TEST_CASE_FRAME_TEXTS.existenceConditional,
+              codeIfExistenceOnly: existenceConditional.map(({ test, observed }) => ({ targetId: test.target.roleId ?? "", kind: test.kind, observes: observed })),
+            },
     };
   });
 }
