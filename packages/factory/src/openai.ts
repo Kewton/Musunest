@@ -542,9 +542,11 @@ function baseBody(
   input: readonly unknown[],
   maxOutputTokens: number,
   requestEffort?: string,
+  requestModel?: string,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
-    model: config.model,
+    // 要求にモデルがあればそれを、無ければ設定の値を送る（段ごとのモデル。要求に無ければ body は今と同じ。Issue #829）
+    model: requestModel ?? config.model,
     store: false,
     max_output_tokens: maxOutputTokens,
     instructions,
@@ -588,6 +590,7 @@ function buildStructuredBody(
     ),
     request.maxOutputTokens,
     request.effort,
+    request.model,
   );
   body.text = {
     format: {
@@ -673,7 +676,7 @@ function buildToolBody(config: WireConfig, request: LlmToolRequest): Record<stri
     ),
     ...turnsToInput(request.turns),
   ];
-  const body = baseBody(config, request.instructions, input, request.maxOutputTokens, request.effort);
+  const body = baseBody(config, request.instructions, input, request.maxOutputTokens, request.effort, request.model);
   // 印のある要求で道具を外す設定のとき（Ollama。Issue #777）は、道具の定義と `tool_choice` の**両方**を
   // 送らない——`tool_choice: "none"` が効かない応答があるので、道具そのものを外す。instructions・入力・
   // 履歴・最後の答えの schema・上限・effort は今のまま。印の無い要求の body は今のまま。

@@ -23,8 +23,10 @@ import {
   type AssembledBundle,
 } from "../bundle.js";
 import type { StageOutputLimits } from "../call.js";
+import { costOfUsageUsd } from "../budget.js";
 import type { Judge, JudgeAnswer } from "../judge.js";
 import { createFakeJudge } from "../judge-fake.js";
+import { MODEL_RATES, TERRA_RATES } from "../cli.js";
 import type { RecordedCall } from "../llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse, LlmUsage } from "../llm.js";
 import { AGENT_LIMITS, STAGE_EFFORT_STAGES, maxOutputTokensForEffort } from "../limits.js";
@@ -39,7 +41,7 @@ import * as repairStage from "../stages/repair.js";
 import * as runTestsStage from "../stages/run-tests.js";
 import * as staticCheckStage from "../stages/static-check.js";
 import * as triageStage from "../stages/unwritable-triage.js";
-import { makeRunInput, structured as plainStructured } from "../__tests__/run.js";
+import { makeRunInput, RATES as RUN_RATES, structured as plainStructured } from "../__tests__/run.js";
 import {
   bundledC2Client,
   bundledC3Client,
@@ -10513,5 +10515,56 @@ describe("旗 v12.ids：検査の式の要件の配線 (a)〜(d) を、一気通
         ),
       );
     }
+  });
+});
+
+// ── 判定の会計は走りのモデルの単価で、段のモデルの単価を流さない（Issue #829 完了条件 (8)）────────────
+//
+// 完了条件 (8) は「LLM の判定は走りのモデルの単価、Jev は `JEV_RATES`。T2 の段のモデルを変えても判定の
+// 単価は走りのもの」を求める。`createBudgetedJudge` を単体で呼ぶ試験では、**run が判定の口にどの単価を
+// 渡すか**（`run.ts` の `judgeBudget` の配線）を照らせない——段の単価を判定へ流す変異が緑のまま通る。
+// ここでは run の実経路（`runScenario`）で、段のモデル（T2=terra）を指定した走りの判定の費用が
+// **走りの単価**で数えられ、**段の単価では数えられていない**ことを等値で固定する。
+describe("(8) 判定の会計：段のモデルを変えても判定は走りのモデルの単価で数える（Issue #829）", () => {
+  const JUDGE_USAGE: LlmUsage = { inputTokens: 900, cachedInputTokens: 100, cacheWriteTokens: 50, outputTokens: 140, reasoningTokens: 0 };
+
+  it("判定の費用は走りの単価（makeRunInput の RATES）で、段の単価（TERRA_RATES）ではない", async () => {
+    // 問いの名前・表の ID に依らず、すべての Noul の問いに 0.9（印なし）を返す LLM の名乗りの判定。
+    // usage を返すので、判定の費用が要約に残る（段の単価を流すと値が変わる）
+    const judge: Judge = {
+      source: "llm",
+      async judge(request) {
+        const answers: Record<string, JudgeAnswer> = {};
+        for (const [name, question] of Object.entries(request.questions)) {
+          if (question.kind !== "noul") throw new Error(`前提が壊れた：Noul でない問い ${question.kind}`);
+          answers[name] = { kind: "noul", noul: 0.9 };
+        }
+        return { answers, inputTokens: JUDGE_USAGE.inputTokens, usage: JUDGE_USAGE, model: "gpt-6-luna", answeredBy: "llm" };
+      },
+    };
+    const flags = { ledger: true, searchRepair: true, ids: true };
+    // 同じ台本を、段のモデルあり／なしで流す（判定の呼び出しの数と usage は同じ）
+    const staged = await runScenario([...idsHead(), structured(acceptAll())], {
+      flags,
+      judge,
+      stageModels: { "test-spec": "gpt-6.1-terra" },
+      stageModelRates: MODEL_RATES,
+    });
+    const plain = await runScenario([...idsHead(), structured(acceptAll())], { flags, judge });
+    // 走りの単価は `makeRunInput` の `RATES`（試験の小さな値）。段のモデルあり／なしで同じ走りの単価を使う
+    const perCall = costOfUsageUsd(JUDGE_USAGE, RUN_RATES);
+    const perCallIfStageRates = costOfUsageUsd(JUDGE_USAGE, TERRA_RATES);
+    // 段の単価を流すと、走りの単価より高くなる（正の差があることを確かめてから赤の意味を測る）
+    expect(perCallIfStageRates).toBeGreaterThan(perCall);
+    const calls = staged.result.summary.judge.calls_by_adapter.llm;
+    expect(calls).toBeGreaterThan(0);
+    expect(perCall).toBeGreaterThan(0);
+    expect(perCallIfStageRates).toBeGreaterThan(perCall);
+    // 段のモデルを指定しても、判定の費用は指定しない走りと等しい（段の単価を判定へ流していない）
+    expect(staged.result.summary.judge.cost_usd).toBeCloseTo(plain.result.summary.judge.cost_usd, 12);
+    expect(plain.result.summary.judge.calls_by_adapter.llm).toBe(calls);
+    // 1 回あたりの費用は走りの単価。段の単価（TERRA_RATES）を流すとこの期待が赤になる
+    expect(staged.result.summary.judge.cost_usd).toBeCloseTo(calls * perCall, 12);
+    expect(staged.result.summary.judge.cost_usd).not.toBeCloseTo(calls * perCallIfStageRates, 12);
   });
 });

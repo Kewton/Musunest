@@ -36,6 +36,7 @@ import {
   type ReasoningEffort,
   type StageEfforts,
   type StageEffortStage,
+  type StageModels,
 } from "./limits.js";
 import type {
   LlmClient,
@@ -386,6 +387,17 @@ export interface CallGatewayOptions {
    */
   readonly stageEfforts?: StageEfforts;
   /**
+   * 段ごとのモデルの組（段 → モデル。Issue #829）。`forStage` で段の名前で引いた口が、その段のモデルを
+   * 要求に載せ、予約と精算をそのモデルの単価で行う。単価は `stageModelRates` の表から引く。
+   * 省けば、どの段の口も今の口と同じ。
+   */
+  readonly stageModels?: StageModels;
+  /**
+   * 段のモデルの単価の表（モデル → 単価。Issue #829）。`stageModels` で指定したモデルの単価をここから引く。
+   * 表に無いモデルは、元の口の単価（`rates`）へ倒す。省けば元の口の単価のまま。
+   */
+  readonly stageModelRates?: Readonly<Record<string, TokenRates>>;
+  /**
    * 段の出力の上限（`max_output_tokens`）の上書きの表（段 → 値。Issue #776）。渡した口では
    * `maxOutputTokens(段)` が表の値を返し、要求の `max_output_tokens` と予算の予約（`estimateMaxCostUsd`）が
    * その値で揃う。表に無い段は `STAGE_MAX_OUTPUT_TOKENS` の値のまま。**provider ごとに違う推論の量へ
@@ -687,6 +699,10 @@ export class CallGateway {
   readonly #explicitCallTimeoutMs: number | undefined;
   /** 段ごとの effort の組（段の名前で引いた口の出所。Issue #664） */
   readonly #stageEfforts: StageEfforts;
+  /** 段ごとのモデルの組（段の名前で引いた口の出所。Issue #829） */
+  readonly #stageModels: StageModels;
+  /** 段のモデルの単価の表（段の名前で引いた口が予約と精算に使う。Issue #829） */
+  readonly #stageModelRates: Readonly<Record<string, TokenRates>>;
   /** 段の出力の上限の上書きの表（渡した口だけ。段の名前で引いた口へ引き継ぐ。Issue #776） */
   readonly #stageOutputLimits: StageOutputLimits;
   /** 実試行の観測器（省けば観測しない。Issue #748） */
@@ -697,6 +713,8 @@ export class CallGateway {
   #root: CallGateway = this;
   /** 要求に載せる effort（段の名前で引いた口だけが持つ。無ければ載せない＝今の要求。構造化と道具付きの両方。Issue #664・#751） */
   #requestEffort: ReasoningEffort | undefined;
+  /** 要求に載せるモデル（段の名前で引いた口だけが持つ。無ければ載せない＝今の要求。Issue #829） */
+  #requestModel: string | undefined;
   /** 口の計（段の名前で引いた口は、元の口と同じ計を共有する。Issue #664） */
   #counts: GatewayCounters = newGatewayCounters();
 
@@ -721,6 +739,8 @@ export class CallGateway {
     this.#gate = options.gate;
     this.#explicitCallTimeoutMs = options.callTimeoutMs;
     this.#stageEfforts = options.stageEfforts ?? {};
+    this.#stageModels = options.stageModels ?? {};
+    this.#stageModelRates = options.stageModelRates ?? {};
     this.#stageOutputLimits = options.stageOutputLimits ?? {};
     this.#observer = options.observer;
     this.#recordMalformedKinds = options.recordMalformedKinds === true;
@@ -749,16 +769,20 @@ export class CallGateway {
   forStage(stage: StageEffortStage): CallGateway {
     const root = this.#root;
     const effort = root.#stageEfforts[stage];
-    if (effort === undefined) return root;
+    const model = root.#stageModels[stage];
+    // effort もモデルも指定の無い段は、元の口そのもの（要求・単価・上限・timeout は今と同じ。Issue #664・#829）
+    if (effort === undefined && model === undefined) return root;
     const view = new CallGateway({
       client: root.#client,
       budget: root.#budget,
-      rates: root.#rates,
+      // 段のモデルがあれば、そのモデルの単価で予約と精算をする（予約の式は変えない。Issue #829）
+      rates: model === undefined ? root.#rates : (root.#stageModelRates[model] ?? root.#rates),
       now: root.#now,
       deadline: root.#deadline,
       limits: root.#limits,
       maxAttempts: root.#maxAttempts,
-      effort,
+      // モデルだけの指定でも、出力の上限と timeout の基準は元の口の effort のまま（Issue #829）
+      effort: effort ?? root.#effort,
       ...(root.#explicitCallTimeoutMs === undefined ? {} : { callTimeoutMs: root.#explicitCallTimeoutMs }),
       ...(root.#gate === undefined ? {} : { gate: root.#gate }),
       ...(root.#observer === undefined ? {} : { observer: root.#observer }),
@@ -767,6 +791,7 @@ export class CallGateway {
     });
     view.#root = root;
     view.#requestEffort = effort;
+    view.#requestModel = model;
     view.#counts = root.#counts;
     return view;
   }
@@ -839,10 +864,23 @@ export class CallGateway {
     else this.#counts.retriesContent += 1;
   }
 
+  /**
+   * 段の名前で引いた口だけ、要求にその段の effort・モデルを載せる（どちらも指定の無い口は、要求をそのまま返す
+   * ＝今の要求のバイト列。Issue #664・#829）。
+   */
+  #sentRequest<T extends LlmStructuredRequest | LlmToolRequest>(request: T): T {
+    if (this.#requestEffort === undefined && this.#requestModel === undefined) return request;
+    return {
+      ...request,
+      ...(this.#requestEffort === undefined ? {} : { effort: this.#requestEffort }),
+      ...(this.#requestModel === undefined ? {} : { model: this.#requestModel }),
+    } as T;
+  }
+
   /** 構造化出力（①'・②'・⑤a・⑥'）を共通の口を通して呼ぶ */
   async callStructured<T>(request: LlmStructuredRequest): Promise<CallResult<LlmStructuredResponse<T>>> {
-    // 段の名前で引いた口だけ、要求に段の effort を載せる（指定の無い口の要求は今と同じ。Issue #664）
-    const sent: LlmStructuredRequest = this.#requestEffort === undefined ? request : { ...request, effort: this.#requestEffort };
+    // 段の名前で引いた口だけ、要求に段の effort・モデルを載せる（指定の無い口の要求は今と同じ。Issue #664・#829）
+    const sent = this.#sentRequest(request);
     return this.#run(structuredInputParts(sent), sent.maxOutputTokens, async (signal) => {
       const response = await this.#client.callStructured<T>({ ...sent, signal });
       return { value: response, usage: response.usage };
@@ -851,8 +889,8 @@ export class CallGateway {
 
   /** 道具付き（⑥ 直す）を共通の口を通して呼ぶ。道具の呼び出しの回数も数える */
   async callWithTools(request: LlmToolRequest): Promise<CallResult<LlmToolResponse>> {
-    // 段の名前で引いた口だけ、要求に段の effort を載せる（指定の無い口の要求は今と同じ。Issue #664・#751）
-    const sent: LlmToolRequest = this.#requestEffort === undefined ? request : { ...request, effort: this.#requestEffort };
+    // 段の名前で引いた口だけ、要求に段の effort・モデルを載せる（指定の無い口の要求は今と同じ。Issue #664・#751・#829）
+    const sent = this.#sentRequest(request);
     return this.#run(toolInputParts(sent), sent.maxOutputTokens, async (signal) => {
       const response = await this.#client.callWithTools({ ...sent, signal });
       if (response.kind === "toolCalls") this.#counts.toolCalls += response.toolCalls.length;
