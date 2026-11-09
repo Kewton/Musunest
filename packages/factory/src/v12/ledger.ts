@@ -962,8 +962,11 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       t1Acceptance:
         "確かめ方が validation-expression の要件は、要件の決まりが入力の値を 1 つの比較で縛る決まりだけで、targets がその決まりが縛る項目と過不足なく合うときだけ受理する。式で書けない決まりを含む要件や targets の合わない要件は受理せず、weak-verification で拒否する。",
       t2: "検査の式（validation-expression）の試験は、確かめ方が validation-expression の要件にだけ、対象の項目ごとに正常・異常・境界の 3 種類を作る。対象（target）はその要件の targets の項目（field）の行、operation は validate、observes は validation-expression、期待（expected）は今の評価器のとおり（validate の異常は誤りコード、正常は値）にする。確かめ方がこの種類でない要件の validate の試験に validation-expression を書かない。",
+      // 旗 ids の T2 の文（Issue #832）：旧の文は「確かめ方が validation-expression の要件の項目・entity の行の場合だけ
+      // validation-expression と書き」と肯定で書かせ、場合の schema の observes の enum（value・empty-aggregate・null）と
+      // 食い違っていた。項目の行は null と書き、validation-expression はコードが確かめ方から埋める。旧の文は試験の定数に残す
       t2Ids:
-        "場合の観測する性質（observes）は、確かめ方が validation-expression の要件の項目・entity の行の場合だけ validation-expression と書き、対象（targetId）はその要件の targets の項目の行から選ぶ。確かめ方がこの種類でない要件の項目・entity の行の場合は validation-expression と書かない。",
+        "確かめ方が validation-expression の要件は、その targets の項目（field）の行に場合を書く（対象（targetId）はその要件の targets の項目の行から選ぶ）。その場合の観測する性質（observes）は null と書く。validation-expression はコードが確かめ方から埋めるので、どの場合にも observes を validation-expression と書かない。確かめ方がこの種類でない要件の項目・entity の行の場合も、observes は null と書く。",
       // 契約の持ち主を R-w11-07 の例外に 1 つにする（#816 の R3。旧の文は試験の定数に残す）
       b1: "固定した試験のうち observes が validation-expression の試験は、R-w11-07 の例外（データ「要る検査の骨組み」の件ごとに書く検査 1 つ）で確かめる。この性質のために、ほかの検査や名前を足さない。",
     },

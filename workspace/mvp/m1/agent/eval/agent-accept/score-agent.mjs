@@ -81,6 +81,10 @@
 // #664 で足したもの（条件の読み取りだけ。採点の規則・既存の欄・値・並びは変えない）：
 //   条件の params.stage_efforts（段ごとの effort。v7・v8 の計測で --stage-effort を付けたときだけ）は署名に入る（conditionsSignature は params を丸ごと入れる）。
 //   --compare は両群に同じ値を求めず（群の params の照合から外す）、どちらかの群が持つときだけ群ごとの欄 stage_efforts に両群の値を並べる（持たない群は null）
+// #837 で足したもの（#830 の続き。条件の読み取りだけ。採点の規則・既存の欄・値・並びは変えない）：
+//   条件の params.stage_models（段ごとのモデル。計測の道具の --stage-model を候補の群にだけ渡したとき）を、stage_efforts と同じく群の意図した差として
+//   --compare の群の params の照合から外す（通常の比較の comparableParams と段だけの比較の core の 2 か所）。署名には入ったまま。
+//   どちらかの群が持つときだけ群ごとの欄 stage_models に両群の値を並べる（持たない群は null。stage_efforts の後）。両群とも持たなければ欄を作らない
 // run-agent.mjs は、ここから指紋の関数と定義ファイルの読み込みを import して条件のファイルに書く（道具は 2 本で 1 組。入口として起動したときだけ採点する）
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -2106,9 +2110,12 @@ export function groupConditionsProblem(cond, group) {
 }
 /** 群の params の共通の比較の形：経路・v1.1α の上限の欄・旗の組（意図した差）を除く */
 // #664：段ごとの effort（params.stage_efforts）も群の違いとして外す（両群に同じ値を求めない。値は比較の記録と採点の群の欄に並べる）
-export const comparableParams = (p) => { if (!isObj(p)) return null; const { pipeline: _p, stage_output_limits_v11a: _l, v12_flags: _f, stage_efforts: _e, ...rest } = p; return rest; };
+// #837：段ごとのモデル（params.stage_models。#830）も同じく群の違いとして外す（計測の道具の群の条件の照合と揃える）
+export const comparableParams = (p) => { if (!isObj(p)) return null; const { pipeline: _p, stage_output_limits_v11a: _l, v12_flags: _f, stage_efforts: _e, stage_models: _m, ...rest } = p; return rest; };
 /** 群の段ごとの effort（#664。条件の params.stage_efforts。どちらかの群が持つときだけ、両群の採点の欄に並べる。持たない群は null） */
 const stageEffortsOf = (cond) => (isObj(cond?.params?.stage_efforts) ? cond.params.stage_efforts : null);
+/** 群の段ごとのモデル（#837。条件の params.stage_models。stage_efforts と同じ作法で並べる） */
+const stageModelsOf = (cond) => (isObj(cond?.params?.stage_models) ? cond.params.stage_models : null);
 /**
  * #776 レビュー R3：Ollama の段の出力の上限の表（`params.ollama_stage_output_limits`）を、キーの並び順に依らない形
  * （キー昇順）へ正規化する。計測の道具（run-agent.mjs）は読んだ時点で正規化して書くが、採点は書き換えた出力先や
@@ -2379,6 +2386,8 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
       transitions: full.transitions, first_upstream_failures: full.first_upstream_failures, // #633
       // 段ごとの effort（#664）：どちらかの群の条件が持つときだけ、両群の値を並べる（違いを隠さない。持たない群は null）
       ...(GROUPS.some((x) => stageEffortsOf(groups[x].cond) !== null) ? { stage_efforts: stageEffortsOf(groups[g].cond) } : {}),
+      // 段ごとのモデル（#837）：同じ作法（どちらかの群の条件が持つときだけ両群の値を並べる。持たない群は null）
+      ...(GROUPS.some((x) => stageModelsOf(groups[x].cond) !== null) ? { stage_models: stageModelsOf(groups[g].cond) } : {}),
     };
   }
   // 段の役割ごとの対の差（#539。README §5.10.3）：両側で指標が定義されている対だけを n に入れる。片側だけ・欠測・適用外は差 null で理由を残す
@@ -3035,8 +3044,8 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
   const ollamaLimits = STAGE_COMPARE_GROUPS.map((g) => groups[g].cond.params?.ollama_stage_output_limits ?? null);
   if (ollamaLimits.some((t) => !sameOllamaLimits(t, ollamaLimits[0]))) throw refusal("群の Ollama の段の出力の上限の表が違う [compare:ollama-limits-differ]");
   // 両群の params（範囲・上流の条件の指紋・本ごとの上流の入力の SHA を含む）と入力なしの本が同じ（上流を固定して効果を局所化する前提）
-  // 段ごとの effort（#664）は群の違いとして外す（両群に同じ値を求めない。値は採点の群の欄に並べる）
-  const core = (p) => { if (!isObj(p)) return null; const { stage_output_limits_v11a: _l, stage_efforts: _e, ...rest } = p; return JSON.stringify(withCanonicalLimits(rest)); };
+  // 段ごとの effort（#664）・モデル（#837）は群の違いとして外す（両群に同じ値を求めない。値は採点の群の欄に並べる）
+  const core = (p) => { if (!isObj(p)) return null; const { stage_output_limits_v11a: _l, stage_efforts: _e, stage_models: _m, ...rest } = p; return JSON.stringify(withCanonicalLimits(rest)); };
   if (core(groups[before].cond.params) === null || core(groups[before].cond.params) !== core(groups[after].cond.params)) throw mismatch("群の params");
   if (JSON.stringify(groups[before].cond.stage_input_absent) !== JSON.stringify(groups[after].cond.stage_input_absent)) throw mismatch("群の入力なしの本");
   const plannedIds = pv.pairs.map((p) => `${p.pid}-r${p.r}`);
@@ -3066,6 +3075,8 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
       ...(isObj(full.stage_external) ? { stage_external: full.stage_external, stage_verification: full.stage_verification, stage_agreement: full.stage_agreement } : {}), // #687
       // 段ごとの effort（#664）：どちらかの群の条件が持つときだけ、両群の値を並べる（持たない群は null）
       ...(STAGE_COMPARE_GROUPS.some((x) => stageEffortsOf(groups[x].cond) !== null) ? { stage_efforts: stageEffortsOf(groups[g].cond) } : {}),
+      // 段ごとのモデル（#837）：同じ作法（持たない群は null）
+      ...(STAGE_COMPARE_GROUPS.some((x) => stageModelsOf(groups[x].cond) !== null) ? { stage_models: stageModelsOf(groups[g].cond) } : {}),
     }];
   }));
   // 照合：(i) 未照合（群の照合・指紋）＞ (ii) 完了（全対が両方観測・両群が完了・予算の停止の記録なし）＞ (iii) 未完了

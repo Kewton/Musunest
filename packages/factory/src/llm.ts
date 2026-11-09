@@ -114,6 +114,11 @@ export interface LlmStructuredRequest {
    * 段ごとに指定しない走りの要求には載らない（要求のバイト列は今と同じ）。
    */
   readonly effort?: ReasoningEffort;
+  /**
+   * モデル（段の名前で引いた口が載せる。Issue #829）。adapter は、あればこれを、無ければ adapter の設定の値を送る。
+   * 段のモデルを指定しない走りの要求には載らない（要求のバイト列は今と同じ）。
+   */
+  readonly model?: string;
   /** 締切までの残り時間で実呼び出しを打ち切るための合図（共通の口が付ける。§1.5） */
   readonly signal?: AbortSignal;
 }
@@ -163,6 +168,11 @@ export interface LlmToolRequest {
    * 段ごとに指定しない走りの要求には載らない（要求のバイト列は今と同じ）。構造化の要求と同じ規則である。
    */
   readonly effort?: ReasoningEffort;
+  /**
+   * モデル（段の名前で引いた口が載せる。Issue #829）。adapter は、あればこれを、無ければ adapter の設定の値を送る。
+   * 段のモデルを指定しない走りの要求には載らない（要求のバイト列は今と同じ）。構造化の要求と同じ規則である。
+   */
+  readonly model?: string;
   /**
    * **最後の答えだけを求める印**（旗 `v12.ids` の探索 on の全文の直し。Issue #768）。道具の定義と履歴は
    * 送るが、モデルに道具を選ばせない。adapter は、真のときだけ道具を選ばせない指定

@@ -64,7 +64,7 @@
 // `danglingRowReferences`・`pruneForCarryOver`）で掛ける。
 import type { ConfirmedPlan, NormalizedAppSpec } from "@musunest/appspec-schema";
 import { sha256Hex, type Diagnostic } from "@musunest/spec-engine";
-import { JobBudget } from "../budget.js";
+import { JobBudget, type TokenRates } from "../budget.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse, MalformedKindCounts, MalformedKindKey } from "../llm.js";
 import { MALFORMED_KIND_KEYS } from "../llm.js";
 import {
@@ -88,7 +88,7 @@ import {
 import { CallGateway, callCountsDelta, createCallGate, type CallCounts, type CallGate, type StageOutputLimits } from "../call.js";
 import type { TestSuite } from "../fixed-test.js";
 import { createBudgetedJudge, type BudgetedJudge } from "../judge-budget.js";
-import { AGENT_LIMITS, type StageEfforts } from "../limits.js";
+import { AGENT_LIMITS, type StageEfforts, type StageModels } from "../limits.js";
 import { decideOutcome, type Outcome } from "../outcome.js";
 import {
   requirementsFromPlan,
@@ -291,6 +291,16 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
    * 要求をその段の名前で引いた口で呼ぶ。省けば、どの段の口も今の口と同じ（要求・記録・要約は今と同じ）。
    */
   readonly stageEfforts?: StageEfforts;
+  /**
+   * 段ごとのモデル（`--pipeline v1.2` の `--stage-model`。Issue #829）。共通の口に渡し、C1・C2・C3・T2（束の口を含む）・
+   * B1・B3'・⑥ の要求にその段のモデルを載せ、予約と精算をそのモデルの単価で行う。省けば今の口と同じ。
+   */
+  readonly stageModels?: StageModels;
+  /**
+   * 段のモデルの単価の表（モデル → 単価。Issue #829）。`stageModels` で指定したモデルの単価をここから引く。
+   * `rates`（走りのモデルの単価）は、段のモデルを指定しない段と、LLM の判定に使う。
+   */
+  readonly stageModelRates?: Readonly<Record<string, TokenRates>>;
   /**
    * 段の出力の上限の上書きの表（段 → 値。Issue #776）。共通の口（`CallGateway`）と T2 の束ごとの口に渡し、
    * 表にある段の要求の `max_output_tokens` と予算の予約がその値で揃う。省けば今の口と同じ。段のコードは
@@ -929,6 +939,8 @@ async function runV11a(
     ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
     ...(callGate === undefined ? {} : { gate: callGate }),
     ...(input.stageEfforts === undefined ? {} : { stageEfforts: input.stageEfforts }),
+    ...(input.stageModels === undefined ? {} : { stageModels: input.stageModels }),
+    ...(input.stageModelRates === undefined ? {} : { stageModelRates: input.stageModelRates }),
     ...(input.stageOutputLimits === undefined ? {} : { stageOutputLimits: input.stageOutputLimits }),
     ...(input.recordMalformedKinds === true ? { recordMalformedKinds: true } : {}),
     ...(requestLog === undefined ? {} : { observer: requestLog.observer() }),
@@ -1842,6 +1854,8 @@ async function runV11a(
           ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
           ...(callGate === undefined ? {} : { gate: callGate }),
           ...(input.stageEfforts === undefined ? {} : { stageEfforts: input.stageEfforts }),
+          ...(input.stageModels === undefined ? {} : { stageModels: input.stageModels }),
+          ...(input.stageModelRates === undefined ? {} : { stageModelRates: input.stageModelRates }),
           ...(input.stageOutputLimits === undefined ? {} : { stageOutputLimits: input.stageOutputLimits }),
           ...(input.recordMalformedKinds === true ? { recordMalformedKinds: true } : {}),
           ...(requestLog === undefined || unit === undefined ? {} : { observer: requestLog.observer(unit) }),

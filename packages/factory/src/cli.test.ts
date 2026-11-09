@@ -29,6 +29,7 @@ import {
   PROMPT_VERSION_V12,
   STAGE_EFFORT_USAGE,
   STAGE_USAGE,
+  TERRA_RATES,
   VOCABULARY_VERSION,
   USAGE,
   apiKeyEnvOf,
@@ -168,7 +169,7 @@ import {
 import * as runModule from "./run.js";
 import type { Judge, JudgeRequest } from "./judge.js";
 import { createFallbackJudge } from "./judge.js";
-import { JEV_RATES, JobBudget } from "./budget.js";
+import { JEV_RATES, JobBudget, costOfUsageUsd, estimateMaxCostUsd, type TokenRates } from "./budget.js";
 import { createBudgetedJudge } from "./judge-budget.js";
 import { createJevJudge } from "./judge-jev.js";
 import { createLlmJudge, DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS } from "./judge-llm.js";
@@ -1534,6 +1535,8 @@ async function runV11aCli(input: {
   readonly source?: string;
   /** 判定の偽物（省けば `v11aJudge`。Issue #776 レビュー R4） */
   readonly judge?: Judge;
+  /** 走りの単価（省けば受入の表から。`--model` の terra の試験で、直す前の単価を差し込む。Issue #829） */
+  readonly rates?: TokenRates;
 }) {
   const planPath = `${input.dir}-plan.json`;
   const planText = JSON.stringify(input.envelope ?? (await v11aEnvelope()));
@@ -1557,6 +1560,7 @@ async function runV11aCli(input: {
     makeClient,
     makeLlmJudge: () => input.judge ?? v11aJudge(),
     now: () => 0,
+    ...(input.rates === undefined ? {} : { rates: input.rates }),
     log: (line) => lines.push(line),
   });
   const summary = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
@@ -3053,8 +3057,11 @@ const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
   // Issue #816 で取り直した（R2 で ids の上流の指紋、R3 で ids の全体の指紋が変わり、t1-t2 の checkpoint の版と、それを
   // 入力の出力ダイジェストに持つ記録が変わるため。旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_816` に残し、checkpoint の
   // `ledger`・`ledger_upstream` を #806 の ids の値に戻せば一致することを試験で確かめる）
-  "8ef7fba757a1fab987122c1a48b73a1049387ce4c6b7b17966ab36fb6cb13822",
-  "5ae7bf97d93262c003cda5c0dbc330f87a1b5d578ab8d8066d3195501eaf5138",
+  // Issue #832 で取り直した（検査の式の行の旗 ids の T2 の文を直し、ids の全体の指紋が変わり、t1-t2 の checkpoint の版と、
+  // それを入力の出力ダイジェストに持つ記録が変わるため。旧の値は 8ef7fba757a1fab987122c1a48b73a1049387ce4c6b7b17966ab36fb6cb13822・
+  // 5ae7bf97d93262c003cda5c0dbc330f87a1b5d578ab8d8066d3195501eaf5138。上流の指紋は変えないので、#806 へ戻す照合の値は今までどおり）
+  "1be3778ab239f95e3ce67f4f9bd0490207062e083279d26282eec2d43d769f0c",
+  "e31d2d2988950c499b0583f3c5608190d539e3996db457aeb219eab58fa1364f",
 ];
 
 /** Issue #816 の前（#806 の後）の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値） */
@@ -4165,6 +4172,8 @@ async function runStageCli(input: {
   readonly judge?: Judge;
   /** 入口に渡す環境変数（省けば OpenAI の鍵だけ。`--provider ollama` の試験で差し替える。Issue #776） */
   readonly env?: Readonly<Record<string, string>>;
+  /** 走りの単価（省けば受入の表から。直す前の単価を差し込む。Issue #829） */
+  readonly rates?: TokenRates;
 }) {
   const planPath = `${input.dir}-plan.json`;
   const planText = JSON.stringify(input.envelope ?? (await v11aEnvelope()));
@@ -4211,6 +4220,7 @@ async function runStageCli(input: {
     makeClient,
     makeLlmJudge: () => input.judge ?? v11aJudge(),
     now: input.clock?.now ?? (() => 0),
+    ...(input.rates === undefined ? {} : { rates: input.rates }),
     log: (line) => lines.push(line),
     logError: (line) => errors.push(line),
   });
@@ -9178,5 +9188,466 @@ describe("Jev の主・落とし先・再点検の会計（JEV_RATES と注入�
     expect(budget.remainingUsd).toBeCloseTo(BUDGET_USD - LLM_COST_USD, 15);
     expect(budget.reservedUsd).toBeCloseTo(0, 15);
     expect(budgeted.callsByAdapter).toEqual({ jev: 0, llm: 1, fake: 0 });
+  });
+});
+
+// ── 段ごとのモデルの単価（`--stage-model`。Issue #829）────────────────────────────
+//
+// (5) 条件の記録の位置・順・有無を条件どうしで直接比べる（Build だけと段の走りの両方）。
+// (7) 段の走り（vocabulary..semantic-check・test-spec..test-spec・write..judge）でも要求・費用・条件が成り立つ。
+// (9) 走りのモデルの単価を入口で引く（通常の v1・Build だけ・段の走り）。(6)(10) 不変の対象はバイト列で同じ。
+
+const STAGE_MODEL_TERRA = "gpt-6.1-terra";
+
+/** 1 回の構造化出力の費用（記録の usage は `structured` の既定。Issue #829） */
+const recordedCost = (rates: TokenRates): number => costOfUsageUsd(RECORDED_USAGE, rates);
+
+/** 打ち切りの合図を除く（要求の列を base と比べる。Issue #829） */
+const withoutCallSignal = ({ signal: _signal, ...rest }: LlmStructuredRequest) => rest;
+
+/** 条件から 1 欄を除く（欄を除けば付けない走りと条件が同じ、を直接比べる。Issue #829） */
+const withoutCondition = (conditions: Record<string, unknown>, key: string): Record<string, unknown> => {
+  const { [key]: _omitted, ...rest } = conditions;
+  return rest;
+};
+
+/** 費用・残り・予約の値（とそれを写す欄）を除く（走りの単価の違いで変わるのはこれだけ。Issue #829） */
+const withoutCostAmounts = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(withoutCostAmounts);
+  if (typeof value !== "object" || value === null) return value;
+  const omit = new Set(["provider_cost_usd", "budget_remaining_usd", "budget_reserved_usd"]);
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !omit.has(key))
+      .map(([key, inner]) => [key, withoutCostAmounts(inner)]),
+  );
+};
+
+/** 書いたファイルの本文から、費用・残り・予約の値だけを除く（JSON でなければ本文のまま。Issue #829） */
+const withoutCostFromText = (text: string): string => {
+  try {
+    return JSON.stringify(withoutCostAmounts(JSON.parse(text) as unknown));
+  } catch {
+    return text;
+  }
+};
+
+describe("(5) 条件の記録の stage_models の位置・順・有無（Issue #829）", () => {
+  it("(5) Build だけの記録：stage_models は stage_efforts の直後・最後に載り、欄を除けば付けない走りと条件が同じ", async () => {
+    const calls = (): RecordedCall[] => [...v12Head(), structured(v11aJudgments())];
+    const plain = await runV11aCli({ dir: `${directory}/sm-cond-build-plain`, calls: calls(), pipeline: "v1.2", args: ["--budget", "1.00"] });
+    const effort = await runV11aCli({
+      dir: `${directory}/sm-cond-build-effort`,
+      calls: calls(),
+      pipeline: "v1.2",
+      args: ["--budget", "1.00", "--stage-effort", "semantic-check=low"],
+    });
+    const model = await runV11aCli({
+      dir: `${directory}/sm-cond-build-model`,
+      calls: calls(),
+      pipeline: "v1.2",
+      args: ["--budget", "1.00", "--stage-model", `test-spec=${STAGE_MODEL_TERRA}`, "--stage-model", `vocabulary=${DEFAULT_OPENAI_MODEL}`],
+    });
+    const both = await runV11aCli({
+      dir: `${directory}/sm-cond-build-both`,
+      calls: calls(),
+      pipeline: "v1.2",
+      args: [
+        "--budget",
+        "1.00",
+        "--stage-effort",
+        "semantic-check=low",
+        "--stage-model",
+        `test-spec=${STAGE_MODEL_TERRA}`,
+        "--stage-model",
+        `vocabulary=${DEFAULT_OPENAI_MODEL}`,
+      ],
+    });
+    for (const run of [plain, effort, model, both]) expect(run.code).toBe(EXIT_OK);
+
+    // 有無
+    expect(plain.record.conditions).not.toHaveProperty("stage_models");
+    expect(effort.record.conditions).not.toHaveProperty("stage_models");
+    // 位置・順（stage_efforts の直後。ollama の欄が無いので末尾）
+    const bothKeys = Object.keys(both.record.conditions);
+    expect(bothKeys.indexOf("stage_models")).toBe(bothKeys.indexOf("stage_efforts") + 1);
+    expect(bothKeys.at(-1)).toBe("stage_models");
+    expect(Object.keys(effort.record.conditions).at(-1)).toBe("stage_efforts");
+    expect(Object.keys(model.record.conditions).at(-1)).toBe("stage_models");
+    // 段 → モデルは付けた順
+    expect(model.record.conditions["stage_models"]).toEqual({ "test-spec": STAGE_MODEL_TERRA, vocabulary: DEFAULT_OPENAI_MODEL });
+    expect(Object.keys(model.record.conditions["stage_models"] as object)).toEqual(["test-spec", "vocabulary"]);
+    // 欄を除けば、付けない走り（モデルだけ）／effort だけの走り（併記）と条件が同じ
+    expect(withoutCondition(model.record.conditions, "stage_models")).toEqual(plain.record.conditions);
+    expect(withoutCondition(both.record.conditions, "stage_models")).toEqual(effort.record.conditions);
+    // Ollama の走りは今のまま：stage_models を持たず、ollama の欄が末尾（宣言した並びの最後）
+    const ollama = await runV11aCli({
+      dir: `${directory}/sm-cond-build-ollama`,
+      calls: calls(),
+      pipeline: "v1.2",
+      env: { [OLLAMA_API_KEY_ENV]: "ol-FAKE" },
+      args: ["--budget", "1.00", "--provider", "ollama", "--stage-effort", "semantic-check=low"],
+    });
+    expect(ollama.code).toBe(EXIT_OK);
+    expect(ollama.record.conditions).not.toHaveProperty("stage_models");
+    expect(Object.keys(ollama.record.conditions).at(-1)).toBe("ollama_stage_output_limits");
+  });
+
+  it("(5) 段の走りの記録：stage_models は stage_efforts の直後・最後に載り、欄を除けば付けない走りと条件が同じ", async () => {
+    const baseArgs = ["--stage-start", "vocabulary", "--stage-end", "semantic-check", "--budget", "1.00"];
+    const calls = (): RecordedCall[] => v12Head().slice(0, 5);
+    const plainDir = `${directory}/sm-cond-stage-plain`;
+    const effortDir = `${directory}/sm-cond-stage-effort`;
+    const modelDir = `${directory}/sm-cond-stage-model`;
+    const bothDir = `${directory}/sm-cond-stage-both`;
+    const plain = await runStageCli({ dir: plainDir, args: baseArgs, calls: calls(), pipeline: "v1.2" });
+    const effort = await runStageCli({
+      dir: effortDir,
+      args: [...baseArgs, "--stage-effort", "semantic-check=low"],
+      calls: calls(),
+      pipeline: "v1.2",
+    });
+    const model = await runStageCli({
+      dir: modelDir,
+      args: [...baseArgs, "--stage-model", `semantic-check=${STAGE_MODEL_TERRA}`],
+      calls: calls(),
+      pipeline: "v1.2",
+    });
+    const both = await runStageCli({
+      dir: bothDir,
+      args: [...baseArgs, "--stage-effort", "semantic-check=low", "--stage-model", `semantic-check=${STAGE_MODEL_TERRA}`],
+      calls: calls(),
+      pipeline: "v1.2",
+    });
+    for (const run of [plain, effort, model, both]) expect(run.code).toBe(EXIT_OK);
+    const conditionsOf = async (dir: string): Promise<Record<string, unknown>> =>
+      (await stageRecordOf(dir))["conditions"] as Record<string, unknown>;
+    const plainC = await conditionsOf(plainDir);
+    const effortC = await conditionsOf(effortDir);
+    const modelC = await conditionsOf(modelDir);
+    const bothC = await conditionsOf(bothDir);
+
+    expect(plainC).not.toHaveProperty("stage_models");
+    expect(effortC).not.toHaveProperty("stage_models");
+    const bothKeys = Object.keys(bothC);
+    expect(bothKeys.indexOf("stage_models")).toBe(bothKeys.indexOf("stage_efforts") + 1);
+    expect(bothKeys.at(-1)).toBe("stage_models");
+    expect(Object.keys(effortC).at(-1)).toBe("stage_efforts");
+    expect(Object.keys(modelC).at(-1)).toBe("stage_models");
+    expect(modelC["stage_models"]).toEqual({ "semantic-check": STAGE_MODEL_TERRA });
+    expect(withoutCondition(modelC, "stage_models")).toEqual(plainC);
+    expect(withoutCondition(bothC, "stage_models")).toEqual(effortC);
+  });
+});
+
+describe("(7) 段の走りでも (1)(3)(5) が成り立つ（Issue #829）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** 段の走りの費用（`runStageRangeV11a` が返す `costUsd`。spy で採る） */
+  async function stageCost(
+    spy: { readonly mock: { readonly results: readonly { readonly value: unknown }[] } },
+    index: number,
+  ): Promise<number> {
+    const value = await (spy.mock.results[index]!.value as Promise<{ readonly costUsd: number }>);
+    return value.costUsd;
+  }
+
+  it("(7) vocabulary..semantic-check：C3 の要求だけ terra・effort high。費用は段ごとの手計算の和。条件に stage_models", async () => {
+    const spy = vi.spyOn(v11aRunModule, "runStageRangeV11a");
+    const dir = `${directory}/sm-stage-range-c3`;
+    const run = await runStageCli({
+      dir,
+      args: [
+        "--stage-start",
+        "vocabulary",
+        "--stage-end",
+        "semantic-check",
+        "--budget",
+        "1.00",
+        "--stage-effort",
+        "semantic-check=high",
+        "--stage-model",
+        `semantic-check=${STAGE_MODEL_TERRA}`,
+      ],
+      calls: v12Head().slice(0, 5),
+      pipeline: "v1.2",
+    });
+    expect(run.code).toBe(EXIT_OK);
+    const c3 = run.structuredRequests.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+    const others = run.structuredRequests.filter((request) => request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(c3.length).toBeGreaterThan(0);
+    for (const request of c3) {
+      expect(request.model).toBe(STAGE_MODEL_TERRA);
+      expect(request.effort).toBe("high");
+      expect(request.maxOutputTokens).toBe(maxOutputTokensForEffort("high", "semantic-check"));
+    }
+    for (const request of others) {
+      expect(request.model).toBeUndefined();
+      expect(request.effort).toBeUndefined();
+    }
+    expect(await stageCost(spy, 0)).toBeCloseTo(c3.length * recordedCost(TERRA_RATES) + others.length * recordedCost(DEFAULT_RATES), 12);
+    const conditions = (await stageRecordOf(dir))["conditions"] as Record<string, unknown>;
+    expect(conditions["stage_models"]).toEqual({ "semantic-check": STAGE_MODEL_TERRA });
+    expect(Object.keys(conditions).at(-1)).toBe("stage_models");
+  });
+
+  it("(7) test-spec..test-spec：T2 の要求だけ terra・effort high。費用と条件も成り立つ", async () => {
+    const source = `${directory}/sm-stage-range-source`;
+    await runV11aCli({ dir: source, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2", args: ["--budget", "1.00"] });
+    const spy = vi.spyOn(v11aRunModule, "runStageRangeV11a");
+    const dir = `${directory}/sm-stage-range-t2`;
+    const run = await runStageCli({
+      dir,
+      args: [
+        "--stage-start",
+        "test-spec",
+        "--stage-end",
+        "test-spec",
+        "--stage-input",
+        `${source}/${stageCheckpointFile("t1-t2")}`,
+        "--budget",
+        "1.00",
+        "--stage-effort",
+        "test-spec=high",
+        "--stage-model",
+        `test-spec=${STAGE_MODEL_TERRA}`,
+      ],
+      calls: [structured(v11aRenamed(v12TestSpec()))],
+      pipeline: "v1.2",
+    });
+    expect(run.code).toBe(EXIT_OK);
+    const t2 = run.structuredRequests.filter((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME);
+    expect(t2).toHaveLength(1);
+    expect(t2[0]?.model).toBe(STAGE_MODEL_TERRA);
+    expect(t2[0]?.effort).toBe("high");
+    expect(t2[0]?.maxOutputTokens).toBe(maxOutputTokensForEffort("high", "test-spec"));
+    expect(await stageCost(spy, 0)).toBeCloseTo(recordedCost(TERRA_RATES), 12);
+    const conditions = (await stageRecordOf(dir))["conditions"] as Record<string, unknown>;
+    expect(conditions["stage_models"]).toEqual({ "test-spec": STAGE_MODEL_TERRA });
+    expect(Object.keys(conditions).at(-1)).toBe("stage_models");
+  });
+
+  it("(7) write..judge：B1 の要求だけ terra。費用と条件も成り立つ", async () => {
+    const source = `${directory}/sm-stage-range-source-b1`;
+    await runV11aCli({ dir: source, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2", args: ["--budget", "1.00"] });
+    const spy = vi.spyOn(v11aRunModule, "runStageRangeV11a");
+    const dir = `${directory}/sm-stage-range-b1`;
+    const run = await runStageCli({
+      dir,
+      args: [
+        "--stage-start",
+        "write",
+        "--stage-end",
+        "judge",
+        "--stage-input",
+        `${source}/${stageCheckpointFile("t2-b1")}`,
+        "--budget",
+        "1.00",
+        "--stage-model",
+        `write=${STAGE_MODEL_TERRA}`,
+      ],
+      calls: [structured({ declaration: V11A_YAML }), structured(v11aJudgments())],
+      pipeline: "v1.2",
+    });
+    expect(run.code).toBe(EXIT_OK);
+    const b1 = run.structuredRequests.filter((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME);
+    expect(b1.length).toBeGreaterThan(0);
+    for (const request of b1) expect(request.model).toBe(STAGE_MODEL_TERRA);
+    const others = run.structuredRequests.filter((request) => request.schemaName !== WRITE_V11A_SCHEMA_NAME);
+    for (const request of others) expect(request.model).toBeUndefined();
+    expect(await stageCost(spy, 0)).toBeCloseTo(b1.length * recordedCost(TERRA_RATES) + others.length * recordedCost(DEFAULT_RATES), 12);
+    const conditions = (await stageRecordOf(dir))["conditions"] as Record<string, unknown>;
+    expect(conditions["stage_models"]).toEqual({ write: STAGE_MODEL_TERRA });
+    expect(Object.keys(conditions).at(-1)).toBe("stage_models");
+  });
+});
+
+/** 通常の v1 の入口を 1 回流す（偽物の LLM。`rates` で直す前の単価を差し込む。Issue #829） */
+async function runV1ModelEntry(input: {
+  readonly dir: string;
+  readonly budget: string;
+  readonly model: string;
+  readonly rates?: TokenRates;
+  readonly calls?: readonly RecordedCall[];
+}) {
+  const recording = createRecordingClient(input.calls ?? recordedRun());
+  const lines: string[] = [];
+  const written: string[] = [];
+  const code = await runCli({
+    argv: ["--", "request.txt", "--out", input.dir, "--model", input.model, "--budget", input.budget],
+    env: { [API_KEY_ENV]: "sk-FAKE" },
+    readFile: async () => SOURCE_TEXT,
+    writeFile: async (path, text) => {
+      written.push(path.slice(input.dir.length + 1));
+      await fs.writeFile(path, text, "utf8");
+    },
+    makeDirectory: async (path) => {
+      await fs.mkdir(path, { recursive: true });
+    },
+    loadDocuments: async () => [],
+    makeClient: () => recording.client,
+    now: () => 0,
+    ...(input.rates === undefined ? {} : { rates: input.rates }),
+    log: (line) => lines.push(line),
+  });
+  const summary = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
+  return { code, summary, recording, written };
+}
+
+describe("(9) model-rate:v1-and-plan：走りのモデルの単価を入口で引く（Issue #829）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("(9) 通常の v1：予約と精算が terra の単価。要求の列は base とバイト列で同じ、差は費用と残り（とそれを写す要約）だけ", async () => {
+    const fixedDir = `${directory}/sm-entry-v1-fixed`;
+    const baseDir = `${directory}/sm-entry-v1-base`;
+    const fixed = await runV1ModelEntry({ dir: fixedDir, model: STAGE_MODEL_TERRA, budget: "1.00" });
+    const base = await runV1ModelEntry({
+      dir: baseDir,
+      model: STAGE_MODEL_TERRA,
+      budget: "1.00",
+      rates: DEFAULT_RATES,
+    });
+    expect(fixed.code).toBe(EXIT_OK);
+    expect(base.code).toBe(EXIT_OK);
+    // 要求の列は base とバイト列で同じ（走りのモデルは adapter の設定で、要求には載らない）
+    expect(fixed.recording.structured.map(withoutCallSignal)).toEqual(base.recording.structured.map(withoutCallSignal));
+    const n = fixed.recording.structured.length;
+    expect(n).toBe(base.recording.structured.length);
+    expect(Number(fixed.summary["provider_cost_usd"])).toBeCloseTo(n * recordedCost(TERRA_RATES), 12);
+    expect(Number(base.summary["provider_cost_usd"])).toBeCloseTo(n * recordedCost(DEFAULT_RATES), 12);
+    expect(Number(base.summary["provider_cost_usd"])).toBeCloseTo(Number(fixed.summary["provider_cost_usd"]) / 10, 12);
+    expect(Number(fixed.summary["budget_remaining_usd"])).toBeCloseTo(1 - n * recordedCost(TERRA_RATES), 12);
+    expect(Number(base.summary["budget_remaining_usd"])).toBeCloseTo(1 - n * recordedCost(DEFAULT_RATES), 12);
+    // 書いたファイルの差は、費用・残り・予約（とそれを写す欄・SHA）だけである
+    expect(fixed.written).toEqual(base.written);
+    for (const path of fixed.written) {
+      const fixedText = (await fs.readFile(`${fixedDir}/${path}`, "utf8")).replaceAll(fixedDir, "<out>");
+      const baseText = (await fs.readFile(`${baseDir}/${path}`, "utf8")).replaceAll(baseDir, "<out>");
+      if (path === BUNDLE_MANIFEST_FILE) {
+        const fixedManifest = JSON.parse(fixedText) as { readonly files: readonly { readonly path: string; readonly sha256: string; readonly size_bytes: number }[] };
+        const baseManifest = JSON.parse(baseText) as { readonly files: readonly { readonly path: string; readonly sha256: string; readonly size_bytes: number }[] };
+        expect(fixedManifest.files.map((file) => file.path)).toEqual(baseManifest.files.map((file) => file.path));
+        for (const file of fixedManifest.files) {
+          // 費用を写す要約の SHA と大きさだけが変わる（その他の納品物の SHA は同じ）
+          if (file.path === "artifacts/summary.json") continue;
+          expect(file).toEqual(baseManifest.files.find((other) => other.path === file.path));
+        }
+      } else if (path === "artifacts/summary.json") {
+        // 要約の差は、費用・残り・予約の値だけ
+        expect(withoutCostFromText(fixedText), path).toBe(withoutCostFromText(baseText));
+      } else {
+        expect(fixedText, path).toBe(baseText);
+      }
+    }
+  });
+
+  it("(9) 予算で止まる台本：terra の予約で始まらない呼び出しと not_started.budget。同じ予算で base は始まる", async () => {
+    // 最初の要求の入力の上界から、luna の予約と terra の予約の中間の予算を作る（予約の式は変えない）
+    const probe = await runV1ModelEntry({ dir: `${directory}/sm-entry-v1-probe`, model: STAGE_MODEL_TERRA, budget: "1.00" });
+    const first = probe.recording.structured[0];
+    if (first === undefined) throw new Error("前提が壊れた：最初の要求が無い");
+    const inputTokens = callModule.estimateInputUpperBoundTokens(callModule.structuredInputParts(first));
+    const lunaMax = estimateMaxCostUsd({ inputTokens, maxOutputTokens: first.maxOutputTokens, rates: DEFAULT_RATES });
+    const terraMax = estimateMaxCostUsd({ inputTokens, maxOutputTokens: first.maxOutputTokens, rates: TERRA_RATES });
+    const budget = String((lunaMax + terraMax) / 2);
+    const blocked = await runV1ModelEntry({ dir: `${directory}/sm-entry-v1-blocked`, model: STAGE_MODEL_TERRA, budget });
+    const allowed = await runV1ModelEntry({
+      dir: `${directory}/sm-entry-v1-allowed`,
+      model: STAGE_MODEL_TERRA,
+      budget,
+      rates: DEFAULT_RATES,
+    });
+    expect(blocked.code).toBe(EXIT_RUN_FAILED);
+    expect(blocked.recording.structured).toHaveLength(0);
+    expect(Number(blocked.summary["provider_cost_usd"])).toBe(0);
+    const blockedStages = blocked.summary["stages"] as readonly { readonly attempts: { readonly not_started: { readonly budget: number } } }[];
+    expect(blockedStages.some((stage) => stage.attempts.not_started.budget > 0)).toBe(true);
+    // 予算を緩めていない：同じ予算で base は最初の呼び出しを始める
+    expect(allowed.recording.structured.length).toBeGreaterThan(0);
+  });
+
+  it("(9) model-rate:build-and-stage：Build だけ（v1.1a・v1.2）でも terra の単価で予約・精算し、要求は base と同じ", async () => {
+    const cases = [
+      { pipeline: "v1.1a" as const, calls: (): RecordedCall[] => [...v11aHead(), structured(v11aJudgments())] },
+      { pipeline: "v1.2" as const, calls: (): RecordedCall[] => [...v12Head(), structured(v11aJudgments())] },
+    ];
+    for (const entry of cases) {
+      const fixed = await runV11aCli({
+        dir: `${directory}/sm-entry-build-${entry.pipeline}-fixed`,
+        calls: entry.calls(),
+        pipeline: entry.pipeline,
+        args: ["--model", STAGE_MODEL_TERRA, "--budget", "1.00"],
+      });
+      const base = await runV11aCli({
+        dir: `${directory}/sm-entry-build-${entry.pipeline}-base`,
+        calls: entry.calls(),
+        pipeline: entry.pipeline,
+        args: ["--model", STAGE_MODEL_TERRA, "--budget", "1.00"],
+        rates: DEFAULT_RATES,
+      });
+      expect(fixed.code).toBe(EXIT_OK);
+      expect(base.code).toBe(EXIT_OK);
+      expect(fixed.recording.structured.map(withoutCallSignal)).toEqual(base.recording.structured.map(withoutCallSignal));
+      const n = fixed.recording.structured.length;
+      expect(n).toBe(base.recording.structured.length);
+      expect(Number(fixed.summary["provider_cost_usd"])).toBeCloseTo(n * recordedCost(TERRA_RATES), 12);
+      expect(Number(base.summary["provider_cost_usd"])).toBeCloseTo(n * recordedCost(DEFAULT_RATES), 12);
+      expect(Number(fixed.summary["budget_remaining_usd"])).toBeCloseTo(1 - n * recordedCost(TERRA_RATES), 12);
+    }
+  });
+
+  it("(9) model-rate:build-and-stage：段の走りの入口でも terra の単価で予約・精算し、要求は base と同じ", async () => {
+    const spy = vi.spyOn(v11aRunModule, "runStageRangeV11a");
+    const args = ["--stage-start", "vocabulary", "--stage-end", "semantic-check", "--budget", "1.00", "--model", STAGE_MODEL_TERRA];
+    const fixed = await runStageCli({ dir: `${directory}/sm-entry-stage-fixed`, args, calls: v12Head().slice(0, 5), pipeline: "v1.2" });
+    const base = await runStageCli({
+      dir: `${directory}/sm-entry-stage-base`,
+      args,
+      calls: v12Head().slice(0, 5),
+      pipeline: "v1.2",
+      rates: DEFAULT_RATES,
+    });
+    expect(fixed.code).toBe(EXIT_OK);
+    expect(base.code).toBe(EXIT_OK);
+    expect(fixed.structuredRequests.map(withoutCallSignal)).toEqual(base.structuredRequests.map(withoutCallSignal));
+    const n = fixed.structuredRequests.length;
+    const fixedOutcome = await (spy.mock.results[0]!.value as Promise<{ readonly costUsd: number }>);
+    const baseOutcome = await (spy.mock.results[1]!.value as Promise<{ readonly costUsd: number }>);
+    expect(fixedOutcome.costUsd).toBeCloseTo(n * recordedCost(TERRA_RATES), 12);
+    expect(baseOutcome.costUsd).toBeCloseTo(n * recordedCost(DEFAULT_RATES), 12);
+  });
+});
+
+describe("(6)(10) 不変：--stage-model を付けない luna・表に無いモデル・他の provider（Issue #829）", () => {
+  it("(6)(10) luna と表に無いモデルは、直す前の単価（base）と要求・書いたファイルがバイト列で同じ", async () => {
+    for (const model of [DEFAULT_OPENAI_MODEL, "gpt-unknown"]) {
+      const fixed = await runV11aCli({
+        dir: `${directory}/sm-invariant-${model}-fixed`,
+        calls: [...v12Head(), structured(v11aJudgments())],
+        pipeline: "v1.2",
+        args: ["--model", model, "--budget", "1.00"],
+      });
+      const base = await runV11aCli({
+        dir: `${directory}/sm-invariant-${model}-base`,
+        calls: [...v12Head(), structured(v11aJudgments())],
+        pipeline: "v1.2",
+        args: ["--model", model, "--budget", "1.00"],
+        rates: DEFAULT_RATES,
+      });
+      expect(fixed.code).toBe(base.code);
+      expect(fixed.recording.structured.map(withoutCallSignal)).toEqual(base.recording.structured.map(withoutCallSignal));
+      expect(fixed.written).toEqual(base.written);
+      for (const path of fixed.written) {
+        const fixedText = (await fs.readFile(`${directory}/sm-invariant-${model}-fixed/${path}`, "utf8")).replaceAll(
+          `${directory}/sm-invariant-${model}-fixed`,
+          `${directory}/sm-invariant-${model}-base`,
+        );
+        expect(fixedText, path).toBe(await fs.readFile(`${directory}/sm-invariant-${model}-base/${path}`, "utf8"));
+      }
+    }
   });
 });

@@ -1457,10 +1457,20 @@ describe("旗 v12.ids の C2 への文（Issue #806）", () => {
   /** Issue #816 の前の検査の式の行の B1 の文（R3。旧の文は消さずに試験の定数に残す） */
   const OLD_VALIDATION_EXPRESSION_B1 =
     "固定した試験のうち observes が validation-expression の試験は、対象の項目（field）の行ごとに、その項目の名前と同じ名前の検査を要求する（同じ entity の別の項目は別の検査の名前になる）。";
+  /**
+   * Issue #832 の前の検査の式の行の旗 ids の T2 の文（旧の文は消さずに試験の定数に残す）。schema の enum に無い
+   * validation-expression を肯定で書かせていた文で、T2 の文を戻すと指紋が base（#816・#800）に戻る
+   */
+  const OLD_VALIDATION_EXPRESSION_T2 =
+    "場合の観測する性質（observes）は、確かめ方が validation-expression の要件の項目・entity の行の場合だけ validation-expression と書き、対象（targetId）はその要件の targets の項目の行から選ぶ。確かめ方がこの種類でない要件の項目・entity の行の場合は validation-expression と書かない。";
 
   /** 検査の式の行の B1 の文を #816 の前の文に戻した台帳（R3 の復元） */
   const withOldValidationExpressionB1 = (rows: readonly PropertyRow[] = PROPERTY_LEDGER): readonly PropertyRow[] =>
     withRow("validation-expression", (row) => ({ ...row, rules: { ...row.rules, b1: OLD_VALIDATION_EXPRESSION_B1 } }), rows);
+
+  /** 検査の式の行の旗 ids の T2 の文を #832 の前の文に戻した台帳（#832 の復元） */
+  const withOldValidationExpressionT2 = (rows: readonly PropertyRow[] = PROPERTY_LEDGER): readonly PropertyRow[] =>
+    withRow("validation-expression", (row) => ({ ...row, rules: { ...row.rules, t2Ids: OLD_VALIDATION_EXPRESSION_T2 } }), rows);
 
   /**
    * #806 の導出を再現した ids の上流の部分の指紋（版 1・off の適用行から導いた射影に、ids の見方の `t1IdsRuleTexts` を足す）。
@@ -1552,10 +1562,11 @@ describe("旗 v12.ids の C2 への文（Issue #806）", () => {
     expect(await upstreamLedgerSha256(PROPERTY_LEDGER, off)).toBe(BASE_OFF_UPSTREAM);
     const idsWhole = await propertyLedgerSha256(PROPERTY_LEDGER, ids);
     expect(idsWhole).not.toBe(BASE_IDS_WHOLE);
-    // R3 の B1 の文を旧の文に戻すと、ids の全体の指紋は base（#806 の後・#816 の前）の値に戻る（R3 の差がその 1 文だけであることの証跡）
-    expect(await propertyLedgerSha256(withOldValidationExpressionB1(), ids)).toBe(BASE_IDS_WHOLE_806);
+    // R3 の B1 の文と #832 の T2 の文を旧の文に戻すと、ids の全体の指紋は base（#806 の後・#816 の前）の値に戻る
+    // （#816・#832 の差がその 2 文だけであることの証跡）
+    expect(await propertyLedgerSha256(withOldValidationExpressionB1(withOldValidationExpressionT2()), ids)).toBe(BASE_IDS_WHOLE_806);
     // #806 で足した t1Ids も外すと、#800 の ids の全体の指紋に戻る（旧の値も消さずに照らす）
-    expect(await propertyLedgerSha256(withOldValidationExpressionB1(withoutIdsRuleTexts()), ids)).toBe(BASE_IDS_WHOLE);
+    expect(await propertyLedgerSha256(withOldValidationExpressionB1(withOldValidationExpressionT2(withoutIdsRuleTexts())), ids)).toBe(BASE_IDS_WHOLE);
     const idsUpstream = await upstreamLedgerSha256(PROPERTY_LEDGER, ids);
     expect(idsUpstream).not.toBe(BASE_OFF_UPSTREAM);
     expect(UPSTREAM_LEDGER_VIEW_VERSION_IDS).toBe(2);
