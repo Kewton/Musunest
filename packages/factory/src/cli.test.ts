@@ -3053,8 +3053,11 @@ const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
   // Issue #816 で取り直した（R2 で ids の上流の指紋、R3 で ids の全体の指紋が変わり、t1-t2 の checkpoint の版と、それを
   // 入力の出力ダイジェストに持つ記録が変わるため。旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_816` に残し、checkpoint の
   // `ledger`・`ledger_upstream` を #806 の ids の値に戻せば一致することを試験で確かめる）
-  "8ef7fba757a1fab987122c1a48b73a1049387ce4c6b7b17966ab36fb6cb13822",
-  "5ae7bf97d93262c003cda5c0dbc330f87a1b5d578ab8d8066d3195501eaf5138",
+  // Issue #832 で取り直した（検査の式の行の旗 ids の T2 の文を直し、ids の全体の指紋が変わり、t1-t2 の checkpoint の版と、
+  // それを入力の出力ダイジェストに持つ記録が変わるため。旧の値は 8ef7fba757a1fab987122c1a48b73a1049387ce4c6b7b17966ab36fb6cb13822・
+  // 5ae7bf97d93262c003cda5c0dbc330f87a1b5d578ab8d8066d3195501eaf5138。上流の指紋は変えないので、#806 へ戻す照合の値は今までどおり）
+  "1be3778ab239f95e3ce67f4f9bd0490207062e083279d26282eec2d43d769f0c",
+  "e31d2d2988950c499b0583f3c5608190d539e3996db457aeb219eab58fa1364f",
 ];
 
 /** Issue #816 の前（#806 の後）の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値） */

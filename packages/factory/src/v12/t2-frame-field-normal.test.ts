@@ -425,7 +425,9 @@ describe("台帳の全体・上流の指紋（off は base と同じ。ids on �
     expect(await propertyLedgerSha256(PROPERTY_LEDGER, ids)).not.toBe(base806.ledger);
     expect(await upstreamLedgerSha256(PROPERTY_LEDGER, ids)).not.toBe(base806.upstream);
     // #816 の値（台帳の試験（ledger.test.ts）と CLI の試験（cli.test.ts）の定数と同じ）
-    expect(await propertyLedgerSha256(PROPERTY_LEDGER, ids)).toBe("fac851157c424650e597a3fe8c8e0b4156ec983c835d7f3e90b1f147284d27e4");
+    // Issue #832：検査の式の行の旗 ids の T2 の文を null と書く形に直したので、ids の全体の指紋だけが変わる
+    // （旧の #816 の値 fac851157… は、T2 の文を旧の文に戻すと等値になる。ledger.test.ts の (3) で照らす）
+    expect(await propertyLedgerSha256(PROPERTY_LEDGER, ids)).toBe("65c1f276c2f72cc7fbe947397ee214da740dcdbd1680bdd001f61f889d141487");
     expect(await upstreamLedgerSha256(PROPERTY_LEDGER, ids)).toBe("dc21dd0177557eec5af22eafe2355a41f99884ab4e063d6745e30ae9c554c110");
   });
 });
