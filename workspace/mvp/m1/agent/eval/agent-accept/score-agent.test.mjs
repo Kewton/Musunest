@@ -4016,7 +4016,7 @@ function single557(base, name, { pids = ["P1", "P2"], runs = 3, runOf = () => ({
   return { out, ids };
 }
 /** 比較の出力先（run-agent.mjs --compare --compare-pipelines と同じ形）。groups ＝ [比較元, 候補] */
-function compareFixture557(base, name, { groups, pids = ["P1", "P2"], runs = 3, runOf = () => ({}), groupsExtra = {}, profile = "diagnostic", mismatches = ["deadline_min", "pipelines"], recordGroups = true, paramsExtra = {} } = {}) {
+function compareFixture557(base, name, { groups, pids = ["P1", "P2"], runs = 3, runOf = () => ({}), groupsExtra = {}, profile = "diagnostic", mismatches = ["deadline_min", "pipelines"], recordGroups = true, paramsExtra = {}, recordExtra = {} } = {}) {
   const out = join(base, name);
   mkdirSync(out, { recursive: true });
   const fz = frozen557(base, name, pids);
@@ -4028,7 +4028,7 @@ function compareFixture557(base, name, { groups, pids = ["P1", "P2"], runs = 3, 
     const dir = join(out, g);
     mkdirSync(dir, { recursive: true });
     const cond = cond557({ name, g, ids, pids, ...fz, comparison: { pairs_sha256: pairsSha, group: g, role: roles[g], profile }, extra: groupsExtra[g] ?? {}, paramsExtra: paramsExtra[g] ?? {} });
-    rec[g] = { role: roles[g], pipeline: g, factory: { fingerprint: cond.factory.fingerprint }, conditions_signature: cond.signature, ...(g === V12_PIPELINE ? { v12_flags: FLAGS557 } : {}) };
+    rec[g] = { role: roles[g], pipeline: g, factory: { fingerprint: cond.factory.fingerprint }, conditions_signature: cond.signature, ...(g === V12_PIPELINE ? { v12_flags: FLAGS557 } : {}), ...(recordExtra[g] ?? {}) };
     writeFileSync(join(dir, "conditions.json"), JSON.stringify(cond));
     for (const id of ids) run557(dir, id, g, runOf(g, id));
   }
@@ -4981,7 +4981,7 @@ const stageRecord638 = (id, { kind = "t2-pass", dropped = 0, end = "test-spec", 
   });
 };
 /** 段単位の v1.2 の計測の出力先（条件 v8・開始 T1・終了 end）。runOf(id) ＝ 記録の文字列｜"missing"（読めない記録）｜"unlaunched" */
-function stageFixture638(out, { ids = IDS545, end = "test-spec", runOf, frozenPath, group = null, pairsSha = null, factoryFp = sha256("factory-638"), flags = FLAGS638, pending = [], efforts = null, ollamaLimits = null }) {
+function stageFixture638(out, { ids = IDS545, end = "test-spec", runOf, frozenPath, group = null, pairsSha = null, factoryFp = sha256("factory-638"), flags = FLAGS638, pending = [], efforts = null, ollamaLimits = null, models = null, paramsExtra = {} }) {
   mkdirSync(out, { recursive: true });
   const set = loadEvalSet(join(repo, DEFAULT_SET_PATH)), evDir = join(repo, "workspace/mvp/m1/agent/eval");
   const pids = [...new Set(ids.map((id) => id.split("-")[0]))];
@@ -4993,7 +4993,9 @@ function stageFixture638(out, { ids = IDS545, end = "test-spec", runOf, frozenPa
       ...(group === null ? { v12_call_limits: { logical_calls: 7, real_attempts: 11, judge_branch: 5 } } : {}),
       ...(efforts === null ? {} : { stage_efforts: efforts }),
       ...(ollamaLimits === null ? {} : { ollama_stage_output_limits: ollamaLimits }),
+      ...(models === null ? {} : { stage_models: models }), // #837
       stage_start: "name-table", stage_end: end, budget_scope: "stage-run", stage_from: null, stage_inputs: [],
+      ...paramsExtra, // #837：負例で上流の条件などを群ごとに変える
     },
     child_args: ids.map((id) => ({ id, argv: ["cli.js", id] })),
     frozen: { path: frozenPath, sha256: sha256(readFileSync(frozenPath)), id: "t", version: 1, origin: "frozen-plan", author: null, adopted: pids.map((p) => ({ pattern: p, plan_sha256: PSHA513(p), source_sha256: SSHA513(p), envelope_sha256: sha256(p) })), missing: [] },
@@ -5133,7 +5135,7 @@ test("#638 匿名の口：v8 の段単位の採点の --anonymous に経路・�
 });
 
 /** 段だけの対の比較（v1.2 の群）の出力先：両群とも条件 v8・開始 T1・終了 T2'。passOf(群, 本) ＝ 真なら T2' まで通る */
-function stageCompareFixture638(base, name, { passOf, flagsOf = () => FLAGS638, effortsOf = () => null, limitsOf = () => null }) {
+function stageCompareFixture638(base, name, { passOf, flagsOf = () => FLAGS638, effortsOf = () => null, limitsOf = () => null, modelsOf = () => null, paramsOf = () => ({}) }) {
   const out = join(base, name), fzp = frozenFile545(base);
   mkdirSync(out, { recursive: true });
   const stage = { start: "name-table", end: "test-spec", stage_from_sha256: null };
@@ -5141,8 +5143,10 @@ function stageCompareFixture638(base, name, { passOf, flagsOf = () => FLAGS638, 
   writeFileSync(join(out, "pairs.json"), pairsText);
   const pairsSha = sha256(pairsText), groups = {};
   for (const g of ["before", "after"]) {
-    const cond = stageFixture638(join(out, g), { runOf: (id) => stageRecord638(id, { kind: passOf(g, id) ? "t2-pass" : "t2-fail", dropped: 2, flags: flagsOf(g) }), group: g, pairsSha, frozenPath: fzp, factoryFp: sha256(`factory-638-${g}`), flags: flagsOf(g), efforts: effortsOf(g), ollamaLimits: limitsOf(g) });
-    groups[g] = { role: g === "before" ? "baseline" : "candidate", pipeline: "v1.2", factory: { fingerprint: cond.factory.fingerprint }, conditions_signature: cond.signature };
+    const cond = stageFixture638(join(out, g), { runOf: (id) => stageRecord638(id, { kind: passOf(g, id) ? "t2-pass" : "t2-fail", dropped: 2, flags: flagsOf(g) }), group: g, pairsSha, frozenPath: fzp, factoryFp: sha256(`factory-638-${g}`), flags: flagsOf(g), efforts: effortsOf(g), ollamaLimits: limitsOf(g), models: modelsOf(g), paramsExtra: paramsOf(g) });
+    // #837：計測の道具（#830）と同じく、どちらかの群が段ごとのモデルを持つときだけ比較の記録の群に両群の値を並べる
+    const anyModels = ["before", "after"].some((x) => modelsOf(x) !== null);
+    groups[g] = { role: g === "before" ? "baseline" : "candidate", pipeline: "v1.2", factory: { fingerprint: cond.factory.fingerprint }, conditions_signature: cond.signature, ...(anyModels ? { stage_models: modelsOf(g) } : {}) };
   }
   writeFileSync(join(out, "comparison.json"), JSON.stringify({ schema: "musunest-eval/stage-compare-record/v1", stage: { ...stage, input_absent: 0 }, pairs: { sha256: pairsSha }, groups, scoring_cost_usd: 0 }));
   return out;
@@ -5706,4 +5710,140 @@ test("#776 レビュー R3 段だけの対の比較：比較元の表だけキ�
     assert.equal(rb.status, 3, rb.stderr);
     assert.ok(rb.stderr.includes("[compare:ollama-limits-differ]"), rb.stderr);
   });
+});
+
+// ── #837：段ごとのモデル（条件の params.stage_models。#830 の --stage-model）を、段ごとの effort（#664）と同じく比較の群の意図した差として外す。
+// 計測の道具（run-agent.mjs）の比較の記録の形（群に両群の stage_models。持たない群は null）を偽物の出力で置き、採点まで通す。LLM・工場は流さない。
+// 直す前（score-agent.mjs が stage_models を外さなかったとき）は、(1)・(2) の指定ありの比較が compare:scoring-mismatch（群の params）で断られた（変異の証跡は #837 の PR）
+const MODELS837 = { write: "gpt-6-luna", "test-spec": "gpt-6.1-terra" };
+const pairLines837 = (stdout) => stdout.split("\n").filter((l) => l.startsWith("pair\t"));
+
+test("#837 (1)(3)(3') 比較の採点 v1.1a,v1.2：候補の群（v1.2）だけが stage_models を持つ比較を断らずに採点し、群の欄 stage_models に両群の値（持たない群は null）を並べる。指定なしの比較は欄を作らず、指定ありはモデルの欄を除けば同じ採点", async () => {
+  await withOut(async (base) => {
+    const groups = ["v1.1a", "v1.2"];
+    const plain = compareFixture557(base, "c837-plain", { groups, pids: PIDS557, runOf: runOf557 });
+    const tuned = compareFixture557(base, "c837-tuned", { groups, pids: PIDS557, runOf: runOf557, paramsExtra: { "v1.2": { stage_models: MODELS837 } }, recordExtra: { "v1.1a": { stage_models: null }, "v1.2": { stage_models: MODELS837 } } });
+    const both = compareFixture557(base, "c837-both", { groups, pids: PIDS557, runOf: runOf557, paramsExtra: { "v1.2": { stage_efforts: EFFORTS664, stage_models: MODELS837 } }, recordExtra: { "v1.1a": { stage_models: null }, "v1.2": { stage_models: MODELS837 } } });
+    const rp = scoreCompareRun(plain.out), rt = scoreCompareRun(tuned.out), rb = scoreCompareRun(both.out);
+    for (const r of [rp, rt, rb]) assert.equal(r.status, 0, r.stderr);
+    const p = readCompare(plain.out), t = readCompare(tuned.out), b = readCompare(both.out);
+    // (3') 指定なし：新しい欄を作らない（採点の欄・標準出力にモデルの欄が無い）
+    for (const g of groups) assert.ok(!("stage_models" in p.groups[g]) && !("stage_efforts" in p.groups[g]), `${g}: 指定なしの比較に欄を足さない`);
+    assert.ok(!rp.stdout.includes("stage_models"), "指定なしの標準出力にモデルの欄が無い");
+    // (3) 両群の値を並べる（持たない群は null）。群の欄の末尾に足す
+    assert.deepEqual([t.groups["v1.1a"].stage_models, t.groups["v1.2"].stage_models], [null, MODELS837]);
+    for (const g of groups) assert.equal(Object.keys(t.groups[g]).at(-1), "stage_models", g);
+    assert.ok(rt.stdout.includes('"stage_models"'), "指定ありの標準出力の群に欄がある");
+    // effort とモデルの両方：effort の欄の後にモデルの欄
+    assert.deepEqual([b.groups["v1.1a"].stage_efforts, b.groups["v1.2"].stage_efforts, b.groups["v1.1a"].stage_models, b.groups["v1.2"].stage_models], [null, EFFORTS664, null, MODELS837]);
+    for (const g of groups) assert.deepEqual(Object.keys(b.groups[g]).slice(-2), ["stage_efforts", "stage_models"], g);
+    // 足した欄を除けば同じ採点（欄・値・順）。対の行の標準出力も同じ
+    for (const g of groups) {
+      const { stage_models: _m, ...rest } = t.groups[g];
+      assert.deepEqual(rest, p.groups[g], g);
+      assert.deepEqual(Object.keys(rest), Object.keys(p.groups[g]), `${g}: 欄の順`);
+      const { stage_models: _m2, stage_efforts: _e2, ...restB } = b.groups[g];
+      assert.deepEqual(restB, p.groups[g], g);
+    }
+    for (const x of [t, b]) assert.deepEqual(x.pairs, p.pairs);
+    for (const r of [rt, rb]) assert.deepEqual(pairLines837(r.stdout), pairLines837(rp.stdout));
+    assert.ok(pairLines837(rp.stdout).length > 0);
+  });
+});
+
+test("#837 (2)(3)(3') 段だけの対の比較（v1.2）：after だけ・両群で違う値の stage_models を持つ比較を断らずに採点し、群の欄に両群の値を並べる。指定なしは欄を作らず、指定ありはモデルの欄を除けば同じ採点", async () => {
+  await withOut(async (base) => {
+    const passOf = (g, id) => !id.startsWith("P10-");
+    const OTHER = { "test-spec": "gpt-6-luna" };
+    const plain = stageCompareFixture638(base, "s837-plain", { passOf });
+    const after = stageCompareFixture638(base, "s837-after", { passOf, modelsOf: (g) => (g === "after" ? MODELS837 : null) });
+    const both = stageCompareFixture638(base, "s837-both", { passOf, modelsOf: (g) => (g === "after" ? MODELS837 : OTHER) });
+    const mixed = stageCompareFixture638(base, "s837-mixed", { passOf, effortsOf: (g) => (g === "after" ? EFFORTS664 : null), modelsOf: (g) => (g === "after" ? MODELS837 : null) });
+    const exec = (out) => spawnSync(process.execPath, [scoreFile, repo, out, "--compare"], { encoding: "utf8" });
+    const rp = exec(plain), ra = exec(after), rb = exec(both), rm = exec(mixed);
+    for (const r of [rp, ra, rb, rm]) assert.equal(r.status, 0, r.stderr);
+    const p = readCompare(plain), a = readCompare(after), b = readCompare(both), m = readCompare(mixed);
+    for (const g of ["before", "after"]) assert.ok(!("stage_models" in p.groups[g]) && !("stage_efforts" in p.groups[g]), `${g}: 指定なしの比較に欄を足さない`);
+    assert.ok(!rp.stdout.includes("stage_models"), "指定なしの標準出力にモデルの欄が無い");
+    assert.deepEqual([a.groups.before.stage_models, a.groups.after.stage_models], [null, MODELS837]);
+    assert.deepEqual([b.groups.before.stage_models, b.groups.after.stage_models], [OTHER, MODELS837]);
+    assert.deepEqual([m.groups.before.stage_efforts, m.groups.after.stage_efforts, m.groups.before.stage_models, m.groups.after.stage_models], [null, EFFORTS664, null, MODELS837]);
+    for (const g of ["before", "after"]) {
+      assert.equal(Object.keys(a.groups[g]).at(-1), "stage_models", g);
+      assert.deepEqual(Object.keys(m.groups[g]).slice(-2), ["stage_efforts", "stage_models"], g);
+      for (const x of [a, b]) { const { stage_models: _m, ...rest } = x.groups[g]; assert.deepEqual(rest, p.groups[g], g); assert.deepEqual(Object.keys(rest), Object.keys(p.groups[g]), `${g}: 欄の順`); }
+      const { stage_models: _m, stage_efforts: _e, ...restM } = m.groups[g];
+      assert.deepEqual(restM, p.groups[g], g);
+    }
+    for (const x of [a, b, m]) assert.deepEqual(x.pairs, p.pairs);
+    for (const r of [ra, rb, rm]) assert.deepEqual(pairLines837(r.stdout), pairLines837(rp.stdout));
+    assert.ok(pairLines837(rp.stdout).length > 0);
+  });
+});
+
+test("#837 (4) 負例：stage_models のほかに params の差（effort の既定・予算の外の欄・上流の条件の指紋・本ごとの入力の SHA・旗の組）があれば今のまま群の params で断り、Ollama の表の違いは専用の符号で断る。署名が中身と合わない群も断る", async () => {
+  await withOut(async (base) => {
+    const groups = ["v1.1a", "v1.2"];
+    // 通常の比較：モデルに加えて effort の既定が違う／計画の有無が違う
+    for (const [name, extra] of [["c837-effort", { effort: "medium" }], ["c837-plan", { plan: true }]]) {
+      const f = compareFixture557(base, name, { groups, pids: PIDS557, runOf: runOf557, paramsExtra: { "v1.2": { stage_models: MODELS837, ...extra } }, recordExtra: { "v1.1a": { stage_models: null }, "v1.2": { stage_models: MODELS837 } } });
+      const r = scoreCompareRun(f.out);
+      assert.equal(r.status, 3, `${name}: ${r.stderr}`);
+      assert.ok(r.stderr.includes("compare:scoring-mismatch") && r.stderr.includes("群の params"), `${name}: ${r.stderr}`);
+    }
+    const lim = compareFixture557(base, "c837-limits", { groups, pids: PIDS557, runOf: runOf557, paramsExtra: { "v1.2": { stage_models: MODELS837, ollama_stage_output_limits: OLLAMA_TABLE_776 } } });
+    const rl = scoreCompareRun(lim.out);
+    assert.equal(rl.status, 3, rl.stderr);
+    assert.ok(rl.stderr.includes("[compare:ollama-limits-differ]"), rl.stderr);
+    // 段だけの比較：モデルに加えて上流の条件の指紋・本ごとの入力の SHA・effort の既定・旗の組が違う
+    const passOf = () => true, modelsOf = (g) => (g === "after" ? MODELS837 : null);
+    const cases = [
+      ["s837-from", { modelsOf, paramsOf: (g) => (g === "after" ? { stage_from: { conditions_sha256: sha256("upstream-837") } } : {}) }],
+      ["s837-inputs", { modelsOf, paramsOf: (g) => (g === "after" ? { stage_inputs: [{ id: "P1-r1", sha256: sha256("input-837") }] } : {}) }],
+      ["s837-effort", { modelsOf, paramsOf: (g) => (g === "after" ? { effort: "medium" } : {}) }],
+      ["s837-flags", { modelsOf, flagsOf: (g) => (g === "before" ? { ledger: true, ids: false } : FLAGS638) }],
+    ];
+    for (const [name, o] of cases) {
+      const out = stageCompareFixture638(base, name, { passOf, ...o });
+      const r = spawnSync(process.execPath, [scoreFile, repo, out, "--compare"], { encoding: "utf8" });
+      assert.equal(r.status, 3, `${name}: ${r.stderr}`);
+      assert.ok(r.stderr.includes("群の params"), `${name}: ${r.stderr}`);
+    }
+    // 署名：候補の群の条件のモデルを、署名を取り直さずに書き換えた出力先は断る（モデルを外しても署名の照合は今のまま）
+    const forged = stageCompareFixture638(base, "s837-forged", { passOf, modelsOf });
+    const cp = join(forged, "after", "conditions.json"), c = JSON.parse(readFileSync(cp, "utf8"));
+    writeFileSync(cp, JSON.stringify({ ...c, params: { ...c.params, stage_models: { "test-spec": "gpt-6-luna" } } }));
+    const rf = spawnSync(process.execPath, [scoreFile, repo, forged, "--compare"], { encoding: "utf8" });
+    assert.equal(rf.status, 3, rf.stderr);
+    assert.ok(rf.stderr.includes("署名が中身と合わない"), rf.stderr);
+    const forgedN = compareFixture557(base, "c837-forged", { groups, pids: PIDS557, runOf: runOf557, paramsExtra: { "v1.2": { stage_models: MODELS837 } } });
+    const np = join(forgedN.out, "v1.2", "conditions.json"), n = JSON.parse(readFileSync(np, "utf8"));
+    writeFileSync(np, JSON.stringify({ ...n, params: { ...n.params, stage_models: { "test-spec": "gpt-6-luna" } } }));
+    const rn = scoreCompareRun(forgedN.out);
+    assert.equal(rn.status, 3, rn.stderr);
+    assert.ok(rn.stderr.includes("署名が中身と合わない"), rn.stderr);
+  });
+});
+
+test("#837 純粋な関数：comparableParams は stage_models と stage_efforts を外し、ほかの欄は今のまま残す", () => {
+  const params = { effort: "high", pipeline: V12_PIPELINE, budget_usd: 1 };
+  assert.deepEqual(comparableParams({ ...params, stage_models: MODELS837 }), comparableParams(params));
+  assert.deepEqual(comparableParams({ ...params, stage_models: MODELS837, stage_efforts: EFFORTS664 }), comparableParams(params));
+  assert.deepEqual(Object.keys(comparableParams({ ...params, stage_models: MODELS837, ollama_stage_output_limits: OLLAMA_TABLE_776 })), ["effort", "budget_usd", "ollama_stage_output_limits"]);
+});
+
+test("#837 README：§10.8 の本文の #830 の項目に、比較の採点が stage_models を群の意図した差として外すこと（通常・段だけ）と指定なしでは欄を作らないことがあり、「採点はまだ外さず比較を断る」という古い制限の文が無い。見出しは足さない（§10.8.4 が末尾のまま）", () => {
+  const text = readFileSync(join(ev, "README.md"), "utf8");
+  const at = text.indexOf("\n### 10.8 "), end = text.indexOf("\n#### 10.8.1 ");
+  assert.ok(at > 0 && end > at, "§10.8 の本文は §10.8.1 の前");
+  const sec = text.slice(at, end), from = sec.indexOf("- **#830 ");
+  assert.ok(from > 0, "#830 の項目は §10.8 の本文の中");
+  const part = sec.slice(from), item = part.slice(part.indexOf("#837"));
+  assert.ok(part.includes("#837"), "#837 の説明がある");
+  for (const w of ["stage_models", "comparableParams", "段だけの対の比較", "欄を作らない", "compare:scoring-mismatch", "署名"]) assert.ok(item.includes(w), w);
+  for (const old of ["まだ `stage_models` を外していない", "採点の道具を直すまで"]) assert.ok(!text.includes(old), `古い制限の文：${old}`);
+  const words = [[0x6301, 0x3061, 0x5bc4, 0x308a], [0x5f53, 0x756a, 0x8868], [0x4f1a, 0x8cbb], [0x51fa, 0x6b20], [0x8cb8, 0x3057, 0x51fa, 0x3057]].map((cs) => String.fromCodePoint(...cs));
+  for (const w of words) assert.ok(!part.includes(w), w);
+  assert.doesNotMatch(part, /[¥￥]\s?\d|\d\s?円|\$\d/);
+  assert.equal(text.slice(text.indexOf("\n#### 10.8.4 ")).indexOf("\n#", 1), -1, "§10.8.4 が末尾のまま");
 });
