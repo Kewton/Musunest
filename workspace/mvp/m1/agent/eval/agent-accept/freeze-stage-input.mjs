@@ -107,10 +107,20 @@ async function loadStageDist(distDir) {
     const checks = await loadPlanFileChecks(distDir);
     if (!Array.isArray(lib.STAGE_BOUNDARIES) || !Array.isArray(lib.STAGE_STARTS) || typeof lib.boundaryBefore !== "function" || typeof lib.stageCheckpointFile !== "function" || typeof lib.verifyStageInput !== "function" || typeof lib.STAGE_RUN_RECORD_FILE !== "string") return null;
     if (typeof cliPlan.BUILD_CLI_RECORD_FILE !== "string" || typeof cli.VOCABULARY_VERSION !== "string" || typeof cli.CONTRACT_VERSION !== "string") return null;
-    if (!isFlagMap(entry.V12_PIPELINE_FLAGS) || typeof entry.propertyLedgerSha256 !== "function") return null;
+    if (!isFlagMap(entry.V12_PIPELINE_FLAGS)) return null;
+    const flags = JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS));
+    const recordFiles = [lib.STAGE_RUN_RECORD_FILE, cliPlan.BUILD_CLI_RECORD_FILE];
+    // #817：公開の関数 ledgerVersionsOf（#816）があれば、その dist の V12_PIPELINE_FLAGS を渡して全体と上流の指紋を読む（どちらも 64 桁の 16 進でなければ
+    // 読み取りの失敗）。無い dist に限り、今までの旗なしの呼び出しに戻る（上流の指紋は境界が最初のときだけ freezeStageInputSet が読む）
+    if (typeof entry.ledgerVersionsOf === "function") {
+      const versions = await entry.ledgerVersionsOf(JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS)));
+      if (typeof versions?.ledger !== "string" || !HEX64.test(versions.ledger) || typeof versions.ledgerUpstream !== "string" || !HEX64.test(versions.ledgerUpstream)) return null;
+      return { lib, cli, entry, checks, recordFiles, v12: { ledger: versions.ledger, flags }, ledgerUpstream: versions.ledgerUpstream };
+    }
+    if (typeof entry.propertyLedgerSha256 !== "function") return null;
     const ledger = await entry.propertyLedgerSha256();
     if (typeof ledger !== "string") return null;
-    return { lib, cli, entry, checks, recordFiles: [lib.STAGE_RUN_RECORD_FILE, cliPlan.BUILD_CLI_RECORD_FILE], v12: { ledger, flags: JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS)) } };
+    return { lib, cli, entry, checks, recordFiles, v12: { ledger, flags } };
   } catch { return null; }
 }
 
@@ -131,7 +141,9 @@ export async function freezeStageInputSet({ repo, outRoot, scorePath, id, versio
   // #713：境界が dist の境界の表の最初（上流の段だけが前にある境界）なら、照合の関数に上流の台帳の部分の指紋（upstreamLedgerSha256）の今の値も渡す。
   // 関数が無い・例外・返りの値が 64 桁の 16 進でなければ dist の読み取りの失敗。ほかの境界では部分の関数を取らず・呼ばない（今までの dist も受ける）
   let v12 = dist.v12;
-  if (boundary === lib.STAGE_BOUNDARIES[0]) {
+  if (boundary === lib.STAGE_BOUNDARIES[0] && dist.ledgerUpstream !== undefined) {
+    v12 = { ledger: dist.v12.ledger, ledgerUpstream: dist.ledgerUpstream, flags: dist.v12.flags };
+  } else if (boundary === lib.STAGE_BOUNDARIES[0]) {
     if (typeof dist.entry.upstreamLedgerSha256 !== "function") return { code: "freeze:dist-unreadable" };
     let ledgerUpstream = null;
     try { ledgerUpstream = await dist.entry.upstreamLedgerSha256(); } catch { ledgerUpstream = null; }

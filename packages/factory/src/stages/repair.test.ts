@@ -1707,7 +1707,7 @@ describe("直す段の数の口と上限の塊（旗 v12.ids・Issue #665）", (
 
 describe("直す段のデータの末尾に要る検査の骨組みを足す（旗 v12.ids・Issue #666）", () => {
   /** 骨組み（v1.1α の requiredValidationsOf が導く形。値はそのまま JSON で渡る） */
-  const SKELETON = [{ entity: "item", name: "amount", rowId: "f.item.amount", rowKind: "field", testIds: ["t1", "t2"], conflict: false }] as const;
+  const SKELETON = [{ requirementId: "R1", entity: "item", targets: ["amount"], testIds: ["t1", "t2"], conflict: false }] as const;
   const stepRequests = async (extra: Partial<RepairStepInput>) => {
     const initial = await version(V1);
     const recording = createRecordingClient([toolCalls([staticCheckCall("c1", V1)]), done(V2)]);
@@ -1780,7 +1780,7 @@ describe("直す段のデータの末尾に診断を足す（旗 v12.ids と探�
     correspondence: [{ requirementId: "R-1", misses: [{ requirementId: "R-1", location: null, detail: "対応そのものが無い" }] }],
     rejections: [{ requirementId: "R-2", rejections: [{ requirementId: "R-2", kind: "weak-verification", quote: "補助の値を出す" }] }],
   };
-  const SKELETON = [{ entity: "record", name: "amount", rowId: "f.record.amount", rowKind: "field", testIds: ["t1"], conflict: false }] as const;
+  const SKELETON = [{ requirementId: "R1", entity: "record", targets: ["amount"], testIds: ["t1"], conflict: false }] as const;
   const stepRequests = async (extra: Partial<RepairStepInput>) => {
     const initial = await version(V1);
     const recording = createRecordingClient([toolCalls([staticCheckCall("c1", V1)]), done(V2)]);

@@ -50,7 +50,13 @@ import { createFakeJudge } from "./judge-fake.js";
 import type { JudgeAnswer } from "./judge.js";
 import { FakeLlmSchemaMismatchError, uncheckedBecause, type RecordedCall } from "./llm-fake.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL, OpenAiIncompleteError } from "./openai.js";
-import { FIELD_REPAIR_IDS_DIAGNOSTIC_RULE_DEFINITIONS, FIELD_REPAIR_IDS_R08_DEFINITION, FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "./v12/stages/field-repair.js";
+import {
+  FIELD_REPAIR_IDS_DIAGNOSTIC_RULE_DEFINITIONS,
+  FIELD_REPAIR_IDS_R07_DEFINITION,
+  FIELD_REPAIR_IDS_R08_DEFINITION,
+  FIELD_REPAIR_SCHEMA_NAME,
+  MERGE_REFUSALS,
+} from "./v12/stages/field-repair.js";
 import { REPAIR_DIAGNOSTIC_DATA_NAME } from "./stages/repair.js";
 import {
   ENVELOPE_SCHEMA,
@@ -112,6 +118,9 @@ import {
   revert735,
   revertBundleFiles735,
   requestListedIds,
+  withoutValidationExpression,
+  withoutFrameFieldNormal,
+  withoutWhenlessFrameField,
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
 import * as callModule from "./call.js";
@@ -139,7 +148,7 @@ import {
 import { NAMED_FAILURE_MESSAGES } from "./v12/search-repair.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME, semanticCheckRuleDefinitionsOf } from "./v11a/stages/semantic-check.js";
 import { structuralReadingText } from "./v12/structural-meanings.js";
-import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
+import { WRITE_V11A_DATA_NAMES, WRITE_V11A_IDS_R07_DEFINITION, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
 import { MAPPING_SCHEMA_NAME } from "./v12/stages/mapping.js";
 import * as mappingModule from "./v12/stages/mapping.js";
@@ -167,6 +176,206 @@ import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolReq
 import { createRecordingClient, expectNoAcceptanceMaterial, ACCEPTANCE_MATERIAL_WORDS } from "./stages/__tests__/prompt.js";
 import { ATTEMPT_KEYS, FAILURE_KINDS, RETRY_KEYS, STAGE_IDS } from "./record.js";
 import { CONFIRMED_PLAN, DESIGN_OUTPUT_MAPPED, SOURCE_TEXT, recordedRun, structured, USAGE as RECORDED_USAGE } from "./__tests__/run.js";
+
+/** 旗 v12.ids が on の v1.2 の実効の旗（checkpoint の版の期待を組む。Issue #806） */
+const V12_IDS_FLAGS = ledgerModule.fromPublicV12Flags(factory.V12_PIPELINE_FLAGS);
+/** Issue #806：旗 ids の C2 への 3 文（台帳の順。要求から位置で外して旧の指紋と照らす） */
+const IDS_C2_RULE_TEXTS: readonly string[] = ledgerModule.PROPERTY_LEDGER.flatMap((row) =>
+  row.rules.t1Ids === undefined ? [] : [row.rules.t1Ids.text],
+);
+const IDS_C2_RULE_TEXT = IDS_C2_RULE_TEXTS.join("");
+/** 記録から 1 つの鍵を外した写し（Issue #815。連鎖で照らさない台本を除く） */
+function withoutOne<T>(record: Readonly<Record<string, T>>, key: string): Record<string, T> {
+  const { [key]: _removed, ...rest } = record;
+  return rest;
+}
+
+/** 要求・記録の文字列から、旗 ids の C2 への 3 文を位置で外す（Issue #806。旧の指紋と照らす） */
+function withoutIdsC2Texts<T>(value: T): T {
+  const walk = (inner: unknown): unknown => {
+    if (typeof inner === "string") return inner.split(IDS_C2_RULE_TEXT).join("");
+    if (Array.isArray(inner)) return inner.map(walk);
+    if (typeof inner !== "object" || inner === null) return inner;
+    return Object.fromEntries(Object.entries(inner as Record<string, unknown>).map(([key, entry]) => [key, walk(entry)]));
+  };
+  return walk(value) as T;
+}
+
+// ── Issue #815：#801 の段の復元（今の要求から、戻した旧の値（db91af3）を照らす）──────────────
+//
+// 復元の順は新しい差から古い差へ：#813 → #806 → #805 → #801 → #800。ここは #801 の段だけを扱い、
+// 骨組みの形・R-w11-07 の文・B3' の塊・R-dc-03 の文・R-fr-07 の文を #800 の組み立てに戻す。
+
+/** Issue #800 の前の R-w11-07 の旗 ids の文（#801 の復元に使う） */
+const OLD_WRITE_V11A_IDS_R07_TEXT =
+  "表に無い補助の要素（計算・検査など）は、要件に要るときだけ足してよい。ただし表の名前を奪わない（表にある名前を別の要素に使わない）。この禁止の唯一の例外は、データ「要る検査の骨組み」に競合なしで列挙された検査で、その entity と名前で validations に 1 つずつ書く（式は要件と固定した試験から書く）。競合の印の付いた件は書かない。骨組みに無い補助の要素には表の名前を使わない。";
+/** Issue #800 の前の R-fr-07 の旗 ids の文（#801 の復元に使う） */
+const OLD_FIELD_REPAIR_IDS_R07_TEXT =
+  "追加の場所には、その entity と名前の検査 1 つの本文を `-` で始まる行から書く。名前と entity は変えない。式は要件と固定した試験から書く。別の要素を書かない。";
+/** Issue #800 の前の R-dc-03 の ids の文の末尾（#795 の文のまま） */
+const OLD_DECL_CHECK_R03_IDS_SUFFIX =
+  "データの「要件に結び付いた検査」にある検査は、その要件の所属に準ずるものとして見て、追加の要素にあっても behavior-outside-ownership にしない。その塊は要件が求めることの一覧でも、正しさの証明でもない。検査の式が要件と合うかは宣言から読む。要件の文が求めない検査が無いことを拒否の理由にしない";
+/** Issue #800 の前の R-dc-03 の ids の文 */
+const OLD_DECL_CHECK_IDS_R03_TEXT = `${DECL_CHECK_RULE_DEFINITIONS.find((definition) => definition.id === "R-dc-03")?.text ?? ""}${OLD_DECL_CHECK_R03_IDS_SUFFIX}`;
+
+/** 新しい形の骨組み（{requirementId, entity, targets, testIds, conflict}）を #800 の形に組み直す */
+function oldValidationsOf(
+  skeleton: readonly Record<string, unknown>[],
+  table: readonly Record<string, unknown>[] | undefined,
+  tests: readonly Record<string, unknown>[],
+): readonly Record<string, unknown>[] | undefined {
+  const rowById = new Map<string, Record<string, unknown>>();
+  (table ?? []).forEach((row) => {
+    if (typeof row["id"] === "string") rowById.set(row["id"], row);
+  });
+  const entityName = (id: unknown): string | null => {
+    if (typeof id !== "string") return null;
+    const row = rowById.get(id);
+    return row !== undefined && row["kind"] === "entity" && typeof row["name"] === "string" ? row["name"] : null;
+  };
+  const rowIndex = new Map<string, number>();
+  (table ?? []).forEach((row, index) => {
+    if (typeof row["id"] === "string") rowIndex.set(row["id"], index);
+  });
+  const testById = new Map(tests.flatMap((test) => (typeof test["id"] === "string" ? [[test["id"], test] as const] : [])));
+  type Group = { readonly index: number; readonly rowId: string; readonly rowKind: string; readonly entity: unknown; readonly name: string; readonly testIds: string[] };
+  const groups: Group[] = [];
+  for (const entry of skeleton) {
+    const targets = Array.isArray(entry["targets"]) ? (entry["targets"] as readonly unknown[]).map(String) : [];
+    let groupIndex = 0;
+    for (const testId of Array.isArray(entry["testIds"]) ? entry["testIds"] : []) {
+      const test = testById.get(String(testId));
+      const target = test?.["target"] as { readonly roleId?: unknown; readonly kind?: unknown } | undefined;
+      const id = target?.roleId;
+      const kind = target?.kind;
+      if (typeof id !== "string" || typeof kind !== "string") continue;
+      const existing = groups.find((group) => group.rowId === id && group.rowKind === kind);
+      if (existing !== undefined) {
+        existing.testIds.push(String(testId));
+        continue;
+      }
+      const row = rowById.get(id);
+      if (table !== undefined && (row === undefined || row["kind"] !== kind)) continue;
+      const name = row !== undefined ? String(row["name"]) : (targets[groupIndex] ?? targets[0] ?? "");
+      const entity = row !== undefined ? (row["kind"] === "entity" ? name : entityName(row["entity"])) : (entry["entity"] ?? null);
+      groups.push({ index: row !== undefined ? (rowIndex.get(id) ?? 0) : groups.length, rowId: id, rowKind: kind, entity, name, testIds: [String(testId)] });
+      groupIndex += 1;
+    }
+  }
+  if (groups.length === 0) return undefined;
+  const ordered = [...groups].sort((a, b) => a.index - b.index);
+  return ordered.map((group) => ({
+    entity: group.entity,
+    name: group.name,
+    rowId: group.rowId,
+    rowKind: group.rowKind,
+    testIds: group.testIds,
+    conflict: ordered.some((other) => other !== group && other.name === group.name),
+  }));
+}
+
+/** 要求の input の骨組みの塊を #800 の組み立てに戻し、旗 ids の文を #800 の文に戻す */
+function restoreOld801InText(text: string): string {
+  const blockOf = (name: string, source: string): { readonly start: number; readonly end: number; readonly text: string } | undefined => {
+    const opener = `<data name="${name}">\n`;
+    const open = source.indexOf(opener);
+    if (open < 0) return undefined;
+    const start = open + opener.length;
+    const close = source.indexOf("\n</data>", start);
+    return close < 0 ? undefined : { start, end: close, text: source.slice(start, close) };
+  };
+  const withRules = text
+    .split(WRITE_V11A_IDS_R07_DEFINITION.text)
+    .join(OLD_WRITE_V11A_IDS_R07_TEXT)
+    .split(FIELD_REPAIR_IDS_R07_DEFINITION.text)
+    .join(OLD_FIELD_REPAIR_IDS_R07_TEXT)
+    .split(DECL_CHECK_IDS_R03_DEFINITION.text)
+    .join(OLD_DECL_CHECK_IDS_R03_TEXT);
+  const skeletonBlock = blockOf(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, withRules);
+  if (skeletonBlock === undefined) return withRules;
+  let skeleton: unknown;
+  let table: readonly Record<string, unknown>[] | undefined;
+  let suite: { readonly tests?: readonly Record<string, unknown>[] };
+  try {
+    skeleton = JSON.parse(skeletonBlock.text);
+    const tableBlock = blockOf("名前の表", withRules);
+    table = tableBlock === undefined ? undefined : (JSON.parse(tableBlock.text) as readonly Record<string, unknown>[]);
+    const suiteBlock = blockOf(WRITE_V11A_DATA_NAMES[2]!, withRules);
+    suite = (suiteBlock === undefined ? {} : JSON.parse(suiteBlock.text)) as { readonly tests?: readonly Record<string, unknown>[] };
+  } catch {
+    return withRules;
+  }
+  if (!Array.isArray(skeleton) || skeleton.length === 0) return withRules;
+  const old = oldValidationsOf(
+    skeleton as readonly Record<string, unknown>[],
+    table === undefined ? undefined : Array.isArray(table) ? table : undefined,
+    suite.tests ?? [],
+  );
+  if (old === undefined) return withRules;
+  return `${withRules.slice(0, skeletonBlock.start)}${JSON.stringify(old, null, 2)}${withRules.slice(skeletonBlock.end)}`;
+}
+
+/** B3' の塊「要件に結び付いた検査」から targets を外し、#800 の形（{entity, name, conflict}）に戻す */
+function restoreOldLinkedInText(text: string): string {
+  const opener = `<data name="${DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME}">\n`;
+  const open = text.indexOf(opener);
+  if (open < 0) return text;
+  const start = open + opener.length;
+  const close = text.indexOf("\n</data>", start);
+  if (close < 0) return text;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.slice(start, close));
+  } catch {
+    return text;
+  }
+  if (!Array.isArray(parsed)) return text;
+  const old = parsed.map((entry) => {
+    if (typeof entry !== "object" || entry === null) return entry;
+    const record = entry as Record<string, unknown>;
+    const validations = Array.isArray(record["validations"]) ? record["validations"] : [];
+    const withoutTargets = validations.map((validation) => {
+      if (typeof validation !== "object" || validation === null) return validation;
+      const { targets: _targets, ...rest } = validation as Record<string, unknown>;
+      return rest;
+    });
+    return { ...record, validations: withoutTargets };
+  });
+  return `${text.slice(0, start)}${JSON.stringify(old, null, 2)}${text.slice(close)}`;
+}
+
+/** #801 の段を外した 1 本の要求（input の骨組み・B3' の塊・rules の文を #800 に戻す） */
+function restoreOld801OnRequest<T extends { readonly input?: unknown; readonly rules?: unknown }>(request: T): T {
+  const out: Record<string, unknown> = { ...(request as Record<string, unknown>) };
+  if (typeof out["input"] === "string") out["input"] = restoreOldLinkedInText(restoreOld801InText(out["input"]));
+  if (Array.isArray(out["rules"])) out["rules"] = (out["rules"] as readonly unknown[]).map((text) => (typeof text === "string" ? restoreOld801InText(text) : text));
+  return out as T;
+}
+
+/**
+ * #801 の段を外した要求の列（`requests`）。構造化・道具の要求の組は各要求に、段の走りの要求の列は
+ * JSON 文字列を本文に戻してから掛け、同じ JSON 文字列に戻す
+ */
+function restoreOld801<T>(value: T): T {
+  const walk = (inner: unknown): unknown => {
+    if (Array.isArray(inner)) return inner.map(walk);
+    if (typeof inner === "string") {
+      try {
+        const parsed: unknown = JSON.parse(inner);
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && "input" in (parsed as Record<string, unknown>)) {
+          return JSON.stringify(walk(parsed));
+        }
+      } catch {
+        return inner;
+      }
+      return inner;
+    }
+    if (typeof inner !== "object" || inner === null) return inner;
+    if ("input" in (inner as Record<string, unknown>)) return restoreOld801OnRequest(inner as { readonly input?: unknown; readonly rules?: unknown });
+    return Object.fromEntries(Object.entries(inner as Record<string, unknown>).map(([key, entry]) => [key, walk(entry)]));
+  };
+  return walk(value) as T;
+}
 
 interface NodeFs {
   mkdtemp(prefix: string): Promise<string>;
@@ -1246,7 +1455,7 @@ const V11A_TABLE_IDS: NameTable = withCodeIds(withAggregates(V11A_TABLE));
 const v11aRenamed = <T,>(value: T): T => renameIds(value, V11A_CODE_RENAME);
 
 /** v1.2 の走りの C1 の 3 束と C2 の記録（台帳を渡せば、その台帳の schema に合わせる。Issue #593） */
-const v12TableCalls = (ledger: LedgerView = ledgerModule.PROPERTY_LEDGER_VIEW): RecordedCall[] =>
+const v12TableCalls = (ledger: LedgerView = ledgerModule.PROPERTY_LEDGER_VIEW_IDS): RecordedCall[] =>
   idsResponseList(idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledger)).map((output) => structured(output));
 
 /**
@@ -1524,10 +1733,14 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
    * 「要る検査の骨組み」の塊を外し、R-w11-07 を旗 ids off の文に戻す（塊が在ることを確かめてから）
    */
   const withoutIdsGenerated = (requests: readonly unknown[], ledger: LedgerView = PROPERTY_LEDGER_VIEW, generated = true): unknown[] => {
-    const idsRules = ruleTexts(testSpecRuleDefinitionsOf(ledger, true));
+    // Issue #800：既定の呼び出しは ids と ledger が on の走り（検査の式の行を含む導出）を戻す。2B などの固有の台帳はそのまま使う
+    const idsLedger = ledger === PROPERTY_LEDGER_VIEW ? ledgerModule.PROPERTY_LEDGER_VIEW_IDS : ledger;
+    const idsRules = ruleTexts(testSpecRuleDefinitionsOf(idsLedger, true));
     const offRules = ruleTexts(testSpecRuleDefinitionsOf(ledger));
-    const idsSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(ledger, true));
+    const idsSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(idsLedger, true));
     const offSemanticRules = ruleTexts(semanticCheckRuleDefinitionsOf(ledger));
+    // Issue #800：旗 ids on の B1 は台帳の検査の式の行の文（R-w11-13）を末尾に持つ。比べる相手には無いので外す
+    const newRowB1 = idsLedger === ledgerModule.PROPERTY_LEDGER_VIEW_IDS ? (ledgerModule.PROPERTY_LEDGER.find((row) => row.id === "validation-expression")?.rules.b1 ?? "") : "";
     const [, , testsName] = WRITE_V11A_DATA_NAMES;
     const testsBlock = new RegExp(`(<data name="${testsName}">\\n)([\\s\\S]*?)(\\n</data>)`);
     return requests.map((value) => {
@@ -1553,7 +1766,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
           expect(parsed.tests.some((test) => isGeneratedTestId(test.id))).toBe(generated);
           return `${head}${JSON.stringify({ ...parsed, tests: parsed.tests.filter((test) => !isGeneratedTestId(test.id)) }, null, 2)}${tail}`;
         });
-        return { ...restored, input };
+        // Issue #800：旗 ids on の B1 は台帳の検査の式の行の文を末尾に足す。比べる相手には無いので外す
+        return { ...restored, rules: (restored.rules ?? []).filter((text) => text !== newRowB1), input };
       }
       // Issue #795：旗 ids on の B3' は塊「要件に結び付いた検査」と R-dc-03 の ids の文を持つ。どちらも元に戻して比べる
       if (request.schemaName === DECL_CHECK_SCHEMA_NAME) return withoutLinkedValidationsOn(request);
@@ -1723,10 +1937,32 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     spy2C.mockRestore();
     const before2CRequests = withoutStructuralRequirement(withoutCheckTargets(laterRequests(v12Before2C.recording.structured)), LEDGER_VIEW_2C);
     const diffs2C = requestDiffsOf(onRequests, before2CRequests);
-    const when2C = withoutTableStage(WHEN_NON_REQUIREMENT_REQUEST_DIFF);
+    // Issue #800：ids on の B1 は台帳の検査の式の行の文（R-w11-13）を末尾に持つ。ids off（run.test の #550）の期待は変えず、
+    // ids on の比較にだけ差を足す
+    const when2C = withoutTableStage({ ...WHEN_NON_REQUIREMENT_REQUEST_DIFF, [WRITE_V11A_SCHEMA_NAME]: ["$.rules"] });
     for (const diff of diffs2C) expect(diff.paths, diff.schemaName).toEqual(when2C[diff.schemaName] ?? []);
     expect(diffs2C.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(when2C));
-    expect(JSON.stringify(withoutWhenAndNonRequirement(onRequests))).toBe(JSON.stringify(before2CRequests));
+    // Issue #800：ids on の要求から検査の式の行の文だけを外す（ほかの #595・#666・#795 の塊は 2C の走りにもあるので残す）
+    const fullT2Rules = ruleTexts(testSpecRuleDefinitionsOf(ledgerModule.PROPERTY_LEDGER_VIEW_IDS, true));
+    const noNewT2Rules = ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true));
+    const fullC3Rules = ruleTexts(semanticCheckRuleDefinitionsOf(ledgerModule.PROPERTY_LEDGER_VIEW_IDS, true));
+    const noNewC3Rules = ruleTexts(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true));
+    const newRowB1Rule = ledgerModule.PROPERTY_LEDGER.find((row) => row.id === "validation-expression")?.rules.b1 ?? "";
+    const stripValidationExpression = (requests: readonly unknown[]): unknown[] =>
+      requests.map((value) => {
+        const request = value as LlmStructuredRequest;
+        if (request.schemaName === TEST_SPEC_SCHEMA_NAME) {
+          return { ...request, rules: (request.rules ?? []).map((text) => { const at = fullT2Rules.indexOf(text); return at < 0 ? text : (noNewT2Rules[at] ?? text); }) };
+        }
+        if (request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME) {
+          return { ...request, rules: (request.rules ?? []).map((text) => { const at = fullC3Rules.indexOf(text); return at < 0 ? text : (noNewC3Rules[at] ?? text); }) };
+        }
+        if (request.schemaName === WRITE_V11A_SCHEMA_NAME) {
+          return { ...request, rules: (request.rules ?? []).filter((text) => text !== newRowB1Rule) };
+        }
+        return request;
+      });
+    expect(JSON.stringify(withoutWhenAndNonRequirement(stripValidationExpression(onRequests)))).toBe(JSON.stringify(before2CRequests));
     expect(v12Before2C.code).toBe(v12.code);
     expect(v12Before2C.summary).toEqual(v12.summary);
     expect(v12Before2C.record.conditions).toEqual(v12.record.conditions);
@@ -1866,8 +2102,8 @@ describe("v1.2 の一気通貫の走りの checkpoint（`--pipeline v1.2 --plan-
         contract: CONTRACT_VERSION,
         prompt: "v1.2",
         factory: "0.0.0",
-        ledger: await ledgerModule.propertyLedgerSha256(),
-        ledger_upstream: entry.boundary === "t1-t2" ? await ledgerModule.upstreamLedgerSha256() : null,
+        ledger: await ledgerModule.propertyLedgerSha256(ledgerModule.PROPERTY_LEDGER, V12_IDS_FLAGS),
+        ledger_upstream: entry.boundary === "t1-t2" ? await ledgerModule.upstreamLedgerSha256(ledgerModule.PROPERTY_LEDGER, V12_IDS_FLAGS) : null,
         flags: factory.V12_PIPELINE_FLAGS,
         call_limits: { logical_calls: V12_CALL_LIMITS.logicalCalls, real_attempts: V12_CALL_LIMITS.realAttempts, judge_branch: V12_CALL_LIMITS.judgeBranch },
       });
@@ -1878,6 +2114,35 @@ describe("v1.2 の一気通貫の走りの checkpoint（`--pipeline v1.2 --plan-
     expect(await fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).not.toContain("stage-checkpoint");
     // Build だけの記録の既存の欄は今のまま（checkpoints を末尾に足すだけ）
     expect(Object.keys(run.record)).toEqual(["schema_version", "conditions", "plan_sha256", "source_sha256", "return_to_plan", "checkpoints"]);
+  });
+
+  it("(R1) 一気通貫・段の走りの checkpoint の ledger・ledger_upstream が公開の関数に V12_PIPELINE_FLAGS を渡した値と等しく、off の走りは off の指紋のまま（直す前の挙動として、旗なしの呼び出しの値は ids の値と違う）", async () => {
+    const ids = await ledgerModule.ledgerVersionsOf(factory.V12_PIPELINE_FLAGS);
+    const off = { ledger: await ledgerModule.propertyLedgerSha256(), ledgerUpstream: await ledgerModule.upstreamLedgerSha256() };
+    // 直す前の挙動を残す：旗なし（off）の呼び出しの値は ids の checkpoint の値と違う
+    expect(off.ledger).not.toBe(ids.ledger);
+    expect(off.ledgerUpstream).not.toBe(ids.ledgerUpstream);
+    // 一気通貫の checkpoint（t1-t2・t2-b1）
+    const whole = await runV11aCli({ dir: `${directory}/v12-r1-whole`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    expect(whole.code).toBe(EXIT_OK);
+    for (const boundary of ["t1-t2", "t2-b1"] as const) {
+      const checkpoint = JSON.parse(await fs.readFile(`${directory}/v12-r1-whole/${stageCheckpointFile(boundary)}`, "utf8")) as Record<string, any>;
+      expect(checkpoint["versions"]["ledger"], boundary).toBe(ids.ledger);
+      expect(checkpoint["versions"]["ledger_upstream"], boundary).toBe(boundary === "t1-t2" ? ids.ledgerUpstream : null);
+    }
+    // 段の走りの checkpoint（t1-t2）
+    const stage = await runStageCli({ dir: `${directory}/v12-r1-stage`, args: ["--stage-end", "semantic-check"], calls: v12Head().slice(0, 5), pipeline: "v1.2" });
+    expect(stage.code).toBe(EXIT_OK);
+    const stageCheckpoint = JSON.parse(await fs.readFile(`${directory}/v12-r1-stage/${stageCheckpointFile("t1-t2")}`, "utf8")) as Record<string, any>;
+    expect(stageCheckpoint["versions"]["ledger"]).toBe(ids.ledger);
+    expect(stageCheckpoint["versions"]["ledger_upstream"]).toBe(ids.ledgerUpstream);
+    // off の走り（旗 ids が off）は off の指紋のまま
+    vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => ({ ledger: true, searchRepair: true, ids: false }));
+    const offStage = await runStageCli({ dir: `${directory}/v12-r1-off`, args: ["--stage-end", "semantic-check"], calls: [structured(v11aT1(true)), structured(v11aJudgments())], pipeline: "v1.2" });
+    expect(offStage.code).toBe(EXIT_OK);
+    const offCheckpoint = JSON.parse(await fs.readFile(`${directory}/v12-r1-off/${stageCheckpointFile("t1-t2")}`, "utf8")) as Record<string, any>;
+    expect(offCheckpoint["versions"]["ledger"]).toBe(off.ledger);
+    expect(offCheckpoint["versions"]["ledger_upstream"]).toBe(off.ledgerUpstream);
   });
 
   it("段の入力の照合は Build だけの記録と checkpoint の組で ok を返し、壊した組は今までの符号で断る", async () => {
@@ -1918,6 +2183,23 @@ describe("v1.2 の一気通貫の走りの checkpoint（`--pipeline v1.2 --plan-
     expect(resumed.errors.filter((line) => line.startsWith("stage-input:"))).toEqual([]);
     expect(resumed.makeClient).toHaveBeenCalledTimes(1);
     expect(resumed.code).not.toBe(EXIT_STAGE_INPUT);
+  });
+
+  it("Issue #806：C2 を呼ばない境界（t1-t2）からの再開でも、書く checkpoint の版は新しい全体の指紋を持つ（上流は t2-b1 で null）", async () => {
+    const source = `${directory}/v12-resume-v2-source`;
+    await runV11aCli({ dir: source, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    const dir = `${directory}/v12-resume-v2-resume`;
+    const resumed = await runStageCli({
+      dir,
+      args: ["--stage-start", "test-spec", "--stage-end", "test-spec", "--stage-input", `${source}/${stageCheckpointFile("t1-t2")}`],
+      calls: [structured(v11aRenamed(v12TestSpec()))],
+      pipeline: "v1.2",
+    });
+    expect(resumed.code).toBe(EXIT_OK);
+    expect(resumed.written).toContain(stageCheckpointFile("t2-b1"));
+    const checkpoint = JSON.parse(await fs.readFile(`${dir}/${stageCheckpointFile("t2-b1")}`, "utf8")) as Record<string, any>;
+    expect(checkpoint["versions"]["ledger"]).toBe(await ledgerModule.propertyLedgerSha256(ledgerModule.PROPERTY_LEDGER, V12_IDS_FLAGS));
+    expect(checkpoint["versions"]["ledger_upstream"]).toBeNull();
   });
 
   it("表を組む段（C1）で止まった走りは checkpoint 0 件で、記録の checkpoints が空", async () => {
@@ -2014,6 +2296,41 @@ describe("v1.2 の一気通貫の走りの checkpoint（`--pipeline v1.2 --plan-
     expect(run.record).not.toHaveProperty("checkpoints");
     expect(run.written.filter((path) => path.startsWith("stage-checkpoint-"))).toEqual([]);
   });
+
+  it("(3) 一気通貫と段の走りの ids の B1 の要求に、検査の式の行の新しい文があり、旧の文（名前と同じ名前の検査）が無い（Issue #816 の R3）", async () => {
+    const OLD_B1 =
+      "固定した試験のうち observes が validation-expression の試験は、対象の項目（field）の行ごとに、その項目の名前と同じ名前の検査を要求する（同じ entity の別の項目は別の検査の名前になる）。";
+    const NEW_B1 = ledgerModule.PROPERTY_LEDGER.find((row) => row.id === "validation-expression")?.rules.b1 ?? "";
+    const writeRulesOf = (requests: readonly unknown[]): readonly string[] => {
+      const request = requests.find((value) => (value as { schemaName?: string }).schemaName === WRITE_V11A_SCHEMA_NAME) as
+        | { readonly rules?: readonly string[] }
+        | undefined;
+      if (request === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+      return request.rules ?? [];
+    };
+    // 一気通貫
+    const whole = await runV11aCli({ dir: `${directory}/v12-b1-r3-whole`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    expect(whole.code).toBe(EXIT_OK);
+    const wholeRules = writeRulesOf(whole.recording.structured);
+    // 段の走り（一気通貫の t2-b1 から B1 を流す）
+    const stage = await runStageCli({
+      dir: `${directory}/v12-b1-r3-stage`,
+      args: ["--stage-start", "write", "--stage-input", `${directory}/v12-b1-r3-whole/${stageCheckpointFile("t2-b1")}`],
+      calls: [structured({ declaration: V11A_YAML }), structured(v11aJudgments())],
+      pipeline: "v1.2",
+    });
+    expect(stage.code).toBe(EXIT_OK);
+    const stageRules = writeRulesOf(stage.structuredRequests);
+    for (const [name, rules] of [
+      ["一気通貫", wholeRules],
+      ["段の走り", stageRules],
+    ] as const) {
+      expect(rules, name).toContain(NEW_B1);
+      expect(rules.some((text) => text.includes("名前と同じ名前の検査")), name).toBe(false);
+      expect(rules, name).not.toContain(OLD_B1);
+      expect(rules, name).toContain(WRITE_V11A_IDS_R07_DEFINITION.text);
+    }
+  });
 });
 
 describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Issue #637）", () => {
@@ -2033,7 +2350,7 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
   const segment0 = (): RecordedCall[] => v12Head().slice(0, 5);
   /** C2 が 2 回とも形で断られる応答（C1 の 3 束は通る） */
   const c2Broken = (): RecordedCall[] => {
-    const outputs = idsResponseList(idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW));
+    const outputs = idsResponseList(idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW_IDS));
     const mapping = outputs[3] as { readonly requirements: readonly unknown[] };
     return [...outputs.slice(0, 3).map((output) => structured(output)), structured({ requirements: mapping.requirements.slice(1) }), structured({ requirements: mapping.requirements.slice(0, -1) })];
   };
@@ -2064,8 +2381,8 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
       contract: CONTRACT_VERSION,
       prompt: "v1.2",
       factory: "0.0.0",
-      ledger: await ledgerModule.propertyLedgerSha256(),
-      ledger_upstream: await ledgerModule.upstreamLedgerSha256(),
+      ledger: await ledgerModule.propertyLedgerSha256(ledgerModule.PROPERTY_LEDGER, V12_IDS_FLAGS),
+      ledger_upstream: await ledgerModule.upstreamLedgerSha256(ledgerModule.PROPERTY_LEDGER, V12_IDS_FLAGS),
       flags: factory.V12_PIPELINE_FLAGS,
       call_limits: CALL_LIMITS,
     });
@@ -2177,7 +2494,8 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     expect(await rejectedRun("run-flags", `${source}/${stageCheckpointFile("t1-t2")}`)).toEqual(version);
     vi.restoreAllMocks();
     // 上流の台帳の部分の指紋が今の走りと違えば断る（境界 t1-t2。Issue #713 で全体の指紋から部分の指紋に替えた）
-    vi.spyOn(ledgerModule, "upstreamLedgerSha256").mockImplementation(async () => "0".repeat(64));
+    const versions = ledgerModule.ledgerVersionsOf;
+    vi.spyOn(ledgerModule, "ledgerVersionsOf").mockImplementation(async (flags) => ({ ...(await versions(flags)), ledgerUpstream: "0".repeat(64) }));
     expect(await rejectedRun("run-ledger", `${source}/${stageCheckpointFile("t1-t2")}`)).toEqual(version);
     vi.restoreAllMocks();
     // 同じなら通る
@@ -2204,12 +2522,10 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
   /** 上流の見方に入る値（T1 の規則の文）を変えた台帳 */
   const upstreamLedger = (): readonly ledgerModule.PropertyRow[] =>
     ledgerModule.PROPERTY_LEDGER.map((row) => (row.rules.t1 === null ? row : { ...row, rules: { ...row.rules, t1: marked(row.rules.t1) } }));
-  /** 今の工場の台帳を差し替える（全体の指紋と部分の指紋を、差し替えた台帳から本物の関数で出す） */
+  /** 今の工場の台帳を差し替える（公開の関数 1 つを通す。差し替えた台帳から本物の関数で出す。Issue #816） */
   const asFactoryWith = (rows: readonly ledgerModule.PropertyRow[]) => {
-    const full = ledgerModule.propertyLedgerSha256;
-    const upstream = ledgerModule.upstreamLedgerSha256;
-    vi.spyOn(ledgerModule, "propertyLedgerSha256").mockImplementation(async () => full(rows));
-    vi.spyOn(ledgerModule, "upstreamLedgerSha256").mockImplementation(async () => upstream(rows));
+    const versions = ledgerModule.ledgerVersionsOf;
+    vi.spyOn(ledgerModule, "ledgerVersionsOf").mockImplementation(async (flags) => versions(flags, rows));
   };
   /** 断る段の走り（クライアントを作らない・何も書かない） */
   const refusedStage = async (name: string, start: "test-spec" | "write", input: string) => {
@@ -2244,7 +2560,7 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     expect(t2.written).toEqual([stageCheckpointFile("t2-b1"), STAGE_RUN_RECORD_FILE]);
     expect((await stageRecordOf(t2Dir))["input"]).toMatchObject({ checkpoint: stageCheckpointFile("t1-t2"), boundary: "t1-t2" });
     const written = await readJson(`${t2Dir}/${stageCheckpointFile("t2-b1")}`);
-    expect(written["versions"]["ledger"]).toBe(await ledgerModule.propertyLedgerSha256(t2OnlyLedger()));
+    expect(written["versions"]["ledger"]).toBe(await ledgerModule.propertyLedgerSha256(t2OnlyLedger(), V12_IDS_FLAGS));
     expect(written["versions"]).toHaveProperty("ledger_upstream", null);
     // 同じ工場は、変える前の工場が書いた t2-b1 を今のまま全体の指紋で断る
     expect(await refusedStage("t2-change-b1", "write", `${source}/${stageCheckpointFile("t2-b1")}`)).toEqual(versionRefusal);
@@ -2291,8 +2607,9 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
       expect(await refusedStage(`t1-${name}`, "test-spec", input), name).toEqual(versionRefusal);
     }
     // 今の工場の部分の指紋の値が取れない形なら、照合を省かずに断る
+    const versions = ledgerModule.ledgerVersionsOf;
     for (const [name, value] of [["empty", ""], ["short", "0".repeat(63)]] as const) {
-      vi.spyOn(ledgerModule, "upstreamLedgerSha256").mockImplementation(async () => value);
+      vi.spyOn(ledgerModule, "ledgerVersionsOf").mockImplementation(async (flags) => ({ ...(await versions(flags)), ledgerUpstream: value }));
       expect(await refusedStage(`t1-run-${name}`, "test-spec", `${source}/${stageCheckpointFile("t1-t2")}`), name).toEqual(versionRefusal);
       vi.restoreAllMocks();
     }
@@ -2331,7 +2648,8 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
       expect(await refusedStage(`b1-${name}`, "write", input), name).toEqual(versionRefusal);
     }
     // t2-b1 は今の工場の部分の指紋を受理の判断に使わない（値が取れない形でも、全体の指紋が同じなら通る）
-    vi.spyOn(ledgerModule, "upstreamLedgerSha256").mockImplementation(async () => "");
+    const versions = ledgerModule.ledgerVersionsOf;
+    vi.spyOn(ledgerModule, "ledgerVersionsOf").mockImplementation(async (flags) => ({ ...(await versions(flags)), ledgerUpstream: "" }));
     const run = await runStageCli({ dir: `${directory}/v12-upstream-b1-out-run`, args: ["--stage-start", "write", "--stage-input", `${source}/${stageCheckpointFile("t2-b1")}`], calls: calls.slice(6), pipeline: "v1.2" });
     expect(run.errors.filter((line) => line.startsWith("stage-input:"))).toEqual([]);
     expect(run.code).toBe(EXIT_OK);
@@ -2404,7 +2722,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     vi.restoreAllMocks();
   });
 
-  const outputs = () => idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW);
+  const outputs = () => idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW_IDS);
   const raw = (): readonly Record<string, unknown>[] => idsResponseList(outputs());
   const rawFields = (): { readonly fields: readonly Record<string, unknown>[] } => raw()[1] as { readonly fields: readonly Record<string, unknown>[] };
   const fieldsWithEntity = (entity: string) => ({
@@ -2484,7 +2802,32 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     // 差は checkpoint の版の ledger_upstream と、それに由来する記録の出力ダイジェストだけ（Issue #713）：欄を除いた checkpoint と、
     // その出力ダイジェストに戻した記録は、直す前（fa21c65）のバイト列と同じ
     const checkpoint = JSON.parse(await fs.readFile(`${dir}/${stageCheckpointFile("t1-t2")}`, "utf8")) as Record<string, any>;
-    expect(checkpoint["versions"]["ledger_upstream"]).toBe(await ledgerModule.upstreamLedgerSha256());
+    expect(checkpoint["versions"]["ledger_upstream"]).toBe(await ledgerModule.upstreamLedgerSha256(ledgerModule.PROPERTY_LEDGER, V12_IDS_FLAGS));
+    {
+      // Issue #816：この Issue の段（checkpoint の版の `ledger`・`ledger_upstream`）だけを #816 の前（#806）の ids の値に
+      // 戻した状態が、直す前の値に等しい。記録の output_digest は戻した checkpoint から計算し直す
+      const reverted = {
+        ...checkpoint,
+        versions: { ...checkpoint["versions"], ledger: "bfb08678980fa71aa03b1ad012a9a397ebcefa73b404c8fcb52943157eb86d5d", ledger_upstream: "22b8b846038207ed3acbcde92a7f64fbb3f3e843ebe2a11835fb9a9f8c275a71" },
+      };
+      const revertedRecord = await stageRecordOf(dir);
+      (revertedRecord["checkpoints"] as { output_digest: string }[])[0]!.output_digest = await stageOutputDigest(reverted);
+      expect([await sha256Hex(stageJsonText(revertedRecord)), await sha256Hex(stageJsonText(reverted))]).toEqual(
+        V12_STAGE_C1_RETRY_DIGESTS_BEFORE_816,
+      );
+    }
+    // Issue #806：全体・上流の指紋は base の CLI が記録していた off の値に戻して、下の旧の定数と照らす
+    checkpoint["versions"]["ledger"] = await ledgerModule.propertyLedgerSha256();
+    checkpoint["versions"]["ledger_upstream"] = await ledgerModule.upstreamLedgerSha256();
+    {
+      // Issue #806：checkpoint の `ledger`・`ledger_upstream` だけを off の値に戻した（#735・#748 は戻さない）状態が、
+      // #806 の直前の値に等しい。記録の output_digest は戻した checkpoint から計算し直す
+      const revertedRecord = await stageRecordOf(dir);
+      (revertedRecord["checkpoints"] as { output_digest: string }[])[0]!.output_digest = await stageOutputDigest(checkpoint);
+      expect([await sha256Hex(stageJsonText(revertedRecord)), await sha256Hex(stageJsonText(checkpoint))]).toEqual(
+        V12_STAGE_C1_RETRY_DIGESTS_BEFORE_806,
+      );
+    }
     // Issue #735 で取り直した差は、論理の枠の値（checkpoint の call_limits・条件の記録の v12_call_limits）と記録の v12_calls の C3 の束の欄、
     // それに由来する記録の出力ダイジェストだけ：欄を旧の値に戻すと #735 の前と同じ。以下の #725・#713 の照合は戻した値で続ける
     expect(checkpoint["versions"]["call_limits"]["logical_calls"]).toBe(80);
@@ -2704,6 +3047,24 @@ const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
   // Issue #748 で取り直した（ids on の段の走りの記録の末尾に実試行の行 `requests` と段全体の span `stage_spans` を足したため。
   // checkpoint は変わらない。旧の値は c22cffe09c359a3e98eee0885efd47c9c3d2ab2c6158a731442e27f62572fc9b・
   // 3646122573cce8254ad727db2d194021b54e683dbf9f98166cbdd36faadbf92d で、`revert748` で 2 欄を外せば一致する）
+  // Issue #806 で取り直した（ids on の checkpoint の版が新しい全体・上流の指紋を持ち、記録の出力ダイジェストが変わるため。
+  // 旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_806` に残し、checkpoint の `ledger`・`ledger_upstream` を off の値に戻せば一致する
+  // ことを試験で確かめる。#735・#748 の 2 欄は戻さない）
+  // Issue #816 で取り直した（R2 で ids の上流の指紋、R3 で ids の全体の指紋が変わり、t1-t2 の checkpoint の版と、それを
+  // 入力の出力ダイジェストに持つ記録が変わるため。旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_816` に残し、checkpoint の
+  // `ledger`・`ledger_upstream` を #806 の ids の値に戻せば一致することを試験で確かめる）
+  "8ef7fba757a1fab987122c1a48b73a1049387ce4c6b7b17966ab36fb6cb13822",
+  "5ae7bf97d93262c003cda5c0dbc330f87a1b5d578ab8d8066d3195501eaf5138",
+];
+
+/** Issue #816 の前（#806 の後）の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値） */
+const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_816: readonly string[] = [
+  "d16c2b0cbb5a2b76ab7fa9b148aa97fe40d2b8c9afb12e0eed0fc2d7bfa4b7fe",
+  "ffc47708d7a482d0fa256aa4fb2b61a5b315bf7add60be29cfef4ae18746af7e",
+];
+
+/** Issue #806 の前の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値。base 17f75fe） */
+const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_806: readonly string[] = [
   "96fa815fe904db51703079e76135d2ef3ee420bdcd1049847acbf9cb816273af",
   "3646122573cce8254ad727db2d194021b54e683dbf9f98166cbdd36faadbf92d",
 ];
@@ -2792,7 +3153,7 @@ describe("旗 v12.ids の C3 の構造の検査の読み方（Issue #732）：�
     expect(wholeRules).toHaveLength(1);
     expect(stageRules).toEqual(wholeRules);
     expect(wholeRules[0]).toContain(structuralReadingText());
-    expect(wholeRules[0]).toBe(ruleTexts(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true))[1]);
+    expect(wholeRules[0]).toBe(ruleTexts(semanticCheckRuleDefinitionsOf(ledgerModule.PROPERTY_LEDGER_VIEW_IDS, true))[1]);
     // ids off（台帳と探索は on）の走りは読み方の文を持たない
     const flags = { ledger: true, searchRepair: true, ids: false };
     vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => flags);
@@ -3026,11 +3387,18 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
   ]);
 
   it("段の走りと一気通貫の Build の記録の両方で、ids と ledger の on・off に依らず、t1-t2 の ledger_upstream と記録の output_digest だけを旧の値に戻すと直す前とバイト列で同じ。要約・終了コード・納品物・ほかの診断は不変、要求は ids と ledger が on の走りだけ変わる", async () => {
-    const current = await ledgerModule.upstreamLedgerSha256();
-    expect(current).not.toBe(BEFORE_UPSTREAM);
+    const currentOffUpstream = await ledgerModule.upstreamLedgerSha256();
+    const currentIdsUpstream = await ledgerModule.upstreamLedgerSha256(ledgerModule.PROPERTY_LEDGER, V12_IDS_FLAGS);
+    const currentOffLedger = await ledgerModule.propertyLedgerSha256();
+    const currentIdsLedger = await ledgerModule.propertyLedgerSha256(ledgerModule.PROPERTY_LEDGER, V12_IDS_FLAGS);
+    expect(currentOffUpstream).not.toBe(BEFORE_UPSTREAM);
+    expect(currentIdsUpstream).not.toBe(currentOffUpstream);
+    expect(currentIdsLedger).not.toBe(currentOffLedger);
     expect(Object.keys(BEFORE)).toEqual(SCENARIOS.map((scenario) => scenario.name));
     for (const [index, scenario] of SCENARIOS.entries()) {
       const run = await measure(scenario, index);
+      // ids off の走りは off の値、ids on の走りは新しい ids の値を持つ（Issue #806）
+      const idsRun = scenario.flags?.ids !== false;
       const before = BEFORE[scenario.name]!;
       expect(run.code, scenario.name).toBe(before.code);
       expect(run.summary, scenario.name).toBe(before.summary);
@@ -3048,7 +3416,11 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
         const text = await run.textOf(path);
         const checkpoint = JSON.parse(text) as Record<string, any>;
         expect(stageJsonText(checkpoint), path).toBe(text);
-        expect(run.upstream[path], path).toBe(path === stageCheckpointFile("t1-t2") ? current : null);
+        expect(run.upstream[path], path).toBe(path === stageCheckpointFile("t1-t2") ? (idsRun ? currentIdsUpstream : currentOffUpstream) : null);
+        // ids の走りは全ての境界で新しい全体の指紋を持つ（off の走りは off の値。Issue #806）
+        expect(checkpoint["versions"]["ledger"], path).toBe(idsRun ? currentIdsLedger : currentOffLedger);
+        // Issue #806：全体・上流の指紋を、base の CLI が記録していた off の値と旧の上流の値に戻す
+        checkpoint["versions"]["ledger"] = currentOffLedger;
         if (checkpoint["versions"]["ledger_upstream"] !== null) checkpoint["versions"]["ledger_upstream"] = BEFORE_UPSTREAM;
         // Issue #735 で変わった論理の枠の値も旧の値に戻す（#725 の前の値と照らすため）
         revert735(checkpoint);
@@ -5316,9 +5688,13 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
 
   /** Issue #795：旗 ids の B3' の規則から、R-dc-03 の ids の文だけを off の文に戻す（その規則が 1 つであることを確かめる） */
   function withoutLinkedRule(rules: readonly string[]): readonly string[] {
-    const index = rules.indexOf(DECL_CHECK_IDS_R03_DEFINITION.text);
+    // Issue #815：先に #801 の段を戻した列（`OLD_DECL_CHECK_IDS_R03_TEXT`）にも当たるようにする
+    const index = rules.findIndex((rule) => rule === DECL_CHECK_IDS_R03_DEFINITION.text || rule === OLD_DECL_CHECK_IDS_R03_TEXT);
     if (index < 0) return rules;
-    expect(rules.filter((rule) => rule === DECL_CHECK_IDS_R03_DEFINITION.text), "R-dc-03 の ids の文は 1 つ").toHaveLength(1);
+    expect(
+      rules.filter((rule) => rule === DECL_CHECK_IDS_R03_DEFINITION.text || rule === OLD_DECL_CHECK_IDS_R03_TEXT),
+      "R-dc-03 の ids の文は 1 つ",
+    ).toHaveLength(1);
     return [...rules.slice(0, index), DECL_CHECK_OFF_R03_TEXT, ...rules.slice(index + 1)];
   }
 
@@ -5440,10 +5816,18 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     readonly digest: string;
     readonly stripped: string;
     readonly strippedRequests: string;
+    /** Issue #815：復元の順に #801 の段も外した要求の列の指紋（戻した旧の値と照らす） */
+    readonly oldStrippedRequests: string;
+    /** Issue #815：#813 の JSON.parse の経路に #806・#801 を重ねた要求の列の指紋（stage の走りだけ） */
+    readonly oldFrameRequests: string | undefined;
     readonly budgetNormalized: string;
     readonly budgetKeys: readonly string[];
     readonly budgetDerived: BudgetNormalizedFiles["derived"];
     readonly hasSearch: boolean;
+    /** 段の走りの要求列（JSON 文字列）を本文に戻して枠を復元したときの指紋（#813。取り直しの根拠を試験で照らす） */
+    readonly restoredStage:
+      | { readonly whole: string; readonly stripped: string; readonly requests: string }
+      | undefined;
   }> {
     if (entry.flags !== null) {
       const flags = entry.flags;
@@ -5471,9 +5855,42 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       };
       line = JSON.stringify(run.summary);
     }
+    // Issue #800：台帳に足した行の文と C2 の schema の欄を外して、旧の指紋と照らす
+    // Issue #813：T2 の R-tsp-02 の新しい文と枠の免除の枝を #813 の前に戻す
+    // Issue #806：旗 ids の C2 への 3 文も位置で外して、旧の指紋と照らす
+    requests = withoutWhenlessFrameField(withoutIdsC2Texts(withoutFrameFieldNormal(withoutValidationExpression(requests))));
     if (timing !== undefined) timing.runMs += performance.now() - runStart;
     vi.restoreAllMocks();
     let hasSearch = false;
+    // Issue #806：ids の C2 を通る走りは、checkpoint の全体・上流の指紋が新しい値を持つ。旧の値（off）に戻して照らす
+    const idsOnV12 = entry.pipeline === "v1.2" && (entry.flags === null || entry.flags.ids === true);
+    const legacyLedger = idsOnV12 ? await ledgerModule.propertyLedgerSha256() : null;
+    const legacyUpstream = idsOnV12 ? await ledgerModule.upstreamLedgerSha256() : null;
+    /**
+     * Issue #816：この Issue の段（checkpoint の版の 2 欄）を戻した出力ダイジェスト。checkpoint の版の `ledger`・
+     * `ledger_upstream` を #816 の前（#806）の ids の値に戻し、出力ダイジェストを計算し直す。記録や Build だけの記録が
+     * 埋め込む checkpoint の出力ダイジェスト（入力の checkpoint も含む）を、この値に戻して旧の値と照らす
+     */
+    const restore816Ledger = "bfb08678980fa71aa03b1ad012a9a397ebcefa73b404c8fcb52943157eb86d5d";
+    const restore816Upstream = "22b8b846038207ed3acbcde92a7f64fbb3f3e843ebe2a11835fb9a9f8c275a71";
+    const restored816 = new Map<string, string>();
+    /** 入力の checkpoint（`--stage-input` で受けた t2-b1）を #816 の前に戻した出力ダイジェスト */
+    let restoredInput816: string | null = null;
+    if (idsOnV12) {
+      const restore = async (checkpointPath: string): Promise<string> => {
+        const checkpoint = JSON.parse(await fs.readFile(checkpointPath, "utf8")) as Record<string, any>;
+        checkpoint["versions"]["ledger"] = restore816Ledger;
+        if (checkpoint["versions"]["ledger_upstream"] !== null) checkpoint["versions"]["ledger_upstream"] = restore816Upstream;
+        return stageOutputDigest(checkpoint);
+      };
+      for (const path of written.filter((name) => name.startsWith("stage-checkpoint-"))) {
+        restored816.set(path, await restore(`${dir}/${path}`));
+      }
+      // 既定の引数（`--stage-start write --stage-input checkpoint746`）の段の走りの入力は checkpoint746（t2-b1）
+      if (entry.kind === "stage" && entry.args === undefined) restoredInput816 = await restore(checkpoint746);
+    }
+    /** 戻した checkpoint の出力ダイジェスト（記録の output_digest を旧の値に戻すのに使う） */
+    const revertedCheckpoints = new Map<string, string>();
     /** 費用の印への置換に使う、ディレクトリを目印に置き換えた全ファイルの本文 */
     const budgetSources: { readonly path: string; readonly text: string }[] = [];
     const files: [string, string][] = [];
@@ -5484,11 +5901,33 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       const raw = await fs.readFile(`${dir}/${path}`, "utf8");
       if (timing !== undefined) timing.ioMs += performance.now() - ioStart;
       let text = raw.replaceAll(directory, "<tmp>");
-      const rawText = text;
+      let rawText = text;
+      // checkpoint の版の全体・上流の指紋を旧の値（off）に戻す（Issue #806）
+      if (idsOnV12 && legacyLedger !== null && legacyUpstream !== null && path.startsWith("stage-checkpoint-")) {
+        const checkpoint = JSON.parse(text) as Record<string, any>;
+        checkpoint["versions"]["ledger"] = legacyLedger;
+        if (checkpoint["versions"]["ledger_upstream"] !== null) checkpoint["versions"]["ledger_upstream"] = legacyUpstream;
+        text = stageJsonText(checkpoint);
+        rawText = text;
+        revertedCheckpoints.set(path, await stageOutputDigest(checkpoint));
+      }
       if (path === STAGE_RUN_RECORD_FILE) {
         const record = JSON.parse(text) as Json;
         hasSearch = "search_repair" in record;
         const idsOnStage = entry.kind === "stage" && entry.pipeline === "v1.2" && (entry.flags === null || entry.flags.ids);
+        // 記録が指す checkpoint の出力ダイジェストを、版を戻した中身から計算し直す（Issue #806）
+        const reverted = (record["checkpoints"] ?? []) as { path: string; output_digest: string }[];
+        for (const entry of reverted) {
+          const digest = revertedCheckpoints.get(entry.path);
+          if (digest !== undefined) entry.output_digest = digest;
+        }
+        // Issue #816：入力の checkpoint（この走りが書いたものではない）の出力ダイジェストを #816 の前に戻す
+        const input = record["input"] as { output_digest?: string } | null | undefined;
+        if (idsOnV12 && restoredInput816 !== null && input !== null && input !== undefined) {
+          input.output_digest = restoredInput816;
+          rawText = stageJsonText(record);
+        }
+        if (idsOnV12 && reverted.some((entry) => revertedCheckpoints.has(entry.path))) rawText = stageJsonText(record);
         if (idsOnStage) {
           if (!keepSearch) delete record["search_repair"];
           // Issue #748 で足した実試行の行・段全体の span も外して、直す前（4a80f4b）の記録と照らす。
@@ -5500,6 +5939,23 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
           expect(record["requests"], path).toBeUndefined();
           expect(record["stage_spans"], path).toBeUndefined();
           expect(stageJsonText(record), path).toBe(text);
+        }
+      }
+      // 一気通貫の Build だけの記録も checkpoint の出力ダイジェストを持つ（Issue #806。#816 の段を戻した値に直す）
+      if (idsOnV12 && path === BUILD_CLI_RECORD_FILE) {
+        const record = JSON.parse(raw) as Record<string, any>;
+        const reverted = (record["checkpoints"] ?? []) as { path: string; output_digest: string }[];
+        let changed = false;
+        for (const entry of reverted) {
+          const digest = restored816.get(entry.path);
+          if (digest !== undefined) {
+            entry.output_digest = digest;
+            changed = true;
+          }
+        }
+        if (changed) {
+          text = JSON.stringify(record).replaceAll(directory, "<tmp>");
+          rawText = text;
         }
       }
       const hashStart = performance.now();
@@ -5522,15 +5978,50 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const budgetNormalized = await sha256Hex(
       JSON.stringify({ files: budgetFiles.files, requests: strippedRequests, code, line: budgetLine }).replaceAll(directory, "<tmp>"),
     );
+    // Issue #815：復元の順（#813 → #806 → #805 → #801 → #800）に #801 の段も外した要求の列。戻した旧の値（db91af3）と照らす。
+    // 全出力・費用の指紋は checkpoint の output_digest に #800 の経路の差を持つので、要求と body だけを連鎖で照らす
+    const oldRequests = restoreOld801(requests);
+    const oldStrippedRequests = withoutDiagnostics(oldRequests);
+    const oldStrippedRequestsDigest = await sha256Hex(JSON.stringify(oldStrippedRequests));
+    // Issue #815：#813 の JSON.parse の経路（`restoredStage` と同じ入口）に #806・#801 を重ねた要求の列の指紋。
+    // 文字列のままの経路では #813 の枠の塊（改行がエスケープされている）を戻せないが、この経路なら戻せる
+    const oldFrameRequests =
+      entry.kind === "stage" && Array.isArray(requests) && (requests as readonly unknown[]).every((text) => typeof text === "string")
+        ? (() => {
+            const restored = (requests as readonly string[]).map((text) =>
+              JSON.stringify(restoreOld801(withoutWhenlessFrameField(withoutIdsC2Texts(withoutFrameFieldNormal(JSON.parse(text)))))),
+            );
+            return withoutDiagnostics(restored);
+          })()
+        : undefined;
+    const oldFrameRequestsDigest = oldFrameRequests === undefined ? undefined : await sha256Hex(JSON.stringify(oldFrameRequests));
+    // Issue #813：段の走りの要求列は `requestText` の JSON 文字列の並びで、枠の塊の改行がエスケープされている。本文に戻して
+    // `withoutFrameFieldNormal` を掛け直すと（#794・#663 の文は元から含む）、診断と R-fr-08 を外した要求列・全出力・
+    // 診断と R-fr-08 を外した全出力が旧値に戻る。取り直しの根拠を、注ではなく等値で照らす
+    const restoredStage =
+      entry.kind === "stage" && Array.isArray(requests) && (requests as readonly unknown[]).every((text) => typeof text === "string")
+        ? await (async () => {
+            const objectRequests = (requests as readonly string[]).map((text) => JSON.stringify(withoutWhenlessFrameField(withoutFrameFieldNormal(JSON.parse(text)))));
+            const objectStrippedRequests = withoutDiagnostics(objectRequests);
+            return {
+              whole: await sha256Hex(JSON.stringify({ files, requests: objectRequests, code, line }).replaceAll(directory, "<tmp>")),
+              stripped: await sha256Hex(JSON.stringify({ files: rawFiles, requests: objectStrippedRequests, code, line }).replaceAll(directory, "<tmp>")),
+              requests: await sha256Hex(JSON.stringify(objectStrippedRequests)),
+            };
+          })()
+        : undefined;
     if (timing !== undefined) timing.hashMs += performance.now() - bodyHashStart;
     return {
       digest,
       stripped,
       strippedRequests: strippedRequestsDigest,
+      oldStrippedRequests: oldStrippedRequestsDigest,
+      oldFrameRequests: oldFrameRequestsDigest,
       budgetNormalized,
       budgetKeys: [...new Set(budgetFiles.keys)].sort(),
       budgetDerived: budgetFiles.derived,
       hasSearch,
+      restoredStage,
     };
   }
 
@@ -5595,6 +6086,286 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     "whole-mixed": "0c560b407f214f9115e3d366f7d1306da5b32e70c2e9050a19b789f83cd8d7c1",
     "whole-search-repair-off": "8cf44cc06499042297ae53826453603f104c032e2e1b9e6d7d07253eb70c94a1",
   };
+  /**
+   * Issue #800：台帳に足した行の文と C2 の schema の欄を `withoutValidationExpression` で外しても、T2 の枠（値の対象から項目・
+   * entity を外し、値の対象が無い要件を免除する）が変わる ids on の経路は、旧の指紋と合わない。**上の旧値は残したまま**、
+   * 経路が変わる台本として新しい期待を直接固定する（ids off・v1・v1.1a の値は変えない）。
+   * Issue #815：値を #801 の前（db91af3）に戻した。区分：字どおり戻すだけ（全出力の checkpoint の output_digest に #800 の
+   * 経路の差を持つため連鎖では照らさない。直接固定した Issue：#800）。#801 の値は `BEFORE_746_801`
+   */
+  const BEFORE_746_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "11fbfca2b2afa7f3b85ff3d97ae231cc5ace2e82ae4ed216946db5f434a6c666",
+    "stage-adopting": "c83f6ba4c02599b6b7810ffade3e40ea8877a9b15f21366d9318bd4f6d103e07",
+    "stage-sets": "9698928e2cb48c22cf171fc6a2d6545581463a48ce0cb028398492e6e2e06aca",
+    "stage-mixed": "5240cefe691b1ce82c7fdfb5e472fcec02ecab99ae8cae8a3a1474018279c44a",
+    "stage-returned": "5f2e735e693e85882afaea2ab63ed514f70b805f81afac4fd3f2cc6c16066344",
+    "stage-recounts": "4e51e9d179cb1e49483154e0119832d9a12f1320bf8fb1c5cc9fea9b486c1d50",
+    "stage-stop-repair": "9f26df28b8a7518958f778cb432aafd949f3077ee2dedd796296158503108a60",
+    "stage-stop-first-eval": "fa508ed3f82e4fcbf680ad92345ee2263864efb3d186dcc00b6ed8a92328c20b",
+    "stage-stop-commit": "9ae79a30e1f5df2c4495ad0fc5437c23effb8a389115185558a972c644e2ed6a",
+    "whole-stagnation": "f3c552f06a6b34db62c6fddb3931413565a85fa059eedb65ab77ccc42bbfb2df",
+    "whole-adopting": "32cdac31366d76f94c211bc7b66118f1ff3ab09ac55c86f6998cf969ac3f23ff",
+    "whole-sets": "03000c2abba9e26a77473627f7dc5ea675ae0c40446572133794c631f7edff8b",
+    "whole-mixed": "f8f6bae44c7a4e18800c906ce5cfec7e106128f86fbf1371779fde91be345615",
+    "whole-recounts": "7013d30de1d3514958571c0538a4090f99ec2d453ee9a8302fc541490f7fc39a",
+    "stage-search-repair-off": "976cb9b83a8ea59333ce3eec02a8c861e4a3ffe49c32c41acb03b688f9e5ea7c",
+    "whole-search-repair-off": "0b3f93b1e83a8e971980a45528717865e8e0f25400b53f813346ab0875bb668a",
+  };
+  /**
+   * Issue #801 の値（`BEFORE_746_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。
+   * 区分：連鎖で照らす（`stage-search-repair-off` だけは #813 が経路を変えたので字どおり戻すだけ。直接固定した Issue：#813）
+   */
+  const BEFORE_746_801: Readonly<Record<string, string>> = {
+    "stage-stagnation": "2f3faf318225b10194f1917a23ae6a91070582d939e406a7ba2e51031409008c",
+    "stage-adopting": "71c17a27902ff79c2f94197296062efe3e88eb7ad29afa8302a6c781313170cd",
+    "stage-sets": "fc286ff643856c8c55609876773649c2b0653cdea5ec0a67a169d137d830a83c",
+    "stage-mixed": "7bf5dd856381678ccb118f065b67c54e8686eea0c99c92befd1c02b43540d015",
+    "stage-returned": "02ec1cfc8faf214d4cc2b129ceef911b58830a458309b9999d98b1ccd720b49a",
+    "stage-recounts": "85b7ef90961deba030744db2a9e1c21b5420ccdcdd64e823303781a23f576a7c",
+    "stage-stop-repair": "98dd0c4f58fbe5e2fa0bdb6f5f87e57b52975964e96c0c4c3630359a5b735cb4",
+    "stage-stop-first-eval": "545ee47b21605b1700428d75ea1c578fcdb43a0011cc2f3752f087300e82376c",
+    "stage-stop-commit": "a8333d55f16d79cb4c7dcc06fc7e49f5de23f7c85ef8ee308785cb72760d99ce",
+    "whole-stagnation": "4f0c6659b6a6c142e400d9276c24316169ad09513a7f636703db2fed8724e0de",
+    "whole-adopting": "0b2ab13e924744789176e67ae0decbfcb723ae551ae9cf621e4641dc339ccdcf",
+    "whole-sets": "bf854e57d8e8a0298fb86ecba169236984fcf61113dc50a0deff823e5956a302",
+    "whole-mixed": "a5fb86aaa7f826f107e8db60d15b8327901551ded527cc3f1ed8b74af9442ced",
+    "whole-recounts": "5ea508e57f7b20c2d64434deaf95668f3d2a59f55df7b04833f0bd580c0c7d08",
+    "stage-search-repair-off": "a37acf94234f4c2df76444dfe1b9cd53814796cd8e4d35c14b30cd8584a2cd9c",
+    "whole-search-repair-off": "758fd5614ac8a1170ed4276287ab30f08e7cc28fbd3b6791faad7c1b97f92a81",
+  };
+  /** Issue #815：値を #801 の前（db91af3）に戻した。区分：字どおり戻すだけ（直接固定した Issue：#800）。#801 の値は `BEFORE_748_BASE_801` */
+  const BEFORE_748_BASE_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "cb1c9775fe1514e4e9e9e789402f91fabed20277d5b47a721677303bce4147ab",
+    "stage-adopting": "3a1f86d6abb08c472a3852c17350c6689fa9993dda16c0d21cc225d28b9fdec9",
+    "stage-sets": "017b26b7fabc144f595a8c4280ecb86e6a71f38297354fbbc94d3b6a5e07c8b6",
+    "stage-mixed": "6e691aaea07205938eb6bf62a48be69dee828a2233f0da7ad6028facde67c7a6",
+    "stage-returned": "07b41986d2f281c462a0375d4c3ecc4ffad7e4839b850437c8ce6325358b1b7e",
+    "stage-recounts": "2262479ff2c70c87e010b82f5a8627920026da2be5396578e035f029453a5e9b",
+    "stage-stop-repair": "c2528e34a3ca6623c62a5823a9df79951fd00199be4efebaee775452549a7633",
+    "stage-stop-first-eval": "32bde2e6e436c6315138c9ab6b4f9baad914bbbd65dbcca734d942a722f67e2e",
+    "stage-stop-commit": "6c021bb209e8188e1c04dcbf42e60618cdd46f5cbac6ace10c11eb2cbe27c226",
+    "whole-stagnation": "f3c552f06a6b34db62c6fddb3931413565a85fa059eedb65ab77ccc42bbfb2df",
+    "whole-adopting": "32cdac31366d76f94c211bc7b66118f1ff3ab09ac55c86f6998cf969ac3f23ff",
+    "whole-sets": "03000c2abba9e26a77473627f7dc5ea675ae0c40446572133794c631f7edff8b",
+    "whole-mixed": "f8f6bae44c7a4e18800c906ce5cfec7e106128f86fbf1371779fde91be345615",
+    "whole-recounts": "7013d30de1d3514958571c0538a4090f99ec2d453ee9a8302fc541490f7fc39a",
+    "stage-search-repair-off": "976cb9b83a8ea59333ce3eec02a8c861e4a3ffe49c32c41acb03b688f9e5ea7c",
+    "whole-search-repair-off": "0b3f93b1e83a8e971980a45528717865e8e0f25400b53f813346ab0875bb668a",
+  };
+  /** Issue #801 の値（`BEFORE_748_BASE_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす（`stage-search-repair-off` は #813。直接固定した Issue：#813） */
+  const BEFORE_748_BASE_801: Readonly<Record<string, string>> = {
+    "stage-stagnation": "30da71282f0505765704d336850d3e8baa2645e1e06c1885d88d9081e8dfc56a",
+    "stage-adopting": "7a7ff4fd0d8fdb797abf6bbb3ccdd5b8d7fe40bed7672c61e3e33e17928efce0",
+    "stage-sets": "d9fd8b55adc2530c66e49056fcb08291a36227e23018a5feac017e46e4fc1a55",
+    "stage-mixed": "071ebef828fc73572e8443f48bbd4165ae67333a6d311538e1330e563e972853",
+    "stage-returned": "77df0ceb28f4a66071c731f2fe7657fac2db3901ad79c08cc8ac02253b6ea27f",
+    "stage-recounts": "1e043a3723b7235286f797f93bc19253b15f28c8264c989c7b23ee054f8499d0",
+    "stage-stop-repair": "ac2be55dcae3eb41c4f584aa2ad911c284de4aaa857ee596f3e0d9b34d380314",
+    "stage-stop-first-eval": "494e77b490cbe19d2d9e935ab764ed27ca2c290fdd66a32ab04983214f9a3a26",
+    "stage-stop-commit": "38e46d69387a8219bc38ceb2ba2b65423d41414d4234273d206e60814c55928d",
+    "whole-stagnation": "4f0c6659b6a6c142e400d9276c24316169ad09513a7f636703db2fed8724e0de",
+    "whole-adopting": "0b2ab13e924744789176e67ae0decbfcb723ae551ae9cf621e4641dc339ccdcf",
+    "whole-sets": "bf854e57d8e8a0298fb86ecba169236984fcf61113dc50a0deff823e5956a302",
+    "whole-mixed": "a5fb86aaa7f826f107e8db60d15b8327901551ded527cc3f1ed8b74af9442ced",
+    "whole-recounts": "5ea508e57f7b20c2d64434deaf95668f3d2a59f55df7b04833f0bd580c0c7d08",
+    "stage-search-repair-off": "a37acf94234f4c2df76444dfe1b9cd53814796cd8e4d35c14b30cd8584a2cd9c",
+    "whole-search-repair-off": "758fd5614ac8a1170ed4276287ab30f08e7cc28fbd3b6791faad7c1b97f92a81",
+  };
+  /**
+   * Issue #806：旗 ids の C2 の R-map-03 に 3 文を足したため、ids on の C2 の要求と、そこから派生する費用（入力トークン数）が
+   * 変わる。要求の列は 3 文を位置で外すと旧の値に戻る（`withoutIdsC2Texts`）。全出力の指紋は要求と費用を含むので、ids on の
+   * 経路だけ取り直した（旧の値は上の #800 の値。ids off・v1・v1.1a は旧値のまま）
+   */
+  const BEFORE_746_806: Readonly<Record<string, string>> = {
+    "stage-stagnation": "ad2e7574abb0332cc8522091535b1448650f7fa4f4a5d0aee9d397d681a0a67e",
+    "stage-adopting": "b98279b2383d7b8b8d8bbee6ca817c51f8271c5a84ac5510c048d3d49038b689",
+    "stage-sets": "3c9542efcb290a60542884d7c89f45809d087ddd4e09cc4cee6339c5f7b90aa0",
+    "stage-mixed": "517fe84c878b53a30e566f0be18ec88f842eb735dfa135392d7ea78c25803c27",
+    "stage-returned": "5284cd357f652465dfcc83379e52447f3598170b4b2d1d932d8100d909158c70",
+    "stage-recounts": "d89f12d10f26498225eacf8d67c1847946a1d88ae5d8b008b1bda64a584eb202",
+    "stage-stop-repair": "e1a8ce5c82cb7cd305d3f781287ecb3fa2565cb7eb82b6b4522b6c3351f25a12",
+    "stage-stop-first-eval": "4a3da228c418aa0a3e43d2b849fa5b76ad1ce56df7c2958d964d516c0c51e13e",
+    "stage-stop-commit": "dd1468e74c972eff85ab80308d37453e77a1ec8e9ed4e10094ac81cdb594f1a0",
+    "whole-stagnation": "e7fd58dafaff971e70df5872a379522a8349b8e0eeb500ac2af34be19e260f56",
+    "whole-adopting": "72dcb9dbe6d3bd635cd43f8131b2981ec0f155665a88b4579e8ae6c49730d291",
+    "whole-sets": "6aa3261462f3c555c892d62112327693e8effc878b5153f624f4ab4762643032",
+    "whole-mixed": "e23acc5563d0739ba6c3a0359e71d3f01770b84ee982bd08466dcf548595a30a",
+    "whole-recounts": "d8f7047ac4244c51a65127462612e0777a588ac228f652d712adfbe6a2e5ab0f",
+    "whole-search-repair-off": "56f0f089e1f93cbe15d716a07baeb005eb1d729478dfcbb715783857942822f8",
+  };
+  /** Issue #806：ids on の段の走りの全出力（`keepSearch`）の取り直した値（`BEFORE_748_BASE_800` の後ろに重ねる） */
+  const BEFORE_748_BASE_806: Readonly<Record<string, string>> = {
+    "stage-stagnation": "ea75c2fab7d50c5c3694ae58874b5771639fd92ef190812c4b739b7cbbdefddb",
+    "stage-adopting": "afe008d05d3094847d95a22d5d0cc7ddbf75cf2459c9cc821420f9f10242f67f",
+    "stage-sets": "438b1bb39f8070014b81e34099708fd66829016fd7464b90c5b9f520366c5ceb",
+    "stage-mixed": "48475f5d791fd7c9200bb690b3ac9ade0c7a4abb301221061b6390e0d3d7c2fd",
+    "stage-returned": "cbc04945e2081867647823b538c9068e5b1e290797ef23e6d1dfcb03a0c7c443",
+    "stage-recounts": "d4638e16a74e426b18d4183c5f876ebef6dc51b94b79b58f629d49eccb258595",
+    "stage-stop-repair": "8d2b25abef0715a2a539eddd296d1f61fae91c230af561b2c869cdd34fc83af9",
+    "stage-stop-first-eval": "51509ca99284fa465b1fefa6b4052a919fb5457154a21bf79a1b9da6d695b237",
+    "stage-stop-commit": "b228cf9623c3d5968e2922e30ed0fa3fc57c29141a7c21a1da60fec2244be665",
+    "whole-stagnation": "e7fd58dafaff971e70df5872a379522a8349b8e0eeb500ac2af34be19e260f56",
+    "whole-adopting": "72dcb9dbe6d3bd635cd43f8131b2981ec0f155665a88b4579e8ae6c49730d291",
+    "whole-sets": "6aa3261462f3c555c892d62112327693e8effc878b5153f624f4ab4762643032",
+    "whole-mixed": "e23acc5563d0739ba6c3a0359e71d3f01770b84ee982bd08466dcf548595a30a",
+    "whole-recounts": "d8f7047ac4244c51a65127462612e0777a588ac228f652d712adfbe6a2e5ab0f",
+    "whole-search-repair-off": "56f0f089e1f93cbe15d716a07baeb005eb1d729478dfcbb715783857942822f8",
+  };
+  /**
+   * Issue #813：T2 の R-tsp-02 の ids の文（と枠の免除の枝）が変わった。一気通貫の走りは要求の本文を復元して比べるので旧の値の
+   * まま。段の走りの `stage-search-repair-off` だけは、要求の列が `requestText` の JSON 文字列の並びで、枠の塊の改行がエスケープ
+   * されているため、文字列のままの復元では枠を戻せず、新しい値が残る（経路が変わる台本として新しい期待を直接固定する）。
+   * 旧値の書き分け：
+   *   - 全出力 a37acf94…（#813 の直前の値。＝ BEFORE_746_800 と BEFORE_748_BASE_800）
+   *   - 診断と R-fr-08 を外した全出力 c064d53f…（#813 の直前の値。＝ BEFORE_761_RAW_806）
+   *   - 要求の列 d953399…（#813 の直前の実効値。＝ BEFORE_761_REQUESTS_800）
+   *   - 要求の列 426ba93f…（f9bf3b3（#761 の基準）の値。BEFORE_761_REQUESTS の値で、#800 で上の d953399… に取り直されている）
+   */
+  const BEFORE_746_813: Readonly<Record<string, string>> = {
+    "stage-search-repair-off": "4ad139d01a5490f3404f77c771eea9baded6e60786fddd16637498dd8a9adc68",
+  };
+  const BEFORE_748_BASE_813: Readonly<Record<string, string>> = {
+    "stage-search-repair-off": "4ad139d01a5490f3404f77c771eea9baded6e60786fddd16637498dd8a9adc68",
+  };
+  const BEFORE_761_RAW_813: Readonly<Record<string, string>> = {
+    "stage-search-repair-off": "b3695ef9e868a1018dab694ee30d4f598a9be802b8f259163c496dd68d6b87ae",
+  };
+  const BEFORE_761_REQUESTS_813: Readonly<Record<string, string>> = {
+    "stage-search-repair-off": "916ac101f1b664c4d1fc52efa87a9608340d28f387ba1411b2959bae3c29b96d",
+  };
+  /**
+   * Issue #826：T2 の必要な試験の枠の existence-only の枝に条件つきの試験の欄（`codeIfExistenceOnly`）を足した。段の走りの
+   * `stage-search-repair-off` だけは要求の列が JSON 文字列の並びで、枠の塊の改行がエスケープされているため、文字列のままの
+   * 復元では枠を戻せず、新しい値が残る（経路が変わる台本として新しい期待を直接固定する）。復元の入口（JSON.parse の経路）を
+   * 通せば旧の値に戻る（下の `restoredStages`）
+   */
+  const BEFORE_746_826: Readonly<Record<string, string>> = {
+    "stage-search-repair-off": "a234e521079c3ae8f272d519e49d438909ccf5ea550e5554e513e215e9529011",
+  };
+  const BEFORE_748_BASE_826: Readonly<Record<string, string>> = { ...BEFORE_746_826 };
+  const BEFORE_761_RAW_826: Readonly<Record<string, string>> = {
+    "stage-search-repair-off": "c9d92fb53add4fa107f526e0864a6b805d863c76c37b64f8c93d2eb20d736458",
+  };
+  const BEFORE_761_REQUESTS_826: Readonly<Record<string, string>> = {
+    "stage-search-repair-off": "8abcc6e38b63ec296e309c3efbd92e21d0ff4df95c7342e4945e7bf62f2a91f3",
+  };
+  /** Issue #806：ids on の経路の、診断の塊と R-fr-08 を外した全出力の取り直した値（旧値は上の #800 の値） */
+  const BEFORE_761_RAW_806: Readonly<Record<string, string>> = {
+    "stage-stagnation": "51528472071d324516f55b59946075dec5be761e405aa68022d38474aa6dd2d0",
+    "stage-adopting": "81cc53ba78e38eaa980324ed89bbc5693f7e7c94a929b45c0ff422d5d6d76623",
+    "stage-sets": "04f59e1fe645a5b62a1d6b9abbdb47be0d2580800a03d05195134401a2b1e2d8",
+    "stage-mixed": "42077539d597f29a2f50845b02026b5aae2761305afeb189c8ebd1d00cdfe472",
+    "stage-returned": "3d538db58bcb8c81b920bd716d81ea426d39247432e9dce451dd480403c86e3c",
+    "stage-recounts": "b0a7c96f9333daa313b3102d63e56cc402c11daa4a67b981b6f19920cd89fea8",
+    "stage-stop-repair": "3efbf4daa630406d1356efece73d13e951d3afd2035a81179be865918b6ee80a",
+    "stage-stop-first-eval": "51f490e017bd06e4f72a3bf682f1b0260d45b725d0a5db34a4413b01f100571f",
+    "stage-stop-commit": "93bc3a44d7ad3bcccde58407c4e490f5608daa9e8f51a070973944f7ab1e2d67",
+    "stage-search-repair-off": "c064d53fe231a99982ec0ebc08e2948ca82a626d794f95e1b5a24be73300ae5d",
+  };
+  /** Issue #806：費用の印に替えた全出力の取り直した値（ids on の経路だけ。旧値は上の #800 の値） */
+  const BEFORE_761_BUDGET_806: Readonly<Record<string, string>> = {
+    "whole-stagnation": "a589cdb2a9cd4ad9df5f46be2a7b194a652e7889592ef8f31cba3b485bd633cb",
+    "whole-adopting": "b716afb95e34c519808e794777c909076bbc1f98ea4807862c1c51cf7f36c1a5",
+    "whole-sets": "208d6ecc7c0c66bbb5dc0d523827a88481cd06596d620e427f31098489592739",
+    "whole-recounts": "0fa7830adfc47379ebf8c4ab439f892d6a2385dd3361ceeb0db0b91029daf9c4",
+  };
+  const BEFORE_795_BUDGET_806: Readonly<Record<string, string>> = {
+    "whole-mixed": "456d98719c604f2a90df493d9a79c848a9b382c8441d0bd978ba31c1fcf49376",
+    "whole-search-repair-off": "4da606328926cd9803475648cc51ebb668881ee4ef86f1d5812ffd8109498bde",
+  };
+  /** Issue #815：値を #801 の前（db91af3）に戻した。区分：字どおり戻すだけ（直接固定した Issue：#800）。#801 の値は `BEFORE_761_RAW_801` */
+  const BEFORE_761_RAW_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "b9fc8aa8162a3d4911f28f7cef093d93ba5cb9291d267302468c0c618cadc190",
+    "stage-adopting": "a6f70fad3e2f334e2d92be1154f8768b7b7fb0dea73836e0bc798cb5962db8bb",
+    "stage-sets": "cfc043d4d8de249f447948605833f9aff2a9f2a64d7931550e212ffca509e639",
+    "stage-mixed": "ba709dd49d9c8c13f4a78eeecf5770d95fd2400dc5a1202eb2fae4b3bdbf56b8",
+    "stage-returned": "a020ebe732c208c157b0abe4ab35a7c7fb7ffe0ba57282c69d6bb07fee3da253",
+    "stage-recounts": "dc63e55fbe6a87d5683fba40421ef0599e095c5808c5b798b1054201cdc50331",
+    "stage-stop-repair": "aa5fcfffb8b6db79b49fc9601cc6b35afc117a2a84f59789f11dabba81ad0484",
+    "stage-stop-first-eval": "16b14f116cfc47bc8f7f444ca0a9e6762c1923143564b56eab80ca8e6fd3bc61",
+    "stage-stop-commit": "d9528065b58971fbb7cca79c5f4b84f2c964733438bd3302c0067c1ba8653d35",
+    "stage-search-repair-off": "aa031822f2cf86e44a440c06dee29d5a1516dd44fa2f61146f20ab085a9dd836",
+  };
+  /** Issue #801 の値（`BEFORE_761_RAW_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす（`stage-search-repair-off` は #813。直接固定した Issue：#813） */
+  const BEFORE_761_RAW_801: Readonly<Record<string, string>> = {
+    "stage-stagnation": "372c56984fcb3cce7f5e811374f149645c1997173f9465b47ee5bf3689b5e67d",
+    "stage-adopting": "ba2b93d694f6fbaac13e9145af7c346ec48c7bd46a25730d11ad721c31c38e52",
+    "stage-sets": "750e31050098abceb987a63a694af07eb904d5f75c7c3e6b140db727b5b8843f",
+    "stage-mixed": "f7b3e451012c58f5ae44b32486cb5b3035f134088c50627ece1171cebd2d2643",
+    "stage-returned": "1e2cd5c14abd9e2ddc438c53ccec602f9757442a51be12d92466246441bd3d4c",
+    "stage-recounts": "3e745339964b55c0ce0f735bb68b623e23e64192cffafa746ed7e74162518275",
+    "stage-stop-repair": "7c2d7865aba23c3264a894d8ab0b27f5ef773b20d6a017bc6c644cde7690cf60",
+    "stage-stop-first-eval": "2fac98d5970f3b1e3ff8083a467f911c1554dfa6299c9693cc43139e5b71ef9f",
+    "stage-stop-commit": "82c7ec61c4640598759923e670222bc60d7eabe41d165b86e1574979722b04b0",
+    "stage-search-repair-off": "c064d53fe231a99982ec0ebc08e2948ca82a626d794f95e1b5a24be73300ae5d",
+  };
+  /** Issue #815：値を #801 の前（db91af3）に戻した。区分：連鎖で照らす（`stage-search-repair-off` も #813 の JSON.parse の経路で復元する）。#801 の値は `BEFORE_761_REQUESTS_801`。今の等値は `_801` で保つ */
+  const BEFORE_761_REQUESTS_800: Readonly<Record<string, string>> = {
+    "stage-stagnation": "5c51234f156300cf85d282ff2cc32d78891e925da3fb0eddf5e7ae1edc01705a",
+    "stage-adopting": "fe3d32ced7ac8e7137af99369c198d1f36789ca952f9627cc295677544abb21e",
+    "stage-sets": "793a6df6db6e06e70fe12a0b73b7bbffe88df22aa2852d97cfc266c6a78ad590",
+    "stage-mixed": "516f8648cc4924f1e6bbb97b130ed6ea53a9aafd388c92123669880ab25ed68e",
+    "stage-returned": "f6de1db43d14d2f726e496fa55819c01a7e44cc222be1b448093b08d91fb2c37",
+    "stage-recounts": "97a224bd9c6626a5826d4562ef0092b83fa052a54125235f88bda5f9c135e976",
+    "stage-stop-repair": "c443fac0fadb5908f183ef34427f57848a8b62df79b8e05f344d47e94c5d6da7",
+    "stage-stop-first-eval": "dcb789bf2c1e0fbb4fced70f7fd069f33b3786f8fbfc6a1fb5a11652782c9adb",
+    "stage-stop-commit": "b6747a8c137ebe1ad9da7eda39e6100c3627fa5d109858e4b12a836b9ad54558",
+    "whole-stagnation": "1beafeade5f80b2970bf58765ed43c9a157d71e14f8b9aa01125863388269485",
+    "whole-adopting": "25054935f7daba9932ee930cf9fb2d3bc0f289da585b1fd64843aabd9938b4f7",
+    "whole-sets": "e08b138f04db2a038c132b68a290cc860bc1624f730d3f48c8e086228f2651ff",
+    "whole-mixed": "fa8156e6aeb50211a74c639905f25ca75acdfa698d5bee52d2bafed716118786",
+    "whole-recounts": "a0c5594483ab016dbc3147598609eac4a517644cd5abab978660caacab1e84e6",
+    "stage-search-repair-off": "3c21beb9077abd87a0234d6243ff7edac295f378142e72a63b37b42422c527f0",
+    "whole-search-repair-off": "7b30f391f4c943a574d2242f9dc8f6e094139887b47d9e3ef4ea7bfca2bd3d55",
+  };
+  /** Issue #801 の値（`BEFORE_761_REQUESTS_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす */
+  const BEFORE_761_REQUESTS_801: Readonly<Record<string, string>> = {
+    "stage-stagnation": "39d709782210e6c637cc1515b14f03756bf46e8b33187061e8976de8080fcaef",
+    "stage-adopting": "8202bae2f648a7c2851a04d365766faac7808ad42506b8c845489e52caa1e39b",
+    "stage-sets": "fee277e50ccd866b279560b54d33088c26aa55b314cd8b30a11590d15414b6e3",
+    "stage-mixed": "ac4cabca58c10b90e83c48df1bd333572618de76aa2f12d798ccd530801ad0f9",
+    "stage-returned": "6de680f8dc1c4bec9093c37646eb723efaa6c648b0815bc798cf98b815de80c1",
+    "stage-recounts": "c5f42ee698bc32a110a833dc2d0aef3875a99b86755c0757b0d2c912be7fe117",
+    "stage-stop-repair": "4eaa734720ea677576b8011fd36c073c76d24ce1183492aab39b5bbbe2a8f5ba",
+    "stage-stop-first-eval": "026f844792f73d0f375ee73c0842859ef523a16ecda956769377b3b3daf07414",
+    "stage-stop-commit": "1a865ec0ec1f304fa4970c84a30e874de7e6c6fdc2abc7fb157e740efe36facd",
+    "whole-stagnation": "2f4a67146ddb4ac0578356deade71b3a4d424e3b96ab0a0866a8992ed72010ce",
+    "whole-adopting": "c08e99695435b971c91538b3b4732d885f8ce682ede9c0f4a3c8c374546e8cda",
+    "whole-sets": "8e538e9cd2b44cf34fa2c88e8f9e9ab2d0c80bfb6c8f33666f3960dc0a5941e2",
+    "whole-mixed": "019ab5602745e34cbc71b0742e5790dc98f8a17f8992fca870d0974623711fbd",
+    "whole-recounts": "3b39b51af1043e2ac12673d4f5c03489b73b8a9adf972d98c22d8b88f348387a",
+    "stage-search-repair-off": "d953399678e314ecfea3681f33fa716ded260d7f8b0ec00c87833acd4e52e7b1",
+    "whole-search-repair-off": "066527ad5fbd562c0ec6ce139cc435d5ba15ec4ec7ce9680d281a1af1892f9b2",
+  };
+  /** Issue #815：値を #801 の前（db91af3）に戻した。区分：字どおり戻すだけ（直接固定した Issue：#800）。#801 の値は `BEFORE_761_BUDGET_801` */
+  const BEFORE_761_BUDGET_800: Readonly<Record<string, string>> = {
+    "whole-stagnation": "d36fa97a26ffea73d8df7bbff8133de338d4032786fbab10f032c30da7767c70",
+    "whole-adopting": "4f351dca100e00654905c20f17c5549c87d9506562f789f5786eec3db67b1269",
+    "whole-sets": "a8752a9c071c62a617d1fb6034ff34f3679ff5d9ce45ad7d29d47efb2478369a",
+    "whole-recounts": "4b663c7a7e19a2497f5ce2d3358d80ed46c0d312ead85144a96ba614cdc553fd",
+  };
+  /** Issue #801 の値（`BEFORE_761_BUDGET_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす */
+  const BEFORE_761_BUDGET_801: Readonly<Record<string, string>> = {
+    "whole-stagnation": "5e3f2de5f4c23515b0750a4fc48166dd99e8cae7587265fd655b39e297652829",
+    "whole-adopting": "1cdc44a49c5d7d05075effe0b0684a54bc04ea9d9c59347fa37c55751141afaf",
+    "whole-sets": "d9d3afeda2a36be5961f0a9578ccd1f1de38d84d0c15381c363d90190a182c83",
+    "whole-recounts": "7743ad73baca090a7e6910ca2fce0468dff0156840e741523ac8c29bafcc2dd8",
+  };
+  /** Issue #815：値を #801 の前（db91af3）に戻した。区分：字どおり戻すだけ（直接固定した Issue：#800）。#801 の値は `BEFORE_795_BUDGET_801` */
+  const BEFORE_795_BUDGET_800: Readonly<Record<string, string>> = {
+    "whole-mixed": "5bcef53bb34d443f998f7418774a8ce9dc13f01ff24b46d1aefeb1f36cd4ee26",
+    "whole-search-repair-off": "c5a335c7042b951552fdd966e60c87222a5d7fd00493dc7c66c06cb0abd7b96d",
+  };
+  /** Issue #801 の値（`BEFORE_795_BUDGET_800` の #801 の後）。今の等値の期待はこちらで保つ（Issue #815）。区分：連鎖で照らす */
+  const BEFORE_795_BUDGET_801: Readonly<Record<string, string>> = {
+    "whole-mixed": "f5f91e06ec5355e12014eb9e01042b6910eb34fa9b614365ac7414eb6c4d93bc",
+    "whole-search-repair-off": "6739a0ae3872882851da2fff075fe489840bf38bb8e50c2b9616161735b31e29",
+  };
+  /** 費用の印に替えた全出力の期待（#801 で取り直した値を先に、戻した旧値は残す） */
+  const budgetExpectedOf801 = (name: string): string | undefined => BEFORE_795_BUDGET_801[name] ?? BEFORE_761_BUDGET_801[name] ?? budgetExpectedOf(name);
+  /** 費用の印に替えた全出力の期待（#806 で取り直した値を先に。ids on の経路だけ） */
+  const budgetExpectedOf806 = (name: string): string | undefined =>
+    BEFORE_795_BUDGET_806[name] ?? BEFORE_761_BUDGET_806[name] ?? budgetExpectedOf801(name);
   /** 費用の印に替えた全出力の期待（#761 の 4 経路は #761 の値、#795 の 2 経路は #795 の値） */
   const budgetExpectedOf = (name: string): string | undefined => BEFORE_795_BUDGET[name] ?? BEFORE_761_BUDGET[name];
   /** 費用の印に替えるキー（f9bf3b3 の 4 経路の出力に現れた budget_*。ほかのキーを替えていないことをこの集合で照らす） */
@@ -5622,32 +6393,76 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const strippedDigests: Record<string, string> = {};
     const strippedRequestDigests: Record<string, string> = {};
     const budgetDigests: Record<string, string> = {};
+    /** Issue #815：復元の順（#813 → #806 → #805 → #801 → #800）に #801 の段も外した要求の列。戻した旧の値と照らす */
+    const oldStrippedRequestDigests: Record<string, string> = {};
+    /** Issue #815：#813 の JSON.parse の経路に #806・#801 を重ねた要求の列（stage の走りだけ） */
+    const oldFrameRequestDigests: Record<string, string> = {};
     const budgetKeySets: Record<string, readonly string[]> = {};
     const budgetDerivedSets: Record<string, BudgetNormalizedFiles["derived"]> = {};
     const searched: Record<string, boolean> = {};
+    const restoredStages: Record<string, { readonly whole: string; readonly stripped: string; readonly requests: string }> = {};
     for (const entry of INVARIANT_RUNS) {
-      const { digest, stripped, strippedRequests, budgetNormalized, budgetKeys, budgetDerived, hasSearch } = await invariantDigest(entry);
+      const {
+        digest,
+        stripped,
+        strippedRequests,
+        oldStrippedRequests,
+        oldFrameRequests,
+        budgetNormalized,
+        budgetKeys,
+        budgetDerived,
+        hasSearch,
+        restoredStage,
+      } = await invariantDigest(entry);
       digests[entry.name] = digest;
       strippedDigests[entry.name] = stripped;
       strippedRequestDigests[entry.name] = strippedRequests;
+      oldStrippedRequestDigests[entry.name] = oldStrippedRequests;
+      if (oldFrameRequests !== undefined) oldFrameRequestDigests[entry.name] = oldFrameRequests;
       budgetDigests[entry.name] = budgetNormalized;
       budgetKeySets[entry.name] = budgetKeys;
       budgetDerivedSets[entry.name] = budgetDerived;
       searched[entry.name] = hasSearch;
+      if (restoredStage !== undefined) restoredStages[entry.name] = restoredStage;
     }
-    expect(digests).toEqual(BEFORE_746);
+    // 今の等値の期待は #801 の値（`_801`）で保つ（Issue #815）。`_800` は #801 の前（db91af3）に戻した値
+    expect(digests).toEqual({ ...BEFORE_746, ...BEFORE_746_801, ...BEFORE_746_806, ...BEFORE_746_813, ...BEFORE_746_826 });
+    // Issue #815：復元の順（#813 → #806 → #805 → #801 → #800）に #801 の段も外した要求の列が、戻した旧の値と等しい。
+    // 文字列のままの経路では #813 の枠の塊（改行がエスケープされている）を戻せないので `stage-search-repair-off` だけを除き、
+    // その 1 つは #813 の JSON.parse の経路（`restoredStage` と同じ入口）に #806・#801 を重ねて別に照らす（下）。
+    // 全出力の指紋は checkpoint の output_digest に #800 の経路の差を持つので連鎖では照らさない（字どおり戻すだけ。直接固定した Issue：#800）
+    expect(withoutOne(oldStrippedRequestDigests, "stage-search-repair-off")).toEqual(
+      withoutOne({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_800 }, "stage-search-repair-off"),
+    );
+    // Issue #815：`stage-search-repair-off` の要求の列も、#813 の JSON.parse の経路に #806・#801 を重ねれば戻した旧の値に戻る
+    expect(oldFrameRequestDigests["stage-search-repair-off"]).toBe(BEFORE_761_REQUESTS_800["stage-search-repair-off"]);
+    // 戻した旧の値は #801 の値と違う（字どおり戻すだけの値も、値の集合として木に残す。Issue #815）
+    expect(BEFORE_761_RAW_800["stage-stagnation"]).not.toBe(BEFORE_761_RAW_801["stage-stagnation"]);
+    expect(BEFORE_761_BUDGET_800["whole-stagnation"]).not.toBe(BEFORE_761_BUDGET_801["whole-stagnation"]);
+    expect(BEFORE_795_BUDGET_800["whole-mixed"]).not.toBe(BEFORE_795_BUDGET_801["whole-mixed"]);
+    // Issue #813：`stage-search-repair-off` の取り直しの根拠を等値で照らす。要求列（JSON 文字列）を本文に戻してから
+    // `withoutFrameFieldNormal` を掛け直すと、診断と R-fr-08 を外した要求列・全出力・診断と R-fr-08 を外した全出力が
+    // 旧値（既存の定数）に戻る。復元の外に残るのは枠の塊だけで、ほかの欄は変わっていない
+    expect(BEFORE_746_800["stage-search-repair-off"]).toBe(BEFORE_748_BASE_800["stage-search-repair-off"]);
+    expect(restoredStages["stage-search-repair-off"]).toEqual({
+      whole: BEFORE_746_801["stage-search-repair-off"],
+      stripped: BEFORE_761_RAW_806["stage-search-repair-off"],
+      requests: BEFORE_761_REQUESTS_801["stage-search-repair-off"],
+    });
     // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと（search_repair・requests・stage_spans を残したまま）、直す前（f9bf3b3）の生出力とバイト列で同じ
     for (const entry of INVARIANT_RUNS) {
       if (WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_RAW[entry.name]);
+      expect(strippedDigests[entry.name], entry.name).toBe(
+        BEFORE_761_RAW_826[entry.name] ?? BEFORE_761_RAW_813[entry.name] ?? BEFORE_761_RAW_806[entry.name] ?? BEFORE_761_RAW_801[entry.name] ?? BEFORE_761_RAW[entry.name],
+      );
     }
     // 費用が入力長で変わる 4 経路を含む全部の要求の列は、旧値（f9bf3b3）と一致する
-    expect(strippedRequestDigests).toEqual(BEFORE_761_REQUESTS);
+    expect(strippedRequestDigests).toEqual({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_801, ...BEFORE_761_REQUESTS_813, ...BEFORE_761_REQUESTS_826 });
     // 4 経路は、診断と R-fr-08 を外し budget_* の値だけを印に替えた全出力（記録・納品物・要約のほかの欄・終了コード・往復の数と
     // 採否の並び）が f9bf3b3 と一致する。印に替えたキーが budget_* だけであることも照らす
     for (const entry of INVARIANT_RUNS) {
       if (!WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf(entry.name));
+      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf806(entry.name));
       expect(budgetKeySets[entry.name], entry.name).toEqual(BUDGET_KEYS);
       // 印に替えたのは budget_* だけで、導出し直したのは manifest の要約の行（sha256・size_bytes）だけ
       expect(budgetDerivedSets[entry.name], entry.name).toEqual([{ path: "artifacts/summary.json", fields: ["sha256", "size_bytes"] }]);
@@ -5715,6 +6530,10 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     const digests: Record<string, string> = {};
     const strippedDigests: Record<string, string> = {};
     const strippedRequestDigests: Record<string, string> = {};
+    /** Issue #815：復元の順に #801 の段も外した要求の列の指紋（戻した旧の値と照らす） */
+    const oldStrippedRequestDigests: Record<string, string> = {};
+    /** Issue #815：#813 の JSON.parse の経路に #806・#801 を重ねた要求の列（stage の走りだけ） */
+    const oldFrameRequestDigests: Record<string, string> = {};
     const budgetDigests: Record<string, string> = {};
     const budgetKeySets: Record<string, readonly string[]> = {};
     const budgetDerivedSets: Record<string, BudgetNormalizedFiles["derived"]> = {};
@@ -5732,28 +6551,39 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
       const entry = INVARIANT_RUNS[index]!;
       current = `${entry.name}（${index + 1}/${INVARIANT_RUNS.length}）`;
       currentTiming = { ioMs: 0, runMs: 0, hashMs: 0 };
-      const { digest, stripped, strippedRequests, budgetNormalized, budgetKeys, budgetDerived, hasSearch } = await invariantDigest(entry, true, currentTiming);
+      const { digest, stripped, strippedRequests, oldStrippedRequests, oldFrameRequests, budgetNormalized, budgetKeys, budgetDerived, hasSearch } = await invariantDigest(entry, true, currentTiming);
       timings.push({ name: entry.name, ...currentTiming });
       digests[entry.name] = digest;
       strippedDigests[entry.name] = stripped;
       strippedRequestDigests[entry.name] = strippedRequests;
+      oldStrippedRequestDigests[entry.name] = oldStrippedRequests;
+      if (oldFrameRequests !== undefined) oldFrameRequestDigests[entry.name] = oldFrameRequests;
       budgetDigests[entry.name] = budgetNormalized;
       budgetKeySets[entry.name] = budgetKeys;
       budgetDerivedSets[entry.name] = budgetDerived;
       searched[entry.name] = hasSearch;
     }
-    expect(digests).toEqual(BEFORE_748_BASE);
+    expect(digests).toEqual({ ...BEFORE_748_BASE, ...BEFORE_748_BASE_801, ...BEFORE_748_BASE_806, ...BEFORE_748_BASE_813, ...BEFORE_748_BASE_826 });
+    // Issue #815：復元の順に #801 の段も外した要求の列が、戻した旧の値と等しい。`stage-search-repair-off` は
+    // #813 の JSON.parse の経路（`restoredStage` と同じ入口）に #806・#801 を重ねて別に照らす（下）
+    expect(withoutOne(oldStrippedRequestDigests, "stage-search-repair-off")).toEqual(
+      withoutOne({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_800 }, "stage-search-repair-off"),
+    );
+    // Issue #815：`stage-search-repair-off` の要求の列も、#813 の JSON.parse の経路に #806・#801 を重ねれば戻した旧の値に戻る
+    expect(oldFrameRequestDigests["stage-search-repair-off"]).toBe(BEFORE_761_REQUESTS_800["stage-search-repair-off"]);
     // 診断の塊 1 つと規則 R-fr-08 1 つを位置で外すと（search_repair・requests・stage_spans を残したまま）、直す前（f9bf3b3）の生出力とバイト列で同じ
     for (const entry of INVARIANT_RUNS) {
       if (WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(strippedDigests[entry.name], entry.name).toBe(BEFORE_761_RAW[entry.name]);
+      expect(strippedDigests[entry.name], entry.name).toBe(
+        BEFORE_761_RAW_826[entry.name] ?? BEFORE_761_RAW_813[entry.name] ?? BEFORE_761_RAW_806[entry.name] ?? BEFORE_761_RAW_801[entry.name] ?? BEFORE_761_RAW[entry.name],
+      );
     }
     // 費用が入力長で変わる 4 経路を含む全部の要求の列は、旧値（f9bf3b3）と一致する
-    expect(strippedRequestDigests).toEqual(BEFORE_761_REQUESTS);
+    expect(strippedRequestDigests).toEqual({ ...BEFORE_761_REQUESTS, ...BEFORE_761_REQUESTS_801, ...BEFORE_761_REQUESTS_813, ...BEFORE_761_REQUESTS_826 });
     // 4 経路は、診断と R-fr-08 を外し budget_* の値だけを印に替えた全出力が f9bf3b3 と一致する（印のキーも budget_* だけ）
     for (const entry of INVARIANT_RUNS) {
       if (!WHOLE_COST_AFFECTED.has(entry.name)) continue;
-      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf(entry.name));
+      expect(budgetDigests[entry.name], entry.name).toBe(budgetExpectedOf806(entry.name));
       expect(budgetKeySets[entry.name], entry.name).toEqual(BUDGET_KEYS);
       expect(budgetDerivedSets[entry.name], entry.name).toEqual([{ path: "artifacts/summary.json", fields: ["sha256", "size_bytes"] }]);
     }
@@ -6122,7 +6952,7 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     };
   }
 
-  const LARGE_TABLE_RESPONSES = idsResponsesOf(LARGE_LIST, LARGE_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW);
+  const LARGE_TABLE_RESPONSES = idsResponsesOf(LARGE_LIST, LARGE_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW_IDS);
   const LARGE_C1: readonly RecordedCall[] = [
     structured(LARGE_TABLE_RESPONSES.entities),
     structured(LARGE_TABLE_RESPONSES.fields),
@@ -6621,14 +7451,10 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
     await heldC2.whenPending(4);
     clock.advance(10);
     await heldC2.release(3);
-    // C3 の 2 回目（束 3 つ）を、束 1 → 0 → 2 の順に完了させる
-    await heldC3.whenPending(6);
+    // C3 の 2 回目は再点検の部分（書き直した R3 の 1 束）だけ（Issue #805）
+    await heldC3.whenPending(4);
     clock.advance(10);
     await heldC3.release(3);
-    clock.advance(10);
-    await heldC3.release(4);
-    clock.advance(10);
-    await heldC3.release(5);
     const { run, record, requests, spans, stages } = await runPromise;
     expect(run.code, JSON.stringify(record["stopped"])).toBe(EXIT_OK);
     expect(stages.map((stage) => stage["stage"])).toEqual([
@@ -6649,27 +7475,26 @@ describe("旗 v12.ids の段の走り：要件 12 件・束 3 つ（Issue #748�
       [4, 830, 950],
       // C2 の 2 回目（R3 だけ）
       [5, 960, 1_070],
-      // C3 の 2 回目：3 束が 1_070/1_170/1_270 に始まり、束 0 → 1 → 2 の順（1_380/1_390/1_400）で終わる
-      [6, 1_070, 1_380],
-      [6, 1_170, 1_390],
-      [6, 1_270, 1_400],
+      // C3 の 2 回目：再点検の部分の 1 束が 1_070 に始まり 1_180 に終わる（Issue #805）
+      [6, 1_070, 1_180],
     ]);
     expect(spans).toEqual([
       // C2 の初回の span は、いちばん遅い束（束 1）の終わりまで
       { stage: "mapping", round: 1, start_ms: 300, end_ms: 630, stage_indices: [3] },
       // C3 の 1 回目の span は、いちばん遅い束（束 1）の終わりまで
       { stage: "semantic-check", round: 1, start_ms: 630, end_ms: 960, stage_indices: [4] },
-      { stage: "semantic-check", round: 2, start_ms: 1_070, end_ms: 1_400, stage_indices: [6] },
+      { stage: "semantic-check", round: 2, start_ms: 1_070, end_ms: 1_180, stage_indices: [6] },
     ]);
     expect(spans.filter((span) => span["stage"] === "semantic-check").map((span) => span["round"])).toEqual([1, 2]);
-    // 段の時間（= span の時間）は、行の時間の和とは違う（C3 の両 round とも）
+    // 段の時間（= span の時間）は、行の時間の和とは違う（束が複数の回）。1 束の回（再点検の部分）は行の和と同じ
     for (const span of spans.filter((entry) => entry["stage"] === "semantic-check")) {
       const [index] = span["stage_indices"] as readonly number[];
       const rows = requests.filter((request) => request["stage_index"] === index);
       const sum = rows.reduce((total, request) => total + ((request["end_ms"] as number) - (request["start_ms"] as number)), 0);
       const spanMs = (span["end_ms"] as number) - (span["start_ms"] as number);
       expect(spanMs).toBe(stages[index!]!["duration_ms"]);
-      expect(spanMs).not.toBe(sum);
+      if (rows.length > 1) expect(spanMs).not.toBe(sum);
+      else expect(spanMs).toBe(sum);
       const slowest = Math.max(...rows.map((request) => request["end_ms"] as number));
       expect(span["end_ms"]).toBe(slowest);
     }
@@ -7965,8 +8790,8 @@ describe("段の出力の上限の上書きの表（`--provider ollama` の v1.2
       const run = await runOf(execution);
       expect(run.run.code, `${execution}: exit ${String(run.run.code)}`).toBe(EXIT_OK);
       const c3 = requestsOf(run.structuredRequests, SEMANTIC_CHECK_SCHEMA_NAME);
-      // 1 回目の束 2 + 再点検の束 2（要求の数を等値で固定する）
-      expect(c3, execution).toHaveLength(4);
+      // 1 回目の束 2 + 再点検の部分（書き直した先頭の 1 要件）の束 1（要求の数を等値で固定する。Issue #805）
+      expect(c3, execution).toHaveLength(3);
       for (const request of c3) expect(limitOf(request), execution).toBe(32_768);
       // ほかの段（B1）は今の値のまま（上書きを外す変異で赤）
       for (const request of requestsOf(run.structuredRequests, WRITE_V11A_SCHEMA_NAME)) expect(limitOf(request), execution).toBe(maxOutputTokensForEffort("high", "write"));

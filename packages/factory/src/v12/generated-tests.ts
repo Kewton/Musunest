@@ -183,6 +183,11 @@ export interface GeneratedTests {
    * #624）。空でなければ、呼ぶ側はその要件を固定文で止める（試験を作らず、近い行に結び付けない）
    */
   readonly stopped: readonly Problem[];
+  /**
+   * 採った種類が existence-only のときだけ組に残す試験（条件の無い操作とその entity の項目だけの fixed-test に作る
+   * 項目 × screen の在ることの試験。Issue #826）。`keptGenerated` が採った種類（J2 の後）で絞る
+   */
+  readonly existenceOnlyTestIds: ReadonlySet<string>;
 }
 
 /** 作る試験を組む入力（持ち越しを除いた表と一覧。台帳は旗 on の導出） */
@@ -285,25 +290,94 @@ const ownedOfKind = (owned: readonly NameTableRow[], kinds: readonly TestTargetK
   owned.filter((row) => kinds.includes(row.kind));
 
 /**
- * 所属の行がすべて、必須の kind が normal だけの試験の型の対象（台帳の `ownershipRows` の組ごとの対象の種類＝画面・entity の行）
- * である要件 ID（一覧の順。#624）。正常・異常・境界のそろいの不足の免除に使う。**免除は台帳の型と所属だけで決め、作った試験の
- * 有無・数では決めない**。所属が 0 行の要件は載せない
+ * 所属の行がすべて、必須の kind が normal だけの試験の型の対象（画面・entity の行）の要件、または値の対象（計算・条件つき操作の行と、
+ * 確かめ方が検査の式の要件の targets）が無い要件の ID（一覧の順）。正常・異常・境界のそろいの不足の免除に使う。**免除は値の対象が
+ * 無いことで決め、作った試験の有無・数では決めない**。所属が 0 行の要件は載せない（Issue #624・#800）。
  */
 export function normalOnlyOwnershipRequirementIds(table: NameTable, ledger: LedgerView, list: RequirementList): readonly string[] {
-  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
-  const rolesById = new Map(table.ownership.map((entry) => [entry.requirementId, entry.roles] as const));
-  const kinds = new Set(
-    ledger.ownershipRows.filter((row) => row.t2.requiredKinds.every((kind) => kind === "normal")).flatMap((row) => row.t2.targetKinds),
-  );
   return list.requirements
     .filter((requirement) => {
-      const roles = rolesById.get(requirement.id) ?? [];
-      return roles.length > 0 && roles.every((role) => {
-        const owned = rowById.get(role.id);
-        return owned !== undefined && kinds.has(owned.kind);
-      });
+      const roles = table.ownership.find((entry) => entry.requirementId === requirement.id)?.roles ?? [];
+      return roles.length > 0 && frameValueTargetIdsOf(table, ledger, requirement.id).length === 0;
     })
     .map((requirement) => requirement.id);
+}
+
+/** 条件（when）を持つ操作の行か */
+const isOperationWithWhenForFrame = (row: NameTableRow): boolean =>
+  row.kind === "operation" && row.type !== null && typeof row.type === "object" && "hasWhen" in row.type && row.type.hasWhen === true;
+
+/** 条件（when）を持たない操作の行か */
+const isWhenlessOperationRow = (row: NameTableRow): boolean =>
+  row.kind === "operation" && row.type !== null && typeof row.type === "object" && "hasWhen" in row.type && row.type.hasWhen === false;
+
+/**
+ * 項目 × screen の在ることの試験を、採った種類が existence-only のときだけ作る要件の対象の項目（Issue #826）。
+ * 所属（表の所属の行。導いた親 entity を含まない）が、条件の無い操作の行 1 つ以上と、それらの操作の entity の項目の行 1 つ以上
+ * だけのときだけ、所属の順の項目を返す（重複・表に無い ID・ほかの種類の行が混じれば undefined＝fail-closed）
+ */
+function whenlessOperationFieldTargetsOf(owned: readonly NameTableRow[], roles: readonly { readonly id: string }[]): readonly NameTableRow[] | undefined {
+  if (owned.length === 0 || owned.length !== roles.length) return undefined;
+  const ids = owned.map((row) => row.id);
+  if (new Set(ids).size !== ids.length) return undefined;
+  const operations = owned.filter(isWhenlessOperationRow);
+  const fields = owned.filter((row) => row.kind === "field");
+  if (operations.length === 0 || fields.length === 0 || operations.length + fields.length !== owned.length) return undefined;
+  const entities = new Set(operations.flatMap((operation) => (operation.entity === null ? [] : [operation.entity])));
+  if (entities.size === 0) return undefined;
+  return fields.every((field) => field.entity !== null && entities.has(field.entity)) ? fields : undefined;
+}
+
+/** 条件の無い操作とその entity の項目だけの fixed-test に作る 項目 × screen の試験の ID の印（#652 の試験と区別する。Issue #826） */
+export const WHENLESS_FIELD_SCREEN_ID_MARKER = "whenless-field-screen";
+
+/** 採った種類が existence-only のときだけ残す試験の ID か（`existenceOnlyTestIds` と同じ判定を ID でも引けるようにする） */
+export const isWhenlessFieldScreenTestId = (id: string): boolean => id.startsWith(`${GENERATED_TEST_ID_PREFIX}${WHENLESS_FIELD_SCREEN_ID_MARKER}:`);
+
+/**
+ * 採った種類が existence-only のときだけ組に残す試験（要件の順）と観測する性質。初回の枠の existence-only の枝に条件つきで載せる
+ * （Issue #826）
+ */
+export function existenceOnlyConditionalTestsOf(
+  generated: GeneratedTests,
+  requirementId: string,
+): readonly { readonly test: FixedTest; readonly observed: string }[] {
+  return generated.tests
+    .filter((test) => test.target.requirementId === requirementId && generated.existenceOnlyTestIds.has(test.id))
+    .map((test) => ({ test, observed: generated.observes.get(test.id) ?? "" }));
+}
+
+/**
+ * 値の対象の候補（計算・条件つき操作の行と、確かめ方が検査の式の要件の targets。項目・entity・画面の行は入れない）。枠と門の
+ * 免除が同じ関数の値を使うための正本で、並びは所属の順のあとに targets の順（Issue #800）
+ */
+export function frameValueTargetIdsOf(table: NameTable, ledger: LedgerView, requirementId: string): readonly string[] {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const roles = table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? [];
+  const owned = roles.flatMap((role) => {
+    const row = rowById.get(role.id);
+    return row !== undefined && (row.kind === "computation" || isOperationWithWhenForFrame(row)) ? [row.id] : [];
+  });
+  const verification = table.verification.find((entry) => entry.requirementId === requirementId);
+  const targets =
+    verification?.kind === "validation-expression" && ledger.rowByVerificationKind.get(verification.kind)?.t1?.targets === true
+      ? verification.targets.filter((id) => rowById.get(id)?.kind === "field")
+      : [];
+  return [...new Set([...owned, ...targets])];
+}
+
+/**
+ * 表の確かめ方が検査の式（validation-expression）の要件 → その `targets` の項目の行の ID（Issue #800）。T2' が validate の
+ * 試験の対象をこの一覧に照らす。旗 `v12.ids` と台帳が on の走りの表だけが対象を持つ
+ */
+export function validationTargetsOf(table: NameTable, ledger: LedgerView): ReadonlyMap<string, readonly string[]> {
+  const targets = new Map<string, readonly string[]>();
+  for (const entry of table.verification) {
+    if (entry.kind !== "validation-expression") continue;
+    if (ledger.rowByVerificationKind.get(entry.kind)?.t1?.targets !== true) continue;
+    targets.set(entry.requirementId, entry.targets);
+  }
+  return targets;
 }
 
 /**
@@ -322,6 +396,7 @@ export function generateTests(input: GeneratedTestsInput): GeneratedTests {
   const observes = new Map<string, string>();
   const excluded: string[] = [];
   const stopped: Problem[] = [];
+  const existenceOnlyTestIds = new Set<string>();
   const push = (test: FixedTest, observed: string): void => {
     tests.push(test);
     observes.set(test.id, observed);
@@ -362,9 +437,11 @@ export function generateTests(input: GeneratedTestsInput): GeneratedTests {
     });
     // 画面・在ること（#624）：台帳の順に、所属に組ごとの対象の種類の行がある最初の行の型で、その行ごとに 1 本（種類に依らない）。
     // どの行の組ごとの対象の種類も所属に無ければ、台帳の順に、所属の行がすべて代わりの対象の種類の行である最初の行の型で、その行
-    // ごとに 1 本（項目だけの所属。#652）。所属は元の表の行だけ（導いた親 entity で代用しない）。操作・計算の行が混じれば作らない。
-    // 順：ここ（LLM を呼ぶ前・種類に依らない）→ 分類は LLM が独立に書く → 分類の照合・J2 の採用 → 採った種類で絞るのは空の集計の
-    // 試験だけ（項目の在ることの試験は種類に依らず残す）→ 検査を全部（中身のやり直しの合併後も同じ順）
+    // ごとに 1 本（項目だけの所属。#652）。所属は元の表の行だけ（導いた親 entity で代用しない）。操作・計算の行が混じれば作らない
+    // （例外：条件の無い操作とその entity の項目だけの所属は、採った種類が existence-only のときだけ残す項目 × screen を作る。#826）。
+    // 順：ここ（LLM を呼ぶ前・種類に依らない）→ 分類は LLM が独立に書く → 分類の照合・J2 の採用 → 採った種類で絞る
+    // （空の集計の試験は ruled だけ、#826 の条件つきの項目 × screen は existence-only だけ。ほかの項目の在ることの試験は種類に依らず残す）
+    // → 検査を全部（中身のやり直しの合併後も同じ順）
     const roles = rolesById.get(requirement.id) ?? [];
     const primary = ledger.ownershipRows.find((row) => ownedOfKind(owned, row.t2.targetKinds).length > 0);
     const fallbackRow =
@@ -384,6 +461,16 @@ export function generateTests(input: GeneratedTestsInput): GeneratedTests {
           push(generatedTest(id, requirement.id, ownedRow.kind, ownedRow.id, kind, t2.operation, [], true), ownershipRow.id);
         }
       }
+    } else {
+      // #652 の例外（Issue #826）：所属に条件の無い操作が混じっていても、所属の全部が「条件の無い操作」と「それらの entity の項目」
+      // だけなら、項目の在ることの試験（項目 × screen。view-structure の代わりの対象の種類）を項目ごとに作る。#652 の試験と区別できる
+      // よう ID に印を付け、採った種類が existence-only のときだけ組に残す（`existenceOnlyTestIds`）。分類は見ない（LLM が独立に書く）
+      const fields = whenlessOperationFieldTargetsOf(owned, roles);
+      for (const field of fields ?? []) {
+        const id = `${GENERATED_TEST_ID_PREFIX}${WHENLESS_FIELD_SCREEN_ID_MARKER}:${requirement.id}:${field.id}:normal`;
+        push(generatedTest(id, requirement.id, "field", field.id, "normal", "screen", [], true), "view-structure");
+        existenceOnlyTestIds.add(id);
+      }
     }
     // 空の集計：確かめ方が fixed-test で分類が ruled の要件だけ（構造で確かめる要件・在ることだけの要件には境界・異常を作らない）
     if (natureById.get(requirement.id) !== "ruled") return;
@@ -391,7 +478,7 @@ export function generateTests(input: GeneratedTestsInput): GeneratedTests {
       push(test, observed);
     }
   });
-  return { tests, observes, excludedRequirementIds: excluded, stopped };
+  return { tests, observes, excludedRequirementIds: excluded, stopped, existenceOnlyTestIds };
 }
 
 /** コードが作る空の集計の試験 1 本（観測する性質は台帳の集計の行の id、データ状態は台帳の表の状態） */

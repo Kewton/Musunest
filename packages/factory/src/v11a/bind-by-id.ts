@@ -33,7 +33,7 @@ import type {
   FixedTest,
   TestSuite,
 } from "../pipeline.js";
-import type { BindResult } from "../stages/bind.js";
+import type { BindCause, BindResult } from "../stages/bind.js";
 import { declarationHasLocation, declarationKindOfRole } from "../stages/correspondence.js";
 import { deriveOwnership, type NameTable, type NameTableRow } from "./names.js";
 import type { TestObserves } from "./stages/test-spec.js";
@@ -86,20 +86,54 @@ export interface IdBindings {
  */
 export function bindTestsById(app: NormalizedAppSpec, table: NameTable, suite: TestSuite): IdBindings {
   const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const verificationById = new Map(table.verification.map((entry) => [entry.requirementId, entry] as const));
+  const expressionRequirements = validationExpressionRequirementsOf(table);
+  const world = validationWorldOf(app);
   const bindings = new Map<string, BindResult>();
+  const unbound = (testId: string, cause: BindCause, detail: string): void => {
+    bindings.set(testId, { kind: "unbound", testId, cause, detail });
+  };
   for (const test of suite.tests) {
     const roleId = test.target.roleId;
     const row = roleId === undefined ? undefined : rowById.get(roleId);
     if (row === undefined) {
-      bindings.set(test.id, {
-        kind: "unbound",
-        testId: test.id,
-        cause: "no-mapping",
-        detail: "試験の対象の ID が名前の表に無い",
-      });
+      unbound(test.id, "no-mapping", "試験の対象の ID が名前の表に無い");
       continue;
     }
-    // validate の試験の場所は `requiredValidationLocation` 1 つが決める（M-03。v1 と同じ。Issue #666）
+    // 旗 `v12.ids` の検査の式（validation-expression）の要件の validate の試験は、名前ではなく参照の集合で結ぶ（Issue #801）
+    const requirement = expressionRequirements.get(test.target.requirementId);
+    if (test.operation === "validate" && verificationById.get(test.target.requirementId)?.kind === "validation-expression") {
+      if (row.kind !== test.target.kind || requirement === undefined) {
+        unbound(test.id, "no-candidate", "表の ID が指す場所が宣言に無い");
+        continue;
+      }
+      if (requirement.conflict) {
+        unbound(test.id, "ambiguous", "同じ entity で同じ対象の集合を持つ要件が複数あり、検査が 1 つに決まらない");
+        continue;
+      }
+      const wanted = targetNameSet(requirement.targets);
+      const candidates = world.validations.filter((validation) => {
+        if (validation.entity !== requirement.entity) return false;
+        const references = validationReference(world, validation);
+        return references !== null && sameNameSet(references, wanted);
+      });
+      if (candidates.length === 0) {
+        unbound(test.id, "no-candidate", "式がちょうど対象の項目を参照する検査が宣言に無い");
+        continue;
+      }
+      if (candidates.length > 1) {
+        unbound(test.id, "ambiguous", "式がちょうど対象の項目を参照する検査が複数あり、1 つに決まらない");
+        continue;
+      }
+      const location: DeclarationLocation = { kind: "validation", entity: requirement.entity, name: candidates[0]!.name };
+      if (!declarationHasLocation(app, location)) {
+        unbound(test.id, "no-candidate", "表の ID が指す場所が宣言に無い");
+        continue;
+      }
+      bindings.set(test.id, { kind: "bound", testId: test.id, location });
+      continue;
+    }
+    // ほかの種類の validate の試験の場所は `requiredValidationLocation` 1 つが決める（M-03。v1 と同じ。Issue #666）
     const location: DeclarationLocation | undefined =
       test.operation === "validate"
         ? requiredValidationLocation(table, test)
@@ -107,12 +141,7 @@ export function bindTestsById(app: NormalizedAppSpec, table: NameTable, suite: T
           ? locationOfRow(table, row)
           : undefined;
     if (location === undefined || !declarationHasLocation(app, location)) {
-      bindings.set(test.id, {
-        kind: "unbound",
-        testId: test.id,
-        cause: "no-candidate",
-        detail: "表の ID が指す場所が宣言に無い",
-      });
+      unbound(test.id, "no-candidate", "表の ID が指す場所が宣言に無い");
       continue;
     }
     bindings.set(test.id, { kind: "bound", testId: test.id, location });
@@ -141,25 +170,245 @@ export function requiredValidationLocation(table: NameTable, test: FixedTest): D
 }
 
 /**
- * 要る検査の骨組み 1 件（B1・直す段にデータで渡す）。所属 entity の名前・検査の名前・対象の行の id と種類・要求する試験 ID の
- * 並び・競合の印だけを持つ（式・期待・分類・宣言・表の名前の写しは持たない。R2-1）。
- * `conflict` が真の件は、ほかの件に同じ名前がある（別の entity の同名の行、または同じ（entity・名前）を要求する別の行。検査の
- * 名前は宣言全体で一意なので、名前で結ぶ契約の上では両方を実現できない）。書く要求にしない（どちらかを選ばない・改名しない）。
+ * 要る検査の骨組み 1 件（B1・直す段にデータで渡す）。要件 ID・所属 entity の名前・対象の項目の名前の並び（表の順）・要求する
+ * 試験 ID の並び・競合の印だけを持つ（検査の名前・式・期待・分類・宣言・表の名前の写しは持たない。R2-1。Issue #801）。
+ * 確かめ方が検査の式（validation-expression）の要件は要件ごとに 1 件（`targets` は要件の対象の項目）。ほかの種類の要件は
+ * 名前で結ぶ契約のままなので、対象の行ごとに 1 件（`targets` はその行の名前 1 つ）にする（Issue #666・#801）。
  */
 export interface RequiredValidation {
+  readonly requirementId: string;
   readonly entity: string | null;
-  readonly name: string;
-  readonly rowId: string;
-  readonly rowKind: NameTableRow["kind"];
+  readonly targets: readonly string[];
   readonly testIds: readonly string[];
   readonly conflict: boolean;
 }
 
+/** 名前の集合が同じか（順不同・重複なしの集合として比べる） */
+export function sameNameSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) return false;
+  for (const name of left) if (!right.has(name)) return false;
+  return true;
+}
+
+/** entity と正規化した対象の集合から組む鍵（順不同・重複なし） */
+export function normalizedTargetsKey(entity: string | null, targets: readonly string[]): string {
+  return `${entity ?? ""}\u0000${[...new Set(targets)].sort().join("\u0000")}`;
+}
+
+// ── 検査の式が参照する項目の集合（旗 v12.ids の要件。Issue #801）──────────────────────────
+
 /**
- * 固定した組と表から、要る検査の骨組みを導く（純粋。宣言に依らない）。観測する性質が `validation` の validate の試験だけ
- * （既定値・選択肢の集合の試験は専用の照合で検査を要求しないので除く）。同じ行の試験は 1 件にまとめ、並びは表の行の順
- * （試験 ID は組の順）。同じ名前を 2 つ以上の行が要求すれば（別 entity の同名・同じ（entity・名前）を要求する entity の行と項目の
- * 行）、その全件に競合の印を付ける（並びで選ばない）。呼ぶ側は評価の文脈と同じ組（棄却・持ち越しで外した後の組）を渡す。
+ * 検査の式の名前解決に要る宣言の写し。正規化した宣言（`validationWorldOf`）と、読んだ原文
+ * （`validationWorldOfDocument`）の両方から同じ形に組む。`expression` が null の計算（集計・精算）は名前解決には使うが
+ * 項目を足さない
+ */
+export interface ValidationWorld {
+  readonly entities: readonly { readonly name: string; readonly fields: readonly string[] }[];
+  readonly computations: readonly { readonly name: string; readonly entity: string | null; readonly expression: string | null }[];
+  readonly validations: readonly { readonly name: string; readonly entity: string; readonly expression: string }[];
+}
+
+/** 正規化した宣言から、検査の式の名前解決に要る写しを組む */
+export function validationWorldOf(app: NormalizedAppSpec): ValidationWorld {
+  return {
+    entities: app.spec.entities.map((entity) => ({ name: entity.name, fields: Object.keys(entity.fields) })),
+    computations: app.spec.computed.map((computed) => ({
+      name: computed.name,
+      entity: computedEntity(computed),
+      expression: isComputedExpression(computed) ? computed.expression : null,
+    })),
+    validations: app.spec.validations.map((validation) => ({
+      name: validation.name,
+      entity: validation.entity,
+      expression: validation.expression,
+    })),
+  };
+}
+
+const documentRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** 原文を読んだ宣言（spec-engine の `readSpecDocument` の `document`）から、同じ写しを組む */
+export function validationWorldOfDocument(document: Record<string, unknown>): ValidationWorld {
+  const list = (value: unknown): readonly Record<string, unknown>[] =>
+    Array.isArray(value) ? value.filter(documentRecord) : [];
+  const text = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+  return {
+    entities: list(document["entities"]).flatMap((entity) => {
+      const name = text(entity["name"]);
+      const fields = entity["fields"];
+      return name === undefined || !documentRecord(fields) ? [] : [{ name, fields: Object.keys(fields) }];
+    }),
+    computations: list(document["computed"]).flatMap((computed) => {
+      const name = text(computed["name"]);
+      if (name === undefined) return [];
+      const expression = text(computed["expression"]);
+      const entity = text(computed["entity"]) ?? null;
+      return [{ name, entity, expression: expression ?? null }];
+    }),
+    validations: list(document["validations"]).flatMap((validation) => {
+      const name = text(validation["name"]);
+      const entity = text(validation["entity"]);
+      const expression = text(validation["expression"]);
+      return name === undefined || entity === undefined || expression === undefined ? [] : [{ name, entity, expression }];
+    }),
+  };
+}
+
+/**
+ * 検査の式（同じ entity の項目と、その entity の計算）が参照する**項目の名前の集合**（順不同・重複なし）。計算の式は何段でも
+ * 辿って項目に写す（集計・精算の計算は項目を足さない）。構文解析か名前解決に失敗した式・循環する計算を辿った式は null
+ * （候補にしない。部分集合として誤採用しない）。Issue #801
+ */
+export function referenceFieldNamesOf(
+  world: ValidationWorld,
+  entity: string,
+  expression: string,
+): ReadonlySet<string> | null {
+  const host = world.entities.find((candidate) => candidate.name === entity);
+  if (host === undefined) return null;
+  const fields = new Set(host.fields);
+  const expressions = new Map<string, string>();
+  const otherComputed = new Set<string>();
+  for (const computed of world.computations) {
+    if (computed.entity !== entity) continue;
+    if (computed.expression === null) otherComputed.add(computed.name);
+    else expressions.set(computed.name, computed.expression);
+  }
+  const result = new Set<string>();
+  let failed = false;
+  const walkExpression = (text: string, visiting: ReadonlySet<string>): void => {
+    const parsed = parseExpression(text);
+    if (!parsed.ok) {
+      failed = true;
+      return;
+    }
+    const walk = (node: AstNode): void => {
+      if (failed) return;
+      switch (node.kind) {
+        case "name": {
+          if (fields.has(node.name)) {
+            result.add(node.name);
+            return;
+          }
+          const inner = expressions.get(node.name);
+          if (inner !== undefined) {
+            if (visiting.has(node.name)) {
+              failed = true;
+              return;
+            }
+            walkExpression(inner, new Set([...visiting, node.name]));
+            return;
+          }
+          // 集計・精算の計算は名前としては解決するが、項目を足さない。解決できない名前は失敗
+          if (!otherComputed.has(node.name)) failed = true;
+          return;
+        }
+        case "member":
+          failed = true;
+          return;
+        case "unary":
+          walk(node.operand);
+          return;
+        case "binary":
+          walk(node.left);
+          walk(node.right);
+          return;
+        case "call":
+          node.args.forEach(walk);
+          return;
+        case "number":
+        case "string":
+          return;
+      }
+    };
+    walk(parsed.ast);
+  };
+  walkExpression(expression, new Set());
+  return failed ? null : result;
+}
+
+/** 宣言の検査（validation）の式が参照する項目の集合（引けなければ null） */
+function validationReference(
+  world: ValidationWorld,
+  validation: ValidationWorld["validations"][number],
+): ReadonlySet<string> | null {
+  return referenceFieldNamesOf(world, validation.entity, validation.expression);
+}
+
+/** 要件の対象の項目を、名前の集合にする */
+const targetNameSet = (targets: readonly string[]): ReadonlySet<string> => new Set(targets);
+
+/** 検査の式で確かめる要件 1 件（表の `verification` と `targets` から導く。Issue #801） */
+export interface ValidationExpressionRequirement {
+  readonly requirementId: string;
+  readonly entity: string;
+  /** 対象の項目の名前の並び（表の順） */
+  readonly targets: readonly string[];
+  /** 対象の項目の行の id の並び（表の順） */
+  readonly rowIds: readonly string[];
+  /** 同じ entity で同じ対象の集合を持つ別の要件がある */
+  readonly conflict: boolean;
+}
+
+/**
+ * 表の確かめ方が検査の式（validation-expression）の要件を、要件 ID で引ける形に導く（純粋）。`targets` の行を同じ entity の
+ * 項目として引き、名前を**表の行の順**に並べる。行が引けない要件は入れない。`conflict` は同じ entity で同じ名前の集合を持つ
+ * 別の要件があること（Issue #801）
+ */
+export function validationExpressionRequirementsOf(table: NameTable): ReadonlyMap<string, ValidationExpressionRequirement> {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const rowIndex = new Map(table.rows.map((row, index) => [row.id, index] as const));
+  const preliminary: {
+    readonly requirementId: string;
+    readonly entity: string;
+    readonly rows: readonly NameTableRow[];
+  }[] = [];
+  for (const verification of table.verification) {
+    if (verification.kind !== "validation-expression") continue;
+    const rows = verification.targets.flatMap((id) => {
+      const row = rowById.get(id);
+      return row === undefined || row.kind !== "field" ? [] : [row];
+    });
+    if (rows.length !== verification.targets.length || rows.length === 0) continue;
+    const entityId = rows[0]?.entity ?? null;
+    const entityRow = entityId === null ? undefined : rowById.get(entityId);
+    if (entityRow === undefined || entityRow.kind !== "entity") continue;
+    if (rows.some((row) => row.entity !== entityId)) continue;
+    preliminary.push({ requirementId: verification.requirementId, entity: entityRow.name, rows });
+  }
+  const requirements = new Map<string, ValidationExpressionRequirement>();
+  for (const entry of preliminary) {
+    const ordered = [...entry.rows].sort((a, b) => (rowIndex.get(a.id) ?? 0) - (rowIndex.get(b.id) ?? 0));
+    const names = ordered.map((row) => row.name);
+    const conflict = preliminary.some(
+      (other) =>
+        other !== entry &&
+        other.entity === entry.entity &&
+        sameNameSet(targetNameSet(other.rows.map((row) => row.name)), targetNameSet(names)),
+    );
+    requirements.set(entry.requirementId, {
+      requirementId: entry.requirementId,
+      entity: entry.entity,
+      targets: names,
+      rowIds: ordered.map((row) => row.id),
+      conflict,
+    });
+  }
+  return requirements;
+}
+
+/**
+ * validate の試験のうち、検査（宣言の validations）を要求する観測する性質（M-03。検査の式も `validation` と同じに扱う暫定。
+ * Issue #800）
+ */
+export const VALIDATION_OBSERVES: ReadonlySet<string> = new Set(["validation", "validation-expression"]);
+
+/**
+ * 固定した組と表から、要る検査の骨組みを導く（純粋。宣言に依らない）。観測する性質が `validation`（と検査の式。Issue #800）の
+ * validate の試験だけ（既定値・選択肢の集合の試験は専用の照合で検査を要求しないので除く）。同じ行の試験は 1 件にまとめ、並びは
+ * 表の行の順（試験 ID は組の順）。同じ名前を 2 つ以上の行が要求すれば（別 entity の同名・同じ（entity・名前）を要求する entity の
+ * 行と項目の行）、その全件に競合の印を付ける（並びで選ばない）。呼ぶ側は評価の文脈と同じ組（棄却・持ち越しで外した後の組）を渡す。
  */
 export function requiredValidationsOf(
   table: NameTable,
@@ -167,25 +416,60 @@ export function requiredValidationsOf(
   observes: ReadonlyMap<string, TestObserves>,
 ): readonly RequiredValidation[] {
   const rowIndex = new Map(table.rows.map((row, index) => [row.id, index] as const));
-  const entries = new Map<string, { row: NameTableRow; location: DeclarationLocation; testIds: string[] }>();
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const verificationById = new Map(table.verification.map((entry) => [entry.requirementId, entry] as const));
+  const expressionRequirements = validationExpressionRequirementsOf(table);
+  /** 検査の式の要件ごとの試験（要件ごとに 1 件） */
+  const expressionTests = new Map<string, string[]>();
+  /** それ以外の種類の要件の、対象の行ごとの試験（行ごとに 1 件。名前で結ぶ契約のまま） */
+  const legacyEntries = new Map<string, { row: NameTableRow; location: DeclarationLocation; testIds: string[] }>();
   for (const test of suite.tests) {
-    if (observes.get(test.id) !== "validation") continue;
+    const observed = observes.get(test.id);
+    if (observed === undefined || !VALIDATION_OBSERVES.has(observed) || test.operation !== "validate") continue;
+    if (verificationById.get(test.target.requirementId)?.kind === "validation-expression") {
+      if (!expressionRequirements.has(test.target.requirementId)) continue;
+      const found = expressionTests.get(test.target.requirementId) ?? [];
+      found.push(test.id);
+      expressionTests.set(test.target.requirementId, found);
+      continue;
+    }
     const location = requiredValidationLocation(table, test);
-    const row = table.rows.find((candidate) => candidate.id === test.target.roleId);
+    const row = test.target.roleId === undefined ? undefined : rowById.get(test.target.roleId);
     if (location === undefined || row === undefined) continue;
-    const found = entries.get(row.id);
-    if (found === undefined) entries.set(row.id, { row, location, testIds: [test.id] });
+    const found = legacyEntries.get(row.id);
+    if (found === undefined) legacyEntries.set(row.id, { row, location, testIds: [test.id] });
     else found.testIds.push(test.id);
   }
-  const ordered = [...entries.values()].sort((a, b) => (rowIndex.get(a.row.id) ?? 0) - (rowIndex.get(b.row.id) ?? 0));
-  return ordered.map((entry) => ({
-    entity: entry.location.entity,
-    name: entry.location.name,
-    rowId: entry.row.id,
-    rowKind: entry.row.kind,
-    testIds: entry.testIds,
-    conflict: ordered.some((other) => other !== entry && other.location.name === entry.location.name),
-  }));
+  type Ordered = { readonly index: number; readonly value: RequiredValidation };
+  const ordered: Ordered[] = [];
+  for (const [requirementId, testIds] of expressionTests) {
+    const requirement = expressionRequirements.get(requirementId);
+    if (requirement === undefined) continue;
+    const index = rowIndex.get(requirement.rowIds[0] ?? "") ?? 0;
+    ordered.push({
+      index,
+      value: { requirementId, entity: requirement.entity, targets: requirement.targets, testIds, conflict: requirement.conflict },
+    });
+  }
+  const legacy = [...legacyEntries.values()];
+  for (const entry of legacy) {
+    ordered.push({
+      index: rowIndex.get(entry.row.id) ?? 0,
+      value: {
+        requirementId: suite.tests.find((test) => entry.testIds.includes(test.id) && test.target.roleId === entry.row.id)?.target
+          .requirementId ?? "",
+        entity: entry.location.entity,
+        targets: [entry.location.name],
+        testIds: entry.testIds,
+        // 名前で結ぶ契約のまま：別 entity の同名の行も同じ検査の名前を要求するので、名前が重なれば競合（Issue #666）
+        conflict: legacy.some(
+          (other) => other !== entry && other.location.name === entry.location.name,
+        ),
+      },
+    });
+  }
+  ordered.sort((a, b) => a.index - b.index);
+  return ordered.map((entry) => entry.value);
 }
 
 /**

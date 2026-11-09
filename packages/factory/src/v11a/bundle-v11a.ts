@@ -75,6 +75,11 @@ export interface SemanticCheckRound {
   readonly judgments: readonly SemanticJudgment[];
   /** T1'' に渡した J4 の印 */
   readonly advice: readonly JudgeAdviceMarkEntry[];
+  /**
+   * 旗 `v12.ids` の C3 の 2 回目だけ：再点検の部分の外で 1 回目の判定を保つ要件 ID の並び（一覧の順）。1 回目と off の行は
+   * 持たない（今の形のまま。Issue #805）
+   */
+  readonly keptRequirementIds?: readonly string[];
 }
 
 /** J4 の 1 回の記録（T1' を通った表ごと） */
@@ -256,6 +261,7 @@ export function buildV11aArtifacts(input: V11aRecordsInput): readonly BundleArti
           targets: round.targets,
           judgments: round.judgments,
           advice: round.advice,
+          ...(round.keptRequirementIds === undefined ? {} : { kept_requirement_ids: round.keptRequirementIds }),
         })),
       }),
     },
@@ -352,6 +358,8 @@ export interface TableRoundSemanticCheck {
   readonly targets: readonly string[];
   readonly judgments: readonly SemanticJudgment[];
   readonly advice: readonly JudgeAdviceMarkEntry[];
+  /** 旗 `v12.ids` の C3 の 2 回目だけ：1 回目の判定を保つ要件 ID（一覧の順。Issue #805） */
+  readonly kept_requirement_ids?: readonly string[];
 }
 
 /** C2 の 1 回（1 行）。C3 が形で止まった回・C2 が落ちた回は欄を持たない（null） */

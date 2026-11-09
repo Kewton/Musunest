@@ -503,6 +503,8 @@ export function checkCorrespondence(
 export interface RoleMappingCheckOptions {
   readonly ownership?: readonly RequirementRoleOwnership[];
   readonly version?: DesignContractVersion;
+  /** 画面からの到達の規則の選択（旗 `v12.ids` の走りだけが渡す。省けば今の判定。Issue #804） */
+  readonly reach?: ReachRules;
 }
 
 /** 役割 ID の対象の種類が、宣言の場所の種類に対応する（§1.2・Issue #308） */
@@ -579,14 +581,35 @@ function declarationKindsOfName(
 }
 
 /**
+ * 画面からの到達の判定の規則の選択（旗 `v12.ids` の走りだけが渡す。Issue #804）。
+ *
+ * host のボードは、カードに**その entity の項目を宣言の順に全部**出し、強調の印に `highlight` の計算を使う。
+ * 渡されたときだけ、ボードを「項目・entity を表示する画面」に数える。**渡さなければ今の判定**（ids off・v1・
+ * v1.1a はこれ）。
+ */
+export interface ReachRules {
+  /** ボードは、その entity の項目を全部カードに出す（`columns` の項目も含む。`show` の有無は問わない） */
+  readonly board: boolean;
+}
+
+/** ボードを数える規則（旗 `v12.ids` の走りが B3・B4 の両方へ同じ値を渡す。Issue #804） */
+export const BOARD_REACH_RULES: ReachRules = { board: true };
+
+/**
  * 項目が、その entity の一覧か表から辿れるか（§1・§1.3・Issue #324）。`show` に入っているか、`show` を
- * 省略して全部を出す一覧（種類なし・`table`・`list`）に載っていれば辿れる。⑤a の点検（`screenReachable`）と
+ * 省略して全部を出す一覧（種類なし・`table`・`list`）に載っていれば辿れる。**規則の選択が渡されたときだけ**、
+ * その entity のボードも「項目を全部出す画面」に数える（Issue #804）。⑤a の点検（`screenReachable`）と
  * ⑤b の「項目 × 画面」の判定（`judgeFieldScreen`）が、**同じ規則**を使う。
  */
-export function fieldReachableFromScreen(app: NormalizedAppSpec, location: DeclarationLocation): boolean {
+export function fieldReachableFromScreen(
+  app: NormalizedAppSpec,
+  location: DeclarationLocation,
+  rules?: ReachRules,
+): boolean {
   if (location.kind !== "field") return false;
   return app.spec.views.some((view) => {
     if (view.entity !== location.entity) return false;
+    if (rules?.board === true && view.type === "board") return true;
     if (view.show !== undefined) return view.show.includes(location.name);
     return view.type === undefined || view.type === "table" || view.type === "list";
   });
@@ -595,8 +618,13 @@ export function fieldReachableFromScreen(app: NormalizedAppSpec, location: Decla
 /**
  * 計算でない場所も、画面から辿れるか（create の操作・一覧か表の `show`。§1・Issue #308）。
  * 計算は `checkLocation` が到達を見るので、ここでは entity・項目を確かめる。他の種類は実在で足りる。
+ * **規則の選択が渡されたときだけ**、entity はボードでも辿れると数える（Issue #804）。
  */
-function screenReachable(app: NormalizedAppSpec, location: DeclarationLocation): boolean {
+function screenReachable(
+  app: NormalizedAppSpec,
+  location: DeclarationLocation,
+  rules?: ReachRules,
+): boolean {
   if (location.kind === "entity") {
     const hasCreate = app.spec.actions.some(
       (action) => (action.kind ?? "create") === "create" && action.entity === location.name,
@@ -604,11 +632,14 @@ function screenReachable(app: NormalizedAppSpec, location: DeclarationLocation):
     const shown = app.spec.views.some(
       (view) =>
         view.entity === location.name &&
-        (view.type === undefined || view.type === "table" || view.type === "list"),
+        ((rules?.board === true && view.type === "board") ||
+          view.type === undefined ||
+          view.type === "table" ||
+          view.type === "list"),
     );
     return hasCreate || shown;
   }
-  if (location.kind === "field") return fieldReachableFromScreen(app, location);
+  if (location.kind === "field") return fieldReachableFromScreen(app, location, rules);
   return true;
 }
 
@@ -666,9 +697,9 @@ export function checkRoleMappings(
         },
       ];
     }
-    return checkRoleMappingsPerRequirement(app, roles, entries, mappings, ownership);
+    return checkRoleMappingsPerRequirement(app, roles, entries, mappings, ownership, options.reach);
   }
-  return checkRoleMappingsTableWide(app, roles, entries, mappings);
+  return checkRoleMappingsTableWide(app, roles, entries, mappings, options.reach);
 }
 
 /**
@@ -680,6 +711,7 @@ function checkRoleMappingsTableWide(
   roles: readonly RoleEntry[],
   entries: readonly CorrespondenceEntry[],
   mappings: readonly RoleNameMapping[],
+  reach?: ReachRules,
 ): readonly RoleMappingMiss[] {
   const misses: RoleMappingMiss[] = [];
   const roleById = new Map(roles.map((role) => [role.roleId, role]));
@@ -738,7 +770,7 @@ function checkRoleMappingsTableWide(
       });
       continue;
     }
-    if (!screenReachable(app, location)) {
+    if (!screenReachable(app, location, reach)) {
       misses.push({
         requirementId: requirementIdOf(location),
         route: "missing-element",
@@ -792,6 +824,7 @@ function checkRoleMappingsPerRequirement(
   entries: readonly CorrespondenceEntry[],
   mappings: readonly RoleNameMapping[],
   ownership: readonly RequirementRoleOwnership[],
+  reach?: ReachRules,
 ): readonly RoleMappingMiss[] {
   const misses: RoleMappingMiss[] = [];
   const roleById = new Map(roles.map((role) => [role.roleId, role]));
@@ -873,7 +906,7 @@ function checkRoleMappingsPerRequirement(
       });
       continue;
     }
-    if (!screenReachable(app, location)) {
+    if (!screenReachable(app, location, reach)) {
       misses.push({
         requirementId: owner,
         route: "missing-element",

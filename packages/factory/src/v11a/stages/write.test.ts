@@ -27,7 +27,7 @@ import {
   requestDiffsOf,
   withoutEnumMembership,
 } from "../__tests__/fixtures.js";
-import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW } from "../../v12/ledger.js";
+import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, PROPERTY_LEDGER_VIEW_IDS } from "../../v12/ledger.js";
 import * as writeModule from "./write.js";
 import {
   DECLARATION_V11A_SCHEMA,
@@ -453,7 +453,7 @@ describe("旗 v12.ids：要る検査の骨組みを渡したときだけ、「�
     JSON.parse(input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "null");
 
   it("骨組みは固定した試験から導いた 1 件（item・amount）", () => {
-    expect(SKELETON).toEqual([{ entity: "item", name: "amount", rowId: "f.item.amount", rowKind: "field", testIds: ["t1"], conflict: false }]);
+    expect(SKELETON).toEqual([{ requirementId: "R1", entity: "item", targets: ["amount"], testIds: ["t1"], conflict: false }]);
   });
 
   it("R-w11-07 の旗 ids の文：ID・why は同じで since に履歴。元の禁止の文をそのまま含み、例外は骨組みに競合なしで列挙された検査だけ（j：骨組みに無い要素に表の名前を許す文が無い）。規則の不備は 0", () => {
@@ -467,8 +467,9 @@ describe("旗 v12.ids：要る検査の骨組みを渡したときだけ、「�
     const added = text.slice(original.text.length);
     // 例外の文は 1 つで、骨組みに競合なしで列挙された検査だけを指す
     expect(added.match(/例外/g)).toHaveLength(1);
-    expect(added).toContain("この禁止の唯一の例外は、データ「要る検査の骨組み」に競合なしで列挙された検査で、その entity と名前で validations に 1 つずつ書く");
-    expect(added).toContain("競合の印の付いた件は書かない。");
+    expect(added).toContain("この禁止の唯一の例外は、データ「要る検査の骨組み」の件ごとに、その entity に、式がちょうどその項目を参照する検査を 1 つ書くことである");
+    expect(added).toContain("名前は builder が決め、表の名前を奪わない。");
+    expect(added).toContain("競合の印の付いた件も書く（その要件の試験は未解決になる）。");
     expect(added).toContain("骨組みに無い補助の要素には表の名前を使わない。");
     expect(added).not.toMatch(/計算.*例外|例外.*計算/);
     expect(added).not.toMatch(/使ってよい|奪ってよい/);
@@ -528,5 +529,59 @@ describe("旗 v12.ids：要る検査の骨組みを渡したときだけ、「�
     expect(blockOf(request.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME)).toEqual(SKELETON);
     expect(request.rules).toEqual((base.rules ?? []).map((text) => (text === original?.text ? WRITE_V11A_IDS_R07_DEFINITION.text : text)));
     expect(request.rules?.slice(-1)).toEqual(ruleTexts(WRITE_V11A_REWRITE_RULE_DEFINITIONS));
+  });
+});
+
+describe("旗 v12.ids の B1：検査の式の行の文は R-w11-07 の例外に委ねる（Issue #816 の R3）", () => {
+  /** #816 の前の検査の式の行の B1 の文（旧の文は消さずに試験の定数に残す） */
+  const OLD_B1 =
+    "固定した試験のうち observes が validation-expression の試験は、対象の項目（field）の行ごとに、その項目の名前と同じ名前の検査を要求する（同じ entity の別の項目は別の検査の名前になる）。";
+  const NEW_B1 = PROPERTY_LEDGER.find((row) => row.id === "validation-expression")?.rules.b1 ?? "";
+  const SKELETON: readonly RequiredValidation[] = requiredValidationsOf(fixtureTable(), SUITE, new Map([["t1", "validation"]]));
+  const rewriteFailures: readonly NamedFailure[] = [
+    { testId: "t1", requirementId: "R1", kind: "test-mismatch", message: NAMED_FAILURE_MESSAGES["test-mismatch"] },
+  ];
+
+  const requestOf = async (extra: Partial<WriteV11aInput>): Promise<{ readonly rules: readonly string[]; readonly input: string }> => {
+    const recording = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const outcome = await runWriteV11a(inputWith(recording.client, extra));
+    expect(outcome.ok).toBe(true);
+    const request = recording.structured[0];
+    if (request === undefined) throw new Error("要求が無い");
+    return { rules: request.rules ?? [], input: request.input };
+  };
+
+  it("初回と作り直しのどちらも、ids の B1 の要求に新しい文があり、旧の文が無い。ids off・台帳だけ on は検査の式の行が無く、新しい文も旧の文も無い", async () => {
+    for (const extra of [
+      { ledger: PROPERTY_LEDGER_VIEW_IDS, requiredValidations: SKELETON },
+      { ledger: PROPERTY_LEDGER_VIEW_IDS, requiredValidations: SKELETON, rewrite: { failures: rewriteFailures } },
+    ]) {
+      const { rules } = await requestOf(extra);
+      expect(rules).toContain(NEW_B1);
+      expect(rules).not.toContain(OLD_B1);
+      expect(rules.some((text) => text.includes("名前と同じ名前の検査"))).toBe(false);
+    }
+    // ids off・台帳だけ on（検査の式の行を含まない導出）は、新しい文も旧の文も持たない（base と同じ）
+    for (const extra of [
+      { ledger: PROPERTY_LEDGER_VIEW, table: withAggregates(fixtureTable()) },
+      { ledger: PROPERTY_LEDGER_VIEW, table: withAggregates(fixtureTable()), rewrite: { failures: rewriteFailures } },
+    ]) {
+      const { rules } = await requestOf(extra);
+      expect(rules).not.toContain(NEW_B1);
+      expect(rules).not.toContain(OLD_B1);
+    }
+  });
+
+  it("ほかの行の B1 の文と R-w11-07 の ids の文は base と同じ。新しい文を旧の文に戻すと、R3 の 1 文だけが旧の文と入れ替わる", async () => {
+    const { rules } = await requestOf({ ledger: PROPERTY_LEDGER_VIEW_IDS, requiredValidations: SKELETON });
+    // R-w11-07 の ids の文は base と同じ
+    expect(rules).toContain(WRITE_V11A_IDS_R07_DEFINITION.text);
+    // 新しい文を旧の文に戻すと base（#806）の要求に一致する（差はその 1 文だけ）
+    const restored = rules.map((text) => (text === NEW_B1 ? OLD_B1 : text));
+    expect(restored).not.toContain(NEW_B1);
+    expect(restored).toContain(OLD_B1);
+    expect(restored.filter((text, index) => text !== rules[index])).toEqual([OLD_B1]);
+    // 題材の言葉は無い
+    expectNoAcceptanceMaterial([...rules]);
   });
 });

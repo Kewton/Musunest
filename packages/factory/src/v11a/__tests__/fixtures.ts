@@ -25,10 +25,11 @@ import {
 } from "../names.js";
 import { STRUCTURAL_ASSERTIONS, STRUCTURAL_TARGET_KINDS, type StructuralAssertionKind } from "../../fixed-test.js";
 import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
+import { TEST_CASE_FRAME_TEXTS } from "../../v12/test-cases.js";
 import { V12_CALL_LIMITS } from "../../v12/limits.js";
 import { MAPPING_SCHEMA_NAME } from "../../v12/stages/mapping.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
-import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
+import { SEMANTIC_CHECK_REFERENCE_DATA_NAME, SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
 import { TEST_SPEC_RETAINED_DATA_NAME, TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
 import {
   WRITE_V11A_IDS_R07_DEFINITION,
@@ -43,6 +44,55 @@ const requirement = (id: string, text: string): Requirement => ({
   quote: text,
   position: { start: 0, end: text.length },
 });
+/**
+ * 直す前（Issue #800）の検査の式の targets の照合の関数の写し（Issue #808 の二点測定用）。固定文の組が無いと最初に偽を返す
+ * ——直す前の挙動を残すためだけのもので、製品は使わない。固定文の組を渡したときの判定・問題・所属に足してよい ID は今と同じ
+ */
+export function baseCheckValidationExpressionTargets(
+  rows: readonly NameTableRow[],
+  targets: readonly string[],
+  field: string,
+  messages: { readonly missing: string; readonly unknown: string; readonly kind: string; readonly entity: string; readonly overlap: string } | undefined,
+  problems: { field: string; message: string }[],
+): { readonly valid: boolean; readonly allowed: ReadonlySet<string> } {
+  const allowed = new Set<string>();
+  if (messages === undefined) return { valid: false, allowed };
+  if (targets.length === 0) {
+    problems.push({ field: `${field}.targets`, message: messages.missing });
+    return { valid: false, allowed };
+  }
+  const rowById = new Map(rows.map((row) => [row.id, row] as const));
+  const seen = new Set<string>();
+  let valid = true;
+  let entity: string | null | undefined;
+  targets.forEach((id, index) => {
+    const at = `${field}.targets[${index}]`;
+    if (seen.has(id)) {
+      problems.push({ field: at, message: messages.overlap });
+      valid = false;
+    }
+    seen.add(id);
+    const row = rowById.get(id);
+    if (row === undefined) {
+      problems.push({ field: at, message: messages.unknown });
+      valid = false;
+      return;
+    }
+    if (row.kind !== "field") {
+      problems.push({ field: at, message: messages.kind });
+      valid = false;
+      return;
+    }
+    if (entity === undefined) entity = row.entity;
+    else if (row.entity !== entity) {
+      problems.push({ field: at, message: messages.entity });
+      valid = false;
+    }
+    allowed.add(id);
+    if (row.entity !== null) allowed.add(row.entity);
+  });
+  return { valid, allowed };
+}
 
 /** 要件の一覧（R1〜R5。R5 は書けない要件＝unresolved） */
 export function fixtureList(): RequirementList {
@@ -498,7 +548,9 @@ if (NON_REQUIREMENT_ROW === undefined) throw new Error("前提が壊れた：台
  * #549 の台帳の行＝今の台帳から non-requirement の行を除き、when の行を手 2d の前（v1.1α から引き継いだまま。要件の決まりの
  * 型・条件の試験の型・外の対応・規則の文が未定義）に戻したもの（Issue #550）。手 2a〜2c の導出はここから組む。
  */
-export const LEDGER_ROWS_2C: readonly PropertyRow[] = PROPERTY_LEDGER.filter((entry) => entry.id !== "non-requirement").map(
+export const LEDGER_ROWS_2C: readonly PropertyRow[] = PROPERTY_LEDGER.filter(
+  (entry) => entry.id !== "non-requirement" && entry.requires === undefined,
+).map(
   (entry): PropertyRow =>
     entry.id === "when"
       ? { ...entry, requirementRule: null, t2Condition: null, outer: null, rules: { t1: null, t1Acceptance: null, t2: null, t2Ids: null, b1: null } }
@@ -563,6 +615,190 @@ export function withoutRequiredValidations<T extends { readonly input: string; r
       ? {}
       : { rules: request.rules.map((text) => (text === WRITE_V11A_IDS_R07_DEFINITION.text ? original : text)) }),
   };
+}
+
+/**
+ * Issue #800 の復元：台帳に足した行（validation-expression）の文と schema の欄を、要求・記録から外す。
+ * 台帳の行から取った T1・T1''・T2・B1 の文を文字列から外し、B1 の行を並びから外し、C2 の schema の `targets` と
+ * 確かめ方の種類の enum の `validation-expression` を外す。`withoutIdsClock`・`withoutLinkedValidations` と同じ作法で、
+ * 既存の照合の前に掛ける
+ */
+export function withoutValidationExpression<T>(value: T): T {
+  const row = PROPERTY_LEDGER.find((entry) => entry.id === "validation-expression");
+  const texts = row === undefined ? [] : [row.rules.t1, row.rules.t2Ids, row.rules.t1Acceptance, row.rules.b1].filter((text): text is string => text !== null);
+  const b1 = row?.rules.b1 ?? null;
+  const strip = (text: string): string => texts.reduce((result, fragment) => result.split(fragment).join(""), text);
+  const isObject = (inner: unknown): inner is Record<string, unknown> => typeof inner === "object" && inner !== null && !Array.isArray(inner);
+  /** #800 の前の枠（値の対象＝画面以外の所属、免除＝画面・entity の行だけ）へ戻した入力。枠の塊が無ければそのまま */
+  const restoreFrames = (text: string): string => {
+    if (!text.includes('<data name="必要な試験の枠">')) return text;
+    const blocks = [...text.matchAll(/<data name="([^"]+)">\n([\s\S]*?)\n<\/data>/g)];
+    const parsed = new Map<string, unknown>();
+    for (const block of blocks) {
+      try {
+        parsed.set(block[1] ?? "", JSON.parse(block[2] ?? ""));
+      } catch {
+        // JSON でない塊は触らない
+      }
+    }
+    const table = parsed.get("対象の表");
+    const ownership = parsed.get("要件ごとの所属");
+    const frames = parsed.get("必要な試験の枠");
+    if (!isObject(table) || !Array.isArray(table["rows"]) || !Array.isArray(ownership) || !Array.isArray(frames)) return text;
+    const rowById = new Map<string, Record<string, unknown>>();
+    for (const entry of table["rows"]) if (isObject(entry) && typeof entry["id"] === "string") rowById.set(entry["id"], entry);
+    const rolesById = new Map<string, readonly { readonly id: string }[]>();
+    for (const entry of ownership) {
+      if (isObject(entry) && typeof entry["requirementId"] === "string" && Array.isArray(entry["roles"])) {
+        rolesById.set(entry["requirementId"], entry["roles"].filter((role): role is { readonly id: string } => isObject(role) && typeof role["id"] === "string"));
+      }
+    }
+    const restored = frames.map((frame) => {
+      if (!isObject(frame) || typeof frame["requirementId"] !== "string") return frame;
+      const roles = rolesById.get(frame["requirementId"]) ?? [];
+      const owned = roles.flatMap((role) => rowById.get(role.id) ?? []) as Record<string, unknown>[];
+      const valueTargets = owned.filter((entry) => entry["kind"] !== "screen").map((entry) => entry["id"]);
+      const normalTargets = owned
+        .filter((entry) => entry["kind"] === "computation" || (entry["kind"] === "operation" && isObject(entry["type"]) && entry["type"]["hasWhen"] === true))
+        .map((entry) => entry["id"]);
+      const exempt = owned.length > 0 && owned.length === roles.length && owned.every((entry) => entry["kind"] === "screen" || entry["kind"] === "entity");
+      const ifRuled = isObject(frame["ifRuled"]) ? frame["ifRuled"] : undefined;
+      const ifExistenceOnly = isObject(frame["ifExistenceOnly"]) ? frame["ifExistenceOnly"] : undefined;
+      const codeTests = Array.isArray(frame["codeTests"]) ? frame["codeTests"].length : 0;
+      const writable = valueTargets.length > 0;
+      return {
+        ...frame,
+        valueTargets,
+        normalTargets,
+        ifRuled:
+          ifRuled === undefined
+            ? undefined
+            : {
+                ...ifRuled,
+                kinds: exempt ? [] : ["normal", "abnormal", "boundary"],
+                caseTargets: exempt ? [] : valueTargets,
+                note: exempt ? TEST_CASE_FRAME_TEXTS.ruledExempt : TEST_CASE_FRAME_TEXTS.ruled,
+              },
+        ifExistenceOnly:
+          ifExistenceOnly === undefined
+            ? undefined
+            : {
+                ...ifExistenceOnly,
+                note: codeTests === 0 && !writable ? TEST_CASE_FRAME_TEXTS.unsupported : TEST_CASE_FRAME_TEXTS.existence,
+              },
+      };
+    });
+    return text.replace(
+      /<data name="必要な試験の枠">\n[\s\S]*?\n<\/data>/,
+      `<data name="必要な試験の枠">\n${JSON.stringify(restored, null, 2)}\n</data>`,
+    );
+  };
+  const walk = (inner: unknown): unknown => {
+    if (typeof inner === "string") return strip(restoreFrames(inner));
+    if (Array.isArray(inner)) return inner.filter((entry) => entry !== b1).map(walk);
+    if (!isObject(inner)) return inner;
+    const properties = inner["properties"];
+    const required = inner["required"];
+    if (isObject(properties) && Array.isArray(required) && required.includes("targets") && Object.hasOwn(properties, "targets")) {
+      const { targets: _targets, ...rest } = properties;
+      return walk({ ...inner, required: required.filter((key) => key !== "targets"), properties: rest });
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(inner)) {
+      out[key] =
+        key === "enum" && Array.isArray(entry) && entry.includes("validation-expression")
+          ? entry.filter((candidate) => candidate !== "validation-expression")
+          : walk(entry);
+    }
+    return out;
+  };
+  return walk(value) as T;
+}
+
+/**
+ * Issue #813 の復元：旗 `v12.ids` の R-tsp-02 の新しい文を旧の文に戻し、枠の ruled の枝を base（免除は空と `ruledExempt`）に
+ * 戻す（#813 の前の指紋と照らす）。文字列の中の R-tsp-02 の 1 文を置き換え、枠の塊の `ifRuled` と（やり直しの枠の）最上位の
+ * `kinds`・`caseTargets`・`note` を戻す。新しい文の 2 つ（必要な試験の枠の文と上限の文）の順の復元で、上限の文の復元（#663）の前に挟む
+ */
+export function withoutFrameFieldNormal<T>(value: T): T {
+  const normalOnly = TEST_CASE_FRAME_TEXTS.ruledNormalOnly;
+  const noWritable = TEST_CASE_FRAME_TEXTS.ruledNoWritableTarget;
+  const exempt = TEST_CASE_FRAME_TEXTS.ruledExempt;
+  const newRule = "値の対象が無い要件は三種を求めない。そのうち枠に項目の行が示された要件は、その行に正常の場合を 1 本以上書く。";
+  const oldRule = "所属が画面・entity の行だけの要件は三種を求めない（枠が空）。";
+  const isObject = (inner: unknown): inner is Record<string, unknown> => typeof inner === "object" && inner !== null && !Array.isArray(inner);
+  /** 枝の `kinds`・`caseTargets`・`note` を base（免除は空）に戻す（#813 の 2 つの固定文だけ） */
+  const restoreBranch = (branch: unknown): unknown => {
+    if (!isObject(branch) || typeof branch["note"] !== "string") return branch;
+    const note = branch["note"];
+    if (note.startsWith(normalOnly)) return { ...branch, kinds: [], caseTargets: [], note: `${exempt}${note.slice(normalOnly.length)}` };
+    if (note.startsWith(noWritable)) return { ...branch, kinds: [], caseTargets: [], note: `${exempt}${note.slice(noWritable.length)}` };
+    return branch;
+  };
+  const restoreFrames = (text: string): string => {
+    if (!text.includes('<data name="必要な試験の枠">')) return text;
+    const match = /<data name="必要な試験の枠">\n([\s\S]*?)\n<\/data>/.exec(text);
+    if (match === null) return text;
+    let frames: unknown;
+    try {
+      frames = JSON.parse(match[1] ?? "[]");
+    } catch {
+      return text;
+    }
+    if (!Array.isArray(frames)) return text;
+    const restored = frames.map((frame) => {
+      if (!isObject(frame)) return frame;
+      const withRuled = Object.hasOwn(frame, "ifRuled") ? { ...frame, ifRuled: restoreBranch(frame["ifRuled"]) } : frame;
+      // やり直しの枠は採った種類の枝を最上位に持つ
+      return restoreBranch(withRuled);
+    });
+    return text.replace(/<data name="必要な試験の枠">\n[\s\S]*?\n<\/data>/, `<data name="必要な試験の枠">\n${JSON.stringify(restored, null, 2)}\n</data>`);
+  };
+  const walk = (inner: unknown): unknown => {
+    if (typeof inner === "string") return restoreFrames(inner).split(newRule).join(oldRule);
+    if (Array.isArray(inner)) return inner.map(walk);
+    if (!isObject(inner)) return inner;
+    return Object.fromEntries(Object.entries(inner).map(([key, entry]) => [key, walk(entry)]));
+  };
+  return walk(value) as T;
+}
+
+/**
+ * Issue #826 の復元：旗 `v12.ids` の必要な試験の枠の existence-only の枝から、条件つきの試験の欄（`codeIfExistenceOnly`）を外し、
+ * 注記を旧の `unsupported` に戻す（#826 の前の指紋と照らす）。枠の塊の文字列の中だけを戻す（ほかの塊は変えない）
+ */
+export function withoutWhenlessFrameField<T>(value: T): T {
+  const conditional = TEST_CASE_FRAME_TEXTS.existenceConditional;
+  const unsupported = TEST_CASE_FRAME_TEXTS.unsupported;
+  const isObject = (inner: unknown): inner is Record<string, unknown> => typeof inner === "object" && inner !== null && !Array.isArray(inner);
+  const restoreBranch = (branch: unknown): unknown => {
+    if (!isObject(branch) || !Object.hasOwn(branch, "codeIfExistenceOnly")) return branch;
+    const { codeIfExistenceOnly: _omit, ...rest } = branch;
+    return { ...rest, note: rest["note"] === conditional ? unsupported : rest["note"] };
+  };
+  const restoreFrames = (text: string): string => {
+    if (!text.includes('<data name="必要な試験の枠">')) return text;
+    const match = /<data name="必要な試験の枠">\n([\s\S]*?)\n<\/data>/.exec(text);
+    if (match === null) return text;
+    let frames: unknown;
+    try {
+      frames = JSON.parse(match[1] ?? "[]");
+    } catch {
+      return text;
+    }
+    if (!Array.isArray(frames)) return text;
+    const restored = frames.map((frame) =>
+      isObject(frame) && Object.hasOwn(frame, "ifExistenceOnly") ? { ...frame, ifExistenceOnly: restoreBranch(frame["ifExistenceOnly"]) } : frame,
+    );
+    return text.replace(/<data name="必要な試験の枠">\n[\s\S]*?\n<\/data>/, `<data name="必要な試験の枠">\n${JSON.stringify(restored, null, 2)}\n</data>`);
+  };
+  const walk = (inner: unknown): unknown => {
+    if (typeof inner === "string") return restoreFrames(inner);
+    if (Array.isArray(inner)) return inner.map(walk);
+    if (!isObject(inner)) return inner;
+    return Object.fromEntries(Object.entries(inner).map(([key, entry]) => [key, walk(entry)]));
+  };
+  return walk(value) as T;
 }
 
 /** 2 つの JSON の値の違う場所（葉の位置。並びの長さが違えばその並びの位置）を、見つけた順に返す */
@@ -951,7 +1187,9 @@ export function withCodeIds(table: NameTable, keepSource = false): NameTable {
       };
     }),
     ownership: table.ownership.map((entry) => ({ ...entry, roles: entry.roles.map((role) => ({ ...role, id: to(role.id) })) })),
-    verification: table.verification,
+    verification: table.verification.map((entry) =>
+      entry.kind === "validation-expression" ? { ...entry, targets: entry.targets.map(to) } : entry,
+    ),
     classification: table.classification,
   };
 }
@@ -1031,11 +1269,21 @@ export function idsResponsesOf(list: RequirementList, table: NameTable, ledger?:
       verification.kind === "structural"
         ? checkFieldsResponseOf(verification.targets ?? checkTargetsOf(table, item.id, verification.checks))
         : null;
+    // 台帳が検査の式（validation-expression）の行を持つ走りだけ、C2 の schema が targets を要求する（Issue #800）
+    const withValidationTargets = ledger?.rowByVerificationKind.get("validation-expression")?.t1?.targets === true;
+    const validationTargets = verification.kind === "validation-expression" ? [...verification.targets] : null;
     const { targets: _targets, ...withoutTargets } = rest as typeof rest & { readonly targets?: unknown };
     return {
       requirementId: item.id,
       roles: ownership.roles,
-      verification: { value: null, reason: null, constraintIds: [], ...withoutTargets, checks },
+      verification: {
+        value: null,
+        reason: null,
+        constraintIds: [],
+        ...withoutTargets,
+        ...(withValidationTargets ? { targets: validationTargets } : {}),
+        checks,
+      },
       nature: classification.nature,
     };
   });
@@ -1323,6 +1571,15 @@ export function semanticRequestIds(request: LlmStructuredRequest): readonly stri
   return (JSON.parse(block) as readonly { readonly requirementId: string }[]).map((entry) => entry.requirementId);
 }
 
+/** C3 の要求のデータの塊「参照のみ」にある要件 ID（無ければ空。判定の対象ではない。Issue #805 の再点検の部分） */
+function semanticReferenceIds(request: LlmStructuredRequest): readonly string[] {
+  const block = request.input.split(`<data name="${SEMANTIC_CHECK_REFERENCE_DATA_NAME}">\n`)[1]?.split("\n</data>")[0];
+  if (block === undefined) return [];
+  return ((JSON.parse(block) as { readonly 要件の文と引用?: readonly { readonly requirementId: string }[] }).要件の文と引用 ?? []).map(
+    (entry) => entry.requirementId,
+  );
+}
+
 /**
  * 旗 `v12.ids` の C3 の束（Issue #735）の偽物の口。記録した C3 の応答（全対象を書いた 1 本）を「点検の回の位置」の台本として持つ。
  * 回の中では、束（要求の「要件の文と引用」の先頭の要件 ID で見分ける）ごとの n 回目の呼び出しが、その回の先頭から n 番目の記録を
@@ -1351,6 +1608,7 @@ export function bundledC3Client(inner: LlmClient, home: readonly (readonly [stri
         return inner.callStructured<T>(request);
       }
       const ids = semanticRequestIds(request);
+      const referenceIds = new Set(semanticReferenceIds(request));
       const head = ids[0] ?? "";
       for (const id of ids) roundIds.add(id);
       const depth = depths.get(head) ?? 0;
@@ -1374,6 +1632,8 @@ export function bundledC3Client(inner: LlmClient, home: readonly (readonly [stri
       const keep = (item: unknown): boolean => {
         const id = typeof item === "object" && item !== null ? (item as { requirementId?: unknown }).requirementId : undefined;
         if (typeof id !== "string" || ids.includes(id)) return true;
+        // 参照のみの塊の要件（再点検の部分の外で 1 回目の判定を保つ要件）は、判定の対象ではない（Issue #805）
+        if (referenceIds.has(id)) return false;
         const homeHead = homes.get(id);
         if (homeHead !== undefined) return homeHead === head;
         return !roundIds.has(id);
@@ -1498,6 +1758,43 @@ export async function revertBundleFiles735<T extends { readonly path: string; re
       if (entry.path !== "artifacts/summary.json") continue;
       entry.sha256 = summarySha256;
       entry.size_bytes = summaryBytes;
+    }
+    return { ...file, text: toJson(manifest) };
+  });
+}
+
+/**
+ * Issue #805 で足した欄を旧の値に戻す：`semantic-check.json` の `rounds` の各行から `kept_requirement_ids` を外す
+ * （1 回目と off の行には元から無いので変わらない）
+ */
+export function revert805(value: Record<string, any>): void {
+  if (!Array.isArray(value["rounds"])) return;
+  for (const round of value["rounds"] as Record<string, unknown>[]) delete round["kept_requirement_ids"];
+}
+
+/**
+ * 納品物のファイルの `artifacts/semantic-check.json` を `revert805` で戻し（字下げ 2・末尾の改行 1 つの形で書き戻す）、
+ * `bundle-manifest.json` のそのファイルの SHA-256 と大きさを戻した本文から計算し直す（Issue #805）。ほかのファイルはそのまま
+ */
+export async function revertBundleFiles805<T extends { readonly path: string; readonly text: string }>(files: readonly T[]): Promise<readonly T[]> {
+  const toJson = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+  const target = files.find((file) => file.path === "artifacts/semantic-check.json");
+  if (target === undefined) return files;
+  const value = JSON.parse(target.text) as Record<string, any>;
+  if (toJson(value) !== target.text) throw new Error("前提が壊れた：意味の点検の記録の形");
+  revert805(value);
+  const text = toJson(value);
+  const sha256 = await sha256Hex(text);
+  const size = new TextEncoder().encode(text).length;
+  return files.map((file) => {
+    if (file === target) return { ...file, text };
+    if (file.path !== "bundle-manifest.json") return file;
+    const manifest = JSON.parse(file.text) as { files: { path: string; sha256: string; size_bytes: number }[] };
+    if (toJson(manifest) !== file.text) throw new Error("前提が壊れた：manifest の形");
+    for (const entry of manifest.files) {
+      if (entry.path !== "artifacts/semantic-check.json") continue;
+      entry.sha256 = sha256;
+      entry.size_bytes = size;
     }
     return { ...file, text: toJson(manifest) };
   });

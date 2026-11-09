@@ -77,6 +77,7 @@ import {
   generateTests,
   ledgerTargetsOf,
   normalOnlyOwnershipRequirementIds,
+  validationTargetsOf,
   type AggregateTarget,
   type GeneratedTests,
   type LedgerTarget,
@@ -357,6 +358,8 @@ export function checkEvaluabilityByLedger(
 ): readonly Problem[] {
   const problems: Problem[] = [];
   const targets = table === undefined ? new Map<string, LedgerTarget>() : ledgerTargetsOf(table, ledger);
+  // 検査の式（validation-expression）の要件 → targets の項目（Issue #800）
+  const validationTargets = table === undefined ? new Map<string, readonly string[]>() : validationTargetsOf(table, ledger);
   suite.tests.forEach((test, index) => {
     const field = `tests[${index}].observes`;
     const observed: string | undefined = observes.get(test.id);
@@ -371,6 +374,23 @@ export function checkEvaluabilityByLedger(
     }
     if (row.state === "registered-unsupported") {
       problems.push({ field, message: row.unsupportedMessage ?? LEDGER_UNREGISTERED_OBSERVES_MESSAGE });
+      return;
+    }
+    if (row.t1 !== null && row.t1.targets === true && row.t2Validation != null) {
+      // 検査の式：確かめ方がこの種類の要件にだけ書け、対象はその要件の targets の 1 つ（固定文は行の記述子。Issue #800）
+      const required = validationTargets.get(test.target.requirementId);
+      if (required === undefined) {
+        problems.push({ field, message: row.t2Validation.messages.notAllowed });
+        return;
+      }
+      if (
+        test.operation !== row.t2Validation.operation ||
+        test.target.kind !== row.t2Validation.targetKind ||
+        test.target.roleId === undefined ||
+        !required.includes(test.target.roleId)
+      ) {
+        problems.push({ field, message: row.t2Validation.messages.target });
+      }
       return;
     }
     if (row.t1 !== null && row.t2 !== null) {
@@ -610,6 +630,41 @@ export function checkConditionTests(
   return problems;
 }
 
+/**
+ * 式の計算（種別 expression・操作 compute）の正常の期待の型の門（K6。旗 `v12.ids`。Issue #800）。対象の行の `valueType` が
+ * boolean なら decode 済みの期待の値が真偽、number なら数か null であることを求める。集計・精算・見出しごとの集計は対象外
+ * （集計の期待の門のまま）。でなければ固定文で落とす（位置は試験の添字と欄名）。期待の値を書き換えない
+ */
+export const EXPRESSION_TEST_MESSAGES = {
+  boolean: "計算（式）の真偽の行の正常の期待の値は、真偽（true・false）であること",
+  number: "計算（式）の数の行の正常の期待の値は、数か null であること",
+} as const;
+
+export function checkExpressionTests(
+  suite: TestSuite,
+  observes: ReadonlyMap<string, TestObserves>,
+  table: NameTable,
+): readonly Problem[] {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const problems: Problem[] = [];
+  suite.tests.forEach((test, index) => {
+    if (test.operation !== "compute" || test.target.kind !== "computation") return;
+    if (observes.get(test.id) !== "value") return;
+    const row = test.target.roleId === undefined ? undefined : rowById.get(test.target.roleId);
+    if (row === undefined || row.kind !== "computation") return;
+    const type = row.type;
+    if (type === null || typeof type !== "object" || !("form" in type) || type.form !== "expression") return;
+    if (test.expected.kind !== "ok") return;
+    const value = test.expected.value;
+    if (type.valueType === "boolean" && typeof value !== "boolean") {
+      problems.push({ field: `tests[${index}].expected`, message: EXPRESSION_TEST_MESSAGES.boolean });
+    } else if (type.valueType === "number" && value !== null && typeof value !== "number") {
+      problems.push({ field: `tests[${index}].expected`, message: EXPRESSION_TEST_MESSAGES.number });
+    }
+  });
+  return problems;
+}
+
 // ── 規則（R-tsp-nn。②' の定義を元にする。v1 の TEST_SUITE_RULE_DEFINITIONS は変えない）──────
 
 /**
@@ -778,6 +833,9 @@ const TEST_SPEC_FRAME_LIMIT_TEXT = `要件ごとの試験は、コードが作�
 /** 旗 `v12.ids` の上限の文の履歴（R-tsp-02 の since の末尾に足す。#663） */
 const FRAME_LIMIT_SINCE = "（旗 v12.ids の要件ごとの試験の上限の文は #663）";
 
+/** 旗 `v12.ids` の免除の要件の枠の文の履歴（R-tsp-02 の since の末尾に足す。#813） */
+const FRAME_EXEMPT_SINCE = "（旗 v12.ids の免除の要件の枠の文は #813）";
+
 /**
  * T2 の規則の定義（旗 on なら台帳から組む。Issue #547）。省けば今の定数を返す。渡せば R-tsp-02 の除外（structural と、
  * 試験の型の必須の kind が normal だけの確かめ方の種類。台帳の順）と、R-tsp-16 の形の位置（有効の行の文 → 未対応の行の
@@ -791,11 +849,12 @@ export function testSpecRuleDefinitionsOf(ledger?: LedgerView, ids = false): rea
     if (definition.id === "R-tsp-02") {
       const excluded = ["structural", ...ledger.t2ExemptKinds].join("・");
       if (ids) {
-        // 旗 ids：必要な試験の枠の値の対象ごとの三種と、コードの在ることの試験を数えないこと・免除の集合（#653）、要件ごとの上限（#663）
+        // 旗 ids：必要な試験の枠の値の対象ごとの三種と、コードの在ることの試験を数えないこと・免除の集合（#653）、
+        // 免除の要件の枠の事実（#813）、要件ごとの上限（#663）
         return {
           ...definition,
-          text: `確かめ方が ${excluded} の要件を除いて、ruled と分類した要件は、枠の値の対象のうち決まりの対象ごとに正常・異常・境界の場合を書く。コードが作る画面・entity・項目の在ることの試験は三種に数えない。所属が画面・entity の行だけの要件は三種を求めない（枠が空）。${TEST_SPEC_FRAME_LIMIT_TEXT}`,
-          since: `${definition.since}${FRAME_SINCE}${FRAME_LIMIT_SINCE}`,
+          text: `確かめ方が ${excluded} の要件を除いて、ruled と分類した要件は、枠の値の対象のうち決まりの対象ごとに正常・異常・境界の場合を書く。コードが作る画面・entity・項目の在ることの試験は三種に数えない。値の対象が無い要件は三種を求めない。そのうち枠に項目の行が示された要件は、その行に正常の場合を 1 本以上書く。${TEST_SPEC_FRAME_LIMIT_TEXT}`,
+          since: `${definition.since}${FRAME_SINCE}${FRAME_EXEMPT_SINCE}${FRAME_LIMIT_SINCE}`,
         };
       }
       return {
@@ -1264,10 +1323,11 @@ function judgedNatures(decided: ReadonlyMap<string, DecidedNature>): readonly De
 /**
  * 採った種類で、コードが作った試験を絞る（Issue #595）。空の集計の試験（境界・異常）は、採った種類が在ることだけの要件には足さない
  * （v1 の網羅の検査がその要件に境界・異常を許さない）。確かめ方の性質の試験はそのまま。画面・在ること・項目だけの要件の
- * 項目 × screen（#624・#652）も種類に依らず残す。
+ * 項目 × screen（#624・#652）も種類に依らず残す。条件の無い操作とその entity の項目だけの fixed-test の項目 × screen（#826）は、
+ * 逆に採った種類が existence-only のときだけ残す（同じ関数で絞る）。
  *
  * 順（初回も、中身のやり直しの合併後も同じ。Issue #651・#652）：コードの生成（LLM を呼ぶ前・種類に依らない）→ 分類は LLM が独立に
- * 書く → 分類の照合・J2 の採用 → ここ（採った種類で絞るのは空の集計の試験だけ）→ 合併した組に検査を全部
+ * 書く → 分類の照合・J2 の採用 → ここ（採った種類で絞るのは空の集計の試験と #826 の条件つきの試験だけ）→ 合併した組に検査を全部
  */
 function keptGenerated(
   generated: GeneratedTests,
@@ -1275,16 +1335,22 @@ function keptGenerated(
   ledger: LedgerView,
 ): GeneratedTests {
   const aggregateIds = new Set(ledger.aggregateRows.map((row) => row.id));
-  const tests = generated.tests.filter(
-    (test) =>
-      !aggregateIds.has(generated.observes.get(test.id) ?? "") || natures.get(test.target.requirementId) !== "existence-only",
-  );
+  const tests = generated.tests.filter((test) => {
+    const observed = generated.observes.get(test.id) ?? "";
+    const nature = natures.get(test.target.requirementId);
+    // 空の集計：existence-only の要件には足さない
+    if (aggregateIds.has(observed)) return nature !== "existence-only";
+    // #826：existence-only のときだけ残す
+    if (generated.existenceOnlyTestIds.has(test.id)) return nature === "existence-only";
+    return true;
+  });
   if (tests.length === generated.tests.length) return generated;
   const kept = new Set(tests.map((test) => test.id));
   return {
     ...generated,
     tests,
     observes: new Map([...generated.observes].filter(([id]) => kept.has(id))),
+    existenceOnlyTestIds: new Set([...generated.existenceOnlyTestIds].filter((id) => kept.has(id))),
   };
 }
 
@@ -1679,6 +1745,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
               ...checkLedgerTests(suite, observes, targets, quoted),
               ...checkAggregateTests(suite, observes, pruned.table, ledger),
               ...checkConditionTests(suite, observes, pruned.table, ledger),
+              ...(ids ? checkExpressionTests(suite, observes, pruned.table) : []),
               ...(kept === undefined ? [] : checkGeneratedOverlap(llmSuite, llmObserves, kept, pruned.table, ledger)),
             ];
       if (problems.length === 0) {

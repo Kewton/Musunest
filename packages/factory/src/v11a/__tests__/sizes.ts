@@ -47,7 +47,7 @@ import { AGENT_LIMITS } from "../../limits.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
 import type { JudgeAnswer } from "../../judge.js";
 import { casesResponseOf, codeIdRenameOf, draftOf, idsResponseList, idsResponsesOf, t1ResponseOf, withCodeIds } from "./fixtures.js";
-import type { NameTable, NameTableRow } from "../names.js";
+import { ownershipWithValidationTargets, type NameTable, type NameTableRow } from "../names.js";
 import { ledgerViewOf, resolveV12Flags, type V12Flags } from "../../v12/ledger.js";
 
 /** 中央値（要件 15・試験 39）と観測した最大（要件 25・試験 68）。Issue #546 */
@@ -70,6 +70,11 @@ export interface SizedOptions {
   readonly itemsOnly?: boolean;
   /** 値を縛る要件のうち台本 itemsOnly の前の 1 件を、所属が entity の行だけの在ることだけの要件にする（Issue #653） */
   readonly entityOnly?: boolean;
+  /**
+   * 旗 `v12.ids` の走りで、値を縛る要件に条件つき操作の行を足す（Issue #800。値の対象を持つので免除されない）。
+   * 代わりの対象（項目 × screen）の生成は条件つき操作を数えないので、作る試験の数は変えない
+   */
+  readonly valueTargets?: boolean;
 }
 
 /** 台本 `itemsOnly` の要件の数（Issue #652） */
@@ -295,6 +300,18 @@ export function buildSized(
       const lead = leadingOf(index);
       if (lead === "default") return { requirementId: id, kind: "default-value" as const, value: "a1" };
       if (lead === "enum") return { requirementId: id, kind: "enum-membership" as const };
+      // Issue #800：値の対象は targets から入る。代わりの対象（項目 × screen）は fixed-test 以外では作られない
+      if (
+        options.valueTargets === true &&
+        resolvedFlags.ids &&
+        !isStructural(index) &&
+        !isItemsOnly(index) &&
+        !isEntityOnly(index) &&
+        index !== screenRuledIndex &&
+        lead === null
+      ) {
+        return { requirementId: id, kind: "validation-expression" as const, targets: [`f.item.v${index + 1}`] };
+      }
       return isStructural(index)
         ? {
             requirementId: id,
@@ -558,7 +575,8 @@ export function buildSized(
     // 旗 ids の走りでコードが作る試験：構造の検査（checks の数）・台本 codeWritten の 4 件と R3 の在ることの確認・台本 screens の画面 1 件
     generatedTestCount: resolvedFlags.ids ? structuralCount + (screens ? 1 + 1 : 0) + (codeWritten ? 4 + 1 : 0) + itemsOnlyCount + entityOnlyCount : 0,
     // 値を縛る要件のうち所属が項目の行だけのもの（台本 screens の画面を所属に持つ要件を除く）の 項目 × screen（Issue #652）
-    addedTestCount: resolvedFlags.ids ? plainCount - (screens ? 1 : 0) : 0,
+    // Issue #800：valueTargets は検査の式にするので、代わりの対象（項目 × screen）を作らない
+    addedTestCount: resolvedFlags.ids && options.valueTargets !== true ? plainCount - (screens ? 1 : 0) : 0,
     itemsOnlyIds: ids.filter((_, index) => isItemsOnly(index)),
     entityOnlyIds: ids.filter((_, index) => isEntityOnly(index)),
     ids,
@@ -570,7 +588,14 @@ export function buildSized(
     tableResponses: () => (resolvedFlags.ids ? idsResponseList(idsResponsesOf(list, table, ledger)) : [t1ResponseOf(draftOf(list, table), ledger)]),
     adviceAnswers: () => {
       const answers: Record<string, JudgeAnswer> = {};
-      for (const entry of table.ownership) {
+      // 検査の式の要件の所属は、C2' の前の手が targets の項目と entity を足したあとの形で問われる（Issue #808）
+      const ownership = table.ownership.map((entry) => {
+        const verification = table.verification.find((candidate) => candidate.requirementId === entry.requirementId);
+        return verification?.kind === "validation-expression"
+          ? { requirementId: entry.requirementId, roles: ownershipWithValidationTargets(entry.roles, table.rows, verification.targets) }
+          : entry;
+      });
+      for (const entry of ownership) {
         for (const role of entry.roles) answers[`need:${entry.requirementId}:${role.id}`] = { kind: "noul", noul: 0.9 };
       }
       return answers;

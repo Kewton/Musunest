@@ -34,6 +34,7 @@
 | enum-membership | 有効 | Issue #548 | enum-membership | field × validate・normal・期待 ok の json-string-array・入力 empty-record・参照データ 空・1 本以上 | — | code | enum-membership | 外は見ない | 選択肢の項目の値が挙げた選択肢のどれかであることだけを決める要件を、表で確定した選択肢の集合と宣言の options の照合で確かめる（名前の一致に頼らない。08 §8.2 の (c)①・M-03） |
 | empty-aggregate | 有効 | Issue #549 | — | computation × aggregate・boundary（集計元を空と明示し行を置かない）・abnormal（集計元に触れない）・期待 ok の種類 × データ状態の値（sum は空 zero・未読 null／count は空 zero・未読 null／avg は空 null・未読 null）・入力 row-record・参照データ 集計元の行なし・1 本以上 | — | code（アプリ全体・見出しごと × 選択肢）／llm-written-code-checked（行ごと・見出しごと × 月） | v1-run-tests | 外は見ない | 集計元が空・未読のときの集計の値を、集計の種類 × データ状態の表で試験より前に確定し、「読めない（null）」と「空（0）」の契約を T2 に見せる（一律の「空なら 0」は誤り。08 §5・§8.2 の (a)①） |
 | non-requirement | 有効 | Issue #550 | non-requirement | 無し（試験を作らない。T1'' が受理すれば要件でない文として残る一覧から除く） | — | — | — | 外は見ない | 目的を述べる前置きのように決まりも対象の項目も無い文を、試験を作らずに扱う。免除は T1''（独立の点検）の受理だけで決め、受理されなければ持ち越す（出どころや要件 ID の形では免除しない。08 §5・§8.2） |
+| validation-expression | 有効 | Issue #800 | validation-expression | field × validate・normal・abnormal・boundary・期待は今の評価器（ok は値・error は誤りコード）・対象は確かめ方の targets の項目・入力 record・参照データ any | — | llm-written-code-checked | v1-run-tests | 外は見ない | 入力の値を 1 つの比較で縛る決まりを、対象の項目ごとの検査（validate）の試験で確かめる。決まりの無い要件に検査の試験を作らせないため、式で書ける決まりだけを受理し、対象を targets の項目に限る（方法論 03 の H2・H1。08 §5・§8.2） |
 
 - 「有効（v1.1α から引き継ぎ・列の一部は未定義）」の行は、v1.1α の評価の方法の表の組を登録したもの。試験の型・網羅の鍵・外の対応は未定義で、今の検査のまま
 - 「外の対応」の「未定義」は、対応をまだ決めていない欄（「外は見ない」とは別）
@@ -41,3 +42,14 @@
 - `non-requirement` は決まりも対象の項目も無い説明文（目的を述べる前置きなど）だけに使う確かめ方。所属は 0 行（1 行でも所属させれば T1' が落とす）、value は null、分類の欄は完全性の検査のために要るが値は使わない。v1 の型へは fixed-test として写す。試験を作らない（観測する性質の一覧に入れない）ので、T2 の試験の型・網羅の鍵・B4 は無い。**有効になるのは T1''（独立の点検）が受理したときだけ**：受理条件は「文に決まりも対象（項目・計算・集計・操作・画面）も無いとき」で、決まりか対象があれば weak-verification で拒否し、今までどおり持ち越す（出どころ semantic-check）。受理された要件は持ち越しに数えず、残る一覧（T2・B1・B3'・B6・⑦）から除き、持ち越しの記録の `non_requirements` に載る。出どころ（答えから来た・了承した代替先）や要件 ID の形では免除しない
 - `enum-membership` の期待の型は「options の並び」：T2 の LLM が対象の項目の表の options のキーを表の順に並べた並びを JSON で書き、T2' が長さ・順まで照らす（旗 `v12.ids` の走りはコードが同じ形で作る。手 3c・#595）。B4 は宣言の options のキーの集合と長さで照らす（順の違いは B3 の options の照合が落とす）。外の採点の labels は表示名の別の観測で同値ではないので「外は見ない」
 - `empty-aggregate` のデータ状態の値：〔sum・count／空〕行ごと・アプリ全体は 0、見出しごとは見出しごとに 0 の並び（enum の見出しは options の順の `{heading, value}`、月の見出しは各 value だけ見る）／〔avg／空〕null（見出しごとは見出しごとに null）／〔どの種類も／未読〕null（見出しごとも並び全体が null）。一律の「空なら 0」は誤り。旗 `v12.ids` が off の走りと、on の走りの行ごと・見出しごと × 月の集計は、T2 の LLM が期待の値を書き、T2' がこの表から導いた値と厳密に照らす（違えば拒否）。on の走りのアプリ全体と見出しごと × 選択肢の集計の空・未読の試験はコードが作る（手 3c・#595）。observes が value の集計の試験も、参照データに集計元の行が無ければ同じ表で照らす。欠損値（null の行）の規則は sum と avg で違い要確認なので対象外。B4 は v1 の `runTests`（評価器はそのまま）、外の採点（computedVisible・groupChart）は空の値を見ないので「外は見ない」
+
+## 4. 旗 ids だけの C2 への文（Issue #806）
+
+- 各行の `rules.t1Ids` が持つ、**旗 `v12.ids` が on の走りの C2 への文**。off の `t1`・`since`・`why` は変えず、ids だけの履歴（`since`）と理由（`why`）はこの欄の中に持つ。この表はコードの台帳の `t1Ids` と 1 要素 1 行で照らされる（`v12/ledger.test.ts`）
+- ids の見方（`ledgerViewOf` が ids で選ぶ見方）の `t1IdsRuleTexts` は、行ごとに `t1Ids` の文があればそれ、無ければ `t1` を台帳の順に並べる。off の見方には欄を置かない。C2 の規則（R-map-03）は ids の走りだけ `t1IdsRuleTexts` から組み、T1（名前の表の段）は `t1RuleTexts` のまま
+
+| id | since | 文 |
+|---|---|---|
+| when | Issue #806 | 操作ができる条件（いつボタンを出すか・いつ実行できるか）だけを決める要件と、操作の実在・種類とその条件を決める要件は fixed-test にし、条件を持つ操作の行を所属させる。操作のあとの状態の値を求める部分を含む要件は、未対応の観測を根拠に unresolved にする。 |
+| value | Issue #806 | 計算・集計の値を見せる要件（人ごとの数・合計・回数など）は fixed-test にし、計算の行を所属させる。表示の構造（view-shows）だけで確かめない。画面からの到達は名前の照合が見る。 |
+| state-after-set | Issue #806 | この未対応は、操作に set を当てたあとの状態の値そのものを確かめる試験である。条件だけ・操作の実在と種類だけを決める要件は未対応ではない（when の fixed-test・action-kind の構造）。変更後の値を求める部分を含む要件は、分割されていなければ unresolved のまま。 |

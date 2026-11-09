@@ -255,7 +255,7 @@ describe("B3' の要求", () => {
 // ── 旗 v12.ids：要件に結び付いた検査（Issue #795）────────────────────────────
 
 const R1_LINKED: readonly DeclLinkedValidations[] = [
-  { requirementId: "R1", validations: [{ entity: "item", name: "amount", conflict: false }] },
+  { requirementId: "R1", validations: [{ entity: "item", targets: ["amount"], name: "amount", conflict: false }] },
 ];
 
 /** 値の中の全部の鍵（深さ優先。塊に入ってよい欄を照らす） */
@@ -355,9 +355,9 @@ describe("B3' の要求の塊「要件に結び付いた検査」（Issue #795�
 
   it("塊は点検の対象の要件のうち 1 つ以上あるものだけ、対象の順に並べる", async () => {
     const linked: readonly DeclLinkedValidations[] = [
-      { requirementId: "R4", validations: [{ entity: "item", name: "month", conflict: false }] },
-      { requirementId: "R9", validations: [{ entity: "item", name: "outside", conflict: false }] },
-      { requirementId: "R1", validations: [{ entity: "item", name: "amount", conflict: false }] },
+      { requirementId: "R4", validations: [{ entity: "item", targets: ["month"], name: "month", conflict: false }] },
+      { requirementId: "R9", validations: [{ entity: "item", targets: ["outside"], name: "outside", conflict: false }] },
+      { requirementId: "R1", validations: [{ entity: "item", targets: ["amount"], name: "amount", conflict: false }] },
     ];
     const { requests } = await run(FIXTURE_YAML, [{ judgments: TARGETS.map(accept) }], LIST, linked);
     const blocks = dataBlocks(requests[0]!.input);
@@ -379,7 +379,7 @@ describe("B3' の要求の塊「要件に結び付いた検査」（Issue #795�
     const { requests } = await run(FIXTURE_YAML, [{ judgments: TARGETS.map(accept) }], LIST, R1_LINKED);
     const block = dataBlocks(requests[0]!.input).find((entry) => entry.name === DECL_CHECK_LINKED_VALIDATIONS_DATA_NAME);
     if (block === undefined) throw new Error("前提が壊れた：塊が無い");
-    expect(new Set(keysDeep(JSON.parse(block.text)))).toEqual(new Set(["requirementId", "validations", "entity", "name", "conflict"]));
+    expect(new Set(keysDeep(JSON.parse(block.text)))).toEqual(new Set(["requirementId", "validations", "entity", "targets", "name", "conflict"]));
     for (const word of ["r1-normal", "expected", "observes", "verdict", "accept", "reject", "clock", "inputContract", "operation"]) {
       expect(block.text, word).not.toContain(word);
     }
@@ -389,7 +389,7 @@ describe("B3' の要求の塊「要件に結び付いた検査」（Issue #795�
     const requestOf = async (expected: TestSuite["tests"][number]["expected"]) => {
       const suite = validationSuite("t-1", "R1", expected);
       const required = requiredValidationsOf(TABLE, suite, new Map([["t-1", "validation" as const]]));
-      const linked = linkedValidationsByRequirement(suite, required, TARGETS);
+      const linked = linkedValidationsByRequirement(suite, required, TARGETS, TABLE, await normalizedFixture(FIXTURE_YAML));
       expect(linked).toEqual(R1_LINKED);
       const { requests } = await run(FIXTURE_YAML, [{ judgments: TARGETS.map(accept) }], LIST, linked);
       return requests[0]!;
@@ -398,6 +398,61 @@ describe("B3' の要求の塊「要件に結び付いた検査」（Issue #795�
     const error = await requestOf({ kind: "error", code: "E_INVALID" });
     expect(JSON.stringify(error)).toBe(JSON.stringify(ok));
     expectNoAcceptanceMaterial([JSON.stringify(ok)]);
+  });
+});
+
+describe("B3' の塊：検査の式の要件の name は、一意に結び付いたときだけ名前を持つ（Issue #801）", () => {
+  const table = {
+    rows: [
+      { id: "e.item", kind: "entity", entity: null, name: "item", role: "", source: null, type: null, options: null, groupBy: null, refEntity: null },
+      { id: "f.item.amount", kind: "field", entity: "e.item", name: "amount", role: "", source: null, type: "number", options: null, groupBy: null, refEntity: null },
+      { id: "f.item.rate", kind: "field", entity: "e.item", name: "rate", role: "", source: null, type: "number", options: null, groupBy: null, refEntity: null },
+    ],
+    ownership: [],
+    verification: [{ requirementId: "R1", kind: "validation-expression", targets: ["f.item.amount", "f.item.rate"] }],
+    classification: [],
+  } as unknown as Parameters<typeof requiredValidationsOf>[0];
+  const suite: TestSuite = {
+    tests: [
+      {
+        id: "v",
+        target: { requirementId: "R1", kind: "field", roleId: "f.item.amount" },
+        kind: "normal",
+        operation: "validate",
+        clock: "2026-09-16T12:00:00+09:00",
+        input: {},
+        referenceData: [],
+        expected: { kind: "ok", value: true },
+      },
+    ],
+  };
+  const required = requiredValidationsOf(table, suite, new Map([["v", "validation" as const]]));
+  const appOf = (validations: readonly { readonly name: string; readonly expression: string }[]): Parameters<typeof linkedValidationsByRequirement>[4] =>
+    ({ spec: { entities: [{ name: "item", fields: { amount: {}, rate: {} } }], computed: [], validations: validations.map((entry) => ({ ...entry, entity: "item" })) } }) as never;
+
+  it("(1) 骨組みは要件ごとに entity・targets を持ち、名前を持たない", () => {
+    expect(required).toEqual([{ requirementId: "R1", entity: "item", targets: ["amount", "rate"], testIds: ["v"], conflict: false }]);
+  });
+
+  it("(2) 参照の集合がちょうど 1 つの検査と一致すれば名前を持ち、0・2 つ・競合は null。targets は常に載る", () => {
+    const one = linkedValidationsByRequirement(suite, required, ["R1"], table, appOf([{ name: "positive", expression: "rate + amount > 0" }]));
+    expect(one).toEqual([{ requirementId: "R1", validations: [{ entity: "item", targets: ["amount", "rate"], name: "positive", conflict: false }] }]);
+    const none = linkedValidationsByRequirement(suite, required, ["R1"], table, appOf([{ name: "tautology", expression: "1 > 0" }]));
+    expect(none).toEqual([{ requirementId: "R1", validations: [{ entity: "item", targets: ["amount", "rate"], name: null, conflict: false }] }]);
+    const two = linkedValidationsByRequirement(
+      suite,
+      required,
+      ["R1"],
+      table,
+      appOf([
+        { name: "one", expression: "amount + rate > 0" },
+        { name: "two", expression: "rate + amount > 1" },
+      ]),
+    );
+    expect(two[0]?.validations[0]?.name).toBeNull();
+    const conflicting = required.map((entry) => ({ ...entry, conflict: true }));
+    const conflict = linkedValidationsByRequirement(suite, conflicting, ["R1"], table, appOf([{ name: "positive", expression: "rate + amount > 0" }]));
+    expect(conflict[0]?.validations[0]?.name).toBeNull();
   });
 });
 

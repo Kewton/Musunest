@@ -89,6 +89,12 @@ describe("コードが作る試験：純粋で、同じ入力から同じ組（I
     const { tests, observes, excludedRequirementIds, stopped } = generate();
     expect(stopped).toEqual([{ field: "requirements[1]", message: GENERATED_STRUCTURE_STOP_MESSAGES.targets }]);
     expect(tests.map((test) => [test.target.requirementId, test.target.roleId, test.kind, observes.get(test.id)])).toEqual([
+      // R1：条件の無い操作とその entity の項目だけなので、項目 × screen を項目ごとに作る（採った種類が existence-only のときだけ残す。#826）
+      ["R1", "f.item.title", "normal", "view-structure"],
+      ["R1", "f.item.amount", "normal", "view-structure"],
+      ["R1", "f.item.day", "normal", "view-structure"],
+      ["R1", "f.item.kind", "normal", "view-structure"],
+      ["R1", "f.item.owner", "normal", "view-structure"],
       ["R4", "s.overview", "normal", "view-structure"],
       ["R4", "c.byKind", "boundary", "empty-aggregate"],
       ["R4", "c.byKind", "abnormal", "empty-aggregate"],
@@ -539,10 +545,16 @@ describe("手 3d：構造の検査・画面と在ることの構造の確認を�
     }
   });
 
-  it("免除の対象（所属の行がすべて画面・entity の行）は台帳の型と所属で決める：R10・R11 は対象、R12（項目あり）・R4（計算あり）は対象でない。作った試験を消しても対象は変わらない", () => {
-    expect(normalOnlyOwnershipRequirementIds(TABLE_D, ledger, LIST_D)).toEqual(["R10", "R11"]);
-    const noScreens = { ...ledger, ownershipRows: [] };
-    expect(normalOnlyOwnershipRequirementIds(TABLE_D, noScreens, LIST_D)).toEqual([]);
+  it("免除の対象は値の対象（計算・条件つき操作の行と targets）が無い要件（項目・画面・entity だけ）。台帳の型と所属で決め、作った試験の有無では決めない：R9・R10・R11・R12 は対象、計算を持つ R4 は対象でない（Issue #800）", () => {
+    const exempt = normalOnlyOwnershipRequirementIds(TABLE_D, ledger, LIST_D);
+    for (const id of ["R9", "R10", "R11", "R12"]) expect(exempt).toContain(id);
+    expect(exempt).not.toContain("R4");
+    // 二点測定：値の対象（計算の行）を所属に足すと免除の対象から外れる
+    const withComputation = {
+      ...TABLE_D,
+      ownership: TABLE_D.ownership.map((entry) => (entry.requirementId === "R10" ? { ...entry, roles: [...entry.roles, stated("c.rate")] } : entry)),
+    };
+    expect(normalOnlyOwnershipRequirementIds(withComputation, ledger, LIST_D)).not.toContain("R10");
   });
 
   it("混在の回帰（R1）：既定値・選択肢の集合・構造・画面を持つ fixed-test・集計を持つ fixed-test の要件を 1 表に入れると、要件ごとの作る試験が優先の順どおりで、合併した組に台帳の型の全試験の検査・集計・評価可能性・重なりの検査を掛けて問題 0", () => {
@@ -734,10 +746,10 @@ describe("手 3h：所属が項目の行だけの fixed-test の要件に 項目
     expect(shapeOf(generateH(table), "R14")).toEqual([]);
   });
 
-  it("免除は広がらない：項目だけの要件（R9・R14）は免除の対象でない（台帳の型の組ごとの対象の種類＝画面・entity のまま）", () => {
+  it("免除は値の対象が無い要件に広がる：項目だけの要件（R9・R14）も値の対象が無いので免除の対象になる（Issue #800）", () => {
     const exempt = normalOnlyOwnershipRequirementIds(TABLE_H, ledger, LIST_H);
-    expect(exempt).not.toContain("R9");
-    expect(exempt).not.toContain("R14");
+    expect(exempt).toContain("R9");
+    expect(exempt).toContain("R14");
   });
 
   it("二点測定：代わりの対象の種類を外した台帳（#651 まで）では、項目だけの要件に何も作らない", () => {

@@ -62,7 +62,7 @@
 // 「T1・T1'' のあとに残った全要件」に求める形なので、B6 で除いたあとの版の B3' の結果と組めない）。除く行の
 // 規則（その要件だけが所属させる行）とぶら下がりの検査は A1 と同じ関数（`ownersByRowId`・
 // `danglingRowReferences`・`pruneForCarryOver`）で掛ける。
-import type { ConfirmedPlan } from "@musunest/appspec-schema";
+import type { ConfirmedPlan, NormalizedAppSpec } from "@musunest/appspec-schema";
 import { sha256Hex, type Diagnostic } from "@musunest/spec-engine";
 import { JobBudget } from "../budget.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse, MalformedKindCounts, MalformedKindKey } from "../llm.js";
@@ -136,7 +136,16 @@ import {
 import { runStaticCheck } from "../stages/static-check.js";
 import type { DroppedNonstructuralTest } from "../stages/test-suite.js";
 import type { EvaluationContext } from "../stages/tools.js";
-import { correspondenceFromTable, extraElementsOf, markRows, requiredValidationsOf, type RequiredValidation } from "./bind-by-id.js";
+import {
+  correspondenceFromTable,
+  extraElementsOf,
+  markRows,
+  referenceFieldNamesOf,
+  requiredValidationsOf,
+  sameNameSet,
+  validationWorldOf,
+  type RequiredValidation,
+} from "./bind-by-id.js";
 import {
   buildTableRoundsFile,
   buildV11aArtifacts,
@@ -164,6 +173,7 @@ import {
   type CarryOverReason,
   type DeclJudgment,
   type PrunedForCarryOver,
+  type SemanticJudgment,
 } from "./carry-over.js";
 import { identityMappings, toV1 } from "./convert.js";
 import { lostCoverage } from "./coverage.js";
@@ -185,6 +195,8 @@ import {
   type SemanticRejection,
 } from "./stages/name-table.js";
 import {
+  composeRecheckJudgments,
+  recheckTargetsOf,
   runSemanticCheck,
   semanticCheckTargets,
   semanticShapeRetryBudgetOf,
@@ -194,6 +206,7 @@ import {
 import { runTestSpec, type TestSpecRejectedBundle, type TestSpecValue } from "./stages/test-spec.js";
 import { runWriteV11a } from "./stages/write.js";
 import { ledgerViewOf, resolveV12Flags, toPublicV12Flags, type V12Flags } from "../v12/ledger.js";
+import { BOARD_REACH_RULES, type ReachRules } from "../stages/correspondence.js";
 import {
   countViolations,
   isStrictlyBetter,
@@ -733,18 +746,54 @@ export function linkedValidationsByRequirement(
   suite: TestSuite,
   requiredValidations: readonly RequiredValidation[],
   requirementOrder: readonly string[],
+  table?: NameTable,
+  app?: NormalizedAppSpec,
 ): readonly DeclLinkedValidations[] {
+  const verificationById = new Map((table?.verification ?? []).map((entry) => [entry.requirementId, entry] as const));
+  const world = app === undefined ? undefined : validationWorldOf(app);
+  /** この宣言で一意に結び付いた検査の名前（候補 0・2 つ以上・競合は null。Issue #801） */
+  const nameOf = (entry: RequiredValidation): string | null => {
+    if (verificationById.get(entry.requirementId)?.kind === "validation-expression") {
+      if (entry.conflict || world === undefined) return null;
+      const wanted = new Set(entry.targets);
+      const candidates = world.validations.filter((validation) => {
+        if (validation.entity !== entry.entity) return false;
+        const references = referenceFieldNamesOf(world, validation.entity, validation.expression);
+        return references !== null && sameNameSet(references, wanted);
+      });
+      return candidates.length === 1 ? (candidates[0]?.name ?? null) : null;
+    }
+    // 名前で結ぶ契約のままの種類：対象の行の名前と同じ名前の検査が宣言に在れば、それが結び付く名前。
+    // 宣言を渡さない呼び出し（射影の単体）では、対象の名前をそのまま検査の名前として返す
+    const name = entry.targets[0];
+    if (name === undefined) return null;
+    if (world === undefined) return name;
+    return world.validations.some((validation) => validation.entity === entry.entity && validation.name === name) ? name : null;
+  };
   const requirementOfTest = new Map(suite.tests.map((test) => [test.id, test.target.requirementId] as const));
-  const byRequirement = new Map<string, { entity: string | null; name: string; conflict: boolean }[]>();
-  for (const validation of requiredValidations) {
-    const linked = { entity: validation.entity, name: validation.name, conflict: validation.conflict };
-    const seen = new Set<string>();
-    for (const testId of validation.testIds) {
-      const requirementId = requirementOfTest.get(testId);
-      if (requirementId === undefined || seen.has(requirementId)) continue;
-      seen.add(requirementId);
+  const byRequirement = new Map<string, DeclLinkedValidations["validations"][number][]>();
+  for (const entry of requiredValidations) {
+    const linked = { entity: entry.entity, targets: entry.targets, name: nameOf(entry), conflict: entry.conflict };
+    // 共有の検査（同じ行を複数の要件の試験が要求する）は、それぞれの要件に載せる（Issue #795）
+    const requirementIds = new Set(
+      entry.testIds.flatMap((testId) => {
+        const requirementId = requirementOfTest.get(testId);
+        return requirementId === undefined ? [] : [requirementId];
+      }),
+    );
+    for (const requirementId of requirementIds) {
+      if (!requirementOrder.includes(requirementId)) continue;
       const validations = byRequirement.get(requirementId) ?? [];
-      if (!validations.some((entry) => entry.entity === linked.entity && entry.name === linked.name)) validations.push(linked);
+      if (
+        !validations.some(
+          (candidate) =>
+            candidate.entity === linked.entity &&
+            candidate.name === linked.name &&
+            sameNameSet(new Set(candidate.targets), new Set(linked.targets)),
+        )
+      ) {
+        validations.push(linked);
+      }
       byRequirement.set(requirementId, validations);
     }
   }
@@ -853,6 +902,9 @@ async function runV11a(
   const flags = resolveV12Flags(input.flags);
   const ledger = ledgerViewOf(flags);
   const withLedger = ledger === undefined ? {} : { ledger };
+  // 画面からの到達の規則の選択（旗 `v12.ids` の走りだけ。B3 と B4 へ**同じ値**を渡す。Issue #804）
+  const reach: ReachRules | undefined = flags.ids ? BOARD_REACH_RULES : undefined;
+  const withReach = reach === undefined ? {} : { reach };
   const flagsRecord = input.recordV12Flags === true ? { v12_flags: toPublicV12Flags(flags) } : {};
   const limits = input.limits ?? AGENT_LIMITS;
   const meter = new UsageMeter();
@@ -1411,9 +1463,16 @@ async function runV11a(
         ? undefined
         : { table: resume.table, tableSha256: resume.tableSha256, semantic: resume.semanticCheck, advice: resume.judgeAdvice };
     /**
-     * J4 → T1''（C3）を 1 回回す（表を組む段が T1 でも C2 でも同じ関数。旗 `v12.ids` の走りの C3 の表の型は同じ。Issue #593）
+     * J4 → T1''（C3）を 1 回回す（表を組む段が T1 でも C2 でも同じ関数。旗 `v12.ids` の走りの C3 の表の型は同じ。Issue #593）。
+     * 旗 `v12.ids` の C3 の 2 回目は `recheck`（再点検の部分）を渡すと、C3 の対象を部分にし、保つ要件は 1 回目の判定
+     * （`previousJudgments`）で合成した結果を返す（Issue #805）。記録（`raw`）は C3 に実際に渡した部分の結果のまま。
      */
-    const checkTableRound = async (round: number, output: { readonly table: NameTable; readonly tableSha256: string }) => {
+    const checkTableRound = async (
+      round: number,
+      output: { readonly table: NameTable; readonly tableSha256: string },
+      recheck?: readonly string[],
+      previousJudgments?: readonly SemanticJudgment[],
+    ) => {
       // J4（判定の口があるときだけ。予算の包みを渡す。助言であって門ではない。D5）
       const advice =
         judgeBudget === undefined
@@ -1424,12 +1483,16 @@ async function runV11a(
 
       // T1''（完全な結果だけを受ける。表の SHA の合わない結果・判定の欠落は形の落ちとして止める）
       const targets = semanticCheckTargets(list, output.table);
-      // 旗 `v12.ids`：束の数を回ごとに残し、形のやり直しの予算は 2 回の点検で 1 つを共有する（Issue #735）
+      const requested = recheck === undefined ? targets : recheck.filter((id) => targets.includes(id));
+      const kept = recheck === undefined ? undefined : targets.filter((id) => !requested.includes(id));
+      // 旗 `v12.ids`：束の数を回ごとに残し、形のやり直しの予算は 2 回の点検で 1 つを共有する（Issue #735）。
+      // 2 回目の束の数は再点検の部分の数（0 を含む。Issue #805）
       if (flags.ids) {
         semanticShapeRetries ??= semanticShapeRetryBudgetOf(list);
-        semanticBundleRounds.push({ round, bundles: Math.ceil(targets.length / V12_T2_BUNDLE.size) });
+        semanticBundleRounds.push({ round, bundles: Math.ceil(requested.length / V12_T2_BUNDLE.size) });
       }
       const shapeRetries = semanticShapeRetries;
+      let raw: SemanticCheckOutput | undefined;
       const semantic = await runStageOk(
         "semantic-check",
         async (): Promise<StageOutcome<SemanticCheckOutput>> => {
@@ -1443,32 +1506,47 @@ async function runV11a(
             ...withLedger,
             // 旗 `v12.ids`：R-sc-02 に構造の検査の読み方を足す（off は渡さない＝今の文のまま。表の targets の有無で推測しない。Issue #732）
             // 旗 `v12.ids`：対象を束に分けて同時に呼び、形のやり直しは 2 回の点検で共有した予算から使う（Issue #735）
-            ...(flags.ids && shapeRetries !== undefined ? { ids: true, round, shapeRetries } : {}),
+            // 旗 `v12.ids` の 2 回目：対象を再点検の部分にし、参照の塊・R-sc-06・R-sc-07 を足す（Issue #805）
+            ...(flags.ids && shapeRetries !== undefined
+              ? { ids: true, round, shapeRetries, ...(recheck === undefined ? {} : { recheck: requested }) }
+              : {}),
           });
           if (!checked.ok) return checked;
+          raw = checked.value;
           const problems: Problem[] = [];
           if (checked.value.tableSha256 !== output.tableSha256) {
             problems.push({ field: "tableSha256", message: "表の意味の点検の結果が、採用した表の SHA-256 と合わない" });
           }
-          if (!coversExactly(checked.value.judgments, targets)) {
+          // 再点検の部分を渡した 2 回目は、部分の判定と保つ要件の 1 回目の判定を合成してから完全性を確かめる（Issue #805）
+          const composed =
+            recheck === undefined
+              ? { ok: true as const, value: checked.value.judgments }
+              : composeRecheckJudgments(targets, requested, previousJudgments ?? [], checked.value.judgments);
+          if (!composed.ok) return { ok: false, failure: { kind: "malformed", attempts: 1, problems: composed.problems } };
+          if (!coversExactly(composed.value, targets)) {
             problems.push({ field: "judgments", message: "表の意味の点検の判定が、対象の要件にちょうど 1 つずつでない" });
           }
-          return problems.length > 0 ? { ok: false, failure: { kind: "malformed", attempts: 1, problems } } : checked;
+          return problems.length > 0
+            ? { ok: false, failure: { kind: "malformed", attempts: 1, problems } }
+            : { ok: true, value: { tableSha256: checked.value.tableSha256, judgments: composed.value, targets } };
         },
         // C3 は各回の段全体の span を別の欄にも残す（Issue #748）
         requestLog === undefined ? undefined : { stage: "semantic-check", round },
       );
+      const recorded = raw ?? { tableSha256: semantic.tableSha256, judgments: recheck === undefined ? semantic.judgments : [], targets: requested };
       semanticRounds.push({
         round,
-        tableSha256: semantic.tableSha256,
-        targets: semantic.targets,
-        judgments: semantic.judgments,
+        tableSha256: recorded.tableSha256,
+        targets: recorded.targets,
+        judgments: recorded.judgments,
         advice: marks,
+        // 2 回目だけ、部分の外で 1 回目の判定を保つ要件の並びを持つ（Issue #805）
+        ...(kept === undefined ? {} : { keptRequirementIds: kept }),
       });
       const rejections = semantic.judgments.filter(
         (judgment): judgment is SemanticRejection => judgment.verdict === "reject",
       );
-      return { semantic, advice, marks, rejections };
+      return { semantic, advice, marks, rejections, requested, kept, recorded };
     };
 
     if (flags.ids && resume === undefined) {
@@ -1585,12 +1663,29 @@ async function runV11a(
           target_id: entry.targetId,
           removed_row_ids: entry.removedRowIds,
         }));
-        const { semantic, advice, marks, rejections } = await checkTableRound(round, output);
+        // 旗 `v12.ids` の C3 の 2 回目は、1 回目の表と 2 回目の表・C2 が書き直した要件から再点検の部分を導き、
+        // 部分の外の要件は 1 回目の判定を保つ（Issue #805）。部分が 0 件でも合成は完全になる
+        const recheck =
+          flags.ids && round > 1 && firstRound !== undefined && rewrittenIds !== null
+            ? recheckTargetsOf({
+                list,
+                previousTable: firstRound.table,
+                currentTable: output.table,
+                rewrittenRequirementIds: rewrittenIds,
+              })
+            : undefined;
+        const { semantic, advice, marks, rejections, kept, recorded } = await checkTableRound(
+          round,
+          output,
+          recheck,
+          firstRound?.semantic.judgments,
+        );
         tableRound.semantic_check = {
-          table_sha256: semantic.tableSha256,
-          targets: semantic.targets,
-          judgments: semantic.judgments,
+          table_sha256: recorded.tableSha256,
+          targets: recorded.targets,
+          judgments: recorded.judgments,
           advice: marks,
+          ...(kept === undefined ? {} : { kept_requirement_ids: kept }),
         };
         const checked = { table: output.table, tableSha256: output.tableSha256, semantic, advice };
         // 拒否が残れば、2 回目が未使用なら C2 の 2 回目（前回の写像・拒否・印をデータで。C1 は呼ばない）。使用済みなら持ち越し
@@ -1867,6 +1962,7 @@ async function runV11a(
       excludedRowIds: carry.excludedRowIds,
       observes: testSpec.observes,
       ...withLedger,
+      ...withReach,
     });
     /** いまの評価の文脈（棄却で外した後の組・持ち越しを除いた一覧と所属） */
     const contextNow = (): EvaluationContext => ({
@@ -1880,7 +1976,7 @@ async function runV11a(
       carry = await carryOverStep(() => composeCarryOver(list, table, baseCarry, addedCarry));
       if (carry.allCarried) stopAtCarryOver(allCarriedProblemOf(carry));
       pruned = await carryOverStep(() => pruneForCarryOver(list, table, carry, withoutOverturned()));
-      evaluator = createV11aEvaluator({ table, excludedRowIds: carry.excludedRowIds, observes: testSpec.observes, ...withLedger });
+      evaluator = createV11aEvaluator({ table, excludedRowIds: carry.excludedRowIds, observes: testSpec.observes, ...withLedger, ...withReach });
     };
     const addCarry = (requirementId: string, reason: CarryOverReason): void => {
       const listed = addedCarry.get(requirementId) ?? [];
@@ -1949,6 +2045,8 @@ async function runV11a(
                 context.suite,
                 requiredValidationsOf(table, context.suite, testSpec.observes),
                 targets,
+                table,
+                app,
               )
             : undefined;
           const output = await runStageOk("decl-check", async (): Promise<StageOutcome<DeclCheckOutput>> => {
@@ -2505,6 +2603,7 @@ async function runV11a(
               suite: context.suite,
               declaration: best.report.declaration.source,
               failures: located,
+              takenNames: table.rows.map((row) => row.name),
               ...repairDiagnosticFor(best, context.suite),
               documents: input.documents,
               gateway: gateway.forStage("repair"),

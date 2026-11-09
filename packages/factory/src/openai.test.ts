@@ -51,7 +51,7 @@ import {
 import { DESIGN_SCHEMA, DESIGN_SCHEMA_NAME } from "./stages/design.js";
 import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
 import { TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
-import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
+import { PROPERTY_LEDGER_VIEW, PROPERTY_LEDGER_VIEW_IDS } from "./v12/ledger.js";
 import { VOCABULARY_BUNDLES } from "./v12/ids.js";
 import { MAPPING_SCHEMA_NAME, mappingSchemaOf } from "./v12/stages/mapping.js";
 import { VOCABULARY_SCHEMA_NAMES, vocabularySchemaOf } from "./v12/stages/vocabulary.js";
@@ -990,7 +990,7 @@ describe("識別子 v1.2-ids の client は、C1・C2 と T1''〜B5' の全段�
     { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW, ids) },
     ...STAGE_ENVELOPE_ENTRIES_V11A.filter((entry) => entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME),
     ...VOCABULARY_BUNDLES.map((bundle) => ({ stage: VOCABULARY_SCHEMA_NAMES[bundle], schema: vocabularySchemaOf(bundle, PROPERTY_LEDGER_VIEW) })),
-    { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(PROPERTY_LEDGER_VIEW) },
+    { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(PROPERTY_LEDGER_VIEW_IDS) },
   ];
 
   it("C1・C2 と T1''・T2・B1・B3'・B5' の 9 段が、名前 stage-envelope-v12 の 1 種類のバイト列（識別子 v1.2-ids の封筒）を送る", async () => {

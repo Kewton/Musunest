@@ -46,14 +46,15 @@ import {
   withCheckTargets,
   semanticRequestIds,
 } from "../__tests__/fixtures.js";
-import { deriveCarryOver } from "../carry-over.js";
-import { checkNameTable, nameTableSha256, type NameTable } from "../names.js";
+import { deriveCarryOver, type SemanticJudgment } from "../carry-over.js";
+import { checkNameTable, nameTableSha256, ownersByRowId, type NameTable } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView, type UpstreamLedgerView } from "../../v12/ledger.js";
 import { STRUCTURAL_ASSERTIONS } from "../../fixed-test.js";
 import { STRUCTURAL_MEANINGS, structuralReadingText, type StructuralMeaningTable } from "../../v12/structural-meanings.js";
 import {
   SEMANTIC_CHECK_LEDGER_RULE_ID,
+  SEMANTIC_CHECK_RECHECK_RULE_DEFINITION,
   SEMANTIC_CHECK_REFERENCE_DATA_NAME,
   SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION,
   SEMANTIC_CHECK_RULE_DEFINITIONS,
@@ -62,7 +63,9 @@ import {
   SEMANTIC_CHECK_SCHEMA_NAME,
   SEMANTIC_REJECTION_KINDS,
   SEMANTIC_MERGE_MESSAGES,
+  composeRecheckJudgments,
   mergeSemanticJudgments,
+  recheckTargetsOf,
   runSemanticCheck,
   semanticShapeRetryBudgetOf,
   semanticCheckRuleDefinitionsOf,
@@ -1587,5 +1590,463 @@ describe("旗 ids on：束が 2 つ以上の C3 の要求に、束の外の対�
     expect(outcome.failure).toMatchObject({ kind: "malformed" });
     expect(requests.map((request) => semanticRequestIds(request)[0])).toEqual(["R1", "R6", "R6"]);
     for (const request of requests) expect(request.rules?.at(-1)).toContain(HIERARCHY_745);
+  });
+});
+
+// ── Issue #805：C3 の 2 回目の再点検の部分と、保つ要件の 1 回目の判定の合成 ──────────────────
+
+describe("旗 ids on：C3 の 2 回目の再点検の部分（Issue #805）", () => {
+  /**
+   * 旧の組立（2 回目に再点検の部分を渡さない）で組んだ要求の列の指紋。Issue #805 の前のコードと同じ経路で、
+   * この試験の材料（要件 6 件・2 束・助言なし・round 2）から測った値
+   */
+  const OLD_805_ROUND2_REQUESTS = "02721f985e68bb8fbea9e75af7a98d0e651519654367c93da6f744c2dd074c8d";
+  const ROW_IDS = ["E1", "f1", "f2", "f3", "f4", "s1"] as const;
+  const ROW_KINDS: Record<(typeof ROW_IDS)[number], NameTable["rows"][number]["kind"]> = {
+    E1: "entity",
+    f1: "field",
+    f2: "field",
+    f3: "field",
+    f4: "field",
+    s1: "screen",
+  };
+  const ROW_ENTITY: Record<(typeof ROW_IDS)[number], string | null> = { E1: null, f1: "E1", f2: "E1", f3: "E1", f4: "E1", s1: null };
+  /** 要件ごとの所属（R1 と R5 が f1 を、R2 と R6 が f2 を共有する） */
+  const OWNERSHIP: Record<string, readonly string[]> = {
+    R1: ["f1"],
+    R2: ["f2"],
+    R3: ["f3"],
+    R4: ["f4"],
+    R5: ["f1"],
+    R6: ["f2"],
+  };
+  const ids = (count: number): readonly string[] => Array.from({ length: count }, (_, index) => `R${String(index + 1)}`);
+  const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
+  function materialsOf(count = 6) {
+    const requirementIds = ids(count);
+    const list: RequirementList = {
+      requirements: requirementIds.map((id) => ({ id, text: `${id} の項目を一覧で見られる。`, quote: `${id} の項目`, position: { start: 0, end: 6 } })),
+      decisions: [],
+      unresolved: [],
+    };
+    const table: NameTable = {
+      rows: ROW_IDS.map((id) => ({
+        id,
+        kind: ROW_KINDS[id],
+        entity: ROW_ENTITY[id],
+        name: id.toLowerCase(),
+        role: `${id} の役割`,
+        source: null as never,
+        type: null,
+        options: null,
+        groupBy: null,
+        refEntity: null,
+      })),
+      ownership: requirementIds.map((requirementId) => ({
+        requirementId,
+        roles: (OWNERSHIP[requirementId] ?? []).map(stated),
+      })),
+      verification: requirementIds.map((requirementId) => ({ requirementId, kind: "fixed-test" as const })),
+      classification: requirementIds.map((requirementId) => ({ requirementId, nature: "ruled" as const })),
+    };
+    return { list, table, plan: planOf(list) };
+  }
+  const withRoles = (table: NameTable, requirementId: string, roles: readonly string[]): NameTable => ({
+    ...table,
+    ownership: table.ownership.map((entry) => (entry.requirementId === requirementId ? { ...entry, roles: roles.map(stated) } : entry)),
+  });
+  const withUnresolved = (table: NameTable, requirementId: string): NameTable => ({
+    ...table,
+    verification: table.verification.map((entry) =>
+      entry.requirementId === requirementId ? { requirementId, kind: "unresolved" as const, reason: "宣言で書けない", constraintIds: [FIXTURE_CONSTRAINT_ID] } : entry,
+    ),
+  });
+
+  it("(1) 部分の導出：書き直した要件だけ、所属を足した行を共有する要件、所属を減らして残った要件だけが所属させる行になった要件が入り、表の項・行の定義・所属の集合が同じ要件は入らない", () => {
+    const { list, table } = materialsOf(6);
+    // 書き直した R1・R2 だけ（R3〜R6 は同じ）
+    expect(recheckTargetsOf({ list, previousTable: table, currentTable: table, rewrittenRequirementIds: ["R1", "R2"] })).toEqual(["R1", "R2"]);
+    // R1 が f4 を足す（R4 だけが所属させていた行）→ その行を共有する R4 の所属の集合が変わるので部分に入る
+    const added = withRoles(table, "R1", ["f1", "f4"]);
+    expect(recheckTargetsOf({ list, previousTable: table, currentTable: added, rewrittenRequirementIds: ["R1"] })).toEqual(["R1", "R4"]);
+    // R1 が f1 を手放すと、f1 の entity E1 を所属させる集合が R1 を失う。E1 を導いた所属に持つ
+    // R2・R3・R4・R6 も照らす行に E1 を持つので、R1 とともに部分に入る（Issue #823）
+    const removed = withRoles(table, "R1", []);
+    expect(recheckTargetsOf({ list, previousTable: table, currentTable: removed, rewrittenRequirementIds: ["R1"] })).toEqual([
+      "R1",
+      "R2",
+      "R3",
+      "R4",
+      "R5",
+      "R6",
+    ]);
+    // 行の定義（行そのもの）が変われば、その行を所属させる要件が入る（f3 は R3）
+    const rowChanged: NameTable = { ...table, rows: table.rows.map((row) => (row.id === "f3" ? { ...row, role: "変えた役割" } : row)) };
+    expect(recheckTargetsOf({ list, previousTable: table, currentTable: rowChanged, rewrittenRequirementIds: [] })).toEqual(["R3"]);
+    // 変わった要件が無ければ部分は空（表の項・行の定義・所属の集合が同じ要件は保つ）
+    expect(recheckTargetsOf({ list, previousTable: table, currentTable: table, rewrittenRequirementIds: [] })).toEqual([]);
+  });
+
+  it("(1') 書き直した要件が 2 回目の表で unresolved なら全対象にも部分にも無く、全件 unresolved でほかの変化が無ければ部分 0 件。ほかの要件の所属の集合が変われば 0 件にしない", () => {
+    const { list, table } = materialsOf(6);
+    const unresolvedR1 = withUnresolved(table, "R1");
+    expect(semanticCheckTargets(list, unresolvedR1)).toEqual(["R2", "R3", "R4", "R5", "R6"]);
+    expect(recheckTargetsOf({ list, previousTable: table, currentTable: unresolvedR1, rewrittenRequirementIds: ["R1"] })).toEqual([]);
+    const unresolvedR1R2 = withUnresolved(withUnresolved(table, "R1"), "R2");
+    expect(recheckTargetsOf({ list, previousTable: table, currentTable: unresolvedR1R2, rewrittenRequirementIds: ["R1", "R2"] })).toEqual([]);
+    // R1 を unresolved にし、かつ R1 が f1 を手放す → E1 を所属させる集合が R1 を失うので、
+    // E1 を導いた所属に持つ R2・R3・R4・R5・R6 が部分に入る（Issue #823）
+    const dropped = withUnresolved(withRoles(table, "R1", ["s1"]), "R1");
+    expect(recheckTargetsOf({ list, previousTable: table, currentTable: dropped, rewrittenRequirementIds: ["R1"] })).toEqual([
+      "R2",
+      "R3",
+      "R4",
+      "R5",
+      "R6",
+    ]);
+  });
+
+  /**
+   * Issue #823 の材料：要件 4 件（すべて fixed-test・ruled）。entity E1 の項目 F1・F2、entity E2 の項目 F3。
+   * R1・R3 が F1、R2 が F2、R4 が F3 を明示して所属させ、entity はコードが導く。行は抽象的な ID だけを使う。
+   */
+  function ownedItemsMaterials(): { readonly list: RequirementList; readonly table: NameTable } {
+    const requirementIds = ["R1", "R2", "R3", "R4"] as const;
+    const list: RequirementList = {
+      requirements: requirementIds.map((id) => ({ id, text: `${id} の項目を見られる。`, quote: `${id} の項目`, position: { start: 0, end: 6 } })),
+      decisions: [],
+      unresolved: [],
+    };
+    const rowOf = (id: string, kind: NameTable["rows"][number]["kind"], entity: string | null): NameTable["rows"][number] => ({
+      id,
+      kind,
+      entity,
+      name: id.toLowerCase(),
+      role: `${id} の役割`,
+      source: null as never,
+      type: null,
+      options: null,
+      groupBy: null,
+      refEntity: null,
+    });
+    const table: NameTable = {
+      rows: [rowOf("E1", "entity", null), rowOf("E2", "entity", null), rowOf("F1", "field", "E1"), rowOf("F2", "field", "E1"), rowOf("F3", "field", "E2")],
+      ownership: [
+        { requirementId: "R1", roles: [stated("F1")] },
+        { requirementId: "R2", roles: [stated("F2")] },
+        { requirementId: "R3", roles: [stated("F1")] },
+        { requirementId: "R4", roles: [stated("F3")] },
+      ],
+      verification: requirementIds.map((requirementId) => ({ requirementId, kind: "fixed-test" as const })),
+      classification: requirementIds.map((requirementId) => ({ requirementId, nature: "ruled" as const })),
+    };
+    return { list, table };
+  }
+  /** E1 の行の定義（`role`）だけを変える（所属は変えない） */
+  const withE1Role = (table: NameTable): NameTable => ({ ...table, rows: table.rows.map((row) => (row.id === "E1" ? { ...row, role: "変えた役割" } : row)) });
+
+  /**
+   * 直す前（Issue #805 の実装）の挙動の写し：照らす行の集合を**生の所属**（`table.ownership`）の役の ID から作る。
+   * 直す前の値を試験に残すためだけに置く（新しい実装がこの値に戻ると、導いた entity の行を見ていない）。
+   */
+  const legacyRecheckTargetsOf = (input: Parameters<typeof recheckTargetsOf>[0]): readonly string[] => {
+    const sameIdSet = (left: readonly string[], right: readonly string[]): boolean => {
+      const a = new Set(left);
+      const b = new Set(right);
+      return a.size === b.size && [...a].every((id) => b.has(id));
+    };
+    const { list, previousTable, currentTable } = input;
+    const targets = semanticCheckTargets(list, currentTable);
+    const rewritten = new Set(input.rewrittenRequirementIds);
+    const keyOf = (entry: NameTable["ownership"][number] | undefined): string =>
+      entry === undefined ? "" : [...entry.roles].map((role) => `${role.id}\u0000${role.basis}\u0000${role.reason ?? ""}`).sort().join("\u0001");
+    const previousOwner = new Map(previousTable.ownership.map((entry) => [entry.requirementId, entry] as const));
+    const currentOwner = new Map(currentTable.ownership.map((entry) => [entry.requirementId, entry] as const));
+    const previousVerification = new Map(previousTable.verification.map((entry) => [entry.requirementId, entry] as const));
+    const currentVerification = new Map(currentTable.verification.map((entry) => [entry.requirementId, entry] as const));
+    const previousClassification = new Map(previousTable.classification.map((entry) => [entry.requirementId, entry] as const));
+    const currentClassification = new Map(currentTable.classification.map((entry) => [entry.requirementId, entry] as const));
+    const previousOwners = ownersByRowId(previousTable);
+    const currentOwners = ownersByRowId(currentTable);
+    const previousRows = new Map(previousTable.rows.map((row) => [row.id, row] as const));
+    const currentRows = new Map(currentTable.rows.map((row) => [row.id, row] as const));
+    return targets.filter((requirementId) => {
+      if (rewritten.has(requirementId)) return true;
+      const before = previousOwner.get(requirementId);
+      const after = currentOwner.get(requirementId);
+      if (keyOf(before) !== keyOf(after)) return true;
+      if (JSON.stringify(previousVerification.get(requirementId)) !== JSON.stringify(currentVerification.get(requirementId))) return true;
+      if (JSON.stringify(previousClassification.get(requirementId)) !== JSON.stringify(currentClassification.get(requirementId))) return true;
+      const rowIds = new Set([...(before?.roles ?? []).map((role) => role.id), ...(after?.roles ?? []).map((role) => role.id)]);
+      for (const rowId of rowIds) {
+        if (!sameIdSet(previousOwners.get(rowId) ?? [], currentOwners.get(rowId) ?? [])) return true;
+        if (JSON.stringify(previousRows.get(rowId)) !== JSON.stringify(currentRows.get(rowId))) return true;
+      }
+      return false;
+    });
+  };
+
+  it("(823 の 1) 目的の節の再現：R1 の所属が F1 から F3 に変わると、E1 を導いた所属に持つ R2 も部分に入る。部分は [R1,R2,R3,R4]、直す前の値 [R1,R3,R4] は直す前の挙動として残す", () => {
+    const { list, table } = ownedItemsMaterials();
+    const moved = withRoles(table, "R1", ["F3"]);
+    const input = { list, previousTable: table, currentTable: moved, rewrittenRequirementIds: ["R1"] };
+    expect(recheckTargetsOf(input)).toEqual(["R1", "R2", "R3", "R4"]);
+    // 直す前は、項目 F2 を所属させる R2 が E1 の行を見ず、[R1,R3,R4] を返す
+    expect(legacyRecheckTargetsOf(input)).toEqual(["R1", "R3", "R4"]);
+  });
+
+  it("(823 の 2) 所属を変えず、E1 の行の定義だけを変えた表：E1 を導いた所属に持つ R1・R2・R3 が部分に入る。直す前の値 [] は直す前の挙動として残す", () => {
+    const { list, table } = ownedItemsMaterials();
+    const input = { list, previousTable: table, currentTable: withE1Role(table), rewrittenRequirementIds: [] };
+    expect(recheckTargetsOf(input)).toEqual(["R1", "R2", "R3"]);
+    // 直す前は、生の所属 F1・F2・F1・F3 のどれも E1 でないので [] を返す
+    expect(legacyRecheckTargetsOf(input)).toEqual([]);
+  });
+
+  it("(823 の 3) 負例：導いた entity の所属の集合も行の定義も変わらない要件は今のまま保つ（部分に入らない）", () => {
+    const { list, table } = ownedItemsMaterials();
+    // E1 の定義だけが変わる。E2 を導く R4 は、E2 の所属の集合も定義も変わらないので保つ
+    const part = recheckTargetsOf({ list, previousTable: table, currentTable: withE1Role(table), rewrittenRequirementIds: [] });
+    expect(part).not.toContain("R4");
+    // 何も変わらなければ部分 0 件
+    expect(recheckTargetsOf({ list, previousTable: table, currentTable: table, rewrittenRequirementIds: [] })).toEqual([]);
+  });
+
+  it("(823 の 4) entity を明示して所属させた要件は今も部分に入り、書き直した要件・表の項が違う要件は行の集合に依らず部分に入る", () => {
+    const { list, table } = ownedItemsMaterials();
+    // E1 を（導かずに）明示して所属させた R2 も、E1 の行の定義が変われば部分に入る
+    const explicit = withRoles(table, "R2", ["F2", "E1"]);
+    const explicitChanged: NameTable = { ...explicit, rows: withE1Role(explicit).rows };
+    expect(recheckTargetsOf({ list, previousTable: explicit, currentTable: explicitChanged, rewrittenRequirementIds: [] })).toContain("R2");
+    // 書き直した要件は行の集合に依らず部分に入る
+    expect(recheckTargetsOf({ list, previousTable: table, currentTable: table, rewrittenRequirementIds: ["R3"] })).toEqual(["R3"]);
+    // 表の項（分類）が違う要件も行の集合に依らず部分に入る
+    const classificationChanged: NameTable = {
+      ...table,
+      classification: table.classification.map((entry) => (entry.requirementId === "R4" ? { requirementId: "R4", nature: "existence-only" as const } : entry)),
+    };
+    expect(recheckTargetsOf({ list, previousTable: table, currentTable: classificationChanged, rewrittenRequirementIds: [] })).toEqual(["R4"]);
+  });
+
+  it("(823 の 5) 偽物の LLM：再現の表から導いた部分を渡すと、2 回目の要求の対象は 4 件で、保つ要件は無い", async () => {
+    const { list, table } = ownedItemsMaterials();
+    const moved = withRoles(table, "R1", ["F3"]);
+    const recheck = recheckTargetsOf({ list, previousTable: table, currentTable: moved, rewrittenRequirementIds: ["R1"] });
+    const requests: LlmStructuredRequest[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        requests.push(request);
+        return { output: { judgments: semanticRequestIds(request).map(accept) } as T, usage: undefined };
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    const outcome = await runSemanticCheck({
+      plan: planOf(list),
+      list,
+      table: moved,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(client),
+      ids: true,
+      bundleConcurrency: 1,
+      recheck,
+    });
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.targets).toEqual(["R1", "R2", "R3", "R4"]);
+    expect(requests).toHaveLength(1);
+    expect(semanticRequestIds(requests[0] as LlmStructuredRequest)).toEqual(["R1", "R2", "R3", "R4"]);
+  });
+
+  it("(2) 要求：2 回目のデータは部分だけ、参照のみの塊は 2 回目の全対象からその束を除いた要件の全部。R-sc-06 と R-sc-07 が規則にあり、部分 0 件なら要求 0", async () => {
+    const materials = materialsOf(6);
+    const requests: LlmStructuredRequest[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        requests.push(request);
+        return { output: { judgments: semanticRequestIds(request).map(accept) } as T, usage: undefined };
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    const outcome = await runSemanticCheck({
+      plan: materials.plan,
+      list: materials.list,
+      table: materials.table,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(client),
+      ids: true,
+      bundleConcurrency: 1,
+      recheck: ["R1", "R2"],
+    });
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.targets).toEqual(["R1", "R2"]);
+    expect(requests).toHaveLength(1);
+    const data = dataBlocks(requests[0]?.input ?? "");
+    expect((JSON.parse(data.find((block) => block.name === "要件の文と引用")?.text ?? "[]") as readonly { requirementId: string }[]).map((entry) => entry.requirementId)).toEqual(["R1", "R2"]);
+    const reference = JSON.parse(data.find((block) => block.name === SEMANTIC_CHECK_REFERENCE_DATA_NAME)?.text ?? "{}") as Record<string, readonly { requirementId: string }[]>;
+    for (const name of ["要件の文と引用", "要件ごとの所属", "確かめ方"]) {
+      expect((reference[name] ?? []).map((entry) => entry.requirementId)).toEqual(["R3", "R4", "R5", "R6"]);
+    }
+    expect(requests[0]?.rules).toContain(SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION.text);
+    expect(requests[0]?.rules?.at(-1)).toBe(SEMANTIC_CHECK_RECHECK_RULE_DEFINITION.text);
+    // 部分 0 件なら LLM を呼ばず、束 0・判定 0
+    const none = await runSemanticCheck({
+      plan: materials.plan,
+      list: materials.list,
+      table: materials.table,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(client),
+      ids: true,
+      recheck: [],
+    });
+    if (!none.ok) throw new Error("通るはず");
+    expect(none.value).toMatchObject({ judgments: [], targets: [] });
+    expect(requests).toHaveLength(1);
+  });
+
+  it("(2') 部分が束の上限をまたぐと、各束の参照のみの塊にほかの束の要件が入り、すべての要求の末尾が R-sc-07", async () => {
+    const materials = materialsOf(6);
+    const requests: LlmStructuredRequest[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        requests.push(request);
+        return { output: { judgments: semanticRequestIds(request).map(accept) } as T, usage: undefined };
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    const outcome = await runSemanticCheck({
+      plan: materials.plan,
+      list: materials.list,
+      table: materials.table,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(client),
+      ids: true,
+      bundleConcurrency: 1,
+      recheck: ["R1", "R2", "R3", "R4", "R5", "R6"],
+    });
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.targets).toEqual(["R1", "R2", "R3", "R4", "R5", "R6"]);
+    expect(requests).toHaveLength(2);
+    const bundles = [["R1", "R2", "R3", "R4", "R5"], ["R6"]];
+    for (const [index, request] of requests.entries()) {
+      expect(semanticRequestIds(request)).toEqual(bundles[index]);
+      const reference = JSON.parse(dataBlocks(request.input).find((block) => block.name === SEMANTIC_CHECK_REFERENCE_DATA_NAME)?.text ?? "{}") as Record<string, readonly { requirementId: string }[]>;
+      expect((reference["要件の文と引用"] ?? []).map((entry) => entry.requirementId)).toEqual(bundles[index === 0 ? 1 : 0]);
+      expect(request.rules?.at(-1)).toBe(SEMANTIC_CHECK_RECHECK_RULE_DEFINITION.text);
+    }
+  });
+
+  it("(3) 合成：保つ要件は 1 回目の判定、部分の要件は 2 回目の判定を一覧の順に持ち、保つ要件の 1 回目の判定が無ければ形の落ち", () => {
+    const full = ["R1", "R2", "R3", "R4"];
+    const accepted = (requirementId: string): SemanticJudgment => ({ requirementId, verdict: "accept" });
+    const previous: readonly SemanticJudgment[] = [accepted("R1"), { requirementId: "R2", verdict: "reject", kind: "weak-verification", quote: "文" }, accepted("R3"), accepted("R4")];
+    const second: readonly SemanticJudgment[] = [accepted("R3"), { requirementId: "R4", verdict: "reject", kind: "missing-target", quote: "文" }];
+    const composed = composeRecheckJudgments(full, ["R3", "R4"], previous, second);
+    if (!composed.ok) throw new Error("通るはず");
+    expect(composed.value.map((judgment) => [judgment.requirementId, judgment.verdict])).toEqual([
+      ["R1", "accept"],
+      ["R2", "reject"],
+      ["R3", "accept"],
+      ["R4", "reject"],
+    ]);
+    const missing = composeRecheckJudgments(full, ["R3", "R4"], [accepted("R1"), accepted("R3"), accepted("R4")], second);
+    expect(missing.ok).toBe(false);
+    if (missing.ok) return;
+    expect(missing.problems.map((problem) => problem.message)).toContain("保つ要件の 1 回目の判定が無い");
+  });
+
+  it("(4) 負例：部分の外の要件の判定を返す応答は形の落ち（対象の外）。2 回続けば malformed", async () => {
+    const materials = materialsOf(6);
+    const requests: LlmStructuredRequest[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        requests.push(request);
+        return { output: { judgments: [accept("R1"), accept("R2"), accept("R3")] } as T, usage: undefined };
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    const outcome = await runSemanticCheck({
+      plan: materials.plan,
+      list: materials.list,
+      table: materials.table,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(client),
+      ids: true,
+      bundleConcurrency: 1,
+      recheck: ["R1", "R2"],
+    });
+    if (outcome.ok) throw new Error("通らないはず");
+    expect(outcome.failure).toMatchObject({ kind: "malformed" });
+    if (outcome.failure.kind !== "malformed") return;
+    expect(outcome.failure.problems.map((problem) => problem.message)).toContain("要件 ID が点検の対象に無い");
+    expect(requests).toHaveLength(2);
+  });
+
+  it("(5') 規則 R-sc-07 の定義に不備が無く、1 回目の要求と旗 off の要求には入らない（1 回目の指紋はそのまま）", async () => {
+    expect(ruleDefinitionDefects([...semanticCheckRuleDefinitionsOf(undefined, true), SEMANTIC_CHECK_RECHECK_RULE_DEFINITION])).toEqual([]);
+    expect(SEMANTIC_CHECK_RECHECK_RULE_DEFINITION.id).toBe("R-sc-07");
+    expect(SEMANTIC_CHECK_RULE_DEFINITIONS.map((definition) => definition.id)).not.toContain("R-sc-07");
+    const materials = materialsOf(6);
+    const requests: LlmStructuredRequest[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        requests.push(request);
+        return { output: { judgments: semanticRequestIds(request).map(accept) } as T, usage: undefined };
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    await runSemanticCheck({ plan: materials.plan, list: materials.list, table: materials.table, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(client), ids: true, bundleConcurrency: 1 });
+    await runSemanticCheck({ plan: materials.plan, list: materials.list, table: materials.table, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(client), ids: false });
+    expect(requests).toHaveLength(3);
+    for (const request of requests) expect(request.rules).not.toContain(SEMANTIC_CHECK_RECHECK_RULE_DEFINITION.text);
+  });
+
+  it("(7) 指紋：同じ表・一覧・助言から再点検の部分を渡さない旧の組立で再構成した要求の列は旧の指紋と一致し、部分を全対象にした新しい要求は申告した差分（末尾の R-sc-07）だけが変わる", async () => {
+    const materials = materialsOf(6);
+    const runWith = async (recheck?: readonly string[]) => {
+      const requests: LlmStructuredRequest[] = [];
+      const client: LlmClient = {
+        async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+          requests.push(request);
+          return { output: { judgments: semanticRequestIds(request).map(accept) } as T, usage: undefined };
+        },
+        async callWithTools() {
+          throw new Error("道具の呼び出しは無い");
+        },
+      };
+      const outcome = await runSemanticCheck({
+        plan: materials.plan,
+        list: materials.list,
+        table: materials.table,
+        documents: FIXTURE_DOCUMENTS,
+        gateway: makeGateway(client),
+        ids: true,
+        round: 2,
+        bundleConcurrency: 1,
+        ...(recheck === undefined ? {} : { recheck }),
+      });
+      if (!outcome.ok) throw new Error("通るはず");
+      return requests;
+    };
+    // 旧の組立（2 回目に再点検の部分を渡さない）の要求の列の指紋。Issue #805 はこの経路を変えない
+    const old = await runWith();
+    const oldFingerprint = await sha256Hex(JSON.stringify({ structured: old, tools: [] }));
+    expect(oldFingerprint).toBe(OLD_805_ROUND2_REQUESTS);
+    // 部分を全対象（6 件。束 2 つ）にすると、データは旧の組立と同じで、末尾に R-sc-07 が 1 つ増えるだけ
+    const same = await runWith(["R1", "R2", "R3", "R4", "R5", "R6"]);
+    expect(same).toHaveLength(old.length);
+    for (const [index, request] of same.entries()) {
+      expect(request.input).toBe(old[index]?.input);
+      expect(JSON.stringify(request.schema)).toBe(JSON.stringify(old[index]?.schema));
+      expect(request.rules).toEqual([...(old[index]?.rules ?? []), SEMANTIC_CHECK_RECHECK_RULE_DEFINITION.text]);
+    }
   });
 });

@@ -45,6 +45,7 @@ import {
   declarationHasLocation,
   findComputed,
   findEntity,
+  type ReachRules,
   type RequirementRoleOwnership,
   type RoleMappingMiss,
 } from "../stages/correspondence.js";
@@ -73,6 +74,8 @@ export interface NameCheckInput {
   readonly ownership?: readonly RequirementRoleOwnership[];
   /** 除く行の `id`（持ち越しの要件だけが所属させる行。一覧に所属させる要件が無い行も除く） */
   readonly excludedRowIds?: readonly string[];
+  /** 画面からの到達の規則の選択（旗 `v12.ids` の走りだけが渡す。省けば今の判定。Issue #804） */
+  readonly reach?: ReachRules;
 }
 
 /** 照合する範囲（一覧と、照合する行に絞った表とその写し） */
@@ -284,7 +287,10 @@ export function checkNames(input: NameCheckInput): NameCheckResult {
           }));
   const entries = correspondenceFromTable(scope.table);
   const roles = toRoleEntries(scope.table);
-  const mappingMisses = checkRoleMappings(input.app, roles, entries, scope.conversion.mappings, { ownership });
+  const mappingMisses = checkRoleMappings(input.app, roles, entries, scope.conversion.mappings, {
+    ownership,
+    ...(input.reach === undefined ? {} : { reach: input.reach }),
+  });
   // 実在しない場所は 2 つの v1 の検査がどちらも挙げる。同じ要件・同じ場所の落ちは役割の照合の側だけを残す
   const mapped = new Set(mappingMisses.map(missKey).filter((key): key is string => key !== null));
   const entryMisses = checkCorrespondence(input.app, input.list, entries).filter((miss) => {

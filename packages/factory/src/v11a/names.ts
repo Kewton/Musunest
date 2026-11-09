@@ -271,7 +271,16 @@ export type NameTableVerification =
     }
   | { readonly requirementId: string; readonly kind: "default-value"; readonly value: string }
   | { readonly requirementId: string; readonly kind: "enum-membership" }
-  | { readonly requirementId: string; readonly kind: "non-requirement" };
+  | { readonly requirementId: string; readonly kind: "non-requirement" }
+  | {
+      /**
+       * 検査の式（入力の値を 1 つの比較で縛る決まり。旗 `v12.ids` と台帳が on の走りだけ。v1 の型へは fixed-test として写す。
+       * Issue #800）。`targets` は同じ entity の項目（field）の行の ID の並び（1 つ以上）で、entity と対象の項目は C2' が所属に足す
+       */
+      readonly requirementId: string;
+      readonly kind: "validation-expression";
+      readonly targets: readonly string[];
+    };
 
 /**
  * 構造の検査 1 つの対象（旗 `v12.ids`。Issue #594）。`targetId` は検査が見る行（種類は `STRUCTURAL_TARGET_KINDS`）、
@@ -618,6 +627,24 @@ function shapeOfVerificationByLedger(
   const kind = value["kind"];
   const t1 = typeof kind === "string" ? ledger.rowByVerificationKind.get(kind)?.t1 : undefined;
   if (t1 !== undefined && t1 !== null) {
+    if (t1.targets === true) {
+      // 検査の式（Issue #800）：value は null、targets は空でない文字列の並び（形だけ。1 つ以上・項目・同じ entity・重なりは表の検査が照らす）
+      if (value["value"] !== undefined && value["value"] !== null) {
+        problems.push({ field: `${field}.value`, message: t1.messages.valueShape });
+        return undefined;
+      }
+      const raw = value["targets"];
+      const messages = t1.targetMessages;
+      if (messages === undefined) {
+        problems.push({ field: `${field}.targets`, message: t1.messages.count });
+        return undefined;
+      }
+      if (!Array.isArray(raw) || raw.length === 0 || !raw.every(isNonEmptyString)) {
+        problems.push({ field: `${field}.targets`, message: messages.missing });
+        return undefined;
+      }
+      return { kind: t1.kind, targets: raw as readonly string[] } as NameTableDraftVerification;
+    }
     if (t1.valueField === null) {
       if (value["value"] !== undefined && value["value"] !== null) {
         problems.push({ field: `${field}.value`, message: t1.messages.valueShape });
@@ -1277,6 +1304,20 @@ function checkNameTableWith(
         problems.push({ field: `${field}.kind`, message: UNREGISTERED_VERIFICATION_KIND_MESSAGE });
         return;
       }
+      if (t1.targets === true) {
+        // 検査の式（Issue #800）：targets は確かめ方に持ち、value は null・分類は ruled
+        checkValidationExpressionVerification(
+          t1,
+          (entry as unknown as Record<string, unknown>)["value"],
+          (entry as unknown as { readonly targets?: readonly string[] }).targets ?? [],
+          field,
+          derived.get(entry.requirementId)?.roles ?? [],
+          natureById.get(entry.requirementId),
+          table.rows,
+          problems,
+        );
+        return;
+      }
       checkLedgerVerification(
         t1,
         (entry as unknown as Record<string, unknown>)[t1.valueField ?? "value"],
@@ -1600,6 +1641,8 @@ export const CHECK_TARGET_MESSAGES = {
   unknownSource: "view-shows の検査の組の ID（sourceId）が表の行に無い",
   sourcePair: "view-shows の検査の組（sourceId）が、画面と同じ entity の項目か計算でない",
   sourceExtra: "view-shows でない検査の sourceId は null であること",
+  /** view-shows の対象の画面がボード（board は show を持たない。Issue #800） */
+  boardView: "view-shows の対象の画面がボード（board）である（ボードは show を持たない）",
 } as const;
 
 /** 検査の対象を行に照らす（純粋。`field` は確かめ方の位置。問題を足す） */
@@ -1650,4 +1693,160 @@ export function ownershipWithCheckTargets(
     }
   }
   return added.length === 0 ? roles : [...roles, ...added];
+}
+
+// ── 検査の式（validation-expression）の targets（旗 `v12.ids`。Issue #800）────────────
+//
+// C2' は確かめ方の `targets`（同じ entity の項目の行の ID の並び）を、1 つ以上・表の項目の行・同じ entity・重なり無しで照らし、
+// 通れば entity と対象の項目を所属に足す（構造の検査の対象と同じ作法）。T1' の表の検査も同じ関数で照らす。
+
+/**
+ * `targets` を表に照らす（純粋。問題を足し、`targets` が全部正しければ所属に足してよい ID（対象の項目とその entity）を返す）。
+ * 固定文は台帳の行の `targetMessages`（値を埋めない）
+ */
+export function checkValidationExpressionTargets(
+  rows: readonly NameTableRow[],
+  targets: readonly string[],
+  field: string,
+  messages: PropertyT1["targetMessages"],
+  problems: Problem[],
+): { readonly valid: boolean; readonly allowed: ReadonlySet<string> } {
+  const allowed = new Set<string>();
+  // 固定文の組が無いときは問題を足さず、判定だけを返す（Issue #808。直す前は組が無いだけで偽を返していた）
+  const report = (at: string, message: string | undefined): void => {
+    if (messages !== undefined && message !== undefined) problems.push({ field: at, message });
+  };
+  if (targets.length === 0) {
+    report(`${field}.targets`, messages?.missing);
+    return { valid: false, allowed };
+  }
+  const rowById = new Map(rows.map((row) => [row.id, row] as const));
+  const seen = new Set<string>();
+  let valid = true;
+  let entity: string | null | undefined;
+  targets.forEach((id, index) => {
+    const at = `${field}.targets[${index}]`;
+    if (seen.has(id)) {
+      report(at, messages?.overlap);
+      valid = false;
+    }
+    seen.add(id);
+    const row = rowById.get(id);
+    if (row === undefined) {
+      report(at, messages?.unknown);
+      valid = false;
+      return;
+    }
+    if (row.kind !== "field") {
+      report(at, messages?.kind);
+      valid = false;
+      return;
+    }
+    if (entity === undefined) entity = row.entity;
+    else if (row.entity !== entity) {
+      report(at, messages?.entity);
+      valid = false;
+    }
+    allowed.add(id);
+    if (row.entity !== null) allowed.add(row.entity);
+  });
+  return { valid, allowed };
+}
+
+/** `targets` が全部正しいか（C2' の前の手が、所属を足してよいときだけ足すために使う。問題を出さない） */
+export function validationExpressionTargetsValid(rows: readonly NameTableRow[], targets: readonly string[]): boolean {
+  return checkValidationExpressionTargets(rows, targets, "", undefined, []).valid;
+}
+
+/**
+ * `targets` の項目とその entity を所属に足す（既にある行は足さない。足す行は basis dependency・reason に対象の項目の ID。
+ * 表の順は所属のあと。Issue #800）
+ */
+export function ownershipWithValidationTargets(
+  roles: readonly NameTableRoleOwnership[],
+  rows: readonly NameTableRow[],
+  targets: readonly string[],
+): readonly NameTableRoleOwnership[] {
+  const rowById = new Map(rows.map((row) => [row.id, row] as const));
+  const owned = new Set(roles.map((role) => role.id));
+  const added: NameTableRoleOwnership[] = [];
+  for (const id of targets) {
+    const row = rowById.get(id);
+    if (row === undefined || row.kind !== "field") continue;
+    if (!owned.has(id)) {
+      owned.add(id);
+      added.push({ id, basis: "dependency", reason: id });
+    }
+    if (row.entity !== null && !owned.has(row.entity) && rowById.get(row.entity)?.kind === "entity") {
+      owned.add(row.entity);
+      added.push({ id: row.entity, basis: "dependency", reason: id });
+    }
+  }
+  return added.length === 0 ? roles : [...roles, ...added];
+}
+
+/**
+ * 検査の式が守る操作の行か（旗 `v12.ids` の C2'・T1' の所属の形。Issue #824）。targets の entity と同じ entity の、
+ * 条件（when）の無い create・update の操作。検査は保存の前にレコード全体に当たるので、これらの行は値の対象にならず、
+ * 要件の意味として所属に自然である。`entity` が null（targets の entity を読めない）ときは何も許さない（fail-closed）
+ */
+function isValidationExpressionGuardedOperation(row: NameTableRow, entity: string | null): boolean {
+  if (entity === null || row.kind !== "operation" || row.entity !== entity) return false;
+  const type = row.type;
+  return (
+    type !== null &&
+    typeof type === "object" &&
+    "action" in type &&
+    "hasWhen" in type &&
+    (type.action === "create" || type.action === "update") &&
+    type.hasWhen === false
+  );
+}
+
+/**
+ * 検査の式の要件の所属に許す ID（Issue #824）。`targets` の照合が返す集合（対象の項目とその entity）に、targets の entity の
+ * 条件の無い create・update の操作の行を足す。`checkValidationExpressionTargets` の返す集合（C2' の前の手が所属に足す ID）は
+ * 変えない——足すのは所属の形の検査の側だけである
+ */
+function validationExpressionOwnershipAllowed(
+  rows: readonly NameTableRow[],
+  targets: readonly string[],
+  allowed: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const rowById = new Map(rows.map((row) => [row.id, row] as const));
+  const entity = rowById.get(targets[0] ?? "")?.entity ?? null;
+  const extended = new Set(allowed);
+  for (const row of rows) {
+    if (isValidationExpressionGuardedOperation(row, entity)) extended.add(row.id);
+  }
+  return extended;
+}
+
+/**
+ * 検査の式の確かめ方の表の検査（旗 `v12.ids` と台帳が on。Issue #800・#824）。value が null・分類が ruled・`targets` が
+ * 1 つ以上・表の項目の行・同じ entity・重なり無しで、所属が targets の項目とその entity、および targets の entity の条件の無い
+ * create・update の操作だけであることを求める（Issue #824。操作は値の対象にならないので門の目的は保たれる）
+ */
+export function checkValidationExpressionVerification(
+  t1: PropertyT1,
+  verificationValue: unknown,
+  targets: readonly string[],
+  field: string,
+  roles: readonly NameTableRoleOwnership[],
+  nature: RequirementNature | undefined,
+  rows: readonly NameTableRow[],
+  problems: Problem[],
+): void {
+  if (verificationValue !== undefined && verificationValue !== null) {
+    problems.push({ field: `${field}.value`, message: t1.messages.valueEmpty });
+  }
+  if (t1.nature !== null && nature !== undefined && nature !== t1.nature) {
+    problems.push({ field, message: t1.messages.nature ?? t1.messages.count });
+  }
+  const { valid, allowed } = checkValidationExpressionTargets(rows, targets, field, t1.targetMessages, problems);
+  if (!valid) return;
+  const ownershipAllowed = validationExpressionOwnershipAllowed(rows, targets, allowed);
+  const owned = new Set(roles.map((role) => role.id));
+  if (roles.some((role) => !ownershipAllowed.has(role.id))) problems.push({ field, message: t1.messages.others });
+  if (targets.some((id) => !owned.has(id))) problems.push({ field, message: t1.messages.count });
 }

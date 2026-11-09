@@ -134,9 +134,8 @@ import {
 import { runGenerationV11a, runStageRangeV11a, type GenerationResultV11a } from "./v11a/run.js";
 import {
   fromPublicV12Flags,
-  propertyLedgerSha256,
+  ledgerVersionsOf,
   toPublicV12Flags,
-  upstreamLedgerSha256,
   V12_PIPELINE_FLAGS,
   type V12Flags,
   type V12PublicFlags,
@@ -1198,7 +1197,9 @@ interface StageVersionsOfRun {
 async function stageVersionsOf(promptVersion: string, flags?: V12Flags): Promise<StageVersionsOfRun> {
   const versions = { vocabulary: VOCABULARY_VERSION, contract: CONTRACT_VERSION, prompt: promptVersion, factory: FACTORY_VERSION };
   if (flags === undefined) return { versions };
-  const v12 = { ledger: await propertyLedgerSha256(), ledgerUpstream: await upstreamLedgerSha256(), flags: toPublicV12Flags(flags) };
+  // 全体・上流の指紋は公開の関数 1 つを通す（`toPublicV12Flags(flags)` を渡す。旗の組み立てをここに重複させない。Issue #816）
+  const publicFlags = toPublicV12Flags(flags);
+  const v12 = { ...(await ledgerVersionsOf(publicFlags)), flags: publicFlags };
   return {
     versions: { ...versions, ledger: v12.ledger, flags: v12.flags, call_limits: flags.ids ? v12CallLimitsRecord() : null },
     v12,

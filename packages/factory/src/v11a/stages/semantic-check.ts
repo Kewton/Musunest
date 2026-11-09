@@ -22,6 +22,13 @@
 // 束に絞ると材料が欠けるため。関係する要件だけをコードで選ぶと取りこぼすので、束の外の対象を全部渡す。判定の対象・形の検査は
 // 変えない（束の外の要件の判定は今の束の形の検査で落ちる）。束が 1 つの要求は今とバイト列で同じ。
 //
+// 旗 `v12.ids` の C3 の 2 回目（`recheck` を渡したとき。Issue #805）は、対象を「再点検の部分」（C2 が書き直した要件と、表の項・
+// その要件を所属させる行（コードが導いた entity の所属を含む）の所属させる要件の集合・その行の定義が前回の表と違う要件。
+// `recheckTargetsOf`）に限り、束ごとの参照のみの塊を
+// 「2 回目の全対象からその束を除いた要件」にする。部分の外の要件は 1 回目の判定を保ち（R-sc-03 の例外。R-sc-07）、部分の判定と
+// 合成して採用する（`composeRecheckJudgments`）。部分が 0 件なら LLM を呼ばず、束 0・判定 0 を返す。1 回目・off・束が 1 つの
+// 要求は今とバイト列で同じ。
+//
 // **完全性と引用の実在はコードが形として確かめる**（`checkJudgmentsShape`。B3' と共有）：対象の全要件に
 // ちょうど 1 判定。欠落・重複・未知の要件 ID・確定した仕様にも要件の文にも見つからない引用・引用の無い拒否は
 // 形の落ちで、共通の窓口が 1 回やり直し、2 回続けば `malformed`（点検していない状態で先へ進まない）。
@@ -47,7 +54,7 @@ import {
   type StageOutcome,
 } from "../../stages/prompt.js";
 import type { SemanticCheckResult, SemanticJudgment } from "../carry-over.js";
-import { nameTableSha256, type NameTable } from "../names.js";
+import { nameTableSha256, ownersByRowId, type NameTable, type NameTableOwnership } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 import type { UpstreamLedgerView } from "../../v12/ledger.js";
 import { STRUCTURAL_MEANINGS, structuralReadingText, type StructuralMeaningTable } from "../../v12/structural-meanings.js";
@@ -108,6 +115,17 @@ export const SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION: RuleDefinition = {
 
 /** 束の外の対象を渡すデータの塊の名前（旗 `v12.ids` の束が 2 つ以上の要求だけ。Issue #741） */
 export const SEMANTIC_CHECK_REFERENCE_DATA_NAME = "ほかの要件（参照のみ。判定しない）";
+
+/**
+ * 旗 `v12.ids` の C3 の 2 回目にだけ足す規則（Issue #805）。1 回目の受理を、2 回目の揺れで捨てないため、2 回目の対象を
+ * 再点検の部分に限り、部分の外の要件は前回の判定を保つ（R-sc-03 の例外）。
+ */
+export const SEMANTIC_CHECK_RECHECK_RULE_DEFINITION: RuleDefinition = {
+  id: "R-sc-07",
+  text: "この要求の対象は、前回の点検のあとに C2 が書き直した要件と、表の項・所属の行の所属させる要件の集合・所属の行の定義のどれかが前回の表と違う要件だけである（確かめ方が unresolved になった要件は対象に無い）。再点検の対象の外の要件は前回の判定を保つ（R-sc-03 の例外）。この要求で判定するのは直下のデータにある要件（この束）だけで、参照のみの塊の要件（前回の判定を保つ要件と、別の要求で判定する要件の両方）には判定を返さない。参照のみの塊は判定の材料である。",
+  why: "C3 の 2 回目を全要件に掛け直すと、C2 が書き直していない要件の判定が揺れ、1 回目の受理が捨てられて持ち越しになる。再点検の部分に限り、部分の外の受理を保つ（方法論 03 の H5。R-sc-03 の例外）",
+  since: "Issue #805",
+};
 
 /** T1'' に足す規則（定義の `text` から組む） */
 export const SEMANTIC_CHECK_RULES: readonly string[] = ruleTexts(SEMANTIC_CHECK_RULE_DEFINITIONS);
@@ -305,6 +323,12 @@ export interface SemanticCheckInput {
   readonly shapeRetries?: SemanticShapeRetryBudget;
   /** 旗 `v12.ids` の束を同時に始める数の上限（省けば `V12_T2_BUNDLE.concurrency`。試験が順序に依らないことを確かめる。Issue #735） */
   readonly bundleConcurrency?: number;
+  /**
+   * 旗 `v12.ids` の C3 の 2 回目の「再点検の部分」（`recheckTargetsOf` の値。省けば 2 回目の全対象）。渡されたときは
+   * 対象を部分にし、束ごとの参照のみの塊を「2 回目の全対象からその束を除いた要件」で組み、R-sc-06（参照の塊があるとき）と
+   * R-sc-07 を足す。部分が 0 件なら LLM を呼ばず、束 0・判定 0 の結果を返す（Issue #805）
+   */
+  readonly recheck?: readonly string[];
 }
 
 /** T1'' の結果（表の SHA-256 に結ぶ完全な結果と、点検の対象の要件 ID） */
@@ -318,6 +342,121 @@ export function semanticCheckTargets(list: RequirementList, table: NameTable): r
     table.verification.filter((entry) => entry.kind === "unresolved").map((entry) => entry.requirementId),
   );
   return list.requirements.filter((requirement) => !unresolved.has(requirement.id)).map((requirement) => requirement.id);
+}
+
+/** 所属の 1 件を、順序と理由の書き方に依らない文字列にする（要件の表の項の比較に使う） */
+function ownershipKey(entry: NameTableOwnership | undefined): string {
+  if (entry === undefined) return "";
+  return [...entry.roles]
+    .map((role) => `${role.id}\u0000${role.basis}\u0000${role.reason ?? ""}`)
+    .sort()
+    .join("\u0001");
+}
+
+/** 要件 ID の並びを集合として同じか（順序を問わない） */
+function sameIdSet(left: readonly string[], right: readonly string[]): boolean {
+  const a = new Set(left);
+  const b = new Set(right);
+  if (a.size !== b.size) return false;
+  for (const id of a) if (!b.has(id)) return false;
+  return true;
+}
+
+/** 行の `id` ごとの所属（`ownersByRowId`）から、その要件を所属させる行の `id` を引く（導いた entity の所属を含む見方） */
+function rowIdsOwnedBy(owners: ReadonlyMap<string, readonly string[]>, requirementId: string): readonly string[] {
+  const ids: string[] = [];
+  for (const [rowId, ownersOfRow] of owners) if (ownersOfRow.includes(requirementId)) ids.push(rowId);
+  return ids;
+}
+
+/** 再点検の部分を導く入力（Issue #805） */
+export interface SemanticRecheckInput {
+  readonly list: RequirementList;
+  /** 1 回目の表 */
+  readonly previousTable: NameTable;
+  /** 2 回目の表 */
+  readonly currentTable: NameTable;
+  /** C2 が書き直した要件 ID（段と同じ `rejectedRequirementIds` の値） */
+  readonly rewrittenRequirementIds: readonly string[];
+}
+
+/**
+ * 旗 `v12.ids` の C3 の 2 回目の「再点検の部分」を導く（Issue #805。純粋関数）。2 回目の全対象（`semanticCheckTargets`。
+ * 確かめ方が unresolved の要件を除く）のうち、**一覧の順**で次のどれかに当たる要件を部分とする：
+ *   (1) C2 が書き直した要件（2 回目の表で unresolved になったものは全対象にも部分にも無いので除く）
+ *   (2) 書き直していない要件のうち、1 回目と 2 回目の表で、その要件の表の項（所属・確かめ方・分類）が違うもの、
+ *       その要件を所属させる行（1 回目と 2 回目の表それぞれで `ownersByRowId` が導く行の和。コードが導いた entity の
+ *       所属を含む）のどれかについて「その行を所属させる要件の集合」（順序は問わない）が違うもの、その行の定義
+ *       （行そのもの）が違うもの
+ * 書き直した要件は、2 回目の表で unresolved になっているものを除いて必ず部分に入る。0 件になりうる。
+ */
+export function recheckTargetsOf(input: SemanticRecheckInput): readonly string[] {
+  const { list, previousTable, currentTable } = input;
+  const targets = semanticCheckTargets(list, currentTable);
+  const rewritten = new Set(input.rewrittenRequirementIds);
+  const previousOwnerByRequirement = new Map(previousTable.ownership.map((entry) => [entry.requirementId, entry] as const));
+  const currentOwnerByRequirement = new Map(currentTable.ownership.map((entry) => [entry.requirementId, entry] as const));
+  const previousVerification = new Map(previousTable.verification.map((entry) => [entry.requirementId, entry] as const));
+  const currentVerification = new Map(currentTable.verification.map((entry) => [entry.requirementId, entry] as const));
+  const previousClassification = new Map(previousTable.classification.map((entry) => [entry.requirementId, entry] as const));
+  const currentClassification = new Map(currentTable.classification.map((entry) => [entry.requirementId, entry] as const));
+  const previousOwners = ownersByRowId(previousTable);
+  const currentOwners = ownersByRowId(currentTable);
+  const previousRows = new Map(previousTable.rows.map((row) => [row.id, row] as const));
+  const currentRows = new Map(currentTable.rows.map((row) => [row.id, row] as const));
+  return targets.filter((requirementId) => {
+    if (rewritten.has(requirementId)) return true;
+    const previousOwner = previousOwnerByRequirement.get(requirementId);
+    const currentOwner = currentOwnerByRequirement.get(requirementId);
+    if (ownershipKey(previousOwner) !== ownershipKey(currentOwner)) return true;
+    if (JSON.stringify(previousVerification.get(requirementId)) !== JSON.stringify(currentVerification.get(requirementId))) return true;
+    if (JSON.stringify(previousClassification.get(requirementId)) !== JSON.stringify(currentClassification.get(requirementId))) return true;
+    // その要件を所属させる行（1 回目と 2 回目の和。手放した行も見る。導いた entity の所属を含む）の、
+    // 所属させる要件の集合と定義。生の所属ではなく、行の集合を作る見方を `ownersByRowId` に揃える
+    const rowIds = new Set([
+      ...rowIdsOwnedBy(previousOwners, requirementId),
+      ...rowIdsOwnedBy(currentOwners, requirementId),
+    ]);
+    for (const rowId of rowIds) {
+      if (!sameIdSet(previousOwners.get(rowId) ?? [], currentOwners.get(rowId) ?? [])) return true;
+      if (JSON.stringify(previousRows.get(rowId)) !== JSON.stringify(currentRows.get(rowId))) return true;
+    }
+    return false;
+  });
+}
+
+/**
+ * 採用する点検の結果を合成する（Issue #805）。部分の 2 回目の判定と、保つ要件の 1 回目の判定を**一覧の順**に並べ、
+ * 2 回目の全対象にちょうど 1 判定ずつになることを確かめる。保つ要件に 1 回目の判定が無ければ形の落ちにする
+ * （黙って受理にしない）。部分の判定が部分にちょうど 1 つずつでないときも形の落ちにする
+ */
+export function composeRecheckJudgments(
+  fullTargets: readonly string[],
+  recheck: readonly string[],
+  previousJudgments: readonly SemanticJudgment[],
+  secondJudgments: readonly SemanticJudgment[],
+): ShapeCheck<readonly SemanticJudgment[]> {
+  const recheckSet = new Set(recheck);
+  const previousById = new Map(previousJudgments.map((judgment) => [judgment.requirementId, judgment] as const));
+  const secondById = new Map(secondJudgments.map((judgment) => [judgment.requirementId, judgment] as const));
+  const problems: Problem[] = [];
+  if (secondById.size !== recheckSet.size || [...secondById.keys()].some((id) => !recheckSet.has(id))) {
+    problems.push({ field: "judgments", message: "再点検の部分の判定が、部分の要件にちょうど 1 つずつでない" });
+    return { ok: false, problems };
+  }
+  const composed: SemanticJudgment[] = [];
+  fullTargets.forEach((requirementId, index) => {
+    if (recheckSet.has(requirementId)) {
+      const judgment = secondById.get(requirementId);
+      if (judgment === undefined) problems.push({ field: `requirements[${String(index)}]`, message: "再点検の部分の判定が無い要件がある" });
+      else composed.push(judgment);
+      return;
+    }
+    const judgment = previousById.get(requirementId);
+    if (judgment === undefined) problems.push({ field: `requirements[${String(index)}]`, message: "保つ要件の 1 回目の判定が無い" });
+    else composed.push(judgment);
+  });
+  return problems.length === 0 ? { ok: true, value: composed } : { ok: false, problems };
 }
 
 /** 束の判定の合併の問題（固定文。値を埋めない。Issue #735） */
@@ -372,7 +511,9 @@ type SemanticBundleResult =
  */
 export async function runSemanticCheck(input: SemanticCheckInput): Promise<StageOutcome<SemanticCheckOutput>> {
   const tableSha256 = await nameTableSha256(input.table);
-  const targets = semanticCheckTargets(input.list, input.table);
+  const fullTargets = semanticCheckTargets(input.list, input.table);
+  // 旗 `v12.ids` の 2 回目は、対象を再点検の部分にする（部分 0 件なら呼ばない。Issue #805）
+  const targets = input.recheck === undefined ? fullTargets : input.recheck.filter((id) => fullTargets.includes(id));
   if (targets.length === 0) return { ok: true, value: { tableSha256, judgments: [], targets } };
   const rules =
     input.ledger === undefined && input.ids !== true
@@ -380,6 +521,7 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
       : ruleTexts(semanticCheckRuleDefinitionsOf(input.ledger, input.ids === true));
   const sources = quoteSources(input.plan, input.list);
   if (input.ids !== true) {
+    if (input.recheck !== undefined) throw new Error("表の意味の点検：再点検の部分は旗 v12.ids の走りだけが渡す");
     const answer = await callStructuredChecked(input.gateway, {
       request: semanticCheckRequest(input, rules, targets),
       check: (output) => checkJudgmentsShape(output, targets, SEMANTIC_REJECTION_KINDS, sources),
@@ -391,8 +533,17 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
   const round = input.round ?? 1;
   const shapeRetries = input.shapeRetries ?? semanticShapeRetryBudgetOf(input.list);
   const bundles = bundleRequirementIds(targets, V12_T2_BUNDLE.size);
-  // 束が 2 つ以上なら、束の外の対象を参照のみで渡し、その読み方の規則を足す（Issue #741。束が 1 つなら今の要求のまま）
-  const bundleRules = bundles.length > 1 ? [...rules, ...ruleTexts([SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION])] : rules;
+  // 束が 2 つ以上なら、束の外の対象を参照のみで渡し、その読み方の規則を足す（Issue #741。束が 1 つなら今の要求のまま）。
+  // 再点検の部分を渡された 2 回目は、束が 1 つでも保つ要件があれば参照の塊を足し、R-sc-07 を必ず足す（Issue #805）
+  const hasKept = fullTargets.length > targets.length;
+  const withReferences = bundles.length > 1 || hasKept;
+  const referenceRules = withReferences ? ruleTexts([SEMANTIC_CHECK_REFERENCE_RULE_DEFINITION]) : [];
+  const bundleRules =
+    input.recheck === undefined
+      ? withReferences
+        ? [...rules, ...referenceRules]
+        : rules
+      : [...rules, ...referenceRules, ...ruleTexts([SEMANTIC_CHECK_RECHECK_RULE_DEFINITION])];
   const callBundle = async (bundle: number): Promise<SemanticBundleResult> => {
     const bundleTargets = bundles[bundle] ?? [];
     let attempt = 0;
@@ -409,7 +560,8 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
       refused = checked.problems;
       return { ok: true, value: [] };
     };
-    const references = bundles.length > 1 ? targets.filter((id) => !bundleTargets.includes(id)) : undefined;
+    // 参照のみの塊は「2 回目の全対象からその束を除いた要件」（保つ要件と、ほかの束の要件の両方。Issue #805）
+    const references = withReferences ? fullTargets.filter((id) => !bundleTargets.includes(id)) : undefined;
     const answer = await callStructuredChecked(input.gateway, {
       request: semanticCheckRequest(input, bundleRules, bundleTargets, references),
       check,
