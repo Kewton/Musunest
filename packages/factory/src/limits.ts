@@ -274,6 +274,12 @@ export type StageEffortStage = (typeof STAGE_EFFORT_STAGES)[number];
 /** 段ごとの effort の組（段 → 値。指定の無い段は口の 1 つの effort のまま。Issue #664） */
 export type StageEfforts = Readonly<Partial<Record<StageEffortStage, ReasoningEffort>>>;
 
+/**
+ * 段ごとのモデルの組（段 → モデル名。指定の無い段は口の 1 つのモデルのまま。Issue #829）。段の集合は
+ * `STAGE_EFFORT_STAGES` と同じ（配線済みの段）。単価は、このモデルを鍵にして表から引く。
+ */
+export type StageModels = Readonly<Partial<Record<StageEffortStage, string>>>;
+
 /** effort を指定できる段か（Issue #664） */
 export function isStageEffortStage(value: string): value is StageEffortStage {
   return (STAGE_EFFORT_STAGES as readonly string[]).includes(value);

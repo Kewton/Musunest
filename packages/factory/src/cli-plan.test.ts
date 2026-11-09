@@ -15,13 +15,16 @@ import {
   EXIT_RETURN_TO_PLAN,
   EXIT_RUN_FAILED,
   EXIT_USAGE,
+  DEFAULT_RATES,
   FACTORY_VERSION,
   PROMPT_VERSION,
   SPEC_ENGINE_VERSION,
+  TERRA_RATES,
   VOCABULARY_VERSION,
   parseCliArguments,
   runCli,
 } from "./cli.js";
+import { costOfUsageUsd, type TokenRates } from "./budget.js";
 import * as runModule from "./run.js";
 import * as planRunModule from "./plan/run-plan.js";
 import { BUNDLE_MANIFEST_FILE, VERIFICATION_FILE } from "./bundle.js";
@@ -83,7 +86,14 @@ import {
   SOURCE_TEXT,
 } from "./stages/__tests__/prompt.js";
 import { ATTEMPT_KEYS, RETRY_KEYS } from "./record.js";
-import { CONFIRMED_PLAN, CONFIRMED_PLAN_ACCEPTED, recordedRun, recordedRunFromPlan, structured } from "./__tests__/run.js";
+import {
+  CONFIRMED_PLAN,
+  CONFIRMED_PLAN_ACCEPTED,
+  recordedRun,
+  recordedRunFromPlan,
+  structured,
+  USAGE as RECORDED_USAGE,
+} from "./__tests__/run.js";
 
 interface NodeFs {
   mkdtemp(prefix: string): Promise<string>;
@@ -3478,6 +3488,8 @@ async function runPlanOnly(input: {
   readonly terminal?: FakeTerminal;
   readonly now?: () => number;
   readonly deadlineMs?: number;
+  /** 走りの単価（省けば受入の表から。直す前の単価を差し込む。Issue #829） */
+  readonly rates?: TokenRates;
 }): Promise<{ readonly code: number; readonly lines: readonly string[] }> {
   const lines: string[] = [];
   const code = await runCli({
@@ -3496,6 +3508,7 @@ async function runPlanOnly(input: {
     now: input.now ?? (() => 0),
     terminal: input.terminal ?? fakeTerminal([...PLAN_ONLY_TERMINAL_LINES]),
     ...(input.deadlineMs === undefined ? {} : { deadlineMs: input.deadlineMs }),
+    ...(input.rates === undefined ? {} : { rates: input.rates }),
     log: (line) => lines.push(line),
   });
   return { code, lines };
@@ -4404,5 +4417,118 @@ describe("Build だけの記録の checkpoints（`--pipeline v1.2` の走りだ�
     for (const boundary of ["t1-t2", "t2-b1"]) {
       await expect(fs.readFile(`${dir}/stage-checkpoint-${boundary}.json`, "utf8")).rejects.toThrow();
     }
+  });
+});
+
+// ── 走りのモデルの単価（Plan の入口。`--plan-only`・`--plan`。Issue #829）────────────
+//
+// (9) 走りのモデルの単価を入口で引く。Plan の支出と Build への予算の受け渡しも照らす。
+// 直す前（base）は `deps.rates` で既定の単価を差し込み、要求の列がバイト列で同じことを比べる。
+
+const PLAN_MODEL_TERRA = "gpt-6.1-terra";
+
+/** 打ち切りの合図を除く（要求の列を base と比べる。Issue #829） */
+const withoutPlanCallSignal = ({ signal: _signal, ...rest }: LlmStructuredRequest) => rest;
+
+/** 1 回の構造化出力の費用（`structured` の既定の usage。Issue #829） */
+const planRecordedCost = (rates: TokenRates): number => costOfUsageUsd(RECORDED_USAGE, rates);
+
+/** `--plan`（Plan→Build）を 1 回流す（偽物の LLM・判定・端末で閉じる。Issue #829） */
+async function runPlanBuild(input: {
+  readonly dir: string;
+  readonly extraArgs: readonly string[];
+  readonly recording: ReturnType<typeof createRecordingClient>;
+  readonly rates?: TokenRates;
+}): Promise<{ readonly code: number; readonly lines: readonly string[] }> {
+  const lines: string[] = [];
+  const code = await runCli({
+    argv: ["--", "request.txt", "--out", input.dir, "--plan", ...input.extraArgs],
+    env: { [API_KEY_ENV]: "sk-FAKE" },
+    ...realFileDeps(),
+    loadDocuments: async () => [],
+    makeClient: () => input.recording.client,
+    makeLlmJudge: () => cleanJudge(),
+    now: () => 0,
+    terminal: fakeTerminal([...CONFIRM_ONLY_TERMINAL_LINES]),
+    ...(input.rates === undefined ? {} : { rates: input.rates }),
+    log: (line) => lines.push(line),
+  });
+  return { code, lines };
+}
+
+describe("(9) model-rate:v1-and-plan：Plan の入口でも terra の単価（Issue #829）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("(9) --plan-only：予約と精算が terra。要求の列は base とバイト列で同じ、差は費用と残りだけ", async () => {
+    const fixedDir = `${directory}/sm-plan-only-fixed`;
+    const baseDir = `${directory}/sm-plan-only-base`;
+    const fixedRecording = planOnlyCleanRecording();
+    const baseRecording = planOnlyCleanRecording();
+    const fixed = await runPlanOnly({
+      dir: fixedDir,
+      recording: fixedRecording.client,
+      judge: cleanJudge(),
+      terminal: fakeTerminal([...CONFIRM_ONLY_TERMINAL_LINES]),
+      extraArgs: ["--model", PLAN_MODEL_TERRA, "--budget", "1.00"],
+    });
+    const base = await runPlanOnly({
+      dir: baseDir,
+      recording: baseRecording.client,
+      judge: cleanJudge(),
+      terminal: fakeTerminal([...CONFIRM_ONLY_TERMINAL_LINES]),
+      extraArgs: ["--model", PLAN_MODEL_TERRA, "--budget", "1.00"],
+      rates: DEFAULT_RATES,
+    });
+    expect(fixed.code).toBe(EXIT_OK);
+    expect(base.code).toBe(EXIT_OK);
+    expect(fixedRecording.structured.map(withoutPlanCallSignal)).toEqual(baseRecording.structured.map(withoutPlanCallSignal));
+    const n = fixedRecording.structured.length;
+    expect(n).toBe(baseRecording.structured.length);
+    const fixedRecord = await readPlanRecord(fixedDir);
+    const baseRecord = await readPlanRecord(baseDir);
+    expect(fixedRecord.spent_usd).toBeCloseTo(n * planRecordedCost(TERRA_RATES), 12);
+    expect(baseRecord.spent_usd).toBeCloseTo(n * planRecordedCost(DEFAULT_RATES), 12);
+    expect(baseRecord.spent_usd).toBeCloseTo(fixedRecord.spent_usd / 10, 12);
+    expect(fixedRecord.remaining_usd).toBeCloseTo(1 - n * planRecordedCost(TERRA_RATES), 12);
+    expect(baseRecord.remaining_usd).toBeCloseTo(1 - n * planRecordedCost(DEFAULT_RATES), 12);
+  });
+
+  it("(9) --plan：Plan の支出と Build への予算の受け渡しも terra。要求の列は base とバイト列で同じ", async () => {
+    const fixedDir = `${directory}/sm-plan-build-fixed`;
+    const baseDir = `${directory}/sm-plan-build-base`;
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const fixedRecording = planThenBuildCleanRecording();
+    const fixed = await runPlanBuild({ dir: fixedDir, extraArgs: ["--model", PLAN_MODEL_TERRA, "--budget", "1.00"], recording: fixedRecording });
+    const fixedRecord = await readPlanRecord(fixedDir);
+    const fixedJob = spy.mock.calls[0]![0] as { readonly budgetUsd: number };
+    // Build には、全体の予算から Plan で使った額を引いた残りが渡る（§8）
+    expect(fixedJob.budgetUsd).toBeCloseTo(fixedRecord.remaining_usd, 15);
+    const fixedCost = JSON.parse(fixed.lines.at(-1) ?? "{}") as { plan_usd: number; build_usd: number; total_usd: number };
+    const planCalls = 3;
+    const buildCalls = fixedRecording.structured.length - planCalls;
+    expect(fixedCost.plan_usd).toBeCloseTo(planCalls * planRecordedCost(TERRA_RATES), 12);
+    expect(fixedCost.build_usd).toBeCloseTo(buildCalls * planRecordedCost(TERRA_RATES), 12);
+    expect(fixedCost.total_usd).toBeCloseTo(fixedCost.plan_usd + fixedCost.build_usd, 12);
+
+    const baseRecording = planThenBuildCleanRecording();
+    const base = await runPlanBuild({
+      dir: baseDir,
+      extraArgs: ["--model", PLAN_MODEL_TERRA, "--budget", "1.00"],
+      recording: baseRecording,
+      rates: DEFAULT_RATES,
+    });
+    expect(fixed.code).toBe(EXIT_OK);
+    expect(base.code).toBe(EXIT_OK);
+    // 要求の列は base とバイト列で同じ
+    expect(fixedRecording.structured.map(withoutPlanCallSignal)).toEqual(baseRecording.structured.map(withoutPlanCallSignal));
+    const baseRecord = await readPlanRecord(baseDir);
+    const baseJob = spy.mock.calls[1]![0] as { readonly budgetUsd: number };
+    expect(baseJob.budgetUsd).toBeCloseTo(baseRecord.remaining_usd, 15);
+    const baseCost = JSON.parse(base.lines.at(-1) ?? "{}") as { plan_usd: number; build_usd: number; total_usd: number };
+    expect(baseCost.plan_usd).toBeCloseTo(planCalls * planRecordedCost(DEFAULT_RATES), 12);
+    expect(baseCost.build_usd).toBeCloseTo(buildCalls * planRecordedCost(DEFAULT_RATES), 12);
+    expect(baseCost.total_usd).toBeCloseTo(baseCost.plan_usd + baseCost.build_usd, 12);
   });
 });

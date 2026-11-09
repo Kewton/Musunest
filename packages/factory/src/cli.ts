@@ -93,6 +93,7 @@ import {
   type ReasoningEffort,
   type StageEfforts,
   type StageEffortStage,
+  type StageModels,
 } from "./limits.js";
 import type { LlmClient } from "./llm.js";
 import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL, OLLAMA_STAGE_OUTPUT_LIMITS } from "./ollama.js";
@@ -224,6 +225,38 @@ export const OPENROUTER_RATES: TokenRates = {
   outputPerToken: 0.3 / 1_000_000,
 };
 
+/**
+ * terra の単価（USD / 1 トークン。Issue #829）。値は所有者が 2026-11-09 に示した公開値（100 万あたり）：入力 1.00・
+ * キャッシュの読み取り 0.05・キャッシュの書き込み 1.25・出力 5.00。出典・日付は Issue #829（2026-11-09）。
+ */
+export const TERRA_RATES: TokenRates = {
+  inputPerToken: 1.0 / 1_000_000,
+  cachedInputPerToken: 0.05 / 1_000_000,
+  cacheWritePerToken: 1.25 / 1_000_000,
+  outputPerToken: 5.0 / 1_000_000,
+};
+
+/**
+ * モデル → 単価の表（USD / 1 トークン。Issue #829）。**単価の置き場所に 1 つだけ置く**——入口（通常の v1・Plan・
+ * Build だけ・段の走り）と段の口の両方が、この表から走りのモデルと段のモデルの単価を引く。luna は `DEFAULT_RATES` と
+ * 同じ値（所有者が 2026-11-09 に今も正しいと確かめた）なので、luna の走りの予約・記録はバイト列で変わらない。
+ * 表に無いモデルは `DEFAULT_RATES` へ倒す（`--stage-model` を付けない走りの互換。付けた走りでは入口が断る）。
+ */
+export const MODEL_RATES: Readonly<Record<string, TokenRates>> = {
+  [DEFAULT_OPENAI_MODEL]: DEFAULT_RATES,
+  "gpt-6.1-terra": TERRA_RATES,
+};
+
+/** モデルが単価の表にあるか（Issue #829）。表は差し替えられる（試験用の `deps.modelRates`） */
+export function isKnownModel(model: string, table: Readonly<Record<string, TokenRates>> = MODEL_RATES): boolean {
+  return Object.prototype.hasOwnProperty.call(table, model);
+}
+
+/** モデルの単価を表から引く（表に無ければ既定の単価。Issue #829）。表は差し替えられる */
+export function modelRatesOf(model: string, table: Readonly<Record<string, TokenRates>> = MODEL_RATES): TokenRates {
+  return table[model] ?? DEFAULT_RATES;
+}
+
 /** LLM の adapter が読む鍵の環境変数の名前（`--provider` の既定は openai） */
 export function apiKeyEnvOf(provider: Provider): string {
   if (provider === "ollama") return OLLAMA_API_KEY_ENV;
@@ -236,6 +269,24 @@ export function ratesOf(provider: Provider): TokenRates {
   if (provider === "ollama") return OLLAMA_RATES;
   if (provider === "openrouter") return OPENROUTER_RATES;
   return DEFAULT_RATES;
+}
+
+/**
+ * 1 回の走りの単価を決める（Issue #829）。**openai の走りでは、`--stage-model` の有無と経路に依らず、走りのモデル
+ * （`--model`）の単価を表から引く**（通常の v1・Plan・Build だけ・段の走り）。表に無いモデルは `DEFAULT_RATES` へ
+ * 倒す（付けない走りの互換）。Ollama・OpenRouter は今のまま。明示の `deps.rates`（既存の試験）が最優先。
+ */
+export function runRatesOf(
+  options: {
+    readonly provider: Provider;
+    readonly model: string;
+    readonly rates?: TokenRates;
+    readonly modelRates?: Readonly<Record<string, TokenRates>>;
+  },
+): TokenRates {
+  if (options.rates !== undefined) return options.rates;
+  if (options.provider !== "openai") return ratesOf(options.provider);
+  return modelRatesOf(options.model, options.modelRates ?? MODEL_RATES);
 }
 
 /**
@@ -274,6 +325,9 @@ export const STAGE_USAGE =
 
 /** 段ごとの effort の口の使い方（`--stage-effort` の誤りのときだけ、`USAGE` のあとに出す。Issue #664） */
 export const STAGE_EFFORT_USAGE = `段ごとの effort: factory:run -- ... --pipeline v1.2 --plan-file <ファイル> [--stage-effort <段>=<値>]...（段は ${STAGE_EFFORT_STAGES.join("・")}、値は ${REASONING_EFFORTS.join("・")}。同じ段は 1 回まで）`;
+
+/** 段ごとのモデルの口の使い方（`--stage-model` の誤りのときだけ、`USAGE` のあとに出す。Issue #829） */
+export const STAGE_MODEL_USAGE = `段ごとのモデル: factory:run -- ... --pipeline v1.2 --plan-file <ファイル> --provider openai [--stage-model <段>=<モデル>]...（段は ${STAGE_EFFORT_STAGES.join("・")}、モデルは単価の表にある名前。同じ段は 1 回まで）`;
 
 /** 手元の入口が受け取る引数 */
 export interface CliArguments {
@@ -332,6 +386,11 @@ export interface CliArguments {
    * （一気通貫と段の走りの両方）。省けば今と同じ
    */
   readonly stageEfforts?: StageEfforts;
+  /**
+   * 段ごとのモデル（`--stage-model <段>=<モデル>` を付けたときだけ持つ。付けた順。Issue #829）。`--pipeline v1.2` と
+   * `--provider openai` と一緒にだけ受ける（一気通貫と段の走りの両方）。省けば今と同じ。
+   */
+  readonly stageModels?: StageModels;
 }
 
 /** `--stage-effort` の使い方の誤りの説明（符号のあとに添える。Issue #664） */
@@ -346,6 +405,20 @@ const STAGE_EFFORT_USAGE_MESSAGES = {
 
 /** `--stage-effort` の誤りの符号 */
 export type StageEffortErrorCode = keyof typeof STAGE_EFFORT_USAGE_MESSAGES;
+
+/** `--stage-model` の使い方の誤りの説明（符号のあとに添える。Issue #829） */
+const STAGE_MODEL_USAGE_MESSAGES = {
+  "stage-model:pipeline": "--stage-model は --pipeline v1.2 と一緒に指定してください",
+  "stage-model:missing": "--stage-model には <段>=<モデル> を指定してください",
+  "stage-model:format": "--stage-model は <段>=<モデル> の形で指定してください",
+  "stage-model:stage": `段は ${STAGE_EFFORT_STAGES.join("・")} から選んでください`,
+  "stage-model:model": "モデルは単価の表にある名前から選んでください（走りのモデルも含む）",
+  "stage-model:duplicate": "同じ段の --stage-model は 1 回だけ指定してください",
+  "stage-model:provider": "--stage-model は --provider openai と組み合わせてください",
+} as const;
+
+/** `--stage-model` の誤りの符号 */
+export type StageModelErrorCode = keyof typeof STAGE_MODEL_USAGE_MESSAGES;
 
 /**
  * `--stage-effort` の値の並び（付けた順）を、段 → 推論の effort の組に読む（Issue #664）。知らない段・配線していない段・知らない値・
@@ -366,6 +439,36 @@ export function parseStageEfforts(
     stageEfforts[stage] = effort;
   }
   return { stageEfforts };
+}
+
+/**
+ * `--stage-model` の値の並び（付けた順）を、段 → モデルの組に読む（Issue #829）。**既定へ黙って倒さない**——
+ * 知らない段・配線していない段・表に無いモデル（走りのモデルを含む）・同じ段の重複・`<段>=<モデル>` でない形は
+ * 誤り。openai 以外の provider との組はここで断る。計測の道具も、この関数で子を起こす前に確かめる（`parseStageEfforts`
+ * と同じ作法）。`runModel` は `--model` の値（省略時は provider の既定）。
+ */
+export function parseStageModels(
+  values: readonly string[],
+  provider: Provider | undefined,
+  runModel: string,
+  table: Readonly<Record<string, TokenRates>> = MODEL_RATES,
+): { readonly stageModels: StageModels } | { readonly code: StageModelErrorCode } {
+  if (values.length === 0) return { stageModels: {} };
+  if ((provider ?? "openai") !== "openai") return { code: "stage-model:provider" };
+  const stageModels: Partial<Record<StageEffortStage, string>> = {};
+  for (const value of values) {
+    const at = value.indexOf("=");
+    if (at <= 0) return { code: "stage-model:format" };
+    const stage = value.slice(0, at);
+    const model = value.slice(at + 1);
+    if (!isStageEffortStage(stage)) return { code: "stage-model:stage" };
+    if (!isKnownModel(model, table)) return { code: "stage-model:model" };
+    if (stage in stageModels) return { code: "stage-model:duplicate" };
+    stageModels[stage] = model;
+  }
+  // `--stage-model` を付けた走りでは、走りのモデルも表に無ければ断る（推測で数えない。Issue #829）
+  if (!isKnownModel(runModel, table)) return { code: "stage-model:model" };
+  return { stageModels };
 }
 
 function isPipeline(value: string): value is Pipeline {
@@ -433,6 +536,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   let stageInput: string | undefined;
   let stageFlag = false;
   const stageEffortValues: string[] = [];
+  const stageModelValues: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === undefined) continue;
@@ -477,6 +581,13 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
       index += 1;
       if (raw === undefined) return { error: `stage-effort:missing（${STAGE_EFFORT_USAGE_MESSAGES["stage-effort:missing"]}）` };
       stageEffortValues.push(raw);
+      continue;
+    }
+    if (arg === "--stage-model") {
+      const raw = args[index + 1];
+      index += 1;
+      if (raw === undefined) return { error: `stage-model:missing（${STAGE_MODEL_USAGE_MESSAGES["stage-model:missing"]}）` };
+      stageModelValues.push(raw);
       continue;
     }
     if (arg === "--answers") {
@@ -614,16 +725,24 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     if ("code" in read) return { error: `${read.code}（${STAGE_EFFORT_USAGE_MESSAGES[read.code]}）` };
     stageEfforts = read.stageEfforts;
   }
+  const model =
+    explicitModel ??
+    (provider === "ollama"
+      ? DEFAULT_OLLAMA_MODEL
+      : provider === "openrouter"
+        ? DEFAULT_OPENROUTER_MODEL
+        : DEFAULT_OPENAI_MODEL);
+  let stageModels: StageModels | undefined;
+  if (stageModelValues.length > 0) {
+    if (pipeline !== "v1.2") return { error: `stage-model:pipeline（${STAGE_MODEL_USAGE_MESSAGES["stage-model:pipeline"]}）` };
+    const read = parseStageModels(stageModelValues, provider ?? "openai", model);
+    if ("code" in read) return { error: `${read.code}（${STAGE_MODEL_USAGE_MESSAGES[read.code]}）` };
+    stageModels = read.stageModels;
+  }
   return {
     requestFile,
     outDir,
-    model:
-      explicitModel ??
-      (provider === "ollama"
-        ? DEFAULT_OLLAMA_MODEL
-        : provider === "openrouter"
-          ? DEFAULT_OPENROUTER_MODEL
-          : DEFAULT_OPENAI_MODEL),
+    model,
     effort,
     ...(provider === undefined ? {} : { provider }),
     ...(budgetUsd === undefined ? {} : { budgetUsd }),
@@ -638,6 +757,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     ...(stageRange === undefined ? {} : { stageRange }),
     ...(stageInput === undefined ? {} : { stageInput }),
     ...(stageEfforts === undefined ? {} : { stageEfforts }),
+    ...(stageModels === undefined ? {} : { stageModels }),
   };
 }
 
@@ -683,6 +803,12 @@ export interface CliDeps {
   /** 標準エラーに 1 行出す（判定を落としたときの注意。既定は何もしない） */
   readonly logError?: (line: string) => void;
   readonly rates?: TokenRates;
+  /**
+   * モデル → 単価の表（試験が差し込む。Issue #829）。省けば `MODEL_RATES`。明示の `rates` を渡した走りでは、
+   * 走りのモデルの単価も段のモデルの単価もこの表（`MODEL_RATES`）から引く——`rates` は既存の試験の互換のために
+   * 走りの単価だけを差し替える。
+   */
+  readonly modelRates?: Readonly<Record<string, TokenRates>>;
   readonly budgetUsd?: number;
   readonly deadlineMs?: number;
   readonly limits?: AgentLimits;
@@ -758,6 +884,10 @@ interface BuildJob {
   readonly pipeline?: Pipeline;
   /** 段ごとの effort（`--pipeline v1.2` で `--stage-effort` を付けたときだけ。Issue #664） */
   readonly stageEfforts?: StageEfforts;
+  /** 段ごとのモデル（`--pipeline v1.2` で `--stage-model` を付けたときだけ。Issue #829） */
+  readonly stageModels?: StageModels;
+  /** 段のモデルの単価の表（`--stage-model` を付けた走りだけ。Issue #829） */
+  readonly stageModelRates?: Readonly<Record<string, TokenRates>>;
   /** 段の出力の上限の上書きの表（`--provider ollama` の `--pipeline v1.2` の走りだけ。Issue #776） */
   readonly stageOutputLimits?: StageOutputLimits;
 }
@@ -794,6 +924,8 @@ async function runBuild(
           plan: v11aPlan,
           ...(flags === undefined ? {} : { flags, recordV12Flags: true, ...(flags.ids ? { collectBoundaries: true } : {}) }),
           ...(job.stageEfforts === undefined ? {} : { stageEfforts: job.stageEfforts }),
+          ...(job.stageModels === undefined ? {} : { stageModels: job.stageModels }),
+          ...(job.stageModelRates === undefined ? {} : { stageModelRates: job.stageModelRates }),
           ...(job.stageOutputLimits === undefined ? {} : { stageOutputLimits: job.stageOutputLimits }),
           // `--pipeline v1.2` の走りだけ、形の誤りの種類を段の記録と要約に残す（Issue #783。v1・v1.1α は欄を足さない）
           ...(job.pipeline === "v1.2" ? { recordMalformedKinds: true } : {}),
@@ -1131,13 +1263,17 @@ async function runBuildFromPlanFile(
     outDir: parsed.outDir,
     model: parsed.model,
     effort: parsed.effort,
-    rates: deps.rates ?? ratesOf(provider),
+    // 走りのモデルの単価を表から引く（openai。luna は DEFAULT_RATES と同じ値。Issue #829）
+    rates: runRatesOf({ provider, model: parsed.model, ...(deps.rates === undefined ? {} : { rates: deps.rates }), ...(deps.modelRates === undefined ? {} : { modelRates: deps.modelRates }) }),
     budgetUsd: ctx.budgetUsd,
     deadline: ctx.now() + ctx.deadlineMs,
     now: ctx.now,
     ...(parsed.timeoutMs === undefined ? {} : { timeoutMs: parsed.timeoutMs }),
     ...(parsed.pipeline === undefined ? {} : { pipeline: parsed.pipeline }),
     ...(parsed.stageEfforts === undefined ? {} : { stageEfforts: parsed.stageEfforts }),
+    ...(parsed.stageModels === undefined
+      ? {}
+      : { stageModels: parsed.stageModels, stageModelRates: deps.modelRates ?? MODEL_RATES }),
     // Ollama の v1.2 の走りだけ、段の出力の上限の上書きの表を実行口へ渡す（Issue #776）
     ...(() => {
       const limits = stageOutputLimitsOf(provider, parsed.pipeline);
@@ -1348,7 +1484,8 @@ async function runStageFromPlanFile(
     outDir: parsed.outDir,
     model: parsed.model,
     effort: parsed.effort,
-    rates: deps.rates ?? ratesOf(provider),
+    // 走りのモデルの単価を表から引く（openai。luna は DEFAULT_RATES と同じ値。Issue #829）
+    rates: runRatesOf({ provider, model: parsed.model, ...(deps.rates === undefined ? {} : { rates: deps.rates }), ...(deps.modelRates === undefined ? {} : { modelRates: deps.modelRates }) }),
     budgetUsd: ctx.budgetUsd,
     deadline: ctx.now() + ctx.deadlineMs,
     now: ctx.now,
@@ -1357,6 +1494,7 @@ async function runStageFromPlanFile(
   };
   // Ollama の v1.2 の段の走りだけ、段の出力の上限の上書きの表を実行口へ渡し、条件の記録にも残す（Issue #776）
   const stageOutputLimits = stageOutputLimitsOf(provider, pipeline);
+  const stageModelRates = deps.modelRates ?? MODEL_RATES;
   const outcome = await runStageRangeV11a({
     ...generationInputOf(deps, job, promptVersionOf(pipeline)),
     plan: validation.plan,
@@ -1364,6 +1502,7 @@ async function runStageFromPlanFile(
     ...(resume === undefined ? {} : { resume }),
     ...(flags === undefined ? {} : { flags }),
     ...(parsed.stageEfforts === undefined ? {} : { stageEfforts: parsed.stageEfforts }),
+    ...(parsed.stageModels === undefined ? {} : { stageModels: parsed.stageModels, stageModelRates }),
     ...(stageOutputLimits === undefined ? {} : { stageOutputLimits }),
     // v1.2 の段の走りだけ、形の誤りの種類を段の記録に残す（Issue #783。v1.1α の段の走りは欄を足さない）
     ...(pipeline === "v1.2" ? { recordMalformedKinds: true } : {}),
@@ -1406,6 +1545,8 @@ async function runStageFromPlanFile(
       : { pipeline: "v1.2", v12_flags: toPublicV12Flags(flags), ...(flags.ids ? { v12_call_limits: v12CallLimitsRecord() } : {}) }),
     // `--stage-effort` を付けた v1.2 の段の走りだけ：段 → 推論の effort（付けた順。付けなければ欄を出さない。Issue #664）
     ...(parsed.stageEfforts === undefined ? {} : { stage_efforts: parsed.stageEfforts }),
+    // `--stage-model` を付けた v1.2 の段の走りだけ：段 → モデル（付けた順。付けなければ欄を出さない。Issue #829）
+    ...(parsed.stageModels === undefined ? {} : { stage_models: parsed.stageModels }),
     // Ollama の v1.2 の段の走りだけ：上書きした段と値の表（付けなければ欄を出さない。Issue #776）
     ...(stageOutputLimits === undefined ? {} : { ollama_stage_output_limits: stageOutputLimits }),
   };
@@ -1468,7 +1609,8 @@ export async function runCli(deps: CliDeps): Promise<number> {
   if ("error" in parsed) {
     log(`使い方の誤り: ${parsed.error}`);
     log(USAGE);
-    if (parsed.error.startsWith("stage-effort:")) log(STAGE_EFFORT_USAGE);
+    if (parsed.error.startsWith("stage-model:")) log(STAGE_MODEL_USAGE);
+    else if (parsed.error.startsWith("stage-effort:")) log(STAGE_EFFORT_USAGE);
     else if (parsed.error.startsWith("stage-")) log(STAGE_USAGE);
     return EXIT_USAGE;
   }
@@ -1500,13 +1642,15 @@ export async function runCli(deps: CliDeps): Promise<number> {
         };
   // `--stage-effort` を付けた v1.2 の走りだけ、段 → 推論の effort を末尾に足す（付けなければ欄を出さない。Issue #664）
   const stageEffortConditions = parsed.stageEfforts === undefined ? {} : { stage_efforts: parsed.stageEfforts };
+  // `--stage-model` を付けた v1.2 の走りだけ、段 → モデルを `stage_efforts` と `ollama_stage_output_limits` の間に足す（Issue #829）
+  const stageModelConditions = parsed.stageModels === undefined ? {} : { stage_models: parsed.stageModels };
   // Ollama の v1.2 の走りだけ、上書きした段と値の表を末尾に足す（Issue #776。Plan だけの走り・ほかの走りは欄を出さない）
   const ollamaLimits = stageOutputLimitsOf(parsed.provider ?? "openai", parsed.pipeline);
   const ollamaLimitConditions = ollamaLimits === undefined ? {} : { ollama_stage_output_limits: ollamaLimits };
   const recordConditions: PlanCliConditions =
     v12Conditions === undefined
       ? { ...conditions, ...ollamaLimitConditions }
-      : { ...conditions, ...v12Conditions, ...stageEffortConditions, ...ollamaLimitConditions };
+      : { ...conditions, ...v12Conditions, ...stageEffortConditions, ...stageModelConditions, ...ollamaLimitConditions };
 
   // `--plan-file`：包みを検査してから client を作る（検査で断れば API を呼ばない。Issue #495）
   if (parsed.planFile !== undefined) {
@@ -1556,7 +1700,8 @@ export async function runCli(deps: CliDeps): Promise<number> {
     outDir: parsed.outDir,
     model: parsed.model,
     effort: parsed.effort,
-    rates: deps.rates ?? ratesOf(provider),
+    // 走りのモデルの単価を表から引く（openai。luna は DEFAULT_RATES と同じ値。Issue #829）
+    rates: runRatesOf({ provider, model: parsed.model, ...(deps.rates === undefined ? {} : { rates: deps.rates }), ...(deps.modelRates === undefined ? {} : { modelRates: deps.modelRates }) }),
     budgetUsd,
     deadline,
     now,

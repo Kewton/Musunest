@@ -13,6 +13,7 @@
 // 実 API も本物の端末も使わない（試験は偽物を差し込む。CLAUDE.md の不変条件）。
 import { checkConfirmedPlan, planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
 import type { StageOutputLimits } from "./call.js";
+import type { StageModels } from "./limits.js";
 import type { BundleJudgeUsage } from "./bundle.js";
 import type { PlanAnswerDraft } from "./plan/answers.js";
 import type { PlanQuestion } from "./plan/questions.js";
@@ -1064,6 +1065,11 @@ export interface PlanCliConditions {
   readonly contract_version: string;
   readonly factory_version: string;
   readonly spec_engine_version: string;
+  /**
+   * `--pipeline v1.2` の Build の走りで `--stage-model` を付けたときだけ：段 → モデル（付けた順。Issue #829）。
+   * **必須の欄ではない**——`parsePlanFile` の必須の条件の照合には足さない。付けない走りは欄を持たない。
+   */
+  readonly stage_models?: StageModels;
   /**
    * `--provider ollama` の `--pipeline v1.2` の Build の走りだけ：上書きした段と値の表（Issue #776）。
    * **必須の欄ではない**——`parsePlanFile` の必須の条件の照合には足さない（人が作る包みに求めない）。
