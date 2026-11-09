@@ -1786,8 +1786,46 @@ export function ownershipWithValidationTargets(
 }
 
 /**
- * 検査の式の確かめ方の表の検査（旗 `v12.ids` と台帳が on。Issue #800）。value が null・分類が ruled・`targets` が
- * 1 つ以上・表の項目の行・同じ entity・重なり無しで、所属が targets の項目とその entity だけであることを求める
+ * 検査の式が守る操作の行か（旗 `v12.ids` の C2'・T1' の所属の形。Issue #824）。targets の entity と同じ entity の、
+ * 条件（when）の無い create・update の操作。検査は保存の前にレコード全体に当たるので、これらの行は値の対象にならず、
+ * 要件の意味として所属に自然である。`entity` が null（targets の entity を読めない）ときは何も許さない（fail-closed）
+ */
+function isValidationExpressionGuardedOperation(row: NameTableRow, entity: string | null): boolean {
+  if (entity === null || row.kind !== "operation" || row.entity !== entity) return false;
+  const type = row.type;
+  return (
+    type !== null &&
+    typeof type === "object" &&
+    "action" in type &&
+    "hasWhen" in type &&
+    (type.action === "create" || type.action === "update") &&
+    type.hasWhen === false
+  );
+}
+
+/**
+ * 検査の式の要件の所属に許す ID（Issue #824）。`targets` の照合が返す集合（対象の項目とその entity）に、targets の entity の
+ * 条件の無い create・update の操作の行を足す。`checkValidationExpressionTargets` の返す集合（C2' の前の手が所属に足す ID）は
+ * 変えない——足すのは所属の形の検査の側だけである
+ */
+function validationExpressionOwnershipAllowed(
+  rows: readonly NameTableRow[],
+  targets: readonly string[],
+  allowed: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const rowById = new Map(rows.map((row) => [row.id, row] as const));
+  const entity = rowById.get(targets[0] ?? "")?.entity ?? null;
+  const extended = new Set(allowed);
+  for (const row of rows) {
+    if (isValidationExpressionGuardedOperation(row, entity)) extended.add(row.id);
+  }
+  return extended;
+}
+
+/**
+ * 検査の式の確かめ方の表の検査（旗 `v12.ids` と台帳が on。Issue #800・#824）。value が null・分類が ruled・`targets` が
+ * 1 つ以上・表の項目の行・同じ entity・重なり無しで、所属が targets の項目とその entity、および targets の entity の条件の無い
+ * create・update の操作だけであることを求める（Issue #824。操作は値の対象にならないので門の目的は保たれる）
  */
 export function checkValidationExpressionVerification(
   t1: PropertyT1,
@@ -1807,7 +1845,8 @@ export function checkValidationExpressionVerification(
   }
   const { valid, allowed } = checkValidationExpressionTargets(rows, targets, field, t1.targetMessages, problems);
   if (!valid) return;
+  const ownershipAllowed = validationExpressionOwnershipAllowed(rows, targets, allowed);
   const owned = new Set(roles.map((role) => role.id));
-  if (roles.some((role) => !allowed.has(role.id))) problems.push({ field, message: t1.messages.others });
+  if (roles.some((role) => !ownershipAllowed.has(role.id))) problems.push({ field, message: t1.messages.others });
   if (targets.some((id) => !owned.has(id))) problems.push({ field, message: t1.messages.count });
 }
