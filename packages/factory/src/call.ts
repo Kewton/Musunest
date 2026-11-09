@@ -267,6 +267,29 @@ export interface CallAttemptObserver {
 }
 
 /**
+ * 単価の表が、その名前を**自分で持つ**か（Issue #836）。`table[名前]` は表に無い名前でも、オブジェクトが
+ * 継承する名前（`constructor`・`toString`・`hasOwnProperty`・`__proto__` など）を返す。予約と精算は
+ * 表の持ち主の契約（自分で持つ名前だけが表にある）に従い、継承の名前を表の値として採らない。
+ * 入口の `isKnownModel` と段の見方の判定は、この 1 つの関数を使う。
+ */
+export function hasOwnRatesKey(table: Readonly<Record<string, TokenRates>>, model: string): boolean {
+  return Object.prototype.hasOwnProperty.call(table, model);
+}
+
+/**
+ * 段のモデルの単価を、表が自分で持つ名前のときだけ引く（Issue #836）。表に無い名前（継承の名前を含む）は
+ * 元の口の単価へ倒す——継承した関数やオブジェクトを単価として使うと、予約の計算が NaN で壊れる。
+ */
+function stageModelRatesOf(
+  table: Readonly<Record<string, TokenRates>>,
+  model: string | undefined,
+  fallback: TokenRates,
+): TokenRates {
+  if (model === undefined || !hasOwnRatesKey(table, model)) return fallback;
+  return table[model] ?? fallback;
+}
+
+/**
  * 例外を、共通の口の種類に写す（§2.2・#302）。**口は adapter に依存しない**ので、型ではなく
  * `kind` の形で見分ける。分類できない例外は `unknown` として別に出す（拒否に混ぜない）。
  */
@@ -775,8 +798,9 @@ export class CallGateway {
     const view = new CallGateway({
       client: root.#client,
       budget: root.#budget,
-      // 段のモデルがあれば、そのモデルの単価で予約と精算をする（予約の式は変えない。Issue #829）
-      rates: model === undefined ? root.#rates : (root.#stageModelRates[model] ?? root.#rates),
+      // 段のモデルがあれば、そのモデルの単価で予約と精算をする（表が自分で持つ名前のときだけ。
+      // 予約の式は変えない。Issue #829・#836）
+      rates: stageModelRatesOf(root.#stageModelRates, model, root.#rates),
       now: root.#now,
       deadline: root.#deadline,
       limits: root.#limits,

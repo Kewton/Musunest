@@ -55,7 +55,7 @@
 // appspec-schema の contract.ts と同じやり方）。
 import { planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
 import type { TokenRates } from "./budget.js";
-import type { StageOutputLimits } from "./call.js";
+import { hasOwnRatesKey, type StageOutputLimits } from "./call.js";
 import { buildRejectedCandidateFiles, bundleFiles } from "./bundle.js";
 import {
   buildBuildCliRecord,
@@ -247,14 +247,18 @@ export const MODEL_RATES: Readonly<Record<string, TokenRates>> = {
   "gpt-6.1-terra": TERRA_RATES,
 };
 
-/** モデルが単価の表にあるか（Issue #829）。表は差し替えられる（試験用の `deps.modelRates`） */
+/** モデルが単価の表にあるか（Issue #829）。表は差し替えられる（試験用の `deps.modelRates`）。
+ * 表が**自分で持つ名前**だけを表にあると見る（継承の名前を拾わない。Issue #836） */
 export function isKnownModel(model: string, table: Readonly<Record<string, TokenRates>> = MODEL_RATES): boolean {
-  return Object.prototype.hasOwnProperty.call(table, model);
+  return hasOwnRatesKey(table, model);
 }
 
-/** モデルの単価を表から引く（表に無ければ既定の単価。Issue #829）。表は差し替えられる */
+/**
+ * モデルの単価を表から引く（Issue #829）。表が自分で持つ名前のときだけ表の値を使い、表に無い名前
+ * （継承の名前を含む）は既定の単価へ倒す（Issue #836）。表は差し替えられる
+ */
 export function modelRatesOf(model: string, table: Readonly<Record<string, TokenRates>> = MODEL_RATES): TokenRates {
-  return table[model] ?? DEFAULT_RATES;
+  return isKnownModel(model, table) ? (table[model] ?? DEFAULT_RATES) : DEFAULT_RATES;
 }
 
 /** LLM の adapter が読む鍵の環境変数の名前（`--provider` の既定は openai） */
