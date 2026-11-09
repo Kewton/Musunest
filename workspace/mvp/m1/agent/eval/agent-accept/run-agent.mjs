@@ -86,6 +86,16 @@
 //          provider:openrouter-unavailable で断る（子 0 本）。対応していれば子の argv に --provider openrouter と dist の既定モデルを渡し、
 //          条件の params.provider・params.provider_api_key_env に provider と鍵の環境変数の名前（値ではない）を残す。比較の既定の照合は
 //          defaultsOf の model_openrouter を見る（モデルか鍵の名前だけが違えば compare:defaults-differ）。Ollama の上限の表の欄は openrouter の走りに載せない
+// #830（段ごとのモデルの口と、v1.2 の上流の入力なしの判定。README §10.8 の #830 の項目）：
+//   --stage-model <段>=<モデル>（繰り返し可）：--stage-effort（#664）と同じ作法。--pipeline v1.2 のとき（一気通貫と v1.2 の段の旗との組）だけ受け、
+//          子の引数の末尾に付けた順のまま、--stage-effort の後に足す。子を起こす前に、工場の dist の package の入口の parseStageModels に、子へ渡す provider と
+//          実効のモデル（--model。省けば provider の既定）を添えて呼ぶ（段・モデル・provider の集合をこの道具に書かない。走りのモデルが表に無ければここで断られる）。
+//          関数の無い dist は stage-model:unavailable、断られたら工場の符号（stage-model:*）で、どれも exit 3・子 0 本。v1・v1.1α・経路の省略との組は flags:conflict。
+//          条件の params.stage_models に段 → モデルを写す（指定したときだけ。署名に入る）。--compare は候補の群の子にだけ渡し、群の条件の照合は stage_models を外し、
+//          比較の記録の群に両群の値を並べる（持たない群は null）
+//   --stage-from の入力なしの判定：実効の経路が v1.2 で旗 ids が on（今の dist と上流の条件の両方）のときだけ、境界より前の段を工場の dist の stagesInRange
+//          （上流の開始から境界の直前の終了まで）で導き、区間 0 の C1・C2 の停止も入力なしにできる。v1.1α・ids off は今の組み立てのまま。関数の無い dist は
+//          今の組み立てに戻り、関数があるのに結果が不正（配列でない・空・文字列でない・今の組み立ての段を含まない・例外）なら stage:dist-unreadable で断る
 // 採点は: node score-agent.mjs <repo> <out> [--label high]（リポジトリ・出力先の順で渡す）。比較は score-agent.mjs <repo> <out> --compare
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
@@ -169,6 +179,10 @@ const stageEffortArgs = args.flatMap((a, i) => (a === "--stage-effort" ? [args[i
 if (stageEffortArgs.some((v) => v === "" || v.startsWith("--"))) refuseCode("flags:conflict");
 const stageEffortTarget = pipeline === V12_PIPELINE || ((compare || makePairsOut !== null) && !stageMode && compareGroups[1] === V12_PIPELINE);
 if (stageEffortArgs.length > 0 && !stageEffortTarget) refuseCode("flags:conflict");
+// #830：段ごとのモデル。受ける組と値の無い指定の扱いは --stage-effort と同じ
+const stageModelArgs = args.flatMap((a, i) => (a === "--stage-model" ? [args[i + 1] ?? ""] : []));
+if (stageModelArgs.some((v) => v === "" || v.startsWith("--"))) refuseCode("flags:conflict");
+if (stageModelArgs.length > 0 && !stageEffortTarget) refuseCode("flags:conflict");
 if (compare && !args.includes("--budget-usd")) refuseCode("compare:budget-required");
 if (compare && !(Number.isFinite(budget) && budget >= 0 && Number.isInteger(CONC) && CONC >= 1)) refuseCode("flags:conflict");
 /** 条件の params.mode：build（指定なし）・e2e（--plan）・plan-only・build-from・stage-run（段の旗。#545） */
@@ -266,11 +280,28 @@ const stagesBefore = (lib, range, boundary) => {
   return [...new Set(ids)];
 };
 /**
- * 入力なしの記録の整合（境界の checkpoint を宣言しない本）：範囲の中で境界へ未到達と確認できるときだけ真。停止（段は境界より前の段・種類は既知の値）・
- * 段の通過が偽・終了コード 1・段の履歴が全部境界より前の段で、到達した段が履歴の最後と同じで停止の段と一致・宣言した境界は全部それより前
+ * #830：入力なしの判定に使う「境界より前の段」。実効の経路が v1.2 で旗 ids が on（今の dist の旗と上流の条件の旗の両方）のときだけ、工場の dist の
+ * stagesInRange（上流の開始から境界の直前の終了まで）で導く（区間 0 の C1・C2 を含む。段の名前をこの道具に書かない）。v1.1α・ids off は今の組み立て
+ * （stagesBefore）のまま。関数の無い dist は今の組み立てに戻る。関数があるのに例外・配列でない・空・文字列でない要素・今の組み立ての段を含まない結果は
+ * dist の読み取りの失敗として断る（黙って今の組み立てに戻らない）
  */
-function absentRecordConsistent(lib, record, range, boundary) {
-  const before = stagesBefore(lib, range, boundary), j = lib.STAGE_BOUNDARIES.indexOf(boundary);
+const absentStagesFor = (lib, range, boundary, upFlags) => {
+  const base = stagesBefore(lib, range, boundary);
+  const idsOn = pipeline === V12_PIPELINE && v12Flags?.ids === true && isRec(upFlags) && upFlags.ids === true;
+  if (!idsOn || typeof lib.stagesInRange !== "function") return base;
+  const j = lib.STAGE_BOUNDARIES.indexOf(boundary);
+  let derived = null;
+  try { derived = lib.stagesInRange(range.start, lib.STAGE_ENDS[j]); } catch { derived = null; }
+  if (!Array.isArray(derived) || derived.length === 0 || !derived.every((x) => typeof x === "string" && x !== "") || !base.every((x) => derived.includes(x))) refuseCode("stage:dist-unreadable");
+  return [...new Set(derived)];
+};
+/**
+ * 入力なしの記録の整合（境界の checkpoint を宣言しない本）：範囲の中で境界へ未到達と確認できるときだけ真。停止（段は境界より前の段・種類は既知の値）・
+ * 段の通過が偽・終了コード 1・段の履歴が全部境界より前の段で、到達した段が履歴の最後と同じで停止の段と一致・宣言した境界は全部それより前。
+ * before ＝ 境界より前の段（absentStagesFor。#830）
+ */
+function absentRecordConsistent(lib, record, before, boundary) {
+  const j = lib.STAGE_BOUNDARIES.indexOf(boundary);
   const st = record.stopped, stages = record.stages;
   if (!isRec(st) || !before.includes(st.stage) || !RECORD_FAILURE_KINDS.includes(st.kind)) return false;
   if (record.stage_pass !== false || record.exit_code !== 1 || !Array.isArray(stages) || stages.length === 0) return false;
@@ -345,6 +376,19 @@ if (stageEffortArgs.length > 0) {
   if (read === null || typeof read !== "object" || read.stageEfforts === null || typeof read.stageEfforts !== "object" || Array.isArray(read.stageEfforts)) refuseCode(known(read?.code) ? read.code : "stage-effort:unavailable");
   stageEfforts = JSON.parse(JSON.stringify(read.stageEfforts));
 }
+// #830：段ごとのモデルを工場の dist の関数で読む（段・モデル・provider の集合を手書きしない）。子へ渡す provider と実効のモデルを添える。
+// 条件の params.stage_models に写す段 → モデル（指定が無ければ null）
+let stageModels = null;
+if (stageModelArgs.length > 0) {
+  if (typeof v12Entry?.parseStageModels !== "function") refuseCode("stage-model:unavailable");
+  let read = null;
+  try { read = v12Entry.parseStageModels(stageModelArgs, provider, model); } catch { read = null; }
+  const known = (code) => typeof code === "string" && /^stage-model:[a-z-]+$/.test(code);
+  if (read === null || typeof read !== "object" || read.stageModels === null || typeof read.stageModels !== "object" || Array.isArray(read.stageModels)) refuseCode(known(read?.code) ? read.code : "stage-model:unavailable");
+  stageModels = JSON.parse(JSON.stringify(read.stageModels));
+}
+/** 子に段ごとの口（--stage-effort・--stage-model）を付けるか（比較では候補の群だけ） */
+const stageTuned = stageEfforts !== null || stageModels !== null;
 
 // --compare（#513）：比較元の checkout を同じ形で読む（読めなければ断る。パスは出さない）
 let baseline = null;
@@ -533,6 +577,8 @@ if (stageMode && stageBoundary !== null && existsSync(join(resolve(stageFromArg)
   stageFrom = { conditions_sha256: sha256(readFileSync(join(root, "conditions.json"))), signature: upCond.signature, range: upRange };
   const checkpointFile = stageLib.stageCheckpointFile(stageBoundary);
   const v12s = pipeline === V12_PIPELINE ? [await v12Of(v12Entry, libs[0]), ...(baseline === null ? [] : [await v12Of(baselineEntry, libs[1])])] : null;
+  // #830：入力なしの判定に使う境界より前の段（v1.2 ids on だけ dist の stagesInRange から導く）
+  const absentStages = absentStagesFor(stageLib, upRange, stageBoundary, upCond.params.v12_flags);
   for (const job of jobs) {
     const id = idOf(job), upDir = join(root, id, "bundle"), entry = frozen.adopted.find((a) => a.pattern === job.pid);
     // 上流の段の走りの記録：読める・形の版・範囲が上流の条件と同じ・確定した仕様と依頼文の SHA が凍結した組の値と同じ（読めない・壊れた記録は入力なしにしない）
@@ -547,7 +593,7 @@ if (stageMode && stageBoundary !== null && existsSync(join(resolve(stageFromArg)
       // 入力なし：境界の checkpoint を宣言せず、記録の形と段の履歴から範囲の中で境界へ未到達と確認できる本だけ（absentRecordConsistent）。
       // 境界より後の段の停止・到達・履歴、不正な形の停止など、宣言の欠けた壊れた記録は入力なしにせず断る。早期停止を示さない宣言なしも断る
       if (isRec(record.stopped) || record.stage_pass === false) {
-        if (!absentRecordConsistent(stageLib, record, upRange, stageBoundary)) refuseStage("stage-from:record-inconsistent", { ids: [id] });
+        if (!absentRecordConsistent(stageLib, record, absentStages, stageBoundary)) refuseStage("stage-from:record-inconsistent", { ids: [id] });
         stageAbsent.push(id); stageInputRecords.push({ id, absent: true, record_sha256: sha256(recordBytes) }); continue;
       }
       refuseStage("stage-from:stage-input:boundary", { ids: [id] });
@@ -604,7 +650,7 @@ if (script) {
 }
 
 // 子プロセスへ渡す引数を 1 か所で組み立て、条件のファイルもここから作る（既定値を別に手書きしない）。v1.1a・v1.2 の経路だけ末尾に --pipeline <経路> を足す（#513・#557）
-const argvFor = (cli, dir, pl, withEfforts = false) => {
+const argvFor = (cli, dir, pl, tuned = false) => {
   const argv = [cli, join(dir, "request.md"), "--out", join(dir, "bundle"), "--effort", effort, "--model", model, "--budget", String(perRunBudget), "--deadline", String(deadlineMin)];
   // #771：既定でない --provider を指定したときだけ、子にも同じ provider を渡す（省略と openai の明示は今までどおり何も足さない。モデルは上の --model）
   if (providerExplicit) argv.push("--provider", provider);
@@ -613,11 +659,14 @@ const argvFor = (cli, dir, pl, withEfforts = false) => {
   if (pl === "v1.1a" || pl === V12_PIPELINE) argv.push("--pipeline", pl);
   // 段単位の走り（#545）：工場の開始・終了の段と、開始の段の直前の境界があれば本のディレクトリに写した上流の checkpoint
   if (stageMode) argv.push("--stage-start", stageRange.start, "--stage-end", stageRange.end, ...(stageBoundary === null ? [] : ["--stage-input", join(dir, STAGE_INPUT_DIR, stageLib.stageCheckpointFile(stageBoundary))]));
-  // 段ごとの effort（#664）：付けた順のまま末尾に足す（比較では候補の群の子だけ）
-  if (withEfforts) for (const v of stageEffortArgs) argv.push("--stage-effort", v);
+  // 段ごとの effort（#664）と段ごとのモデル（#830。effort の後）：付けた順のまま末尾に足す（比較では候補の群の子だけ）
+  if (tuned) {
+    for (const v of stageEffortArgs) argv.push("--stage-effort", v);
+    for (const v of stageModelArgs) argv.push("--stage-model", v);
+  }
   return argv;
 };
-const childArgsFor = (job) => argvFor(cliFile, dirOf(job), pipeline, stageEfforts !== null);
+const childArgsFor = (job) => argvFor(cliFile, dirOf(job), pipeline, stageTuned);
 
 const gitOut = (checkout, gitArgs) => { try { return execFileSync("git", ["-C", checkout, ...gitArgs], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); } catch { return null; } };
 
@@ -642,7 +691,7 @@ const scoringOf = () => ({ dir: relative(repo, evDir), ...scoringFingerprint(evD
  * ctx ＝ 子を起こす checkout（工場の dist・spec-engine の dist・生成に渡す文書・git の状態はここから）。argvOf ＝ 条件に書く子の引数。
  * pl ＝ 経路、comparison ＝ 比較の群の印（#513。比較でなければ null）
  */
-function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId, efforts = null, ollamaLimits = null }) {
+function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId, efforts = null, models = null, ollamaLimits = null }) {
   const probe = js[0] ?? { pid: only?.[0] ?? "P1", r: 1 };
   const sampleArgv = argvOf(probe);
   const argOf = (flag) => { const i = sampleArgv.indexOf(flag); return i >= 0 ? sampleArgv[i + 1] : undefined; };
@@ -690,6 +739,8 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId, e
       ...(pl === V12_PIPELINE && comparison === null && v12CallLimits !== null ? { v12_call_limits: v12CallLimits } : {}),
       // #664：--stage-effort を子に渡したときだけ。段 → 値（付けた順。署名に入る。値が変われば再開を断る）
       ...(efforts === null ? {} : { stage_efforts: efforts }),
+      // #830：--stage-model を子に渡したときだけ。段 → モデル（付けた順。署名に入る。値が変われば再開を断る）
+      ...(models === null ? {} : { stage_models: models }),
       // #545：段単位の走りのときだけ。範囲・予算と締切の適用の単位（工場の dist の値）・上流の計測の条件の指紋（開始 T1 は null）・本ごとの上流の入力の SHA
       ...(stageMode ? { stage_start: stageRange.start, stage_end: stageRange.end, budget_scope: stageLib.STAGE_BUDGET_SCOPE, stage_from: stageFrom, stage_inputs: stageInputRecords } : {}),
     },
@@ -874,7 +925,7 @@ async function runSingle() {
   // #776：--provider ollama の v1.2 の走りだけ、対象の checkout の dist から段の出力の上限の表を独立に読む（無い・形が違えば子 0 本）
   const ollamaLimits = provider === "ollama" && pipeline === V12_PIPELINE ? await loadOllamaLimits(main) : null;
   if (provider === "ollama" && pipeline === V12_PIPELINE && ollamaLimits === null) refuseCode("provider:ollama-limits-unavailable");
-  const { measured, signature, signatureLegacy } = conditionsFor(main, { jobs, argvOf: childArgsFor, pl: pipeline, comparison: null, measurementId: basename(outRoot), efforts: stageEfforts, ollamaLimits });
+  const { measured, signature, signatureLegacy } = conditionsFor(main, { jobs, argvOf: childArgsFor, pl: pipeline, comparison: null, measurementId: basename(outRoot), efforts: stageEfforts, models: stageModels, ollamaLimits });
   mkdirSync(outRoot, { recursive: true });
   const conditionsPath = join(outRoot, "conditions.json");
   const priorDirs = readdirSync(outRoot).filter((n) => /^P\d+-r\d+$/.test(n));
@@ -978,19 +1029,23 @@ async function runCompare() {
   // 条件に書く子の引数は checkout と出力先からの相対（比較元のパスを記録に写さない。実際の引数は本のディレクトリの絶対パス）
   // 段ごとの effort（#664）は候補の群の子にだけ渡す（比較元の群は付けない）
   const effortsOf = (g) => (g === candGroup ? stageEfforts : null);
-  const relArgvOf = (pl, ctx, g) => (job) => argvFor(relative(ctx.checkout, ctx.cliFile), idOf(job), pl, effortsOf(g) !== null);
+  // 段ごとのモデル（#830）も候補の群の子にだけ渡す
+  const modelsOf = (g) => (g === candGroup ? stageModels : null);
+  const tunedOf = (g) => g === candGroup && stageTuned;
+  const relArgvOf = (pl, ctx, g) => (job) => argvFor(relative(ctx.checkout, ctx.cliFile), idOf(job), pl, tunedOf(g));
   const conds = {};
   for (const g of GROUPS) {
-    conds[g] = conditionsFor(ctxOf[g], { jobs, argvOf: relArgvOf(pipelineOf(g), ctxOf[g], g), pl: pipelineOf(g), comparison: { pairs_sha256: pairsSha, group: g, role: ROLES[g], profile }, measurementId: basename(outRoot), efforts: effortsOf(g), ollamaLimits: ollamaLimitsOfGroup[g] });
+    conds[g] = conditionsFor(ctxOf[g], { jobs, argvOf: relArgvOf(pipelineOf(g), ctxOf[g], g), pl: pipelineOf(g), comparison: { pairs_sha256: pairsSha, group: g, role: ROLES[g], profile }, measurementId: basename(outRoot), efforts: effortsOf(g), models: modelsOf(g), ollamaLimits: ollamaLimitsOfGroup[g] });
   }
   // 経路 v1.2 を含む組（#557）：各群の条件を版ごとに検証してから（v1・v1.1a は v5、v1.2 は v7）、共通の形で照らす。保存する条件と署名は元のまま
   if (GROUPS.includes(V12_PIPELINE)) for (const g of GROUPS) { const problem = groupConditionsProblem(conds[g].measured, g); if (problem !== null) refuseCode(problem); }
   // 照合：意図した差（工場の dist・commit・dirty・経路・v1.1α の上限の欄・v1.2 の旗の組と条件の版）を除いて、両群の条件が同じか。違えば項目の名前（固定の欄の名前）だけ出して断る
   const comparable = (c) => {
     const { source: _s, factory: _f, comparison: _c, schema: _v, params, child_args: childArgs, ...rest } = c;
-    const p = comparableParams(params);
-    // 経路と段ごとの effort（#664）の旗は群の意図した差なので、子の引数の照合から外す
-    const intended = (a) => a === "--pipeline" || a === "--stage-effort";
+    // 段ごとのモデル（#830）も段ごとの effort と同じく群の意図した差として外す（両群に同じ値を求めない）
+    const { stage_models: _sm, ...p } = comparableParams(params);
+    // 経路と段ごとの effort（#664）・モデル（#830）の旗は群の意図した差なので、子の引数の照合から外す
+    const intended = (a) => a === "--pipeline" || a === "--stage-effort" || a === "--stage-model";
     return { ...rest, params: p, child_args: childArgs.map((x) => ({ id: x.id, argv: x.argv === null ? null : x.argv.filter((a, i, all) => !(intended(a) || intended(all[i - 1]))) })) };
   };
   const a = comparable(conds[baseGroup].measured), b = comparable(conds[candGroup].measured);
@@ -1007,7 +1062,7 @@ async function runCompare() {
     const dir = join(outRoot, g);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "conditions.json"), JSON.stringify({ ...conds[g].measured, started_at: startedAt, signature: conds[g].signature }, null, 1));
-    groupCtx[g] = { ctx: ctxOf[g], pipeline: pipelineOf(g), dir, exitClasses: Object.fromEntries(EXIT_CLASSES.map((c) => [c, 0])), spent: 0, executed: [], efforts: effortsOf(g) !== null };
+    groupCtx[g] = { ctx: ctxOf[g], pipeline: pipelineOf(g), dir, exitClasses: Object.fromEntries(EXIT_CLASSES.map((c) => [c, 0])), spent: 0, executed: [], efforts: tunedOf(g) };
   }
   const groupRecord = (g) => {
     const m = conds[g].measured;
@@ -1019,6 +1074,8 @@ async function runCompare() {
       ...(pipelineOf(g) === V12_PIPELINE ? { v12_flags: m.params.v12_flags } : {}),
       // 段ごとの effort（#664）：指定したときだけ、両群の値を並べる（付けない群は null。違いを隠さない）
       ...(stageEfforts === null ? {} : { stage_efforts: m.params.stage_efforts ?? null }),
+      // 段ごとのモデル（#830）：指定したときだけ、両群の値を並べる（付けない群は null）
+      ...(stageModels === null ? {} : { stage_models: m.params.stage_models ?? null }),
     };
   };
   const m1 = conds[candGroup].measured;

@@ -3433,13 +3433,16 @@ test("#664 実の工場の dist の段と値：package の入口を実の dist�
   const real = await import(pathToFileURL(realIndex).href);
   assert.equal(typeof real.parseStageEfforts, "function");
   const [stage] = real.STAGE_EFFORT_STAGES, [value] = real.REASONING_EFFORTS;
+  // 配線していない段は、dist の区間の表に出る段のうち STAGE_EFFORT_STAGES に無いものから導く（#830。repair は #751 で配線済みになった）
+  const unwired = real.STAGE_SEGMENTS.flatMap((s) => s.stages).find((s) => !real.STAGE_EFFORT_STAGES.includes(s));
+  assert.equal(typeof unwired, "string", "配線していない段を dist から導けない");
   await withRepo(async (base) => {
     const repo = makeV12Repo(join(base, "real"), { index: `export * from ${JSON.stringify(pathToFileURL(realIndex).href)};\n` }), fz = frozen557(base, repo), log = join(base, "spawn.log");
     const out = join(base, "out"), r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--stage-effort", `${stage}=${value}`], { FAKE_SPAWN_LOG: log });
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(readJson(join(out, "conditions.json")).params.stage_efforts, { [stage]: value });
     const n0 = spawnCount(log), o = join(base, "out-bad");
-    assertRefused(runAgent(repo, o, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--stage-effort", `repair=${value}`], { FAKE_SPAWN_LOG: log }), "stage-effort:stage", log, n0, "配線していない段");
+    assertRefused(runAgent(repo, o, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--stage-effort", `${unwired}=${value}`], { FAKE_SPAWN_LOG: log }), "stage-effort:stage", log, n0, "配線していない段");
     assertNothingWritten(o, "配線していない段");
   });
 });
@@ -3671,4 +3674,314 @@ test("#788 R6 base のバイト列：provider を省いた走りと ollama の�
       assert.equal(conditionsSignature(JSON.parse(normalizedConditionsText(cond, base))), R6_BASE_SIGNATURE[label], `${label}: 署名の固定値`);
     }, { ollama: true });
   }
+});
+
+// ── #830：--stage-from の入力なしの判定（v1.2 ids on は dist の stagesInRange で境界より前の段を導く）と、段ごとのモデルの口（--stage-model）。README §10.8 の #830 の項目
+// 偽物の工場の dist：#713 の段の表と照合の関数に、区間の表（STAGE_SEGMENTS）と stagesInRange を足す（工場の bundle-v11a.ts と同じ形。区間 0 に C1・C2 の段が出る）。
+// FAKE_SIR で不正な結果（配列でない・空・狭い・例外）を作れる。FAKE_SIR_LOG があれば受けた範囲を 1 行ずつ書く
+const fakeSegments830 = String.raw`
+export const STAGE_SEGMENTS = [
+  { start: "name-table", end: "semantic-check", boundary: null, stages: ["name-table", "semantic-check", "carry-over", "vocabulary", "mapping"] },
+  { start: "test-spec", end: "test-spec", boundary: "t1-t2", stages: ["test-spec"] },
+  { start: "write", end: "judge", boundary: "t2-b1", stages: ["write", "static-check", "name-check", "decl-check", "run-tests", "repair", "arbitration", "coverage", "carry-over", "judge"] },
+];
+export function stagesInRange(start, end) {
+  if (process.env.FAKE_SIR_LOG) appendFileSync(process.env.FAKE_SIR_LOG, JSON.stringify([start, end]) + "\n");
+  const bad = process.env.FAKE_SIR;
+  if (bad === "not-array") return "name-table";
+  if (bad === "empty") return [];
+  if (bad === "narrow") return ["vocabulary", "mapping"];
+  if (bad === "non-string") return ["name-table", "semantic-check", "carry-over", 7];
+  if (bad === "throw") throw new Error("x");
+  const i = STAGE_SEGMENTS.findIndex((s) => s.start === start), k = STAGE_SEGMENTS.findIndex((s) => s.end === end);
+  return i < 0 || k < i ? [] : STAGE_SEGMENTS.slice(i, k + 1).flatMap((s) => s.stages);
+}
+`;
+/** v1.2 の段の走りの偽物（#713 の形）に区間の表と stagesInRange を足したリポジトリ。segments が偽なら足さない（古い dist） */
+function makeStageRepo830(base, name, { flags = FLAGS638, segments = true } = {}) {
+  const repo = makeStageRepo713(base, name, { flags });
+  if (segments) writeFileSync(join(repo, "packages/factory/dist/v11a/bundle-v11a.js"), fakeStageLib713 + fakeSegments830);
+  return repo;
+}
+/** STOPPED545 の 15 本のうち P1〜P3 の 9 本を C2（mapping）の unmet、P4・P5 の 6 本を C1（vocabulary）の unmet の停止に書き換えた上流の写し */
+const C2_IDS830 = STOPPED545.slice(0, 9), C1_IDS830 = STOPPED545.slice(9);
+const stopRecord830 = (rec, history, stage) => {
+  rec.stages = history.map((s, i) => ({ stage: s, status: i === history.length - 1 ? "failed" : "ok", calls: 1, duration_ms: 1 }));
+  rec.reached_stage = stage; rec.stopped = { stage, kind: "unmet" }; rec.stage_pass = false; rec.exit_code = 1; rec.checkpoints = [];
+};
+function withC12Stops(up, dest) {
+  cpSync(up, dest, { recursive: true });
+  const edit = (id, f) => { const p = join(dest, id, "bundle", "stage-run.json"), rec = readJson(p); f(rec); writeFileSync(p, JSON.stringify(rec, null, 2) + "\n"); };
+  for (const id of C2_IDS830) edit(id, (rec) => stopRecord830(rec, ["vocabulary", "vocabulary", "vocabulary", "mapping"], "mapping"));
+  for (const id of C1_IDS830) edit(id, (rec) => stopRecord830(rec, ["vocabulary"], "vocabulary"));
+  return dest;
+}
+const editRecord830 = (root, id, f) => { const p = join(root, id, "bundle", "stage-run.json"), rec = readJson(p); f(rec); writeFileSync(p, JSON.stringify(rec, null, 2) + "\n"); };
+
+test("#830 (1) 入力なし：v1.2 ids on の上流で C2（mapping）と C1（vocabulary）で止まった本が混じる組を開始 T2 の --stage-from に渡すと、止まった 15 本は入力なしで条件の stage_input_absent に件数と ID が載り、ほかの 15 本だけ子が起きる。stagesInRange は上流の開始から境界の直前の終了までで呼ぶ。直す前の組み立て（stagesInRange の無い dist）では同じ組が stage-from:record-inconsistent で断られる", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo830(base, "s830"), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = withC12Stops(runUpstream638(repo, join(base, "up"), fz, log), join(base, "up-c12"));
+    assert.deepEqual(readJson(join(up, "conditions.json")).params.v12_flags, FLAGS638, "上流は ids on");
+    const n0 = spawnCount(log), out = join(base, "t2"), sirLog = join(base, "sir.log");
+    const r = runAgent(repo, out, stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", up]), { FAKE_SPAWN_LOG: log, FAKE_SIR_LOG: sirLog });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(spawnCount(log) - n0, 15, "止まっていない 15 本だけを起こす");
+    const cond = readJson(join(out, "conditions.json"));
+    assert.deepEqual(cond.stage_input_absent, { count: 15, ids: STOPPED545 });
+    for (const id of STOPPED545) {
+      assert.equal(cond.child_args.find((x) => x.id === id).argv, null, id);
+      assert.ok(!existsSync(join(out, id)), `${id}: 起こさない`);
+    }
+    assert.equal(cond.signature, conditionsSignature(cond));
+    assert.deepEqual(readLog(sirLog), [["name-table", "semantic-check"]], "上流の開始から境界 t1-t2 の直前の終了まで");
+    // 直す前の組み立て：stagesInRange の無い dist（同じ旗・同じ照合）では、最初の C2 の停止で組ごと断られる
+    const old = makeStageRepo830(base, "s830-old", { segments: false }), n1 = spawnCount(log), o = join(base, "t2-old");
+    assertStageRefused(runAgent(old, o, stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", up]), { FAKE_SPAWN_LOG: log }), "stage-from:record-inconsistent", [C2_IDS830[0]], log, n1, o, "stagesInRange の無い dist");
+    // 関数があるのに不正な結果：黙って今の組み立てに戻らず断る（exit 3・子 0 本・何も書かない）
+    for (const bad of ["not-array", "empty", "narrow", "non-string", "throw"]) {
+      const ob = join(base, `t2-${bad}`), nb = spawnCount(log);
+      assertRefused(runAgent(repo, ob, stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", up]), { FAKE_SPAWN_LOG: log, FAKE_SIR: bad }), "stage:dist-unreadable", log, nb, bad);
+      assertNothingWritten(ob, bad);
+    }
+    assert.ok(!readFileSync(runAgentFile, "utf8").includes('"mapping"') && !readFileSync(runAgentFile, "utf8").includes('"vocabulary"'), "道具に段の名前を書かない");
+  });
+});
+
+test("#830 (2) 負例：v1.2 ids on でも、境界より後の段の停止・停止と履歴の食い違い・知らない段の停止・境界へ到達した形跡（後の境界の宣言）があるのに境界の宣言が欠けた記録は、今のまま stage-from:record-inconsistent・exit 4・子 0 本・何も書かない", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo830(base, "s830n"), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = withC12Stops(runUpstream638(repo, join(base, "up"), fz, log), join(base, "up-c12"));
+    const cases = [
+      ["after-boundary", C2_IDS830[0], (rec) => stopRecord830(rec, ["vocabulary", "mapping", "test-spec"], "test-spec")],
+      ["history-mismatch", C2_IDS830[1], (rec) => { rec.stopped = { stage: "vocabulary", kind: "unmet" }; }],
+      ["unknown-stage", C1_IDS830[0], (rec) => stopRecord830(rec, ["vocabulary", "made-up-stage"], "made-up-stage")],
+      ["reached-undeclared", "P6-r1", (rec) => { const later = rec.checkpoints.filter((c) => c.boundary !== "t1-t2"); stopRecord830(rec, ["vocabulary", "mapping"], "mapping"); rec.checkpoints = later; }],
+    ];
+    const spawned = spawnCount(log);
+    for (const [label, id, edit] of cases) {
+      const dest = join(base, `up-${label}`);
+      cpSync(up, dest, { recursive: true });
+      editRecord830(dest, id, edit);
+      if (label === "reached-undeclared") assert.ok(readJson(join(dest, id, "bundle", "stage-run.json")).checkpoints.length > 0, "後の境界の宣言が残る");
+      const out = join(base, `out-${label}`);
+      assertStageRefused(runAgent(repo, out, stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", dest]), { FAKE_SPAWN_LOG: log }), "stage-from:record-inconsistent", [id], log, spawned, out, label);
+    }
+  });
+});
+
+test("#830 (2') 経路の負例：v1.1α と v1.2 ids off の上流の記録に C1・C2 で止まった本（宣言は空・unmet・通過は偽・exit 1・履歴と到達と停止が一致）が混じると、stagesInRange のある dist でも stage-from:record-inconsistent・exit 4・子 0 本・何も書かない", async () => {
+  await withRepo(async (base) => {
+    const log = join(base, "spawn.log");
+    // v1.1α：#545 の偽物の段の表に区間の表と stagesInRange を足す
+    const v11 = makeStageRepo(base, "s830-v11");
+    writeFileSync(join(v11, "packages/factory/dist/v11a/bundle-v11a.js"), fakeStageLib + fakeSegments830);
+    const fz = frozen545(base, v11);
+    const up11 = withC12Stops(runUpstream(v11, join(base, "up11"), fz, log), join(base, "up11-c12"));
+    const off = makeStageRepo830(base, "s830-off", { flags: { ledger: true, ids: false } });
+    const upOff = withC12Stops(runUpstream638(off, join(base, "upoff"), fz, log), join(base, "upoff-c12"));
+    assert.equal(readJson(join(upOff, "conditions.json")).params.v12_flags.ids, false);
+    const sirLog = join(base, "sir.log");
+    for (const [label, repo, up, pl] of [["v1.1a", v11, up11, "v1.1a"], ["v1.2 ids off", off, upOff, "v1.2"]]) {
+      const n0 = spawnCount(log), out = join(base, `out-${label}`);
+      assertStageRefused(runAgent(repo, out, stageArgs638(fz, ["--stage-start", "test-spec", "--stage-from", up], pl), { FAKE_SPAWN_LOG: log, FAKE_SIR_LOG: sirLog }), "stage-from:record-inconsistent", [C2_IDS830[0]], log, n0, out, label);
+    }
+    assert.ok(!existsSync(sirLog), "ids on の v1.2 でなければ stagesInRange を呼ばない");
+  });
+});
+
+test("#830 (3) 古い dist：stagesInRange の無い dist では、v1.1α の上流（#545）の入力なしが今の期待のまま（15 本・子 15 本）", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo(base), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream(repo, join(base, "up"), fz, log);
+    const out = join(base, "b1"), n0 = spawnCount(log);
+    const r = runAgent(repo, out, stageArgs(fz, ["--stage-start", "write", "--stage-from", up]), { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(spawnCount(log) - n0, 15);
+    assert.deepEqual(readJson(join(out, "conditions.json")).stage_input_absent, { count: 15, ids: STOPPED545 });
+  });
+});
+
+// 段ごとのモデルの偽物：段・値・モデルの表は合成（道具はこの名前を知らない）。受けた引数を FAKE_PM_LOG に 1 行ずつ書く
+const fakeParse830 = String.raw`import { appendFileSync as pmAppend } from "node:fs";
+export function parseStageEfforts(values) {
+  const S = ["test-spec", "write"], V = ["low", "medium", "high"], out = {};
+  for (const v of values) {
+    const i = v.indexOf("=");
+    if (i <= 0) return { code: "stage-effort:format" };
+    const s = v.slice(0, i), e = v.slice(i + 1);
+    if (!S.includes(s)) return { code: "stage-effort:stage" };
+    if (!V.includes(e)) return { code: "stage-effort:value" };
+    if (s in out) return { code: "stage-effort:duplicate" };
+    out[s] = e;
+  }
+  return { stageEfforts: out };
+}
+export function parseStageModels(values, provider, runModel) {
+  if (process.env.FAKE_PM_LOG) pmAppend(process.env.FAKE_PM_LOG, JSON.stringify({ values, provider, runModel }) + "\n");
+  const S = ["test-spec", "write"], M = ["gpt-6.1-terra", "gpt-6-luna", "fake-model"], out = {};
+  if (values.length === 0) return { stageModels: {} };
+  if ((provider ?? "openai") !== "openai") return { code: "stage-model:provider" };
+  for (const v of values) {
+    const i = v.indexOf("=");
+    if (i <= 0) return { code: "stage-model:format" };
+    const s = v.slice(0, i), m = v.slice(i + 1);
+    if (!S.includes(s)) return { code: "stage-model:stage" };
+    if (!M.includes(m)) return { code: "stage-model:model" };
+    if (s in out) return { code: "stage-model:duplicate" };
+    out[s] = m;
+  }
+  if (!M.includes(runModel)) return { code: "stage-model:model" };
+  return { stageModels: out };
+}
+`;
+const TUNE830 = ["--stage-effort", "test-spec=high", "--stage-model", "test-spec=gpt-6.1-terra"];
+const MODELS830 = ["--stage-model", "write=gpt-6-luna", "--stage-model", "test-spec=gpt-6.1-terra"];
+/** 子の引数から段ごとの口の旗の組を除く */
+const withoutTuneArgs = (argv) => argv.filter((a, i, all) => !(["--stage-effort", "--stage-model"].includes(a) || ["--stage-effort", "--stage-model"].includes(all[i - 1])));
+
+test("#830 (4) --stage-model：--pipeline v1.2 --effort medium --stage-effort test-spec=high --stage-model test-spec=gpt-6.1-terra で、子の引数の末尾に付けた順（effort の後）で渡り、params.stage_efforts と params.stage_models が載って署名に入る。工場の関数には provider と実効のモデルを渡す。付けなければ欄が無く、欄と旗を除けば条件と子の引数は同じ。値を変えた再開は resume:signature", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "a"), { index: v12Index(FLAGS557) + fakeParse830 }), fz = frozen557(base, repo), log = join(base, "spawn.log"), pmLog = join(base, "pm.log");
+    const run = (name, extra) => {
+      const out = join(base, name), r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--effort", "medium", ...extra], { FAKE_SPAWN_LOG: log, FAKE_PM_LOG: pmLog });
+      assert.equal(r.status, 0, r.stderr);
+      return { out, cond: readJson(join(out, "conditions.json")), argv: readJson(join(out, "P1-r1", "received-argv.json")) };
+    };
+    const plain = run("out-plain", []);
+    assert.ok(!existsSync(pmLog), "付けなければ工場の関数を呼ばない");
+    const tuned = run("out-tuned", TUNE830);
+    assert.deepEqual(tuned.argv.slice(-6), ["--pipeline", "v1.2", ...TUNE830]);
+    assert.deepEqual(withoutTuneArgs(tuned.argv).map((a) => a.replace(tuned.out, plain.out)), plain.argv, "ほかの引数は付けない走りと同じ");
+    assert.deepEqual(tuned.cond.params.stage_efforts, { "test-spec": "high" });
+    assert.deepEqual(tuned.cond.params.stage_models, { "test-spec": "gpt-6.1-terra" });
+    assert.equal(tuned.cond.signature, conditionsSignature(tuned.cond));
+    assert.deepEqual(readLog(pmLog), [{ values: ["test-spec=gpt-6.1-terra"], provider: "openai", runModel: "fake-model" }], "provider と実効のモデル（既定）");
+    for (const k of ["stage_efforts", "stage_models"]) assert.ok(!(k in plain.cond.params), `付けなければ ${k} が無い`);
+    const { stage_efforts: _e, stage_models: _m, ...tunedParams } = tuned.cond.params;
+    assert.deepEqual(tunedParams, plain.cond.params, "欄を除けば params は同じ");
+    const unsigned = { ...tuned.cond, params: tunedParams, measurement_id: plain.cond.measurement_id, child_args: tuned.cond.child_args.map((x) => ({ ...x, argv: withoutTuneArgs(x.argv).map((a) => a.replace(tuned.out, plain.out)) })) };
+    assert.equal(conditionsSignature(unsigned), plain.cond.signature, "欄と旗を除けば署名は付けない走りと同じ");
+    // 順：付けた順のまま（モデルだけ 2 つ）・--model を変えれば関数に渡る実効のモデルも変わる
+    const two = run("out-two", [...MODELS830, "--model", "gpt-6-luna"]);
+    assert.deepEqual(two.argv.slice(-4), MODELS830);
+    assert.deepEqual(Object.keys(two.cond.params.stage_models), ["write", "test-spec"], "付けた順");
+    assert.equal(readLog(pmLog).at(-1).runModel, "gpt-6-luna");
+    // 再開：値・有無を変えた --resume は断り、同じ値は残りだけを起こす
+    const out = join(base, "out-r"), args = ["--only", "P1", "--runs", "2", "--concurrency", "1", "--build-from", fz, "--pipeline", "v1.2"];
+    assert.equal(runAgent(repo, out, [...args, ...MODELS830], { FAKE_SPAWN_LOG: log }).status, 0);
+    rmSync(join(out, "P1-r2"), { recursive: true, force: true });
+    const before = treeOf(out), n0 = spawnCount(log);
+    for (const [extra, label] of [[["--stage-model", "write=gpt-6.1-terra", "--stage-model", "test-spec=gpt-6.1-terra"], "値"], [[], "有無"]]) {
+      assertRefused(runAgent(repo, out, [...args, ...extra, "--resume"], { FAKE_SPAWN_LOG: log }), "resume:signature", log, n0, label);
+      assert.deepEqual(treeOf(out), before, label);
+    }
+    const rr = runAgent(repo, out, [...args, ...MODELS830, "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(rr.status, 0, rr.stderr);
+    assert.equal(spawnCount(log), n0 + 1);
+    assert.ok(!readFileSync(runAgentFile, "utf8").includes("gpt-6.1-terra"), "道具にモデルの名前を書かない");
+  });
+});
+
+test("#830 (5) 断り：v1・v1.1α・経路の省略との組と値の無い旗は flags:conflict、工場の関数が断った段・モデル（走りのモデルを含む）・重複・形・provider は工場の符号、関数の無い dist は stage-model:unavailable。どれも exit 3・子 0 本・何も書かない", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "b"), { index: v12Index(FLAGS557) + fakeParse830 }), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const bare = makeV12Repo(join(base, "b-bare"), { index: v12Index(FLAGS557) + fakeParse664 }), fzBare = frozen557(base, bare, "fz-bare");
+    const oll = makeV12OllamaRepo(join(base, "b-oll"), { index: v12Index(FLAGS557) + fakeParse830 }), fzOll = frozen557(base, oll, "fz-oll");
+    const cases = [
+      [repo, fz, ["--pipeline", "v1.1a", "--stage-model", "write=gpt-6-luna"], "flags:conflict", "v1.1a"],
+      [repo, fz, ["--pipeline", "v1", "--stage-model", "write=gpt-6-luna"], "flags:conflict", "v1"],
+      [repo, fz, ["--stage-model", "write=gpt-6-luna"], "flags:conflict", "経路の省略"],
+      [repo, fz, ["--pipeline", "v1.2", "--stage-model"], "flags:conflict", "値の無い旗"],
+      [repo, fz, ["--pipeline", "v1.2", "--stage-model", "--runs"], "flags:conflict", "値が旗"],
+      [repo, fz, ["--pipeline", "v1.2", "--stage-model", "judge=gpt-6-luna"], "stage-model:stage", "知らない段"],
+      [repo, fz, ["--pipeline", "v1.2", "--stage-model", "write=no-such-model"], "stage-model:model", "表に無いモデル"],
+      [repo, fz, ["--pipeline", "v1.2", "--model", "no-such-run-model", "--stage-model", "write=gpt-6-luna"], "stage-model:model", "表に無い走りのモデル"],
+      [repo, fz, ["--pipeline", "v1.2", "--stage-model", "write=gpt-6-luna", "--stage-model", "write=gpt-6.1-terra"], "stage-model:duplicate", "重複"],
+      [repo, fz, ["--pipeline", "v1.2", "--stage-model", "write"], "stage-model:format", "形"],
+      [oll, fzOll, ["--pipeline", "v1.2", "--provider", "ollama", "--stage-model", "write=gpt-6-luna"], "stage-model:provider", "provider"],
+      [bare, fzBare, ["--pipeline", "v1.2", "--stage-model", "write=gpt-6-luna"], "stage-model:unavailable", "関数の無い dist"],
+    ];
+    for (const [r0, f, extra, code, label] of cases) {
+      const out = join(base, `out-${label}`), n0 = spawnCount(log);
+      assertRefused(runAgent(r0, out, ["--only", "P1", "--runs", "1", "--build-from", f, ...extra], { FAKE_SPAWN_LOG: log }), code, log, n0, label);
+      assertNothingWritten(out, label);
+    }
+    // 段の旗との組でも v1.1α は組めない
+    const stage = makeStageRepo638(base, "stage-b830");
+    writeFileSync(join(stage, "packages/factory/dist/index.js"), v12Index638() + fakeParse830);
+    const fzs = frozen545(base, stage), n1 = spawnCount(log), o = join(base, "out-stage-v11a");
+    assertRefused(runAgent(stage, o, stageArgs638(fzs, ["--stage-start", "name-table", "--stage-end", "test-spec", "--stage-model", "write=gpt-6-luna"], "v1.1a"), { FAKE_SPAWN_LOG: log }), "flags:conflict", log, n1, "v1.1α の段の走り");
+    assertNothingWritten(o, "v1.1α の段の走り");
+  });
+});
+
+test("#830 (6) 比較：群の組 v1.1a,v1.2 の --compare で --stage-model は候補の群（v1.2）の子にだけ渡り、群の条件の照合は通る。比較の記録の群に両群の値（v1.1a は null）が並ぶ。段だけの対の比較では after の子にだけ渡る", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "e"), { index: v12Index(FLAGS557) + fakeParse830 }), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const pairs = join(base, "pairs-e.json");
+    assert.equal(runAgent(repo, join(base, "unused"), ["--make-pairs", pairs, "--build-from", fz, "--runs", "1", "--compare-pipelines", "v1.1a,v1.2", ...MODELS830]).status, 0);
+    const out = join(base, "out-e");
+    const r = runAgent(repo, out, ["--compare", "--baseline", repo, "--pairs", pairs, "--build-from", fz, "--budget-usd", "100", "--concurrency", "4", "--compare-pipelines", "v1.1a,v1.2", ...MODELS830], { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    const a1 = readJson(join(out, "v1.1a", "P1-r1", "received-argv.json")), a2 = readJson(join(out, "v1.2", "P1-r1", "received-argv.json"));
+    assert.deepEqual(a2.slice(-6), ["--pipeline", "v1.2", ...MODELS830]);
+    assert.deepEqual(a1.slice(-2), ["--pipeline", "v1.1a"]);
+    const c1 = readJson(join(out, "v1.1a", "conditions.json")), c2 = readJson(join(out, "v1.2", "conditions.json"));
+    assert.ok(!("stage_models" in c1.params));
+    assert.deepEqual(c2.params.stage_models, { write: "gpt-6-luna", "test-spec": "gpt-6.1-terra" });
+    for (const c of [c1, c2]) assert.equal(c.signature, conditionsSignature(c));
+    const rec = readJson(join(out, "comparison.json"));
+    assert.deepEqual([rec.groups["v1.1a"].stage_models, rec.groups["v1.2"].stage_models], [null, { write: "gpt-6-luna", "test-spec": "gpt-6.1-terra" }]);
+    assert.ok(!("stage_efforts" in rec.groups["v1.2"]), "effort を付けなければ effort の欄は無い");
+    // 段だけの対の比較（開始 B1）：after の子にだけ渡し、比較の記録に両群の値（before は null）
+    const cand = makeStageRepo638(base, "cand"), basel = makeStageRepo638(base, "base"), fzs = frozen545(base, cand);
+    writeFileSync(join(cand, "packages/factory/dist/index.js"), v12Index638() + fakeParse830);
+    const up = runUpstream638(cand, join(base, "up"), fzs, log), sp = join(base, "pairs-s.json");
+    assert.equal(runAgent(cand, join(base, "unused-s"), ["--make-pairs", sp, "--build-from", fzs, "--pipeline", "v1.2", "--stage-start", "write", "--stage-from", up, "--runs", "3", ...MODELS830]).status, 0);
+    const so = join(base, "cmp-s");
+    const rs = runAgent(cand, so, ["--compare", "--baseline", basel, "--pairs", sp, "--build-from", fzs, "--pipeline", "v1.2", "--stage-start", "write", "--stage-from", up, "--budget-usd", "10", "--concurrency", "4", ...MODELS830], { FAKE_SPAWN_LOG: log });
+    assert.equal(rs.status, 0, rs.stderr);
+    const pv = readJson(sp), id = `${pv.pairs[0].pid}-r${pv.pairs[0].r}`;
+    assert.deepEqual(readJson(join(so, "after", id, "received-argv.json")).slice(-4), MODELS830);
+    assert.ok(!readJson(join(so, "before", id, "received-argv.json")).includes("--stage-model"), "比較元の群の子には付けない");
+    const srec = readJson(join(so, "comparison.json"));
+    assert.deepEqual([srec.groups.before.stage_models, srec.groups.after.stage_models], [null, { write: "gpt-6-luna", "test-spec": "gpt-6.1-terra" }]);
+  });
+});
+
+test("#830 (7) 実の工場の dist：実の段とモデルの --stage-model を受けて条件に写し、表に無いモデル・表に無い走りのモデルは工場の符号で断る（子 0 本）", async () => {
+  const realIndex = resolve(here, "../../../../../../packages/factory/dist/index.js");
+  assert.ok(existsSync(realIndex), "実の工場の dist が無い（先に pnpm build）");
+  const real = await import(pathToFileURL(realIndex).href);
+  assert.equal(typeof real.parseStageModels, "function");
+  const [stage] = real.STAGE_EFFORT_STAGES, runModel = real.DEFAULT_OPENAI_MODEL;
+  const stageModel = Object.keys(real.MODEL_RATES).find((m) => m !== runModel) ?? runModel;
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "real"), { index: `export * from ${JSON.stringify(pathToFileURL(realIndex).href)};\n` }), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const args = ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2"];
+    const out = join(base, "out"), r = runAgent(repo, out, [...args, "--model", runModel, "--stage-model", `${stage}=${stageModel}`], { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readJson(join(out, "conditions.json")).params.stage_models, { [stage]: stageModel });
+    assert.deepEqual(readJson(join(out, "P1-r1", "received-argv.json")).slice(-2), ["--stage-model", `${stage}=${stageModel}`]);
+    const n0 = spawnCount(log);
+    for (const [extra, label] of [[["--model", runModel, "--stage-model", `${stage}=not-in-the-table`], "表に無いモデル"], [["--stage-model", `${stage}=${stageModel}`], "表に無い走りのモデル（偽物の既定）"]]) {
+      const o = join(base, `out-${label}`);
+      assertRefused(runAgent(repo, o, [...args, ...extra], { FAKE_SPAWN_LOG: log }), "stage-model:model", log, n0, label);
+      assertNothingWritten(o, label);
+    }
+  });
+});
+
+test("#830 README：§10.8 の本文（§10.8.1 の前）の #830 の項目に契約の語（stagesInRange・stage_models・stage-model:unavailable）があり、題材の言葉と価格の表記が無い。見出しは足さない（§10.8.4 が末尾のまま）", () => {
+  const text = readFileSync(join(here, "../README.md"), "utf8");
+  const at = text.indexOf("\n### 10.8 "), end = text.indexOf("\n#### 10.8.1 ");
+  assert.ok(at > 0 && end > at, "§10.8 の本文は §10.8.1 の前");
+  const sec = text.slice(at, end), from = sec.indexOf("- **#830 ");
+  assert.ok(from > 0, "#830 の項目は §10.8 の本文の中");
+  const part = sec.slice(from);
+  for (const w of ["stagesInRange", "stage_models", "stage-model:unavailable", "parseStageModels", "stage-from:record-inconsistent", "stage:dist-unreadable", "flags:conflict", "stage_input_absent"]) assert.ok(part.includes(w), w);
+  const words = [[0x6301, 0x3061, 0x5bc4, 0x308a], [0x5f53, 0x756a, 0x8868], [0x4f1a, 0x8cbb], [0x51fa, 0x6b20], [0x8cb8, 0x3057, 0x51fa, 0x3057]].map((cs) => String.fromCodePoint(...cs));
+  for (const w of words) assert.ok(!part.includes(w), w);
+  assert.doesNotMatch(part, /[¥￥]\s?\d|\d\s?円|\$\d/);
 });
