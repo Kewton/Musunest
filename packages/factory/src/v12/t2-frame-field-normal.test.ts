@@ -287,12 +287,16 @@ describe("(3) やり直しの枠：採った種類が ruled なら (1) と同じ
     });
   });
 
-  it("existence-only の枝は base と同じ（足した後も変えない）", () => {
+  it("existence-only の枝は base と同じ（条件つきの試験は採った種類の枝にだけ載る）", () => {
     const initial = initialFrameOf(REGRESSION);
     const frame = retryFrameOf(REGRESSION, "existence-only");
-    expect({ kinds: frame.kinds, caseTargets: frame.caseTargets, maxCases: frame.maxCases, note: frame.note, remaining: frame.remaining }).toEqual(
-      initial.ifExistenceOnly,
-    );
+    const { kinds, caseTargets, maxCases, remaining } = initial.ifExistenceOnly;
+    expect({ kinds: frame.kinds, caseTargets: frame.caseTargets, maxCases: frame.maxCases, remaining: frame.remaining }).toEqual({
+      kinds,
+      caseTargets,
+      maxCases,
+      remaining,
+    });
     expect(frame).toMatchObject({ adopted: "existence-only", kinds: [], caseTargets: [], maxCases: 0, note: TEST_CASE_FRAME_TEXTS.unsupported });
   });
 });
@@ -367,7 +371,7 @@ describe("(5) 負例：値の対象を持つ要件・コードの試験のある
   it("確かめ方が fixed-test でない免除の要件（所属に項目の行があり、コードの試験が 0 本でも）は ruledExempt のまま", () => {
     const base = scenario([["R1", "金額を持つ。", ["f.item.amount"], "ruled"]]);
     const table: NameTable = { ...base.table, verification: [{ requirementId: "R1", kind: "structural", reason: "構造で確かめる", checks: [] }] };
-    const generated: GeneratedTests = { tests: [], observes: new Map(), excludedRequirementIds: [], stopped: [] };
+    const generated: GeneratedTests = { tests: [], observes: new Map(), excludedRequirementIds: [], stopped: [], existenceOnlyTestIds: new Set() };
     const [frame] = initialTestCaseFramesOf({ table, ledger: LEDGER, list: base.list, generated }, ["R1"]);
     if (frame === undefined) throw new Error("前提が壊れた：枠が無い");
     expect(frame.codeTests).toEqual([]);

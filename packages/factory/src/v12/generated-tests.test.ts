@@ -89,6 +89,12 @@ describe("コードが作る試験：純粋で、同じ入力から同じ組（I
     const { tests, observes, excludedRequirementIds, stopped } = generate();
     expect(stopped).toEqual([{ field: "requirements[1]", message: GENERATED_STRUCTURE_STOP_MESSAGES.targets }]);
     expect(tests.map((test) => [test.target.requirementId, test.target.roleId, test.kind, observes.get(test.id)])).toEqual([
+      // R1：条件の無い操作とその entity の項目だけなので、項目 × screen を項目ごとに作る（採った種類が existence-only のときだけ残す。#826）
+      ["R1", "f.item.title", "normal", "view-structure"],
+      ["R1", "f.item.amount", "normal", "view-structure"],
+      ["R1", "f.item.day", "normal", "view-structure"],
+      ["R1", "f.item.kind", "normal", "view-structure"],
+      ["R1", "f.item.owner", "normal", "view-structure"],
       ["R4", "s.overview", "normal", "view-structure"],
       ["R4", "c.byKind", "boundary", "empty-aggregate"],
       ["R4", "c.byKind", "abnormal", "empty-aggregate"],

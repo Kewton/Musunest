@@ -763,6 +763,44 @@ export function withoutFrameFieldNormal<T>(value: T): T {
   return walk(value) as T;
 }
 
+/**
+ * Issue #826 の復元：旗 `v12.ids` の必要な試験の枠の existence-only の枝から、条件つきの試験の欄（`codeIfExistenceOnly`）を外し、
+ * 注記を旧の `unsupported` に戻す（#826 の前の指紋と照らす）。枠の塊の文字列の中だけを戻す（ほかの塊は変えない）
+ */
+export function withoutWhenlessFrameField<T>(value: T): T {
+  const conditional = TEST_CASE_FRAME_TEXTS.existenceConditional;
+  const unsupported = TEST_CASE_FRAME_TEXTS.unsupported;
+  const isObject = (inner: unknown): inner is Record<string, unknown> => typeof inner === "object" && inner !== null && !Array.isArray(inner);
+  const restoreBranch = (branch: unknown): unknown => {
+    if (!isObject(branch) || !Object.hasOwn(branch, "codeIfExistenceOnly")) return branch;
+    const { codeIfExistenceOnly: _omit, ...rest } = branch;
+    return { ...rest, note: rest["note"] === conditional ? unsupported : rest["note"] };
+  };
+  const restoreFrames = (text: string): string => {
+    if (!text.includes('<data name="必要な試験の枠">')) return text;
+    const match = /<data name="必要な試験の枠">\n([\s\S]*?)\n<\/data>/.exec(text);
+    if (match === null) return text;
+    let frames: unknown;
+    try {
+      frames = JSON.parse(match[1] ?? "[]");
+    } catch {
+      return text;
+    }
+    if (!Array.isArray(frames)) return text;
+    const restored = frames.map((frame) =>
+      isObject(frame) && Object.hasOwn(frame, "ifExistenceOnly") ? { ...frame, ifExistenceOnly: restoreBranch(frame["ifExistenceOnly"]) } : frame,
+    );
+    return text.replace(/<data name="必要な試験の枠">\n[\s\S]*?\n<\/data>/, `<data name="必要な試験の枠">\n${JSON.stringify(restored, null, 2)}\n</data>`);
+  };
+  const walk = (inner: unknown): unknown => {
+    if (typeof inner === "string") return restoreFrames(inner);
+    if (Array.isArray(inner)) return inner.map(walk);
+    if (!isObject(inner)) return inner;
+    return Object.fromEntries(Object.entries(inner).map(([key, entry]) => [key, walk(entry)]));
+  };
+  return walk(value) as T;
+}
+
 /** 2 つの JSON の値の違う場所（葉の位置。並びの長さが違えばその並びの位置）を、見つけた順に返す */
 export function jsonDiffPaths(left: unknown, right: unknown, path = "$"): readonly string[] {
   if (Array.isArray(left) && Array.isArray(right)) {

@@ -1777,13 +1777,13 @@ describe("C2 が組んだ表を整える手（N-map-01・N-map-02。Issue #723�
     return value;
   };
 
-  it("手の定義に why・since があり不備 0。ID は N-map-01・N-map-02 の 2 つ（規則の文の定義とは別。LLM に送らない）", () => {
+  it("手の定義に why・since があり不備 0。ID は N-map-01・N-map-02・N-map-03 の 3 つ（規則の文の定義とは別。LLM に送らない）", () => {
     expect(ruleDefinitionDefects(MAPPING_NORMALIZATION_DEFINITIONS)).toEqual([]);
-    expect(MAPPING_NORMALIZATION_DEFINITIONS.map((definition) => definition.id)).toEqual(["N-map-01", "N-map-02"]);
+    expect(MAPPING_NORMALIZATION_DEFINITIONS.map((definition) => definition.id)).toEqual(["N-map-01", "N-map-02", "N-map-03"]);
     for (const definition of MAPPING_NORMALIZATION_DEFINITIONS) {
       expect(definition.why.trim()).not.toBe("");
-      expect(definition.since).toBe("Issue #723");
     }
+    expect(MAPPING_NORMALIZATION_DEFINITIONS.map((definition) => definition.since)).toEqual(["Issue #723", "Issue #723", "Issue #826"]);
     const sent = ruleTexts(mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)).join("\n");
     for (const definition of MAPPING_NORMALIZATION_DEFINITIONS) expect(sent.includes(definition.text)).toBe(false);
     expectNoAcceptanceMaterial([...MAPPING_NORMALIZATION_DEFINITIONS.flatMap((definition) => [definition.text, definition.why]), MAPPING_NORMALIZATION_REASON]);

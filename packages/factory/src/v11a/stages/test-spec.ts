@@ -1323,10 +1323,11 @@ function judgedNatures(decided: ReadonlyMap<string, DecidedNature>): readonly De
 /**
  * 採った種類で、コードが作った試験を絞る（Issue #595）。空の集計の試験（境界・異常）は、採った種類が在ることだけの要件には足さない
  * （v1 の網羅の検査がその要件に境界・異常を許さない）。確かめ方の性質の試験はそのまま。画面・在ること・項目だけの要件の
- * 項目 × screen（#624・#652）も種類に依らず残す。
+ * 項目 × screen（#624・#652）も種類に依らず残す。条件の無い操作とその entity の項目だけの fixed-test の項目 × screen（#826）は、
+ * 逆に採った種類が existence-only のときだけ残す（同じ関数で絞る）。
  *
  * 順（初回も、中身のやり直しの合併後も同じ。Issue #651・#652）：コードの生成（LLM を呼ぶ前・種類に依らない）→ 分類は LLM が独立に
- * 書く → 分類の照合・J2 の採用 → ここ（採った種類で絞るのは空の集計の試験だけ）→ 合併した組に検査を全部
+ * 書く → 分類の照合・J2 の採用 → ここ（採った種類で絞るのは空の集計の試験と #826 の条件つきの試験だけ）→ 合併した組に検査を全部
  */
 function keptGenerated(
   generated: GeneratedTests,
@@ -1334,16 +1335,22 @@ function keptGenerated(
   ledger: LedgerView,
 ): GeneratedTests {
   const aggregateIds = new Set(ledger.aggregateRows.map((row) => row.id));
-  const tests = generated.tests.filter(
-    (test) =>
-      !aggregateIds.has(generated.observes.get(test.id) ?? "") || natures.get(test.target.requirementId) !== "existence-only",
-  );
+  const tests = generated.tests.filter((test) => {
+    const observed = generated.observes.get(test.id) ?? "";
+    const nature = natures.get(test.target.requirementId);
+    // 空の集計：existence-only の要件には足さない
+    if (aggregateIds.has(observed)) return nature !== "existence-only";
+    // #826：existence-only のときだけ残す
+    if (generated.existenceOnlyTestIds.has(test.id)) return nature === "existence-only";
+    return true;
+  });
   if (tests.length === generated.tests.length) return generated;
   const kept = new Set(tests.map((test) => test.id));
   return {
     ...generated,
     tests,
     observes: new Map([...generated.observes].filter(([id]) => kept.has(id))),
+    existenceOnlyTestIds: new Set([...generated.existenceOnlyTestIds].filter((id) => kept.has(id))),
   };
 }
 
