@@ -61,6 +61,7 @@ import {
   type PromptDocument,
   type ShapeCheck,
 } from "../stages/prompt.js";
+import type { AcceptedPartBasis } from "../v12/accepted-parts.js";
 import { BASE_VERIFICATION_KINDS, type UpstreamLedgerView, type PropertyT1 } from "../v12/ledger.js";
 
 // ── 型の値の一覧（D3。B3 の照合先は A5）────────────────────────────────
@@ -999,7 +1000,15 @@ interface TableCheckOptions {
    * 渡さない。Issue #725）
    */
   readonly ledgerConstraintIds?: ReadonlySet<string>;
+  /**
+   * unresolved の根拠として受ける、計画で了承して除いた部分の索引（C2' だけが、了承済みの部分を持つ計画で渡す。
+   * 部分が全部了承済みの要件の、その了承済みの部分 ID だけを受ける。Issue #841）
+   */
+  readonly acceptedParts?: AcceptedPartBasis;
 }
+
+/** 部分 ID を根拠にできる条件に合わないときの固定文（C2'。Issue #841） */
+export const PART_BASIS_MESSAGE = "部分 ID を根拠にできるのは、その要件の部分が全部了承済みで、その ID がその要件の了承済みの部分のときだけである";
 
 function checkNameTableWith(
   list: RequirementList,
@@ -1371,9 +1380,16 @@ function checkNameTableWith(
         }
         entry.constraintIds.forEach((id, cIndex) => {
           const normalized = normalizeConstraintId(id);
-          if (!constraintIds.has(normalized) && options.ledgerConstraintIds?.has(normalized) !== true) {
-            problems.push({ field: `${field}.constraintIds[${cIndex}]`, message: "制約 ID が文書に無い" });
-          }
+          // 文書の制約 ID・台帳の未対応の観測の ID は今までどおり受ける。部分 ID は、その要件の部分が全部了承済みで、
+          // その ID がその要件の了承済みの部分のときだけ受ける（Issue #841）。文書・観測の ID と同じ文字列は先に受ける
+          if (constraintIds.has(normalized) || options.ledgerConstraintIds?.has(normalized) === true) return;
+          const parts = options.acceptedParts?.byRequirement.get(entry.requirementId);
+          if (parts !== undefined && parts.allAccepted && parts.acceptedPartIds.has(normalized)) return;
+          const message =
+            parts?.partIds.has(normalized) === true || options.acceptedParts?.anyPartIds.has(normalized) === true
+              ? PART_BASIS_MESSAGE
+              : "制約 ID が文書に無い";
+          problems.push({ field: `${field}.constraintIds[${cIndex}]`, message });
         });
         return;
       case "default-value":
@@ -1588,10 +1604,11 @@ export function checkMappedTable(
   list: RequirementList,
   table: NameTable,
   documents: readonly PromptDocument[],
-  options: NameTableLedgerOptions = {},
+  options: NameTableLedgerOptions & { readonly acceptedParts?: AcceptedPartBasis } = {},
 ): readonly Problem[] {
   return checkNameTableWith(list, table, documents, {
     sourceless: true,
+    ...(options.acceptedParts === undefined ? {} : { acceptedParts: options.acceptedParts }),
     ...(options.ledger === undefined
       ? {}
       : { ledger: options.ledger, ledgerConstraintIds: new Set(options.ledger.unsupportedObservations.map((entry) => entry.id)) }),
