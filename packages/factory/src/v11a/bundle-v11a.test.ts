@@ -162,6 +162,19 @@ describe("v1.1α の 7 つの記録", () => {
     expect(byPath.get(V11A_ARTIFACT_NAMES.judgeAdvice).rounds[0].thresholds).toEqual(JUDGE_ADVICE_THRESHOLDS);
     expect(byPath.get(V11A_ARTIFACT_NAMES.verification).decl_check).toEqual({ exhausted: 0, malformed: 1, rejected: 0 });
   });
+
+  it("了承して除いた部分の持ち越し（accepted_removals）は 1 件以上のときだけ欄を足し、0 件では今のバイト列のまま（Issue #841）", () => {
+    const base = input();
+    const carryText = (artifacts: ReturnType<typeof buildV11aArtifacts>) =>
+      artifacts.find((artifact) => artifact.path === V11A_ARTIFACT_NAMES.carryOver)!.text;
+    expect("accepted_removals" in (JSON.parse(carryText(buildV11aArtifacts(base))) as Record<string, unknown>)).toBe(false);
+    const withAccepted = buildV11aArtifacts({ ...base, carryOver: { ...base.carryOver, acceptedRemovals: ["R2"] } });
+    expect((JSON.parse(carryText(withAccepted)) as Record<string, unknown>)["accepted_removals"]).toEqual(["R2"]);
+    // 持ち越しの記録のほかは、欄を足しても同じ
+    expect(withAccepted.filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.carryOver)).toEqual(
+      buildV11aArtifacts(base).filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.carryOver),
+    );
+  });
 });
 
 // ── 探索の記録（旗 v12.search-repair。Issue #551）──────────────────────────────
