@@ -25,9 +25,11 @@
 // 旗 off の表はこの種類を持てない（T1' が落とす）ので、off の持ち越しは今と同じになる。
 //
 // LLM を呼ばない純粋な関数だけを置く（表の SHA-256 を求めるので `deriveCarryOver` は Promise を返す）。
+import type { UnwritableRequirement } from "../bundle.js";
 import type { FixedTest, TestSuite } from "../fixed-test.js";
 import type { RequirementList } from "../pipeline.js";
-import { isRecord } from "../stages/prompt.js";
+import { constraintIdsIn, isRecord, normalizeConstraintId, type PromptDocument } from "../stages/prompt.js";
+import type { AcceptedPartBasis } from "../v12/accepted-parts.js";
 import type { CoverageLoss } from "./coverage.js";
 import { toV1, type V1Conversion } from "./convert.js";
 import { nameTableSha256, ownersByRowId, type NameTable } from "./names.js";
@@ -322,4 +324,71 @@ export function pruneForCarryOver(
     conversion: toV1(pruned),
     ...(remainingSuite === undefined ? {} : { suite: remainingSuite }),
   };
+}
+
+// ── 書けない要件の申告（旗 `v12.ids` の走りだけ。Issue #807）────────────────────────
+//
+// C2 の unresolved は根拠として文書の制約 ID か台帳の未対応の観測の ID を 1 件以上持ち、C2' が正規化した ID で
+// 一覧にあることを照らしている（#682・#725）。そのうち**根拠が文書の制約 ID だけ**の持ち越しを、v1 と同じ形の
+// 申告（`UnwritableRequirement`）に写す。台帳の未対応の観測の ID を根拠にした unresolved は「確かめられない」で
+// あって「書けない」ではないので写さない（観測 ID は文書の集合に無いので自然に外れる）。
+
+/**
+ * 文書の制約 ID だけを根拠にした unresolved の、正規化した ID の並び（文書の集合の列挙順）。
+ * `constraintIds` を正規化し、空を落とし、重なりを 1 つにする。1 件以上あり、**全部が文書の集合にある**ときだけ返し、
+ * そうでなければ null（文書に無い ID・台帳の観測 ID を含む・0 件になる、のどれか）。
+ */
+export function documentBasisOf(
+  constraintIds: readonly string[],
+  documentConstraintIds: ReadonlySet<string>,
+): readonly string[] | null {
+  const normalized = [...new Set(constraintIds.map((id) => normalizeConstraintId(id)).filter((id) => id !== ""))];
+  if (normalized.length === 0) return null;
+  if (!normalized.every((id) => documentConstraintIds.has(id))) return null;
+  // 出す並びは文書の集合の列挙順（表記揺れ・逆順・重複でも同じ並び）
+  const wanted = new Set(normalized);
+  return [...documentConstraintIds].filter((id) => wanted.has(id));
+}
+
+/** 申告の導出の入力 */
+export interface UnwritableClaimsInput {
+  /** 有効な一覧（要件の文と引用を写す元） */
+  readonly list: RequirementList;
+  /** 採用した表（unresolved の理由と根拠） */
+  readonly table: NameTable;
+  /** 文書（制約 ID の集合） */
+  readonly documents: readonly PromptDocument[];
+  /** 最終の持ち越し（`carry-over.json` と同じ集合・同じ順） */
+  readonly entries: readonly CarryOverEntry[];
+  /** 計画で了承して除いた部分の索引（全部が了承済みの要件を外す。Issue #841） */
+  readonly acceptedParts?: AcceptedPartBasis;
+}
+
+/**
+ * 最終の持ち越しから、書けない要件の申告を導く（純粋。一覧の順）。根拠が文書の制約 ID だけで、出どころに
+ * name-table があり、全部が了承済みの要件でないものだけを写す。部分は 1 件で、C2 の理由の末尾に
+ * 「（根拠: ID・ID）」を添える（LLM に書き直させない）。
+ */
+export function deriveUnwritableClaims(input: UnwritableClaimsInput): readonly UnwritableRequirement[] {
+  const documentConstraintIds = constraintIdsIn(input.documents);
+  const requirementById = new Map(input.list.requirements.map((requirement) => [requirement.id, requirement] as const));
+  const verificationById = new Map(input.table.verification.map((entry) => [entry.requirementId, entry] as const));
+  const claims: UnwritableRequirement[] = [];
+  for (const entry of input.entries) {
+    if (!entry.reasons.some((reason) => reason.origin === "name-table")) continue;
+    if (input.acceptedParts?.byRequirement.get(entry.requirementId)?.allAccepted === true) continue;
+    const verification = verificationById.get(entry.requirementId);
+    if (verification === undefined || verification.kind !== "unresolved") continue;
+    const basis = documentBasisOf(verification.constraintIds, documentConstraintIds);
+    if (basis === null) continue;
+    const requirement = requirementById.get(entry.requirementId);
+    if (requirement === undefined) continue;
+    claims.push({
+      requirementId: entry.requirementId,
+      text: requirement.text,
+      quote: requirement.quote,
+      unwritable: [`${verification.reason}（根拠: ${basis.join("・")}）`],
+    });
+  }
+  return claims;
 }
