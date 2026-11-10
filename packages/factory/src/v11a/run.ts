@@ -2729,24 +2729,30 @@ async function runV11a(
     for (const entry of table.verification) {
       if (entry.kind === "unresolved") unresolvedConstraintIds.set(entry.requirementId, entry.constraintIds);
     }
-    const acceptedCarried = acceptedCarryOverIds({
-      entries: carry.entries,
-      unresolvedConstraintIds,
-      basis: acceptedParts.basis,
-      documentConstraintIds: constraintIdsIn(input.documents),
-      observationIds: new Set((ledger?.unsupportedObservations ?? []).map((entry) => normalizeConstraintId(entry.id))),
-    });
+    // 申告（#807）と了承済みの持ち越し（#841）は旗 `v12.ids` の走りだけで導く。off・v1.1a は申告 0 件・
+    // 了承済み 0 件で base と同じ材料にする（Issue #844）
+    const acceptedCarried = flags.ids
+      ? acceptedCarryOverIds({
+          entries: carry.entries,
+          unresolvedConstraintIds,
+          basis: acceptedParts.basis,
+          documentConstraintIds: constraintIdsIn(input.documents),
+          observationIds: new Set((ledger?.unsupportedObservations ?? []).map((entry) => normalizeConstraintId(entry.id))),
+        })
+      : [];
     const acceptedCarriedSet = new Set(acceptedCarried);
     const carriedIds = carry.entries.map((entry) => entry.requirementId);
     const unresolvedCarriedIds = carriedIds.filter((id) => !acceptedCarriedSet.has(id));
     // 書けない要件の申告（根拠が文書の制約 ID だけの name-table の持ち越し。Issue #807）。段の走りも同じ材料を使う
-    const claims = deriveUnwritableClaims({
-      list,
-      table,
-      documents: input.documents,
-      entries: carry.entries,
-      acceptedParts: acceptedParts.basis,
-    });
+    const claims = flags.ids
+      ? deriveUnwritableClaims({
+          list,
+          table,
+          documents: input.documents,
+          entries: carry.entries,
+          acceptedParts: acceptedParts.basis,
+        })
+      : [];
     const materials: JudgeMaterials = {
       staticCheckPassed: final.report.staticCheck.passed,
       correspondenceMisses: final.report.correspondence === null ? 1 : final.report.correspondence.misses.length,

@@ -67,6 +67,28 @@ describe("(1) 了承して除いた部分の導出", () => {
     expect(derived.basis.byRequirement.get("R5")?.allAccepted).toBe(false);
   });
 
+  it("(1) 所属と了承は元の ID で照らし、正規化で衝突する ID は根拠用の索引から除く（Issue #844）", () => {
+    const collision = planWith(
+      {
+        R1: [part("p", "accepted_removal")],
+        R2: [part(" p ", "accepted_removal")],
+        R3: [part("R3-a", "met")],
+      },
+      ["p"],
+    );
+    const derived = deriveAcceptedParts(collision);
+    // 了承ありの `p` だけが全部が了承済み。了承の参照に無い ` p ` は了承済みにならない
+    expect(derived.allAcceptedRequirementIds).toEqual(["R1"]);
+    expect(derived.basis.byRequirement.get("R2")?.allAccepted).toBe(false);
+    expect(derived.basis.byRequirement.get("R2")?.acceptedPartIds.size).toBe(0);
+    // 正規化で衝突する `p` はどちらの部分も索引に入らない（C2' の受理・判定の材料）
+    expect(derived.basis.anyPartIds.has("p")).toBe(false);
+    expect(derived.basis.byRequirement.get("R1")?.acceptedPartIds.has("p")).toBe(false);
+    expect(derived.basis.byRequirement.get("R1")?.partIds.has("p")).toBe(false);
+    // C2 に渡す塊にも、了承していない R2 は入らない
+    expect(derived.requirements.map((entry) => entry.requirementId)).toEqual(["R1"]);
+  });
+
   it("0 件なら何も足さない（空の requirements・空の索引）", () => {
     const derived = deriveAcceptedParts(planWith({ R1: [part("R1-a", "met")] }));
     expect(derived.requirements).toEqual([]);
