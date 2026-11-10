@@ -168,6 +168,7 @@ import {
 import {
   danglingRowReferences,
   deriveCarryOver,
+  deriveUnwritableClaims,
   pruneForCarryOver,
   type CarryOver,
   type CarryOverReason,
@@ -2738,12 +2739,21 @@ async function runV11a(
     const acceptedCarriedSet = new Set(acceptedCarried);
     const carriedIds = carry.entries.map((entry) => entry.requirementId);
     const unresolvedCarriedIds = carriedIds.filter((id) => !acceptedCarriedSet.has(id));
+    // 書けない要件の申告（根拠が文書の制約 ID だけの name-table の持ち越し。Issue #807）。段の走りも同じ材料を使う
+    const claims = deriveUnwritableClaims({
+      list,
+      table,
+      documents: input.documents,
+      entries: carry.entries,
+      acceptedParts: acceptedParts.basis,
+    });
     const materials: JudgeMaterials = {
       staticCheckPassed: final.report.staticCheck.passed,
       correspondenceMisses: final.report.correspondence === null ? 1 : final.report.correspondence.misses.length,
       testMismatches: final.report.testRun === null ? 1 : final.report.testRun.mismatches.length,
       testUnresolved: countUnresolvedTests(unresolved, final.report.testRun) + stalledCorrespondenceMisses,
-      unwritableRequirements: acceptedCarried.length,
+      // 申告の数＋了承済みの持ち越しの数（了承済みは未解決から除いたまま。Issue #841・#807）
+      unwritableRequirements: acceptedCarried.length + claims.length,
       acceptedUnwritable: acceptedCarried.length,
       limitReached,
       carriedOver: { reverseCheck: [], testSuite: unresolvedCarriedIds },
@@ -2820,6 +2830,8 @@ async function runV11a(
           ...(carry.nonRequirements === undefined ? {} : { nonRequirements: carry.nonRequirements }),
           // 1 件以上あるときだけ欄を足す（0 件の走りの納品物を base とバイト列で同じにする。Issue #841）
           ...(acceptedCarried.length === 0 ? {} : { acceptedRemovals: acceptedCarried }),
+          // 申告が 1 件以上の走りだけ、持ち越しの要件ごとに `reported` を足す（0 件は欄を出さない。Issue #807）
+          ...(claims.length === 0 ? {} : { reported: claims.map((claim) => claim.requirementId) }),
         },
         verification: {
           tableSha256: await nameTableSha256(table),
@@ -2865,7 +2877,7 @@ async function runV11a(
       outcome,
       summary,
       requirements: list,
-      unwritable: [],
+      unwritable: claims,
       triage: [],
       markedRequirements: [],
       dropped: [],

@@ -175,6 +175,24 @@ describe("v1.1α の 7 つの記録", () => {
       buildV11aArtifacts(base).filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.carryOver),
     );
   });
+
+  it("書けない要件の申告（reported）は渡したときだけ持ち越しの要件ごとに足し、省けば欄を出さない（Issue #807）", () => {
+    const base = input();
+    const carryText = (artifacts: ReturnType<typeof buildV11aArtifacts>) =>
+      artifacts.find((artifact) => artifact.path === V11A_ARTIFACT_NAMES.carryOver)!.text;
+    // 省いたとき（申告 0 件）は `reported` を出さず、base とバイト列で同じ
+    const without = JSON.parse(carryText(buildV11aArtifacts(base))) as { entries: Record<string, unknown>[] };
+    expect("reported" in (without.entries[0] as Record<string, unknown>)).toBe(false);
+    expect(carryText(buildV11aArtifacts(base))).toBe(carryText(buildV11aArtifacts(input())));
+    // 渡したときは、持ち越しの要件ごとに真偽を足す（申告に写した要件だけ true）
+    const withReported = buildV11aArtifacts({ ...base, carryOver: { ...base.carryOver, reported: ["R2"] } });
+    const entries = ((JSON.parse(carryText(withReported)) as Record<string, unknown>)["entries"] as Record<string, unknown>[]);
+    expect(entries.map((entry) => [entry["requirementId"], entry["reported"]])).toEqual([["R2", true]]);
+    // 持ち越しの記録のほかは、欄を足しても同じ
+    expect(withReported.filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.carryOver)).toEqual(
+      buildV11aArtifacts(base).filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.carryOver),
+    );
+  });
 });
 
 // ── 探索の記録（旗 v12.search-repair。Issue #551）──────────────────────────────
