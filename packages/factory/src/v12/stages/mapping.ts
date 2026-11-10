@@ -104,6 +104,7 @@ import {
 } from "../../v11a/names.js";
 import { planWithoutRequirementKinds, type SemanticRejection } from "../../v11a/stages/name-table.js";
 import type { JudgeAdviceMarkEntry } from "../../v11a/stages/judge-advice.js";
+import { deriveAcceptedParts, type AcceptedPartBasis, type AcceptedParts } from "../accepted-parts.js";
 import { ReferenceTally, idKindOf, type ReferenceCounts } from "../ids.js";
 import type { UpstreamLedgerView } from "../ledger.js";
 import { V12_T2_BUNDLE } from "../limits.js";
@@ -129,6 +130,14 @@ export const MAPPING_DATA_NAMES = {
 /** 台帳を受けた C2 だけが足すデータの塊の名前（文書の塊の直後。Issue #725） */
 export const MAPPING_LEDGER_DATA_NAMES = {
   unsupported: "台帳の未対応の観測",
+} as const;
+
+/**
+ * 了承して除いた部分を持つ計画だけが足すデータの塊の名前（0 件の計画では塊を足さない。Issue #841）。中身は
+ * 了承して除いた部分の要件 ID・部分 ID・部分の文・その要件の部分が全部了承済みかどうかである
+ */
+export const MAPPING_ACCEPTED_DATA_NAMES = {
+  accepted: "計画で了承して除いた部分",
 } as const;
 
 /**
@@ -177,6 +186,33 @@ const UNRESOLVED_RULE_TEXT =
 const UNRESOLVED_LEDGER_RULE_TEXT =
   "宣言で書けない、または台帳が未対応とする観測でしか確かめられない要件は kind を unresolved にし、reason に理由を書き、constraintIds に根拠の ID を 1 件以上（文書の制約 ID の一覧か台帳の未対応の観測の一覧にあるものだけ）書く。根拠を一覧から挙げられない要件は unresolved にしない。";
 
+/**
+ * 了承して除いた部分を持つ計画だけが使う、範囲の外の文（Issue #841）。混在の要件は契約の 3 つ目、全部が了承済みで
+ * 残りが無い要件は 4 つ目のとおりにする。一律に「unresolved にしない」とは書かない
+ */
+const ACCEPTED_SCOPE_SENTENCES =
+  "了承済みの部分と了承していない部分を両方持つ要件は、了承済みの部分を確かめる範囲の外にし、了承済みの部分の ID だけを根拠に unresolved にせず、残りの部分を通常の確かめ方（固定した試験・構造の検査など）で書く。部分が全部了承済みで書ける残りが無い要件だけ、自分の了承済みの部分 ID を根拠に unresolved にできる。";
+
+/** 構造から unresolved へ誘導する文（了承して除いた部分を持つ計画。台帳を受けない版。Issue #841） */
+const STRUCTURAL_RULE_TEXT_ACCEPTED = structuralRuleText(
+  `宣言で書けず、根拠となる文書の制約 ID か、その要件の部分が全部了承済みならその部分 ID（計画で了承して除いた部分の ID に限る）を一覧から 1 件以上挙げられるなら unresolved にする。${ACCEPTED_SCOPE_SENTENCES}`,
+);
+
+/** 構造から unresolved へ誘導する文（了承して除いた部分を持つ計画。台帳を受けた版。Issue #841） */
+const STRUCTURAL_LEDGER_RULE_TEXT_ACCEPTED = structuralRuleText(
+  `宣言で書けないか台帳が未対応とする観測でしか確かめられず、根拠の ID を文書の制約 ID の一覧か台帳の未対応の観測の一覧、またはその要件の部分が全部了承済みならその部分 ID（計画で了承して除いた部分の ID に限る）から 1 件以上挙げられるなら unresolved にする。${ACCEPTED_SCOPE_SENTENCES}`,
+);
+
+/** 書けない要件の書き方（了承して除いた部分を持つ計画。台帳を受けない版。Issue #841） */
+const UNRESOLVED_RULE_TEXT_ACCEPTED = `宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に書けない根拠となる ID を 1 件以上（文書の制約 ID の一覧にあるもの、またはその要件の部分が全部了承済みならその要件の了承済みの部分 ID）書く。${ACCEPTED_SCOPE_SENTENCES}`;
+
+/** 書けない要件の書き方（了承して除いた部分を持つ計画。台帳を受けた版。Issue #841） */
+const UNRESOLVED_LEDGER_RULE_TEXT_ACCEPTED = `宣言で書けない、または台帳が未対応とする観測でしか確かめられない要件は kind を unresolved にし、reason に理由を書き、constraintIds に根拠の ID を 1 件以上（文書の制約 ID の一覧、台帳の未対応の観測の一覧、またはその要件の部分が全部了承済みならその要件の了承済みの部分 ID）書く。${ACCEPTED_SCOPE_SENTENCES}`;
+
+/** R-map-03 の末尾（default-value と使わない欄の文。受け取る計画によらず同じ） */
+const R_MAP_03_TAIL =
+  "要件の決まりが選択肢の項目の既定値だけなら kind を default-value にし、value にそのキー（その項目の options のキー）を書き、その項目だけを所属させる。使わない欄は null か空の並びにする。";
+
 /** C2 の規則の定義（ID は `R-map-nn`） */
 export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   {
@@ -193,7 +229,7 @@ export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
   {
     id: "R-map-03",
-    text: `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}${UNRESOLVED_RULE_TEXT}要件の決まりが選択肢の項目の既定値だけなら kind を default-value にし、value にそのキー（その項目の options のキー）を書き、その項目だけを所属させる。使わない欄は null か空の並びにする。`,
+    text: `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}${UNRESOLVED_RULE_TEXT}${R_MAP_03_TAIL}`,
     why: "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（T1 の R-nt-08）。構造の検査の対象は規則の文で所属を求めず、応答の欄で行の ID を書かせて対と所属をコードが導く（方法論 03 の F4・H1・H2）",
     since:
       "Issue #593（構造の検査の対象の欄は Issue #594。検査の種類ごとの欄・同じ種類の検査を 2 つ以上の行に掛ける要件の fixed-test への選び方・未解決の制約 ID の 1 件以上は Issue #682。当たる種類が無い要件を structural にせず fixed-test か unresolved にする選び方は Issue #690。#682 は形の落ち率を理由に 1 種類 1 件とした。fixed-test にすると試験 0 本・操作が未検証になる要件があり（U1 の 30 本の分析）、Issue #724 で契約を対象の並びに広げ、同じ種類の検査を 2 つ以上の行に掛ける要件の fixed-test への選び方を外した）",
@@ -213,12 +249,40 @@ export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
 const MAPPING_LEDGER_RULE_HEAD = `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_LEDGER_RULE_TEXT}${UNRESOLVED_LEDGER_RULE_TEXT}`;
 const MAPPING_LEDGER_RULE_TAIL = "使わない欄は null か空の並びにする。";
 
+/** 了承して除いた部分を持つ計画の R-map-03 の頭（台帳を受けない版。Issue #841） */
+const MAPPING_ACCEPTED_RULE_HEAD = `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT_ACCEPTED}${UNRESOLVED_RULE_TEXT_ACCEPTED}`;
+
+/** 了承して除いた部分を持つ計画の R-map-03 の頭（台帳を受けた版。Issue #841） */
+const MAPPING_ACCEPTED_LEDGER_RULE_HEAD = `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_LEDGER_RULE_TEXT_ACCEPTED}${UNRESOLVED_LEDGER_RULE_TEXT_ACCEPTED}`;
+
 /** 台帳を受けた版の R-map-03 の since（ID・why は同じ。Issue #725） */
 const MAPPING_LEDGER_RULE_SINCE_TAIL =
   "。#682 は空の並び 34/129 件を理由に 1 件以上とした。根拠を文書に縛る理由（怠慢の持ち越しを塞ぐ）は保ち、台帳の未対応を根拠に足した（Issue #725）";
 
-/** C2 の規則の定義（旗 `v12.ledger` が on なら R-map-03 を台帳の文で組み直す） */
-export function mappingRuleDefinitionsOf(ledger?: UpstreamLedgerView): readonly RuleDefinition[] {
+/** 了承して除いた部分を持つ計画の R-map-03 の since（Issue #841） */
+const MAPPING_ACCEPTED_RULE_SINCE_TAIL =
+  "。了承して除いた部分を根拠にできる条件（部分が全部了承済みの要件だけ。混在の要件は残りを通常の確かめ方で書く）を Issue #841 で足した";
+
+/**
+ * C2 の規則の定義（旗 `v12.ledger` が on なら R-map-03 を台帳の文で組み直す）。`accepted` が真（計画が了承して除いた
+ * 部分を 1 件以上持つ）なら、R-map-03 の根拠の集合を了承済みの部分 ID まで広げ、範囲の外の文を条件で分けて置く
+ * （Issue #841）。偽なら今の文とバイト列で同じ
+ */
+export function mappingRuleDefinitionsOf(ledger?: UpstreamLedgerView, accepted = false): readonly RuleDefinition[] {
+  if (accepted) {
+    return MAPPING_RULE_DEFINITIONS.map((definition) =>
+      definition.id === "R-map-03"
+        ? {
+            ...definition,
+            text:
+              ledger === undefined
+                ? `${MAPPING_ACCEPTED_RULE_HEAD}${R_MAP_03_TAIL}`
+                : `${MAPPING_ACCEPTED_LEDGER_RULE_HEAD}${(ledger.t1IdsRuleTexts ?? ledger.t1RuleTexts).join("")}${MAPPING_LEDGER_RULE_TAIL}`,
+            since: `${definition.since}${ledger === undefined ? "" : MAPPING_LEDGER_RULE_SINCE_TAIL}${MAPPING_ACCEPTED_RULE_SINCE_TAIL}`,
+          }
+        : definition,
+    );
+  }
   if (ledger === undefined) return MAPPING_RULE_DEFINITIONS;
   return MAPPING_RULE_DEFINITIONS.map((definition) =>
     definition.id === "R-map-03"
@@ -254,8 +318,8 @@ const MAPPING_REWRITE_RULE_DEFINITIONS: Readonly<Record<"R-map-01" | "R-map-02",
 };
 
 /** 書き直しの要求の規則の定義（`mappingRuleDefinitionsOf` の R-map-01・R-map-02 だけを部分の文に差し替える。Issue #660） */
-export function mappingRewriteRuleDefinitionsOf(ledger?: UpstreamLedgerView): readonly RuleDefinition[] {
-  return mappingRuleDefinitionsOf(ledger).map((definition) =>
+export function mappingRewriteRuleDefinitionsOf(ledger?: UpstreamLedgerView, accepted = false): readonly RuleDefinition[] {
+  return mappingRuleDefinitionsOf(ledger, accepted).map((definition) =>
     definition.id === "R-map-01" || definition.id === "R-map-02" ? MAPPING_REWRITE_RULE_DEFINITIONS[definition.id] : definition,
   );
 }
@@ -281,8 +345,8 @@ const MAPPING_BUNDLE_RULE_DEFINITION: RuleDefinition = {
 };
 
 /** 初回の束の要求の規則の定義（`mappingRuleDefinitionsOf` の R-map-02 だけを束の文に差し替える。台帳の版も同じ。Issue #736） */
-export function mappingBundleRuleDefinitionsOf(ledger?: UpstreamLedgerView): readonly RuleDefinition[] {
-  return mappingRuleDefinitionsOf(ledger).map((definition) => (definition.id === "R-map-02" ? MAPPING_BUNDLE_RULE_DEFINITION : definition));
+export function mappingBundleRuleDefinitionsOf(ledger?: UpstreamLedgerView, accepted = false): readonly RuleDefinition[] {
+  return mappingRuleDefinitionsOf(ledger, accepted).map((definition) => (definition.id === "R-map-02" ? MAPPING_BUNDLE_RULE_DEFINITION : definition));
 }
 
 /** 初回の束の合併の固定文（Issue #736。要件 ID の値は文に入れない） */
@@ -437,6 +501,10 @@ export interface MappingInput {
   readonly rows: readonly NameTableRow[];
   readonly previous?: MappingPrevious;
   readonly ledger?: UpstreamLedgerView;
+  /**
+   * 計画で了承して除いた部分（省けば `plan` から導く。0 件なら要求・規則・C2' は今のまま。Issue #841）
+   */
+  readonly acceptedParts?: AcceptedParts;
   readonly onRejected?: (candidate: MappingRejectedCandidate) => void;
   /**
    * C2' の検査（試験の口。既定は `inspectMappingSourced`）。初回の応答と、書き直しを合併した写像に**同じ検査**を掛けることを、偽物の
@@ -815,6 +883,7 @@ export type MappingInspector = (
   output: Record<string, unknown>,
   documents: readonly PromptDocument[],
   ledger?: UpstreamLedgerView,
+  acceptedParts?: AcceptedPartBasis,
 ) => MappingInspection;
 
 /**
@@ -828,10 +897,11 @@ export function inspectMapping(
   output: Record<string, unknown>,
   documents: readonly PromptDocument[],
   ledger?: UpstreamLedgerView,
+  acceptedParts?: AcceptedPartBasis,
 ):
   | { readonly ok: true; readonly table: NameTable; readonly normalized: readonly MappingNormalization[] }
   | { readonly ok: false; readonly problems: readonly Problem[] } {
-  const inspected = inspectMappingSourced(list, rows, output, documents, ledger);
+  const inspected = inspectMappingSourced(list, rows, output, documents, ledger, acceptedParts);
   return inspected.ok ? inspected : { ok: false, problems: inspected.problems };
 }
 
@@ -842,6 +912,7 @@ export function inspectMappingSourced(
   output: Record<string, unknown>,
   documents: readonly PromptDocument[],
   ledger?: UpstreamLedgerView,
+  acceptedParts?: AcceptedPartBasis,
 ): MappingInspection {
   const problems: Problem[] = [];
   const shaped = (output["requirements"] as readonly unknown[]).map((item, index) => shapeOfEntry(item, `requirements[${String(index)}]`, problems, ledger));
@@ -875,7 +946,10 @@ export function inspectMappingSourced(
   // 整える手は C2' の前に、組んだ表へ 1 回だけ当てる（門は整えた表に今のまま掛ける。Issue #723）
   const { table, normalized } = normalizeMappedTable(built);
   const sources: MappingProblemSource[] = problems.map(() => "response");
-  const tableProblems = checkMappedTable(list, table, documents, ledger === undefined ? {} : { ledger });
+  const tableProblems = checkMappedTable(list, table, documents, {
+    ...(ledger === undefined ? {} : { ledger }),
+    ...(acceptedParts === undefined ? {} : { acceptedParts }),
+  });
   problems.push(...tableProblems);
   sources.push(...tableProblems.map((): MappingProblemSource => "table"));
   return problems.length > 0
@@ -1030,6 +1104,20 @@ function buildData(input: MappingInput): readonly PromptData[] {
       text: serializeJson({ observations: input.ledger.unsupportedObservations.map((entry) => ({ id: entry.id, message: entry.message })) }),
     });
   }
+  // 了承して除いた部分を持つ計画だけ、要件 ID・部分 ID・部分の文・全部が了承済みかを 1 塊で渡す（Issue #841）。0 件なら足さない
+  const accepted = input.acceptedParts;
+  if (accepted !== undefined && accepted.requirements.length > 0) {
+    data.push({
+      name: MAPPING_ACCEPTED_DATA_NAMES.accepted,
+      text: serializeJson({
+        requirements: accepted.requirements.map((entry) => ({
+          requirementId: entry.requirementId,
+          allAccepted: entry.allAccepted,
+          parts: entry.parts.map((part) => ({ id: part.partId, text: part.text })),
+        })),
+      }),
+    });
+  }
   const previous = input.previous;
   if (previous !== undefined) {
     data.push({ name: MAPPING_DATA_NAMES.response, text: rawResponseText(previous.response) });
@@ -1083,12 +1171,21 @@ export function rejectedRequirementIds(list: RequirementList, rejections: readon
  * 作り直しの要求の頭（Issue #736）。`previous` は見ない（C3 の拒否のあとの 2 回目の要求は別に組む）
  */
 export function mappingWholeRequestOf(
-  input: Pick<MappingInput, "plan" | "list" | "documents" | "gateway" | "rows" | "ledger">,
+  input: Pick<MappingInput, "plan" | "list" | "documents" | "gateway" | "rows" | "ledger" | "acceptedParts">,
 ): LlmStructuredRequest {
+  const accepted = (input.acceptedParts?.requirements.length ?? 0) > 0;
   return buildStructuredRequest({
-    rules: ruleTexts(mappingRuleDefinitionsOf(input.ledger)),
+    rules: ruleTexts(mappingRuleDefinitionsOf(input.ledger, accepted)),
     documents: input.documents,
-    data: buildData({ plan: input.plan, list: input.list, documents: input.documents, gateway: input.gateway, rows: input.rows, ...(input.ledger === undefined ? {} : { ledger: input.ledger }) }),
+    data: buildData({
+      plan: input.plan,
+      list: input.list,
+      documents: input.documents,
+      gateway: input.gateway,
+      rows: input.rows,
+      ...(input.ledger === undefined ? {} : { ledger: input.ledger }),
+      ...(input.acceptedParts === undefined ? {} : { acceptedParts: input.acceptedParts }),
+    }),
     schemaName: MAPPING_SCHEMA_NAME,
     schema: mappingSchemaOf(input.ledger),
     maxOutputTokens: input.gateway.maxOutputTokens("name-table"),
@@ -1107,6 +1204,10 @@ type FirstCheck =
  * どこかで落ちれば `unmet`（`attempts` 1。Issue #661）。
  */
 export async function runMapping(input: MappingInput): Promise<MappingOutcome> {
+  // 了承して除いた部分を計画から導く（渡されていればそれを使う）。0 件の計画では上の塊も規則も C2' の受理も今のまま（Issue #841）
+  const acceptedParts = input.acceptedParts ?? deriveAcceptedParts(input.plan);
+  if (input.acceptedParts === undefined && acceptedParts.requirements.length > 0) input = { ...input, acceptedParts };
+  const acceptedBasis = input.acceptedParts?.requirements.length === 0 ? undefined : input.acceptedParts?.basis;
   const { ledger } = input;
   const inspector = input.inspect ?? inspectMappingSourced;
   const tally = new ReferenceTally();
@@ -1120,7 +1221,7 @@ export async function runMapping(input: MappingInput): Promise<MappingOutcome> {
     lastWasSkeleton = skeleton.length > 0;
     if (skeleton.length > 0) return { ok: false, problems: skeleton, skeleton: true };
     countMappingReferences(input.list, input.rows, output, tally);
-    return inspector(input.list, input.rows, output as Record<string, unknown>, input.documents, ledger);
+    return inspector(input.list, input.rows, output as Record<string, unknown>, input.documents, ledger, acceptedBasis);
   };
   const request = mappingWholeRequestOf(input);
   const onRejected = input.onRejected;
@@ -1175,8 +1276,9 @@ async function rewriteFailedRequirements(
   reject(1, previous, first.problems);
   // 形が合わなかったので 1 回だけやり直す。この**やり直し**を共通の口へ告げる（窓口の形のやり直しと同じ数え方。Issue #446）
   input.gateway.noteRetry("shape");
+  const accepted = (input.acceptedParts?.requirements.length ?? 0) > 0;
   const rewriteRequest = buildStructuredRequest({
-    rules: ruleTexts(mappingRewriteRuleDefinitionsOf(input.ledger)),
+    rules: ruleTexts(mappingRewriteRuleDefinitionsOf(input.ledger, accepted)),
     documents: input.documents,
     data: buildRewriteData(input, previous, first.groups),
     schemaName: MAPPING_SCHEMA_NAME,
@@ -1200,7 +1302,14 @@ async function rewriteFailedRequirements(
   }
   const merged = mergeRewrite(input.list, previous, rewrite, output as Record<string, unknown>);
   // 合併した写像に C2' を全部掛ける（孤立行・網羅・重複を含む。初回と同じ検査）
-  const inspected = (input.inspect ?? inspectMappingSourced)(input.list, input.rows, merged, input.documents, input.ledger);
+  const inspected = (input.inspect ?? inspectMappingSourced)(
+    input.list,
+    input.rows,
+    merged,
+    input.documents,
+    input.ledger,
+    input.acceptedParts?.basis,
+  );
   if (!inspected.ok) {
     reject(2, merged, inspected.problems);
     return { ok: false, failure: { kind: "unmet", attempts: STEP_ATTEMPTS, problems: inspected.problems }, references: tally.counts };
@@ -1305,7 +1414,7 @@ async function runBundledMapping(
 ): Promise<MappingOutcome> {
   const { ledger } = input;
   const maxOutputTokens = input.gateway.maxOutputTokens("name-table");
-  const bundleRules = ruleTexts(mappingBundleRuleDefinitionsOf(ledger));
+  const bundleRules = ruleTexts(mappingBundleRuleDefinitionsOf(ledger, (input.acceptedParts?.requirements.length ?? 0) > 0));
   const schema = mappingSchemaOf(ledger);
   const callBundle = async (bundle: number): Promise<MappingBundleResult> => {
     const ids = new Set(bundles[bundle] ?? []);
@@ -1349,7 +1458,14 @@ async function runBundledMapping(
   const { candidate, origins, skeleton } = mergeMappingBundles(outputs);
   if (skeleton.length > 0) return rebuildAllRequirements(input, maxOutputTokens, candidate, skeleton, tally);
   countMappingReferences(input.list, input.rows, candidate, tally);
-  const inspected = (input.inspect ?? inspectMappingSourced)(input.list, input.rows, candidate, input.documents, ledger);
+  const inspected = (input.inspect ?? inspectMappingSourced)(
+    input.list,
+    input.rows,
+    candidate,
+    input.documents,
+    ledger,
+    input.acceptedParts?.basis,
+  );
   const outside = outsideBundleProblems(input.list, bundles, candidate, origins);
   if (inspected.ok && outside.length === 0) {
     return {
@@ -1390,7 +1506,14 @@ async function rebuildAllRequirements(
     return { ok: false, failure: { kind: "malformed", attempts: STEP_ATTEMPTS, problems: skeleton }, references: tally.counts };
   }
   countMappingReferences(input.list, input.rows, output, tally);
-  const inspected = (input.inspect ?? inspectMappingSourced)(input.list, input.rows, output as Record<string, unknown>, input.documents, input.ledger);
+  const inspected = (input.inspect ?? inspectMappingSourced)(
+    input.list,
+    input.rows,
+    output as Record<string, unknown>,
+    input.documents,
+    input.ledger,
+    input.acceptedParts?.basis,
+  );
   if (!inspected.ok) {
     reject(2, output, inspected.problems);
     return { ok: false, failure: { kind: "unmet", attempts: STEP_ATTEMPTS, problems: inspected.problems }, references: tally.counts };
@@ -1420,7 +1543,7 @@ async function rewriteRejectedRequirements(
     return { ok: false, failure: { kind: "unmet", attempts: 1, problems }, references: tally.counts };
   };
   const request = buildStructuredRequest({
-    rules: ruleTexts(mappingRewriteRuleDefinitionsOf(input.ledger)),
+    rules: ruleTexts(mappingRewriteRuleDefinitionsOf(input.ledger, (input.acceptedParts?.requirements.length ?? 0) > 0)),
     documents: input.documents,
     data: buildRejectedRewriteData(input, rewrite),
     schemaName: MAPPING_SCHEMA_NAME,
@@ -1438,7 +1561,14 @@ async function rewriteRejectedRequirements(
   if (mismatch.length > 0) return unmet(output, mismatch);
   const merged = mergeRewrite(input.list, previous.response as Record<string, unknown>, rewrite, output as Record<string, unknown>);
   // 合併した写像に C2' を全部掛ける（孤立行・網羅・重複を含む。初回と同じ検査）
-  const inspected = (input.inspect ?? inspectMappingSourced)(input.list, input.rows, merged, input.documents, input.ledger);
+  const inspected = (input.inspect ?? inspectMappingSourced)(
+    input.list,
+    input.rows,
+    merged,
+    input.documents,
+    input.ledger,
+    input.acceptedParts?.basis,
+  );
   if (!inspected.ok) return unmet(merged, inspected.problems);
   return {
     ok: true,

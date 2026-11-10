@@ -124,7 +124,7 @@ import {
 } from "../record.js";
 import { countUnresolvedTests, type GenerationInput, type GenerationResult } from "../run.js";
 import { runArbitration } from "../stages/arbitrate.js";
-import type { Problem, RejectedCandidate, StageFailure, StageOutcome } from "../stages/prompt.js";
+import { constraintIdsIn, normalizeConstraintId, type Problem, type RejectedCandidate, type StageFailure, type StageOutcome } from "../stages/prompt.js";
 import {
   failureSignature,
   isStagnant,
@@ -205,6 +205,7 @@ import {
 } from "./stages/semantic-check.js";
 import { runTestSpec, type TestSpecRejectedBundle, type TestSpecValue } from "./stages/test-spec.js";
 import { runWriteV11a } from "./stages/write.js";
+import { acceptedCarryOverIds, deriveAcceptedParts } from "../v12/accepted-parts.js";
 import { ledgerViewOf, resolveV12Flags, toPublicV12Flags, type V12Flags } from "../v12/ledger.js";
 import { BOARD_REACH_RULES, type ReachRules } from "../stages/correspondence.js";
 import {
@@ -1458,6 +1459,8 @@ async function runV11a(
 
   try {
     const list = requirementsFromPlan(input.plan);
+    // 計画で了承して除いた部分（C2 の要求・C2' の受理・判定の材料・記録が同じ導出を使う。Issue #841）
+    const acceptedParts = deriveAcceptedParts(input.plan);
 
     // ── T1 → J4 → T1''（中身の 2 回目は回す側＝ここ。§1 の表）──────────────────
     const semanticRounds: SemanticCheckRound[] = [];
@@ -1634,6 +1637,7 @@ async function runV11a(
             gateway: gateway.forStage("mapping"),
             rows,
             ...(retry === undefined ? {} : { previous: retry }),
+            ...(acceptedParts.requirements.length === 0 ? {} : { acceptedParts }),
             onRejected: rejectionSink("mapping", round),
             ...withLedger,
           });
@@ -2717,17 +2721,32 @@ async function runV11a(
       if (addedCarry.size > 0) await refreshCarry();
     }
 
-    // ⑦ 終わりの判定（v1 と同じコード）。持ち越しは `carriedOver.testSuite` に載せて未解決に数える
+    // ⑦ 終わりの判定（v1 と同じコード）。持ち越しは `carriedOver.testSuite` に載せて未解決に数える。
+    // 計画で了承して除いた部分だけを根拠にした持ち越し（了承済みの要件）は未解決に数えず、v1 の契約（acceptedUnwritable）で
+    // full の妨げから外す（Issue #841。`decideOutcome` は変えない）
+    const unresolvedConstraintIds = new Map<string, readonly string[]>();
+    for (const entry of table.verification) {
+      if (entry.kind === "unresolved") unresolvedConstraintIds.set(entry.requirementId, entry.constraintIds);
+    }
+    const acceptedCarried = acceptedCarryOverIds({
+      entries: carry.entries,
+      unresolvedConstraintIds,
+      basis: acceptedParts.basis,
+      documentConstraintIds: constraintIdsIn(input.documents),
+      observationIds: new Set((ledger?.unsupportedObservations ?? []).map((entry) => normalizeConstraintId(entry.id))),
+    });
+    const acceptedCarriedSet = new Set(acceptedCarried);
     const carriedIds = carry.entries.map((entry) => entry.requirementId);
+    const unresolvedCarriedIds = carriedIds.filter((id) => !acceptedCarriedSet.has(id));
     const materials: JudgeMaterials = {
       staticCheckPassed: final.report.staticCheck.passed,
       correspondenceMisses: final.report.correspondence === null ? 1 : final.report.correspondence.misses.length,
       testMismatches: final.report.testRun === null ? 1 : final.report.testRun.mismatches.length,
       testUnresolved: countUnresolvedTests(unresolved, final.report.testRun) + stalledCorrespondenceMisses,
-      unwritableRequirements: 0,
-      acceptedUnwritable: 0,
+      unwritableRequirements: acceptedCarried.length,
+      acceptedUnwritable: acceptedCarried.length,
       limitReached,
-      carriedOver: { reverseCheck: [], testSuite: carriedIds },
+      carriedOver: { reverseCheck: [], testSuite: unresolvedCarriedIds },
     };
     const outcome = await runStage("judge", async () => decideOutcome(toStageResults(materials)));
     /** B3' の件数（枯渇・形・拒否）。一気通貫の検証の記録と段の走りの検証の数が同じ数え方 */
@@ -2799,6 +2818,8 @@ async function runV11a(
           excludedRowIds: carry.excludedRowIds,
           remainingRequirementIds: carry.remainingRequirementIds,
           ...(carry.nonRequirements === undefined ? {} : { nonRequirements: carry.nonRequirements }),
+          // 1 件以上あるときだけ欄を足す（0 件の走りの納品物を base とバイト列で同じにする。Issue #841）
+          ...(acceptedCarried.length === 0 ? {} : { acceptedRemovals: acceptedCarried }),
         },
         verification: {
           tableSha256: await nameTableSha256(table),

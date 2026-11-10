@@ -158,6 +158,11 @@ export interface V11aRecordsInput {
     readonly remainingRequirementIds: readonly string[];
     /** T1'' が受理した要件でない文の要件 ID（1 件も無ければ省く＝欄を書かない。Issue #550） */
     readonly nonRequirements?: readonly string[];
+    /**
+     * 了承して除いた部分だけを根拠にした持ち越しの要件 ID（full の妨げにしない。1 件も無ければ省く＝欄を書かない。
+     * Issue #841）
+     */
+    readonly acceptedRemovals?: readonly string[];
   };
   readonly verification: {
     readonly tableSha256: string;
@@ -286,6 +291,7 @@ export function buildV11aArtifacts(input: V11aRecordsInput): readonly BundleArti
         excluded_row_ids: carryOver.excludedRowIds,
         remaining_requirement_ids: carryOver.remainingRequirementIds,
         ...(carryOver.nonRequirements === undefined ? {} : { non_requirements: carryOver.nonRequirements }),
+        ...(carryOver.acceptedRemovals === undefined ? {} : { accepted_removals: carryOver.acceptedRemovals }),
       }),
     },
     {
