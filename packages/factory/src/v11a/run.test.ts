@@ -154,7 +154,7 @@ import { NAMED_FAILURE_MESSAGES } from "../v12/search-repair.js";
 import { GENERATED_TEST_ID_PREFIX, generateTests, isGeneratedTestId } from "../v12/generated-tests.js";
 import type { FixedTest } from "../fixed-test.js";
 import { constraintIdsIn, ruleTexts, SHAPE_PROBLEMS_DATA_NAME } from "../stages/prompt.js";
-import { MAPPING_LEDGER_DATA_NAMES, MAPPING_REWRITE_MESSAGES, MAPPING_SCHEMA_NAME } from "../v12/stages/mapping.js";
+import { MAPPING_ACCEPTED_DATA_NAMES, MAPPING_LEDGER_DATA_NAMES, MAPPING_REWRITE_MESSAGES, MAPPING_SCHEMA_NAME } from "../v12/stages/mapping.js";
 import { VOCABULARY_SCHEMA_NAMES } from "../v12/stages/vocabulary.js";
 import { structuralReadingText } from "../v12/structural-meanings.js";
 import {
@@ -10592,6 +10592,23 @@ describe("(9) 了承して除いた部分を持つ計画の走り（C2・C2'・�
       { part_id: "R3-p1", alternative_id: "R3", basis: { doc_version: "v1", location: "1", constraint_id: "c" } },
     ],
   });
+  /**
+   * 正規化で衝突する部分 ID を持つ計画（Issue #844）：R3 の部分 `p` は了承あり、R4 の部分 ` p ` は
+   * 了承の参照（`p`）に元の文字列で一致しないので了承なし。
+   */
+  const collisionPlan = (): ConfirmedPlan => ({
+    ...PLAN,
+    requirements: PLAN.requirements.map((requirement) =>
+      requirement.id === "R3"
+        ? { ...requirement, parts: [{ id: "p", text: requirement.text, disposition: "accepted_removal" as const }] }
+        : requirement.id === "R4"
+          ? { ...requirement, parts: [{ id: " p ", text: requirement.text, disposition: "accepted_removal" as const }] }
+          : requirement,
+    ),
+    accepted_unwritable: [
+      { part_id: "p", alternative_id: "R3", basis: { doc_version: "v1", location: "1", constraint_id: "c" } },
+    ],
+  });
   /** R3 を混在（`R3-p1` は了承済み・`R3-p2` は了承していない）にした計画 */
   const mixedR3Plan = (): ConfirmedPlan => ({
     ...PLAN,
@@ -10622,6 +10639,17 @@ describe("(9) 了承して除いた部分を持つ計画の走り（C2・C2'・�
         ? {
             ...entry,
             // 台帳の schema が targets を必須にする走りでも形が合うよう、元の欄（targets を含む）を保つ
+            verification: { ...(entry["verification"] as Record<string, unknown>), kind: "unresolved", value: null, reason: "宣言で書けない", checks: null, constraintIds },
+          }
+        : entry,
+    ),
+  });
+  /** 指定の要件を unresolved（根拠は渡した ID）にした C2 の応答（Issue #844） */
+  const withUnresolved = (mapping: Record<string, unknown>, requirementId: string, constraintIds: readonly string[]) => ({
+    requirements: (mapping["requirements"] as Record<string, unknown>[]).map((entry) =>
+      entry["requirementId"] === requirementId
+        ? {
+            ...entry,
             verification: { ...(entry["verification"] as Record<string, unknown>), kind: "unresolved", value: null, reason: "宣言で書けない", checks: null, constraintIds },
           }
         : entry,
@@ -10662,6 +10690,26 @@ describe("(9) 了承して除いた部分を持つ計画の走り（C2・C2'・�
     expect(result.outcome).toEqual({ result: "failed", verdict: "none" });
     expect(result.summary.exit_code).toBe(1);
     expect(result.bundle).toBeNull();
+  });
+
+  it("(2) 正規化で衝突する部分 ID を根拠にした unresolved は C2' が断り、了承していない側は C2 の塊にも入らない（Issue #844）", async () => {
+    const bad = withUnresolved(responses().mapping, "R4", [" p "]);
+    const onlyR4 = { requirements: (bad.requirements as readonly Record<string, unknown>[]).filter((entry) => entry["requirementId"] === "R4") };
+    const { result, recording } = await runScenario([...c1Calls(), structured(bad), structured(onlyR4)], {
+      flags: IDS_FLAGS,
+      plan: collisionPlan(),
+    });
+    // 了承していない R4 の部分 ID は根拠にできず、2 回目も同じなので C2 で止まり full にならない
+    expect(result.stopped?.stage).toBe("mapping");
+    expect(result.outcome).toEqual({ result: "failed", verdict: "none" });
+    expect(result.bundle).toBeNull();
+    // C2 へ渡す了承済みの部分の塊は、元の ID が了承の参照に一致する R3 だけ
+    const mappingRequest = recording.structured.find((request) => request.schemaName === MAPPING_SCHEMA_NAME);
+    const accepted = dataBlockOf(mappingRequest?.input ?? "", MAPPING_ACCEPTED_DATA_NAMES.accepted) as {
+      readonly requirements: readonly { readonly requirementId: string }[];
+    };
+    expect(accepted.requirements.map((entry) => entry.requirementId)).toEqual(["R3"]);
+    expect(JSON.stringify(accepted)).not.toContain('" p "');
   });
 
   it("(ii) C3 のあとの 2 回目が無効：C2' が断り、前回の有効な表に戻り、C3 の拒否を持ち越して partial", async () => {
@@ -11032,6 +11080,96 @@ describe("(10) 根拠が文書の制約 ID だけの持ち越しを申告に写�
     expect(restored.filter((file) => !RESTORED_PATHS.includes(file.path))).toEqual(
       files.filter((file) => !RESTORED_PATHS.includes(file.path)),
     );
+  });
+});
+
+// ── (11) 旗 v12.ids の外では申告・了承済みの持ち越しを導かない（Issue #844）──────────
+
+describe("(11) 文書の制約 ID だけの unresolved を持つ off の完走は申告 0 件・了承済み 0 件（Issue #844）", () => {
+  /** ids off の v1.2（台帳・探索の旗は on のまま） */
+  const IDS_OFF_FLAGS = { ledger: true, searchRepair: true, ids: false } as const;
+  /** R3 の確かめ方を、文書の制約 ID だけを根拠にした unresolved にした表 */
+  const documentTable = (): NameTable => ({
+    ...TABLE,
+    verification: TABLE.verification.map((entry) =>
+      entry.requirementId === "R3"
+        ? { requirementId: "R3", kind: "unresolved", reason: "宣言で書けない", constraintIds: [FIXTURE_CONSTRAINT_ID] }
+        : entry,
+    ),
+  });
+  /** 締める操作を外した宣言（R3 を持ち越す走りの B1） */
+  const NO_CLOSE_YAML = fixtureYaml({ closeItem: false }).replace("show: [title, amount, kind]", "show: [title, owner, amount, day, kind]");
+  const REMAINING = ["R1", "R2", "R4"] as const;
+  /**
+   * 文書の制約 ID だけを根拠にした R3 の持ち越しがあり、ほかに R1・R2・R4 も残る完走の台本。
+   * `ledgerOn` は ids off の v1.2（台帳の旗が on）の T1 の応答に集計の欄を足す。
+   */
+  const offCalls = (ledgerOn = false): RecordedCall[] => [
+    structured(t1Of(LIST, ledgerOn ? withAggregates(documentTable()) : documentTable(), ledgerOn)),
+    structured(acceptAll(REMAINING)),
+    structured(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], REMAINING)),
+    structured({ declaration: NO_CLOSE_YAML }),
+    structured(acceptAll(REMAINING)),
+  ];
+
+  /** base（7387ca4。申告・了承済みの持ち越しの前）の走りと比べるダイジェスト（納品物・診断・記録・要約・判定・停止） */
+  const BASE_DIGEST = {
+    v11a: "ca553b854ba371e1c47db4da7e95593ef3129fa5107e0a86b9939725d5fb05de",
+    idsOff: "7acc0484d8e1f49437a14a23723bd5d4c788dcc048198f8d87d9fe57803ad86a",
+  } as const;
+  const digestOf = async (result: Awaited<ReturnType<typeof runScenario>>["result"]): Promise<string> =>
+    sha256Hex(
+      JSON.stringify({
+        bundle: result.bundle === null ? null : bundleFiles(result.bundle).map((file) => ({ path: file.path, text: file.text })),
+        diagnostics: result.diagnostics.map((file) => ({ path: file.path, text: file.text })),
+        record: result.record,
+        summary: result.summary,
+        outcome: result.outcome,
+        stopped: result.stopped,
+      }),
+    );
+
+  /**
+   * base（#807・#841 の前）と同じ材料：申告 0 件・了承済み 0 件・`reported` と `accepted_removals` の欄なし。
+   * 持ち越し R3 は未解決のまま partial（判定の材料の数だけが 0）。
+   */
+  const expectBaseMaterials = (result: Awaited<ReturnType<typeof runScenario>>["result"]): void => {
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    expect(carryEntriesOf(result.bundle)).toEqual([{ requirementId: "R3", reasons: [{ origin: "name-table", reason: "宣言で書けない" }] }]);
+    expect(artifactOf(result.bundle, UNWRITABLE_FILE)["unwritable"]).toEqual([]);
+    const carry = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.carryOver);
+    expect("reported" in carry).toBe(false);
+    expect("accepted_removals" in carry).toBe(false);
+    expect(artifactOf(result.bundle, VERIFICATION_FILE)["partial_reasons"]).toMatchObject({
+      unwritable_requirements: { count: 0, requirement_ids: [] },
+    });
+  };
+
+  it("(3) v1.1a と ids off の v1.2 で、申告・了承済みの持ち越しを導かない", async () => {
+    const v11a = await runScenario(offCalls(), { promptVersion: "v1.1a" });
+    expectBaseMaterials(v11a.result);
+    expect(await digestOf(v11a.result)).toBe(BASE_DIGEST.v11a);
+    const idsOff = await runScenario(offCalls(true), { flags: IDS_OFF_FLAGS, promptVersion: "v1.2" });
+    expectBaseMaterials(idsOff.result);
+    expect(await digestOf(idsOff.result)).toBe(BASE_DIGEST.idsOff);
+  });
+
+  it("(4) ⑦ まで流す段の走りの材料も (3) と同じ", async () => {
+    const cases = [
+      { calls: offCalls(), input: { promptVersion: "v1.1a" } },
+      { calls: offCalls(true), input: { flags: IDS_OFF_FLAGS, promptVersion: "v1.2" } },
+    ] as const;
+    for (const scenario of cases) {
+      const whole = await runScenario(scenario.calls, scenario.input);
+      const stage = await runStageScenario(scenario.calls, scenario.input);
+      expectBaseMaterials(whole.result);
+      expect(stage.result.judgeVerdict).toBe(whole.result.outcome.verdict);
+      expect(stage.result.judgeVerdict).toBe("partial");
+      expect(stage.result.finalCarryOver).toEqual(carryEntriesOf(whole.result.bundle));
+      expect("unwritable" in stage.result).toBe(false);
+      expect("reported" in stage.result).toBe(false);
+    }
   });
 });
 

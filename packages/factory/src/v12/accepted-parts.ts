@@ -9,8 +9,11 @@
 //   - 混在の要件：了承済みの部分と、了承していない部分を両方持つ要件
 //   - 全部が了承済みで書ける残りが無い要件だけ、自分の了承済みの部分 ID を根拠に unresolved にできる
 //
-// 部分 ID は正規化して照らす（文書の制約 ID・台帳の未対応の観測の ID と同じ文字列の扱い）。文書の ID と同じ
-// 文字列の部分 ID は、C2' では文書の ID として受け、判定の材料では了承済みの持ち越しに数えない（衝突）。
+// 部分の所属と「了承済み」の判定は、**元の**部分 ID と `accepted_unwritable` の**元の**部分 ID の一致で行う
+// （計画の検査・v1 の了承の集合と同じ扱い。Issue #844）。そのあとで、C2' と判定の材料が引く索引だけを
+// 正規化した ID で作る。正規化した ID が計画の中で 2 つ以上の部分に当たるときは、その ID を索引に入れない
+// （どちらの了承か決められないので、了承済みに数えず partial に残す）。文書の ID と同じ文字列の部分 ID は、
+// C2' では文書の ID として受け、判定の材料では了承済みの持ち越しに数えない（衝突）。
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { normalizeConstraintId } from "../stages/prompt.js";
 
@@ -65,21 +68,41 @@ export interface AcceptedParts {
  * 判定の材料・記録は今のまま（何も足さない）。
  */
 export function deriveAcceptedParts(plan: ConfirmedPlan): AcceptedParts {
-  const accepted = new Set(plan.accepted_unwritable.map((entry) => normalizeConstraintId(entry.part_id)));
+  // 了承の参照は元の文字列のまま照らす（計画の検査・v1 の了承の集合と同じ。Issue #844）
+  const accepted = new Set(plan.accepted_unwritable.map((entry) => entry.part_id));
+  // 正規化した ID が計画の中で 2 つ以上の部分に当たるときは、どちらの了承か決められないので索引に入れない
+  const normalizedCounts = new Map<string, number>();
+  for (const requirement of plan.requirements) {
+    for (const part of requirement.parts) {
+      const normalized = normalizeConstraintId(part.id);
+      normalizedCounts.set(normalized, (normalizedCounts.get(normalized) ?? 0) + 1);
+    }
+  }
+  const indexIdOf = (id: string): string | undefined => {
+    const normalized = normalizeConstraintId(id);
+    return (normalizedCounts.get(normalized) ?? 0) > 1 ? undefined : normalized;
+  };
   const requirements: AcceptedPartsRequirement[] = [];
   const byRequirement = new Map<string, AcceptedPartRequirementBasis>();
   const anyPartIds = new Set<string>();
   for (const requirement of plan.requirements) {
+    // 所属と了承済みの判定は元の ID で行う（索引の正規化とは分ける。Issue #844）
     const acceptedParts = requirement.parts.filter(
-      (part) => part.disposition === "accepted_removal" && accepted.has(normalizeConstraintId(part.id)),
+      (part) => part.disposition === "accepted_removal" && accepted.has(part.id),
     );
     const allAccepted = requirement.parts.length > 0 && acceptedParts.length === requirement.parts.length;
-    byRequirement.set(requirement.id, {
-      allAccepted,
-      acceptedPartIds: new Set(acceptedParts.map((part) => normalizeConstraintId(part.id))),
-      partIds: new Set(requirement.parts.map((part) => normalizeConstraintId(part.id))),
-    });
-    for (const part of requirement.parts) anyPartIds.add(normalizeConstraintId(part.id));
+    const partIds = new Set<string>();
+    for (const part of requirement.parts) {
+      const id = indexIdOf(part.id);
+      if (id !== undefined) partIds.add(id);
+    }
+    const acceptedPartIds = new Set<string>();
+    for (const part of acceptedParts) {
+      const id = indexIdOf(part.id);
+      if (id !== undefined) acceptedPartIds.add(id);
+    }
+    byRequirement.set(requirement.id, { allAccepted, acceptedPartIds, partIds });
+    for (const id of partIds) anyPartIds.add(id);
     if (acceptedParts.length === 0) continue;
     requirements.push({
       requirementId: requirement.id,
