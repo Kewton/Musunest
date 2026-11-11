@@ -65,7 +65,7 @@ export const FAKE_SPEC: AppSpec = {
   ],
   validations: [],
   computed: [
-    { name: HIGHLIGHT_NAME, entity: "task", expression: "due < today()", type: "boolean" },
+    { name: HIGHLIGHT_NAME, entity: "task", expression: 'due < today() and status != "done"', type: "boolean" },
     {
       name: "openTasks",
       entity: "member",
@@ -155,7 +155,7 @@ export function createFakeTaskBoardApi(options: FakeTaskBoardOptions): FakeTaskB
       due: task.due,
       memo: task.memo,
     },
-    computed: withHighlight ? { [HIGHLIGHT_NAME]: task.due < "2026-09-15" } : {},
+    computed: withHighlight ? { [HIGHLIGHT_NAME]: task.due < "2026-09-15" && task.status !== "done" } : {},
   });
 
   const memberRow = (member: FakeMember): ApiRow => ({
