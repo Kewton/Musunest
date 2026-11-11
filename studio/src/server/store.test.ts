@@ -13,6 +13,7 @@ const makeJob = (overrides: Partial<StoredJob> = {}): StoredJob => ({
   request: "日付順の一覧を作って",
   state: "awaiting-answer",
   stopReason: null,
+  stopReasonCodes: [],
   createdAt: 1_000,
   updatedAt: 2_000,
   answerDeadlineAt: 3_000,
@@ -89,6 +90,34 @@ describe("JobStore", () => {
     store.save(makeJob({ id: "old", createdAt: 1_000 }));
     store.save(makeJob({ id: "new", createdAt: 9_000 }));
     expect(store.list().map((job) => job.id)).toEqual(["new", "old"]);
+  });
+
+  it("止めた理由の符号の並びを保存して読み戻す", () => {
+    store.save(
+      makeJob({
+        state: "stopped",
+        stopReason: "cannot-confirm",
+        stopReasonCodes: ["noncritical-without-default", "not-stated"],
+        answerDeadlineAt: null,
+        question: null,
+      }),
+    );
+
+    const loaded = store.load("job-1");
+    expect(loaded?.stopReason).toBe("cannot-confirm");
+    expect(loaded?.stopReasonCodes).toEqual(["noncritical-without-default", "not-stated"]);
+  });
+
+  it("符号の欄の無い古い記録も、空の並びとして読める", () => {
+    store.save(makeJob({ state: "stopped", stopReason: "cannot-confirm", answerDeadlineAt: null, question: null }));
+    const jobPath = join(store.directory, "job-1", "job.json");
+    const parsed = JSON.parse(readFileSync(jobPath, "utf8")) as Record<string, unknown>;
+    delete parsed["stopReasonCodes"];
+    writeFileSync(jobPath, JSON.stringify(parsed), "utf8");
+
+    const loaded = store.load("job-1");
+    expect(loaded?.stopReason).toBe("cannot-confirm");
+    expect(loaded?.stopReasonCodes).toEqual([]);
   });
 
   it("知らない ID・壊れた記録は null にする", () => {

@@ -63,4 +63,17 @@ describe("RequestPage", () => {
     const alerts = screen.getAllByRole("alert").map((node) => node.textContent ?? "");
     expect(alerts.some((text) => text.includes("今日の費用の上限"))).toBe(true);
   });
+
+  it("後から渡された元の依頼文を欄に入れる（依頼を直してやり直す）", () => {
+    const view = renderPage({ initialRequest: "" });
+    expect((screen.getByLabelText("つくりたいもの") as HTMLTextAreaElement).value).toBe("");
+
+    view.rerender(
+      <RequestPage budget={budgetOf(4)} onStart={() => {}} initialRequest="割り勘を作りたい" />,
+    );
+
+    expect((screen.getByLabelText("つくりたいもの") as HTMLTextAreaElement).value).toBe(
+      "割り勘を作りたい",
+    );
+  });
 });

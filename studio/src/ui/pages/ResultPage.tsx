@@ -36,6 +36,17 @@ export function ResultPage({
   const result = job.result;
 
   if (result === null) {
+    if (job.stopReason === "cannot-confirm") {
+      return (
+        <TerminalPage
+          job={job}
+          title={job.stopReasonLabel ?? "要件を固めきれませんでした"}
+          reason={`${job.stopReasonCategory ?? "理由を分類できませんでした"} 決めてほしいことを依頼に書き足すと、固めやすくなります。`}
+          error={error}
+          onRetry={onRetry}
+        />
+      );
+    }
     return (
       <TerminalPage
         job={job}

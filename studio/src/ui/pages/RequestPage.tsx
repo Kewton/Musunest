@@ -1,6 +1,6 @@
 // 依頼の画面（Issue #869 の目的・1）。自由記述 1 欄と例のチップ、
 // できること・まだできないこと、費用の表示。空では送れず、残りが足りなければ押せない。
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { BudgetView } from "../../shared/api";
 import { BudgetNote, formatUsd, hasEnoughBudget } from "../components/BudgetNote";
 
@@ -41,6 +41,10 @@ export function RequestPage({
   onStart,
 }: RequestPageProps) {
   const [text, setText] = useState(initialRequest);
+  // 依頼を直してやり直すときは、画面がすでに開いていても元の依頼文を入れる（Issue #886）。
+  useEffect(() => {
+    setText(initialRequest);
+  }, [initialRequest]);
   const trimmed = text.trim();
   const enoughBudget = hasEnoughBudget(budget);
   const tooLong = text.length > MAX_REQUEST_CHARS;

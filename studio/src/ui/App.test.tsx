@@ -327,3 +327,134 @@ describe("App（結果・了承と公開・履歴）", () => {
     expect(field.value).toBe("割り勘を作りたい");
   });
 });
+
+// ── Issue #886：要件を固めきれなかった走りと、やり直しの依頼文 ─────────────
+
+const failedJob: JobView = {
+  id: "job-1",
+  request: "割り勘を作りたい",
+  state: "failed",
+  stateLabel: "失敗",
+  stopReason: "factory-failure",
+  stopReasonLabel: "工場の失敗",
+  question: null,
+  confirmation: null,
+  progress: null,
+  result: null,
+  createdAt: 1,
+  updatedAt: 2,
+};
+
+const cannotConfirmJob: JobView = {
+  ...failedJob,
+  state: "stopped",
+  stateLabel: "止めた",
+  stopReason: "cannot-confirm",
+  stopReasonLabel: "要件を固めきれませんでした",
+  stopReasonCategory: "質問の回数の中で決めきれないことが残りました",
+};
+
+const receivedJob: JobView = {
+  ...failedJob,
+  state: "received",
+  stateLabel: "依頼を受けた",
+  stopReason: null,
+  stopReasonLabel: null,
+};
+
+const submitNewRequest = async (): Promise<void> => {
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "新しく作る" }));
+  });
+  await act(async () => {
+    fireEvent.change(screen.getByLabelText("つくりたいもの"), { target: { value: "割り勘を作りたい" } });
+    fireEvent.click(screen.getByRole("button", { name: "依頼を送る" }));
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2_000);
+  });
+};
+
+describe("App（Issue #886 やり直し）", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-11T00:00:00Z"));
+  });
+
+  const installFlowFetch = (jobAfterPoll: JobView) => {
+    const fetchMock = vi.fn(async (input: string, init: RequestInit = {}) => {
+      const method = init.method ?? "GET";
+      if (input === "/api/budget") return json(budget);
+      if (input === "/api/jobs" && method === "POST") return json(receivedJob, 201);
+      if (input === "/api/jobs/job-1") return json(jobAfterPoll);
+      throw new Error(`知らない要求: ${method} ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  };
+
+  it("新しく作る → 送る → 問い合わせ中に failed → やり直しで元の依頼文が入る", async () => {
+    document.head.innerHTML = '<meta name="studio-token" content="t" />';
+    installFlowFetch(failedJob);
+
+    render(<App />);
+    await submitNewRequest();
+    expect(screen.getByText("工場の失敗")).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "依頼を直してやり直す" }));
+    });
+
+    const field = screen.getByLabelText("つくりたいもの") as HTMLTextAreaElement;
+    expect(field.value).toBe("割り勘を作りたい");
+  });
+
+  it("要件を固めきれなかった走りでも、やり直しで元の依頼文が入る", async () => {
+    document.head.innerHTML = '<meta name="studio-token" content="t" />';
+    installFlowFetch(cannotConfirmJob);
+
+    render(<App />);
+    await submitNewRequest();
+    expect(screen.getByText("要件を固めきれませんでした")).toBeTruthy();
+    expect(screen.getByText(/質問の回数の中で決めきれないことが残りました/)).toBeTruthy();
+    expect(screen.queryByText("工場の失敗")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "依頼を直してやり直す" }));
+    });
+
+    const field = screen.getByLabelText("つくりたいもの") as HTMLTextAreaElement;
+    expect(field.value).toBe("割り勘を作りたい");
+  });
+
+  it("履歴から開いた failed のジョブでも、やり直しで元の依頼文が入る", async () => {
+    document.head.innerHTML = '<meta name="studio-token" content="t" />';
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init: RequestInit = {}) => {
+        const method = init.method ?? "GET";
+        if (input === "/api/budget") return json(budget);
+        if (input === "/api/jobs" && method === "GET") return json({ jobs: [failedJob] });
+        throw new Error(`知らない要求: ${method} ${input}`);
+      }),
+    );
+
+    render(<App />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "履歴" }));
+    });
+    await act(async () => {});
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /割り勘を作りたい/ }));
+    });
+
+    expect(screen.getByText("工場の失敗")).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "依頼を直してやり直す" }));
+    });
+
+    const field = screen.getByLabelText("つくりたいもの") as HTMLTextAreaElement;
+    expect(field.value).toBe("割り勘を作りたい");
+  });
+});

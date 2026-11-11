@@ -5,13 +5,22 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_FAKE_CONFIRMATION, DEFAULT_FAKE_QUESTION } from "./runner-fake.js";
 import type { StoredJob } from "./store.js";
-import { DECLARATION_TERMS, UserWordingError, buildBudgetView, buildJobView, declarationTermsIn } from "./view.js";
+import {
+  CONFIRM_CATEGORY_LABELS,
+  DECLARATION_TERMS,
+  UserWordingError,
+  buildBudgetView,
+  buildJobView,
+  confirmCategoryOf,
+  declarationTermsIn,
+} from "./view.js";
 
 const makeJob = (overrides: Partial<StoredJob> = {}): StoredJob => ({
   id: "job-1",
   request: "日付順の一覧を作って",
   state: "awaiting-answer",
   stopReason: null,
+  stopReasonCodes: [],
   createdAt: 10_000,
   updatedAt: 20_000,
   answerDeadlineAt: 30_000,
@@ -196,5 +205,86 @@ describe("buildBudgetView", () => {
   it("1 回の上限と 1 日の上限をコードの定数から返す", () => {
     const view = buildBudgetView({ actualUsd: 0.42, reservedUsd: 2, spentUsd: 2.42, remainingUsd: 1.58, canStart: true });
     expect(view).toEqual({ spentUsd: 2.42, remainingUsd: 1.58, perRunLimitUsd: 2, dailyLimitUsd: 4 });
+  });
+});
+
+describe("要件を固めきれなかった理由の分類（Issue #886）", () => {
+  const category1 = CONFIRM_CATEGORY_LABELS[1];
+  const category2 = CONFIRM_CATEGORY_LABELS[2];
+  const category3 = CONFIRM_CATEGORY_LABELS[3];
+  const category4 = CONFIRM_CATEGORY_LABELS[4];
+
+  const table: readonly (readonly [string, string])[] = [
+    ["question-limit", category1],
+    ["round-trip-limit", category1],
+    ["critical-no-question", category1],
+    ["noncritical-without-default", category1],
+    ["open_issue", category1],
+    ["open_critical", category1],
+    ["not-stated", category2],
+    ["low-confidence", category2],
+    ["unknown", category2],
+    ["duplicate-open-issue", category3],
+    ["quote-not-found", category3],
+    ["position-mismatch", category3],
+    ["uncovered-source", category3],
+    ["uncovered-answer", category3],
+    ["origin-not-answer", category3],
+    ["unknown_reference", category3],
+    ["accepted_outside_parts", category3],
+    ["accepted_not_removal", category3],
+    ["resolution_without_basis", category3],
+    ["other", category4],
+    ["confirmation_expired", category4],
+  ];
+
+  it("表のすべての符号を、決めた分類に写す", () => {
+    for (const [code, expected] of table) {
+      expect(confirmCategoryOf([code])).toBe(expected);
+    }
+  });
+
+  it("空の並びと知らない符号は 4 にする", () => {
+    expect(confirmCategoryOf([])).toBe(category4);
+    expect(confirmCategoryOf(["知らない符号"])).toBe(category4);
+    expect(confirmCategoryOf(["nonsense"])).toBe(category4);
+  });
+
+  it("複数の符号は、番号の小さい分類が勝つ", () => {
+    expect(confirmCategoryOf(["not-stated", "question-limit"])).toBe(category1);
+    expect(confirmCategoryOf(["duplicate-open-issue", "low-confidence"])).toBe(category2);
+    expect(confirmCategoryOf(["nonsense", "duplicate-open-issue"])).toBe(category3);
+    expect(confirmCategoryOf(["nonsense", "other"])).toBe(category4);
+  });
+
+  it("分類の文は、符号・事項 ID・要件 ID・宣言の用語を含まない", () => {
+    for (const [code, expected] of table) {
+      expect(expected).not.toContain(code);
+      expect(expected).not.toMatch(/\b[RI]\d+/u);
+      expect(declarationTermsIn(expected)).toEqual([]);
+    }
+  });
+
+  it("JobView の JSON 全体に、符号と OI:・R: で始まる文字列を出さない", () => {
+    const codes = table.map(([code]) => code);
+    const view = buildJobView(
+      makeJob({
+        state: "stopped",
+        stopReason: "cannot-confirm",
+        stopReasonCodes: codes,
+        answerDeadlineAt: null,
+        question: null,
+      }),
+      20_000,
+    );
+
+    expect(view.stopReasonCategory).toBe(category1);
+    const json = JSON.stringify(view);
+    for (const code of codes) {
+      expect(json).not.toContain(code);
+    }
+    expect(json).not.toContain("OI:");
+    expect(json).not.toMatch(/\bR:/u);
+    expect(json).not.toMatch(/\b[RI]\d+\b/u);
   });
 });

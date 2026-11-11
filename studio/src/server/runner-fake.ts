@@ -170,6 +170,17 @@ export class FakeRunner implements Runner {
     this.emit(jobId, { kind: "failed", reason, spentUsd: this.options.spentUsd ?? 0.42 });
   }
 
+  /** 工場の失敗ではない止まり方（要件を固めきれなかった・費用の上限・時間切れ）を返す */
+  stop(jobId: string, reason: StopReason, codes: readonly string[] = []): void {
+    this.emit(jobId, {
+      kind: "stopped",
+      reason,
+      note: null,
+      codes,
+      spentUsd: this.options.spentUsd ?? 0.42,
+    });
+  }
+
   private end(jobId: string): void {
     const outcome = this.options.outcome ?? "finish";
     if (outcome === "sent-back") {

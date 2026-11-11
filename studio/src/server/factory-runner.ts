@@ -114,15 +114,21 @@ function outcomeEvent(outcome: FactoryChildOutcome): RunnerEvent {
   if (outcome.kind === "failed") {
     return { kind: "failed", reason: outcome.reason, spentUsd: outcome.spentUsd };
   }
-  const reason =
-    outcome.reason === "timeout" || outcome.reason === "deadline"
-      ? "時間切れ"
-      : outcome.reason === "budget"
-        ? "費用の上限に達しました"
-        : outcome.reason === "declined"
-          ? "確認で止めました"
-          : "Plan を確定できませんでした";
-  return { kind: "failed", reason, spentUsd: outcome.spentUsd };
+  // ここからは `stopped`。工場の失敗（Plan の段の失敗）だけを `failed` に残し、
+  // 費用の上限・時間切れ・要件を固めきれなかった、は「止めた」にする（Issue #886 の目的・4）。
+  if (outcome.reason === "factory-failure") {
+    return { kind: "failed", reason: "Plan を確定できませんでした", spentUsd: outcome.spentUsd };
+  }
+  if (outcome.reason === "timeout" || outcome.reason === "deadline") {
+    return { kind: "stopped", reason: "timeout", note: "時間切れ", codes: outcome.codes, spentUsd: outcome.spentUsd };
+  }
+  if (outcome.reason === "budget") {
+    return { kind: "stopped", reason: "budget", note: "費用の上限に達しました", codes: outcome.codes, spentUsd: outcome.spentUsd };
+  }
+  if (outcome.reason === "declined") {
+    return { kind: "stopped", reason: "cancel", note: "確認で止めました", codes: outcome.codes, spentUsd: outcome.spentUsd };
+  }
+  return { kind: "stopped", reason: "cannot-confirm", note: null, codes: outcome.codes, spentUsd: outcome.spentUsd };
 }
 
 /**
