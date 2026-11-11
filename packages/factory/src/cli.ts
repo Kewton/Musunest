@@ -119,6 +119,7 @@ import {
   stagePassOf,
   stagesInRange,
   stageVersionsAt,
+  documentsVersionOf,
   verifyStageInput,
   STAGE_BUDGET_SCOPE,
   STAGE_DECLARATION_FILE,
@@ -1292,7 +1293,7 @@ async function runBuildFromPlanFile(
     build.boundaries === undefined
       ? undefined
       : await writeStageCheckpoints(deps, job.outDir, build.boundaries, {
-          stageVersions: await stageVersionsOf(promptVersionOf(job.pipeline), build.flags),
+          stageVersions: await stageVersionsOf(promptVersionOf(job.pipeline), build.flags, job.documents),
           planSha256: validation.planSha256,
           sourceSha256: validation.sourceSha256,
         });
@@ -1332,16 +1333,32 @@ interface StageVersionsOfRun {
  * checkpoint に残す版（語彙・契約・prompt・工場。段の走りと `--pipeline v1.2` の走りで同じ形。Issue #636）。v1.2 の走り（実効の旗を
  * 渡す）だけ、台帳の指紋・実効の旗の組の公開の形・呼び出しの上限（旗 ids が off なら null）を足す（v1.1a は 4 欄のまま。Issue #637）。
  * v1.2 の走りは照合の版も返す（全体の指紋・上流の台帳の部分の指紋・旗の組。境界ごとの欄は書くときに `stageVersionsAt` で足す。
- * Issue #713）
+ * Issue #713）。旗 ids が on の走りだけ、段へ渡す文書（`documents`。照合と生成に同じ読取結果を渡す）の中身の指紋を checkpoint の版の
+ * `documents` と照合の版に足す（ids off・v1.1a は欄を持たない。Issue #875）
  */
-async function stageVersionsOf(promptVersion: string, flags?: V12Flags): Promise<StageVersionsOfRun> {
+async function stageVersionsOf(
+  promptVersion: string,
+  flags: V12Flags | undefined,
+  documents: readonly PromptDocument[],
+): Promise<StageVersionsOfRun> {
   const versions = { vocabulary: VOCABULARY_VERSION, contract: CONTRACT_VERSION, prompt: promptVersion, factory: FACTORY_VERSION };
   if (flags === undefined) return { versions };
   // 全体・上流の指紋は公開の関数 1 つを通す（`toPublicV12Flags(flags)` を渡す。旗の組み立てをここに重複させない。Issue #816）
   const publicFlags = toPublicV12Flags(flags);
-  const v12 = { ...(await ledgerVersionsOf(publicFlags)), flags: publicFlags };
+  const documentsVersion = flags.ids ? await documentsVersionOf(documents) : undefined;
+  const v12 = {
+    ...(await ledgerVersionsOf(publicFlags)),
+    flags: publicFlags,
+    ...(documentsVersion === undefined ? {} : { documents: documentsVersion }),
+  };
   return {
-    versions: { ...versions, ledger: v12.ledger, flags: v12.flags, call_limits: flags.ids ? v12CallLimitsRecord() : null },
+    versions: {
+      ...versions,
+      ledger: v12.ledger,
+      flags: v12.flags,
+      call_limits: flags.ids ? v12CallLimitsRecord() : null,
+      ...(documentsVersion === undefined ? {} : { documents: documentsVersion }),
+    },
     v12,
   };
 }
@@ -1428,7 +1445,9 @@ async function runStageFromPlanFile(
   const pipeline = parsed.pipeline === "v1.2" ? "v1.2" : "v1.1a";
   const publicFlags = v12FlagsOf(pipeline);
   const flags = publicFlags === undefined ? undefined : fromPublicV12Flags(publicFlags);
-  const stageVersions = await stageVersionsOf(promptVersionOf(pipeline), flags);
+  // 文書は照合の前に 1 回だけ読み、同じ読取結果を照合（旗 ids の文書の中身の指紋）と生成へ渡す（Issue #875）
+  const documents = await deps.loadDocuments();
+  const stageVersions = await stageVersionsOf(promptVersionOf(pipeline), flags, documents);
   let resume: Parameters<typeof runStageRangeV11a>[0]["resume"];
   let inputRecord: { readonly checkpoint: string; readonly boundary: StageBoundary; readonly output_digest: string } | null =
     null;
@@ -1463,7 +1482,6 @@ async function runStageFromPlanFile(
     log(USAGE);
     return EXIT_USAGE;
   }
-  const documents = await deps.loadDocuments();
   const client = deps.makeClient({
     apiKey,
     model: parsed.model,

@@ -86,7 +86,9 @@ import {
   verifyStageInput,
   type StageInputCode,
 } from "./v11a/bundle-v11a.js";
+import * as bundleV11aModule from "./v11a/bundle-v11a.js";
 import * as v11aRunModule from "./v11a/run.js";
+import { BASE_IDS_LEDGER_BEFORE_875, withOldValidationExpressionTexts } from "./v12/__tests__/ledger.js";
 import {
   ENUM_MEMBERSHIP_REQUEST_DIFF,
   FIXTURE_DOCUMENTS,
@@ -128,7 +130,7 @@ import * as callModule from "./call.js";
 import type { LedgerView } from "./v12/ledger.js";
 import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
 import { isGeneratedTestId } from "./v12/generated-tests.js";
-import { ruleTexts } from "./stages/prompt.js";
+import { ruleTexts, type PromptDocument } from "./stages/prompt.js";
 import {
   TEST_SPEC_DATA_NAMES,
   TEST_SPEC_CLOCK_DATA_NAME,
@@ -2110,7 +2112,10 @@ describe("v1.2 の一気通貫の走りの checkpoint（`--pipeline v1.2 --plan-
         ledger_upstream: entry.boundary === "t1-t2" ? await ledgerModule.upstreamLedgerSha256(ledgerModule.PROPERTY_LEDGER, V12_IDS_FLAGS) : null,
         flags: factory.V12_PIPELINE_FLAGS,
         call_limits: { logical_calls: V12_CALL_LIMITS.logicalCalls, real_attempts: V12_CALL_LIMITS.realAttempts, judge_branch: V12_CALL_LIMITS.judgeBranch },
+        // 旗 ids の走りは段へ渡した文書の中身の指紋を末尾に足す 9 欄（Issue #875 で 8 欄から広げた）
+        documents: await factory.documentsVersionOf(FIXTURE_DOCUMENTS),
       });
+      expect(Object.keys(checkpoint["versions"] as object).at(-1)).toBe("documents");
     }
     // checkpoint は納品物の後・Build だけの記録の前に書き、manifest の files には載らない
     expect(run.written.slice(-3)).toEqual([...CHECKPOINT_NAMES, BUILD_CLI_RECORD_FILE]);
@@ -2389,6 +2394,8 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
       ledger_upstream: await ledgerModule.upstreamLedgerSha256(ledgerModule.PROPERTY_LEDGER, V12_IDS_FLAGS),
       flags: factory.V12_PIPELINE_FLAGS,
       call_limits: CALL_LIMITS,
+      // 旗 ids の段の走りは段へ渡した文書の中身の指紋も持つ（Issue #875 で足した欄）
+      documents: await factory.documentsVersionOf(FIXTURE_DOCUMENTS),
     });
     const conditions = record["conditions"] as Record<string, unknown>;
     expect(conditions["prompt_version"]).toBe("v1.2");
@@ -2510,6 +2517,77 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     const v11a = await runStageCli({ dir: `${directory}/v12-stage-version-out-v11a`, args: ["--stage-start", "test-spec", "--stage-end", "test-spec", "--stage-input", `${source}/${stageCheckpointFile("t1-t2")}`], calls: [structured(v11aTestSpec())] });
     expect(v11a.errors.filter((line) => line.startsWith("stage-input:"))).toEqual([]);
     expect(v11a.makeClient).toHaveBeenCalledTimes(1);
+  });
+
+  // ── 段へ渡した文書の中身の指紋（旗 ids。Issue #875）──────────────────────────────
+
+  /** 文書の違う checkpoint の断り（Issue #875） */
+  const versionRefusalOf875 = { code: EXIT_STAGE_INPUT, errors: ["stage-input:version"] };
+
+  it("文書の中身の指紋（Issue #875）：境界 t1-t2・t2-b1 で、本文を 1 文字変えた文書の工場は checkpoint を stage-input:version で断り（クライアントを作らない・何も書かない）、同じ文書なら通る。文書の読取は 1 回で、照合と生成に同じ読取結果が渡る", async () => {
+    const calls = [...v12Head(), structured(v11aJudgments())];
+    const first = `${directory}/v12-documents-a`;
+    await runStageCli({ dir: first, args: ["--stage-end", "semantic-check"], calls: calls.slice(0, 5), pipeline: "v1.2" });
+    const second = `${directory}/v12-documents-b`;
+    const t2 = await runStageCli({
+      dir: second,
+      args: ["--stage-start", "test-spec", "--stage-end", "test-spec", "--stage-input", `${first}/${stageCheckpointFile("t1-t2")}`],
+      calls: calls.slice(5, 6),
+      pipeline: "v1.2",
+    });
+    expect(t2.code).toBe(EXIT_OK);
+    const now = await factory.documentsVersionOf(FIXTURE_DOCUMENTS);
+    for (const path of [`${first}/${stageCheckpointFile("t1-t2")}`, `${second}/${stageCheckpointFile("t2-b1")}`]) {
+      expect((await readJson(path))["versions"], path).toMatchObject({ documents: now });
+    }
+    /** 本文を 1 文字変えた文書（名前・並びは同じ） */
+    const changed = FIXTURE_DOCUMENTS.map((document, index) => (index === 0 ? { ...document, text: `${document.text}字` } : document));
+    expect(await factory.documentsVersionOf(changed)).not.toBe(now);
+    const cases = [
+      { boundary: "t1-t2", start: "test-spec", input: `${first}/${stageCheckpointFile("t1-t2")}`, rest: calls.slice(5, 6), end: ["--stage-end", "test-spec"] },
+      { boundary: "t2-b1", start: "write", input: `${second}/${stageCheckpointFile("t2-b1")}`, rest: calls.slice(6), end: [] },
+    ] as const;
+    for (const { boundary, start, input, rest, end } of cases) {
+      // 文書の違う工場：断る（API を呼ばない・何も書かない）。読取は 1 回
+      let changedReads = 0;
+      const refused = await runStageCli({
+        dir: `${directory}/v12-documents-out-${boundary}-changed`,
+        args: ["--stage-start", start, "--stage-input", input],
+        calls: [],
+        pipeline: "v1.2",
+        loadDocuments: async () => {
+          changedReads += 1;
+          return changed;
+        },
+      });
+      expect({ code: refused.code, errors: refused.errors }, boundary).toEqual(versionRefusalOf875);
+      expect(refused.makeClient, boundary).not.toHaveBeenCalled();
+      expect(refused.written, boundary).toEqual([]);
+      expect(changedReads, boundary).toBe(1);
+      // 同じ文書の工場：通る。照合に使った文書（checkpoint の documents と同じ指紋）と生成に渡した文書が同じ読取結果
+      const read: (readonly PromptDocument[])[] = [];
+      const loaded = FIXTURE_DOCUMENTS.map((document) => ({ ...document }));
+      const verifySpy = vi.spyOn(bundleV11aModule, "documentsVersionOf");
+      const rangeSpy = vi.spyOn(v11aRunModule, "runStageRangeV11a");
+      const passed = await runStageCli({
+        dir: `${directory}/v12-documents-out-${boundary}-same`,
+        args: ["--stage-start", start, ...end, "--stage-input", input],
+        calls: rest,
+        pipeline: "v1.2",
+        loadDocuments: async () => {
+          read.push(loaded);
+          return loaded;
+        },
+      });
+      expect(passed.errors.filter((line) => line.startsWith("stage-input:")), boundary).toEqual([]);
+      expect(passed.code, boundary).toBe(EXIT_OK);
+      expect(read, boundary).toHaveLength(1);
+      expect(verifySpy.mock.calls.length, boundary).toBe(1);
+      expect(verifySpy.mock.calls[0]?.[0], boundary).toBe(loaded);
+      expect(rangeSpy.mock.calls.length, boundary).toBe(1);
+      expect(rangeSpy.mock.calls[0]?.[0].documents, boundary).toBe(loaded);
+      vi.restoreAllMocks();
+    }
   });
 
   // ── 境界ごとの上流の台帳の部分の指紋（Issue #713）──────────────────────────────
@@ -2808,6 +2886,29 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     const checkpoint = JSON.parse(await fs.readFile(`${dir}/${stageCheckpointFile("t1-t2")}`, "utf8")) as Record<string, any>;
     expect(checkpoint["versions"]["ledger_upstream"]).toBe(await ledgerModule.upstreamLedgerSha256(ledgerModule.PROPERTY_LEDGER, V12_IDS_FLAGS));
     {
+      // Issue #875：checkpoint の版の `ledger`・`ledger_upstream` を #875 の前の ids の値（検査の式の行の文を旧の文に戻した台帳の
+      // 指紋）に戻し、`documents` を外した状態が、直す前の値に等しい。記録の output_digest は戻した checkpoint から計算し直す
+      expect(checkpoint["versions"]["documents"]).toBe(await factory.documentsVersionOf(FIXTURE_DOCUMENTS));
+      const { documents: _documents, ...versionsBefore875 } = checkpoint["versions"] as Record<string, unknown>;
+      const reverted = {
+        ...checkpoint,
+        versions: {
+          ...versionsBefore875,
+          ledger: await ledgerModule.propertyLedgerSha256(withOldValidationExpressionTexts(), V12_IDS_FLAGS),
+          ledger_upstream: await ledgerModule.upstreamLedgerSha256(withOldValidationExpressionTexts(), V12_IDS_FLAGS),
+        },
+      };
+      expect(reverted.versions.ledger).toBe(BASE_IDS_LEDGER_BEFORE_875.ledger);
+      expect(reverted.versions.ledger_upstream).toBe(BASE_IDS_LEDGER_BEFORE_875.upstream);
+      const revertedRecord = await stageRecordOf(dir);
+      (revertedRecord["checkpoints"] as { output_digest: string }[])[0]!.output_digest = await stageOutputDigest(reverted);
+      expect([await sha256Hex(stageJsonText(revertedRecord)), await sha256Hex(stageJsonText(reverted))]).toEqual(
+        V12_STAGE_C1_RETRY_DIGESTS_BEFORE_875,
+      );
+    }
+    // 以下の旧い Issue の照合は、#875 で足した `documents` を外した checkpoint で続ける
+    delete checkpoint["versions"]["documents"];
+    {
       // Issue #816：この Issue の段（checkpoint の版の `ledger`・`ledger_upstream`）だけを #816 の前（#806）の ids の値に
       // 戻した状態が、直す前の値に等しい。記録の output_digest は戻した checkpoint から計算し直す
       const reverted = {
@@ -3060,6 +3161,15 @@ const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
   // Issue #832 で取り直した（検査の式の行の旗 ids の T2 の文を直し、ids の全体の指紋が変わり、t1-t2 の checkpoint の版と、
   // それを入力の出力ダイジェストに持つ記録が変わるため。旧の値は 8ef7fba757a1fab987122c1a48b73a1049387ce4c6b7b17966ab36fb6cb13822・
   // 5ae7bf97d93262c003cda5c0dbc330f87a1b5d578ab8d8066d3195501eaf5138。上流の指紋は変えないので、#806 へ戻す照合の値は今までどおり）
+  // Issue #875 で取り直した（検査の式の行の文を文書の式の文法に委ねて ids の全体・上流の指紋が変わり、checkpoint の版の末尾に
+  // 段へ渡した文書の中身の指紋 `documents` を足したため。旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_875` に残し、checkpoint の
+  // `ledger`・`ledger_upstream` を #875 の前の値に戻して `documents` を外せば一致することを試験で確かめる）
+  "8f62c2c2144ee3040d8cff7a6e479ba1d42284141ec6b9584dd54e76ba484afd",
+  "dae0c86b91176eaffdec7f33d9d0e8b7a6da849723ccdf948bb5f67bf11239db",
+];
+
+/** Issue #875 の前（417e14f だけの base）の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値） */
+const V12_STAGE_C1_RETRY_DIGESTS_BEFORE_875: readonly string[] = [
   "1be3778ab239f95e3ce67f4f9bd0490207062e083279d26282eec2d43d769f0c",
   "e31d2d2988950c499b0583f3c5608190d539e3996db457aeb219eab58fa1364f",
 ];
@@ -3429,6 +3539,13 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
         // Issue #806：全体・上流の指紋を、base の CLI が記録していた off の値と旧の上流の値に戻す
         checkpoint["versions"]["ledger"] = currentOffLedger;
         if (checkpoint["versions"]["ledger_upstream"] !== null) checkpoint["versions"]["ledger_upstream"] = BEFORE_UPSTREAM;
+        // Issue #875：旗 ids の走りの checkpoint だけが版の末尾に文書の中身の指紋 `documents` を持つ（off の走りは持たない）。外して照らす
+        if (idsRun && checkpoint["versions"]["flags"]?.["ids"] === true) {
+          expect(checkpoint["versions"]["documents"], path).toBe(await factory.documentsVersionOf(FIXTURE_DOCUMENTS));
+          delete checkpoint["versions"]["documents"];
+        } else {
+          expect("documents" in checkpoint["versions"], path).toBe(false);
+        }
         // Issue #735 で変わった論理の枠の値も旧の値に戻す（#725 の前の値と照らすため）
         revert735(checkpoint);
         digestOf.set(path, await stageOutputDigest(checkpoint));
@@ -4174,6 +4291,8 @@ async function runStageCli(input: {
   readonly env?: Readonly<Record<string, string>>;
   /** 走りの単価（省けば受入の表から。直す前の単価を差し込む。Issue #829） */
   readonly rates?: TokenRates;
+  /** 文書を読む口（省けば `FIXTURE_DOCUMENTS`。読取の回数と照合・生成に渡る値を確かめる。Issue #875） */
+  readonly loadDocuments?: () => Promise<readonly PromptDocument[]>;
 }) {
   const planPath = `${input.dir}-plan.json`;
   const planText = JSON.stringify(input.envelope ?? (await v11aEnvelope()));
@@ -4216,7 +4335,7 @@ async function runStageCli(input: {
       directories.push(path);
       await fs.mkdir(path, { recursive: true });
     },
-    loadDocuments: async () => FIXTURE_DOCUMENTS,
+    loadDocuments: input.loadDocuments ?? (async () => FIXTURE_DOCUMENTS),
     makeClient,
     makeLlmJudge: () => input.judge ?? v11aJudge(),
     now: input.clock?.now ?? (() => 0),
@@ -5891,6 +6010,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
         const checkpoint = JSON.parse(await fs.readFile(checkpointPath, "utf8")) as Record<string, any>;
         checkpoint["versions"]["ledger"] = restore816Ledger;
         if (checkpoint["versions"]["ledger_upstream"] !== null) checkpoint["versions"]["ledger_upstream"] = restore816Upstream;
+        // Issue #875：旗 ids の checkpoint の版の末尾の文書の中身の指紋も外す（#875 の前の版は持たない）
+        delete checkpoint["versions"]["documents"];
         return stageOutputDigest(checkpoint);
       };
       for (const path of written.filter((name) => name.startsWith("stage-checkpoint-"))) {
@@ -5917,6 +6038,9 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
         const checkpoint = JSON.parse(text) as Record<string, any>;
         checkpoint["versions"]["ledger"] = legacyLedger;
         if (checkpoint["versions"]["ledger_upstream"] !== null) checkpoint["versions"]["ledger_upstream"] = legacyUpstream;
+        // Issue #875：旗 ids の checkpoint の版の末尾の文書の中身の指紋を外す（#875 の前の版は持たない）
+        expect(checkpoint["versions"]["documents"], path).toBe(await factory.documentsVersionOf(FIXTURE_DOCUMENTS));
+        delete checkpoint["versions"]["documents"];
         text = stageJsonText(checkpoint);
         rawText = text;
         revertedCheckpoints.set(path, await stageOutputDigest(checkpoint));

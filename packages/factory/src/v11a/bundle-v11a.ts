@@ -51,6 +51,7 @@ import { testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
 import { UPSTREAM_LEDGER_BOUNDARY, type V12PublicFlags } from "../v12/ledger.js";
 import type { SearchEvent, SearchRepairRecord, StageSearchRepairLog, VersionViolations } from "../v12/search-repair.js";
 import type { CallRequestRecord, StageSpanRecord } from "../record.js";
+import type { PromptDocument } from "../stages/prompt.js";
 
 /** v1.1α の記録の置き場所（成果物の置き場所の下。v1 の成果物と重ならない） */
 export const V11A_ARTIFACT_NAMES = {
@@ -608,7 +609,8 @@ export interface StageCallLimits {
  * 性質の台帳の指紋 `ledger`・実効の旗の組の公開の形 `flags`（v1.2 の照合で今の走りと同じことを求める）と、呼び出しの上限
  * `call_limits`（旗 ids が off なら null。記録だけ）を足す。v1.1α の checkpoint は 4 欄のまま（Issue #637）。
  * v1.2 は境界ごとの上流の台帳の部分の指紋 `ledger_upstream` も足す（境界 t1-t2 は部分の指紋、t2-b1 は null。`stageVersionsAt`。
- * 全体の指紋 `ledger` は今のまま記録する。Issue #713）
+ * 全体の指紋 `ledger` は今のまま記録する。Issue #713）。旗 ids が on の v1.2 の走りだけ、段へ渡した文書の中身の指紋 `documents`
+ * （`documentsVersionOf`）を末尾に足す（ids off・v1.1α の checkpoint は欄を持たない。Issue #875）
  */
 export interface StageVersions {
   readonly vocabulary: string;
@@ -619,6 +621,16 @@ export interface StageVersions {
   readonly ledger_upstream?: string | null;
   readonly flags?: V12PublicFlags;
   readonly call_limits?: StageCallLimits | null;
+  readonly documents?: string;
+}
+
+/**
+ * 段へ渡す文書の並びの中身の指紋（Issue #875）。並びの順の名前と本文だけから決まる 64 桁の 16 進の SHA-256（正規化した JSON）。
+ * 語彙・契約の版の名前は文書の中身が変わっても上がらないことがあるので、旗 ids の段の再開はこの値で今の文書と照らす。純粋な関数で、
+ * 計測の道具は各 checkout の `loadDocumentsFromFiles()` の結果を渡して期待値を作る
+ */
+export async function documentsVersionOf(documents: readonly PromptDocument[]): Promise<string> {
+  return sha256Hex(canonicalJson(documents.map((document) => ({ name: document.name, text: document.text }))));
 }
 
 /**
@@ -629,6 +641,11 @@ export interface StageV12Versions {
   readonly ledger: string;
   readonly ledgerUpstream?: string;
   readonly flags: V12PublicFlags;
+  /**
+   * 今の走りの段へ渡す文書の中身の指紋（`documentsVersionOf`。Issue #875）。旗 ids が on の照合だけが読み、checkpoint の版の
+   * `documents` と照らす（呼び手が今の文書から作る。checkpoint の自己申告の値を期待値にしない。欠けは断る）
+   */
+  readonly documents?: string;
 }
 
 /**
@@ -636,7 +653,7 @@ export interface StageV12Versions {
  * 境界 t1-t2 には上流の台帳の部分の指紋、t2-b1 には null を書く（全境界に同じ版を使い回さない。Issue #713）
  */
 export function stageVersionsAt(versions: StageVersions, boundary: StageBoundary, ledgerUpstream: string): StageVersions {
-  const { vocabulary, contract, prompt, factory, ledger, flags, call_limits } = versions;
+  const { vocabulary, contract, prompt, factory, ledger, flags, call_limits, documents } = versions;
   return {
     vocabulary,
     contract,
@@ -646,6 +663,7 @@ export function stageVersionsAt(versions: StageVersions, boundary: StageBoundary
     ledger_upstream: boundary === UPSTREAM_LEDGER_BOUNDARY ? ledgerUpstream : null,
     ...(flags === undefined ? {} : { flags }),
     ...(call_limits === undefined ? {} : { call_limits }),
+    ...(documents === undefined ? {} : { documents }),
   };
 }
 
@@ -1100,7 +1118,8 @@ export async function verifyStageInput(input: {
   /**
    * `--pipeline v1.2` の段の走りだけ：checkpoint の版の `ledger`・`flags` がこの値と同じことを求める（欄が無ければ断る）。省けば
    * 見ない（v1.1α の照合は今までどおり。Issue #637）。入力の境界が t1-t2 なら `ledger` の代わりに上流の台帳の部分の指紋
-   * `ledger_upstream` を `ledgerUpstream` と照らす（両方が 64 桁の 16 進で同じことを求める。Issue #713）
+   * `ledger_upstream` を `ledgerUpstream` と照らす（両方が 64 桁の 16 進で同じことを求める。Issue #713）。旗 ids が on なら、
+   * checkpoint の版の `documents` を `documents`（今の文書の中身の指紋）と照らす（両方が 64 桁の 16 進で同じことを求める。Issue #875）
    */
   readonly v12?: StageV12Versions;
 }): Promise<StageInputVerification> {
@@ -1144,6 +1163,14 @@ export async function verifyStageInput(input: {
           versions["ledger_upstream"] === input.v12.ledgerUpstream
         : versions["ledger"] === input.v12.ledger;
     if (!ledgerMatches || !isObject(versions["flags"]) || !sameJson(versions["flags"], input.v12.flags)) {
+      return fail("stage-input:version");
+    }
+    // 旗 ids の走り：段へ渡した文書の中身の指紋が今の文書と同じ（版の名前を上げない文書の変更で旧い checkpoint を混ぜない。
+    // checkpoint 側の欠け・形の違い・不一致と、呼び手の期待値の欠けは断る。期待値は呼び手が今の文書から作る。Issue #875）
+    if (
+      input.v12.flags.ids === true &&
+      !(isSha256Hex(versions["documents"]) && isSha256Hex(input.v12.documents) && versions["documents"] === input.v12.documents)
+    ) {
       return fail("stage-input:version");
     }
   }

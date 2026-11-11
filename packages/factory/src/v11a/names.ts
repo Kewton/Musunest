@@ -275,8 +275,8 @@ export type NameTableVerification =
   | { readonly requirementId: string; readonly kind: "non-requirement" }
   | {
       /**
-       * 検査の式（入力の値を 1 つの比較で縛る決まり。旗 `v12.ids` と台帳が on の走りだけ。v1 の型へは fixed-test として写す。
-       * Issue #800）。`targets` は同じ entity の項目（field）の行の ID の並び（1 つ以上）で、entity と対象の項目は C2' が所属に足す
+       * 検査の式（同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり。書き方は文書の式の文法のとおり。旗 `v12.ids` と
+       * 台帳が on の走りだけ。v1 の型へは fixed-test として写す。Issue #800・#875）。`targets` は同じ entity の項目（field）の行の ID の並び（1 つ以上）で、entity と対象の項目は C2' が所属に足す
        */
       readonly requirementId: string;
       readonly kind: "validation-expression";

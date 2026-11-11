@@ -5,7 +5,7 @@ import { BUILD_CLI_RECORD_SCHEMA } from "../cli-plan.js";
 import { ARTIFACTS_DIR } from "../bundle.js";
 import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { requirementsFromPlan } from "../pipeline.js";
-import { fixtureList, fixtureNonRequirementList, fixtureNonRequirementTable, fixtureTable } from "./__tests__/fixtures.js";
+import { FIXTURE_DOCUMENTS, fixtureList, fixtureNonRequirementList, fixtureNonRequirementTable, fixtureTable } from "./__tests__/fixtures.js";
 import {
   buildSearchRepairArtifact,
   buildStageCheckpoint,
@@ -24,6 +24,7 @@ import {
   type StageRunOutcome,
   type StageV12Versions,
   type V11aRecordsInput,
+  documentsVersionOf,
 } from "./bundle-v11a.js";
 import type { FailureAttribution, StageRecord } from "../record.js";
 import { deriveCarryOver } from "./carry-over.js";
@@ -432,9 +433,11 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
   /**
    * v1.2 の版の欄を足した checkpoint（Issue #637）。境界 t1-t2 の checkpoint には上流の台帳の部分の指紋 `ledger_upstream` も
    * 足す（Issue #713 で t1-t2 の照合が全体の指紋の代わりにこれを照らすようになったため、Issue #637 の照合の試験の checkpoint と
-   * 照合の版に部分の指紋を足した）
+   * 照合の版に部分の指紋を足した）。旗 ids が on の組なので、段へ渡した文書の中身の指紋 `documents` も checkpoint と照合の版の
+   * 両方に足す（Issue #875 で旗 ids の照合が文書の中身を照らすようになったため。欄だけの照合は下の #875 の試験で照らす）
    */
-  const V12_VERSIONS = { ledger: "c".repeat(64), flags: { ledger: true, "search-repair": true, ids: true } };
+  const DOCUMENTS = "0123456789abcdef".repeat(4);
+  const V12_VERSIONS = { ledger: "c".repeat(64), flags: { ledger: true, "search-repair": true, ids: true }, documents: DOCUMENTS };
   const UPSTREAM = "e".repeat(64);
   const withV12Versions = (extra: Record<string, unknown> = {}) => (checkpoint: Record<string, unknown>) => {
     checkpoint["versions"] = { ...(checkpoint["versions"] as object), ...V12_VERSIONS, ledger_upstream: UPSTREAM, call_limits: null, ...extra };
@@ -494,7 +497,19 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
     const versions = { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0", ...V12_VERSIONS, call_limits: null };
     const t1 = stageVersionsAt(versions, "t1-t2", UPSTREAM);
     const t2 = stageVersionsAt(versions, "t2-b1", UPSTREAM);
-    expect(Object.keys(t1)).toEqual(["vocabulary", "contract", "prompt", "factory", "ledger", "ledger_upstream", "flags", "call_limits"]);
+    // 旗 ids の版は文書の中身の指紋 `documents` を末尾に持つ（Issue #875）。持たない版は今までの 8 欄のまま（下で照らす）
+    expect(Object.keys(t1)).toEqual(["vocabulary", "contract", "prompt", "factory", "ledger", "ledger_upstream", "flags", "call_limits", "documents"]);
+    const { documents: _documents, ...withoutDocuments } = versions;
+    expect(Object.keys(stageVersionsAt(withoutDocuments, "t1-t2", UPSTREAM))).toEqual([
+      "vocabulary",
+      "contract",
+      "prompt",
+      "factory",
+      "ledger",
+      "ledger_upstream",
+      "flags",
+      "call_limits",
+    ]);
     expect(Object.keys(t2)).toEqual(Object.keys(t1));
     expect(t1.ledger_upstream).toBe(UPSTREAM);
     expect(t2.ledger_upstream).toBeNull();
@@ -592,6 +607,79 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
       contractVersion: "v0.2",
     });
     expect(v11a).toMatchObject({ ok: true });
+  });
+
+  // ── 段へ渡した文書の中身の指紋（旗 ids。Issue #875）──────────────────────────────
+
+  /** 本文を 1 文字変えた文書（名前・並びは同じ） */
+  const changedDocuments = FIXTURE_DOCUMENTS.map((document, index) => (index === 0 ? { ...document, text: `${document.text}字` } : document));
+  const BOUNDARIES = [
+    { boundary: "t1-t2" as const, start: "test-spec" as const },
+    { boundary: "t2-b1" as const, start: "write" as const },
+  ];
+
+  it.each(BOUNDARIES)(
+    "二点測定（Issue #875）：境界 $boundary で、本文を 1 文字変えた文書で作った checkpoint（出力ダイジェストはそろえ、差は documents だけ）の再開は stage-input:version で断り、同じ文書なら通る",
+    async ({ boundary, start }) => {
+      const now = await documentsVersionOf(FIXTURE_DOCUMENTS);
+      const before = await documentsVersionOf(changedDocuments);
+      expect(before).not.toBe(now);
+      const caller = { ...V12_VERSIONS, ledgerUpstream: UPSTREAM, documents: now };
+      const same = await written(withV12Versions({ documents: now }), boundary);
+      const other = await written(withV12Versions({ documents: before }), boundary);
+      // 差は版の documents だけ（出力ダイジェストは中身から計算し直してある）
+      const { versions: sameVersions, ...sameRest } = same.checkpoint as Record<string, Record<string, unknown>>;
+      const { versions: otherVersions, ...otherRest } = other.checkpoint as Record<string, Record<string, unknown>>;
+      expect(otherRest).toEqual(sameRest);
+      expect({ ...otherVersions, documents: now }).toEqual(sameVersions);
+      expect(await verifyV12(same, { start, v12: caller })).toMatchObject({ ok: true });
+      expect(await verifyV12(other, { start, v12: caller })).toEqual({ ok: false, code: "stage-input:version" });
+      // 照合を外した経路（v1.1a の照合は版の documents を見ない）では、文書の違う checkpoint が通る。documents の照合が断った証跡
+      const unchecked = await verifyStageInput({
+        start,
+        ...other,
+        checkpointFile: "cp.json",
+        plan: PLAN,
+        planSha256: "a".repeat(64),
+        sourceSha256: "b".repeat(64),
+        vocabularyVersion: "v1",
+        contractVersion: "v0.2",
+      });
+      expect(unchecked).toMatchObject({ ok: true });
+    },
+  );
+
+  it.each(BOUNDARIES)(
+    "二点測定（Issue #875）：境界 $boundary で、checkpoint の documents の欠け・不正の形、呼び手の期待値の欠け・不正の形、両方の欠けを stage-input:version で断る",
+    async ({ boundary, start }) => {
+      const version = { ok: false, code: "stage-input:version" };
+      const caller = { ...V12_VERSIONS, ledgerUpstream: UPSTREAM };
+      for (const [name, documents] of [
+        ["missing", undefined],
+        ["null", null],
+        ["upper", DOCUMENTS.toUpperCase()],
+        ["short", DOCUMENTS.slice(1)],
+        ["not-hex", "g".repeat(64)],
+        ["number", 1],
+        ["object", { sha256: DOCUMENTS }],
+      ] as const) {
+        expect(await verifyV12(await written(withV12Versions({ documents }), boundary), { start, v12: caller }), name).toEqual(version);
+      }
+      const texts = await written(withV12Versions(), boundary);
+      expect(await verifyV12(texts, { start, v12: caller })).toMatchObject({ ok: true });
+      const { documents: _documents, ...withoutDocuments } = caller;
+      expect(await verifyV12(texts, { start, v12: withoutDocuments }), "input-missing").toEqual(version);
+      expect(await verifyV12(texts, { start, v12: { ...caller, documents: DOCUMENTS.toUpperCase() } }), "input-upper").toEqual(version);
+      // 両方の欠けを一致とみなさない
+      expect(await verifyV12(await written(withV12Versions({ documents: undefined }), boundary), { start, v12: withoutDocuments })).toEqual(version);
+    },
+  );
+
+  it.each(BOUNDARIES)("旗 ids が off の照合は documents を見ない（境界 $boundary。欄の無い checkpoint・期待値の無い呼び手で通る。Issue #875）", async ({ boundary, start }) => {
+    const offFlags = { ledger: true, "search-repair": true, ids: false };
+    const texts = await written(withV12Versions({ flags: offFlags, documents: undefined }), boundary);
+    const { documents: _documents, ...caller } = { ...V12_VERSIONS, ledgerUpstream: UPSTREAM, flags: offFlags };
+    expect(await verifyV12(texts, { start, v12: caller })).toMatchObject({ ok: true });
   });
 });
 
