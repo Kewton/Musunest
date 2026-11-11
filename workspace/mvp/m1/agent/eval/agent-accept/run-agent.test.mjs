@@ -14,6 +14,7 @@ import { spawnSync } from "node:child_process";
 import { DEFAULT_SET_PATH, EVAL_SET_SCHEMA, PLAN_SCRIPT_SCHEMA, loadEvalSet, reconcile, scoringFingerprint, scriptsFingerprint } from "./score-agent.mjs";
 import { OFFICIAL_COMPARE, compareProfile, launchAllowed } from "./score-agent.mjs";
 import { conditionsSignature } from "./score-agent.mjs";
+import { fingerprintDir } from "./score-agent.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const runAgentFile = join(here, "run-agent.mjs");
@@ -1054,8 +1055,17 @@ const ENV_CONDITIONS = { model: "fake-model", effort: "high", budget_usd: 0.3, d
 function envelopeOf(pid, { plan = { plan_id: `plan-${pid}`, vocabulary_version: "v1", body: [`spec ${pid}`] }, source = reqText(pid), ...fields } = {}) {
   return { schema_version: ENVELOPE_SCHEMA, outcome: "confirmed", plan, plan_sha256: plan === null ? null : sha256(JSON.stringify(plan)), source_sha256: sha256(source), conditions: ENV_CONDITIONS, stop: null, ...fields };
 }
-/** 合成した凍結の組（envelopes：P → 包みの写像かバイト列。adopted：P → 採用の欄の上書き） */
-function writeFrozen(dir, repo, { envelopes, missing = [], version = 1, origin = "frozen-plan", author, setSha, adopted = {} }) {
+/**
+ * 偽物のリポジトリの生成に渡す文書の指紋（#876。条件の prompt_documents と同じ取り方を、偽物の files の置き場所から直接計算する）。
+ * 合成の組は作成時の文書としてこれを持つ（指紋の無い旧い形の組は断られる）
+ */
+const promptDocumentsOfRepo = (repo) => ({
+  contract: fingerprintDir(join(repo, "packages/appspec-schema/contract")).fingerprint,
+  semantics: sha256(readFileSync(join(repo, "packages/appspec-schema/docs/semantics.md"))),
+  vocabulary: sha256(readFileSync(join(repo, "packages/appspec-schema/vocabulary.yaml"))),
+});
+/** 合成した凍結の組（envelopes：P → 包みの写像かバイト列。adopted：P → 採用の欄の上書き。documents：組の prompt_documents の上書き（undefined なら repo の今の文書、null なら欄を持たない旧い形）） */
+function writeFrozen(dir, repo, { envelopes, missing = [], version = 1, origin = "frozen-plan", author, setSha, adopted = {}, documents }) {
   mkdirSync(join(dir, "envelopes"), { recursive: true });
   const entries = Object.entries(envelopes).map(([pid, env]) => {
     const bytes = Buffer.isBuffer(env) ? env : Buffer.from(JSON.stringify(env));
@@ -1063,6 +1073,7 @@ function writeFrozen(dir, repo, { envelopes, missing = [], version = 1, origin =
     return { pattern: pid, run: null, started_at: null, envelope: { path: `envelopes/${pid}.json`, sha256: sha256(bytes) }, plan_sha256: env.plan_sha256 ?? "x", source_sha256: env.source_sha256 ?? "x", ...(adopted[pid] ?? {}) };
   });
   const set = { schema: "musunest-eval/frozen-plan-set/v1", id: "fz-t", version, origin, ...(author ? { author } : {}), rule: null, set: { path: DEFAULT_SET_PATH, sha256: setSha ?? sha256(readFileSync(join(repo, DEFAULT_SET_PATH))), id: "dev-p1-p10", version: 1 }, source_measurement: null, adopted: entries, missing: missing.map((pattern) => ({ pattern, runs: 1 })) };
+  if (documents !== null) set.prompt_documents = documents === undefined ? promptDocumentsOfRepo(repo) : documents;
   const path = join(dir, "frozen-plan-set.json");
   writeFileSync(path, JSON.stringify(set, null, 1));
   return path;
@@ -3181,6 +3192,10 @@ test("#713 (d) 実の工場の dist の値の受け渡し：package の入口を
   assert.equal(real.V12_PIPELINE_FLAGS.ids, true);
   assert.notEqual(await real.propertyLedgerSha256(), realLedger);
   assert.notEqual(await real.upstreamLedgerSha256(), realUpstream);
+  // #876：実の dist は documentsVersionOf（#875）を出すので、読み手はその dist の loadDocumentsFromFiles() の結果から作った文書の指紋も渡す
+  assert.equal(typeof real.documentsVersionOf, "function", "実の dist に文書の指紋の関数が無い");
+  const realDocuments = await real.documentsVersionOf(await real.loadDocumentsFromFiles());
+  assert.match(realDocuments, /^[0-9a-f]{64}$/);
   await withRepo(async (base) => {
     const repo = makeStageRepo713(base, "real");
     writeFileSync(join(repo, "packages/factory/dist/index.js"), `export * from ${JSON.stringify(pathToFileURL(realIndex).href)};\n`);
@@ -3193,11 +3208,11 @@ test("#713 (d) 実の工場の dist の値の受け渡し：package の入口を
     assert.equal(r.status, 0, r.stderr);
     const seen = readLog(vlog);
     assert.equal(seen.length, 15);
-    for (const v of seen) assert.deepEqual(v, { ledger: realLedger, ledgerUpstream: realUpstream, flags });
+    for (const v of seen) assert.deepEqual(v, { ledger: realLedger, ledgerUpstream: realUpstream, flags, documents: realDocuments });
     const vlogB = join(base, "v12-b1.log");
     const rb = runAgent(repo, join(base, "b1"), stageArgs638(fz, ["--stage-start", "write", "--stage-from", up]), { FAKE_SPAWN_LOG: log, FAKE_VERIFY_V12_LOG: vlogB });
     assert.equal(rb.status, 0, rb.stderr);
-    for (const v of readLog(vlogB)) assert.deepEqual(v, { ledger: realLedger, flags });
+    for (const v of readLog(vlogB)) assert.deepEqual(v, { ledger: realLedger, flags, documents: realDocuments });
     assert.equal(readJson(join(up, "P6-r1", "bundle", "stage-checkpoint-t2-b1.json")).versions.ledger, realLedger);
     // 直す前の挙動：同じ実の dist で公開の関数を隠す（読み手が旗なしの呼び出しに戻る）と、ids の版で書いた上流の入力を断る（子 0 本・何も書かない）
     writeFileSync(join(repo, "packages/factory/dist/index.js"), `export * from ${JSON.stringify(pathToFileURL(realIndex).href)};\nexport const ledgerVersionsOf = undefined;\n`);
@@ -3984,4 +3999,141 @@ test("#830 README：§10.8 の本文（§10.8.1 の前）の #830 の項目に�
   const words = [[0x6301, 0x3061, 0x5bc4, 0x308a], [0x5f53, 0x756a, 0x8868], [0x4f1a, 0x8cbb], [0x51fa, 0x6b20], [0x8cb8, 0x3057, 0x51fa, 0x3057]].map((cs) => String.fromCodePoint(...cs));
   for (const w of words) assert.ok(!part.includes(w), w);
   assert.doesNotMatch(part, /[¥￥]\s?\d|\d\s?円|\$\d/);
+});
+
+// ── #876：(b) の組の文書の指紋（prompt_documents）と、段の再開の文書の指紋（documents。#875 の documentsVersionOf）
+test("#876 (b) --build-from：文書の指紋の無い旧い形の組・形の違う指紋・計測する checkout の今の文書と違う指紋は、子を起こす前に exit 3 で断り何も書かない（API を呼ばない）。同じ文書なら流す。--make-pairs も旧い形の組を断る", async () => {
+  await withRepo(async (base, repo) => {
+    const log = join(base, "spawn-876.log");
+    const envelopes = { P1: envelopeOf("P1") };
+    const docs = promptDocumentsOfRepo(repo);
+    const cases = [
+      ["old-format", { documents: null }, "build-from:documents-missing"],
+      ["null", { documents: "null-marker" }, "build-from:documents-invalid"],
+      ["short", { documents: { ...docs, contract: "a".repeat(63) } }, "build-from:documents-invalid"],
+      ["upper", { documents: { ...docs, semantics: docs.semantics.toUpperCase() } }, "build-from:documents-invalid"],
+      ["no-key", { documents: { contract: docs.contract, semantics: docs.semantics } }, "build-from:documents-invalid"],
+      ["extra-key", { documents: { ...docs, ledger: "a".repeat(64) } }, "build-from:documents-invalid"],
+      ["mismatch-contract", { documents: { ...docs, contract: "0".repeat(64) } }, "build-from:documents-mismatch"],
+      ["mismatch-semantics", { documents: { ...docs, semantics: "0".repeat(64) } }, "build-from:documents-mismatch"],
+      ["mismatch-vocabulary", { documents: { ...docs, vocabulary: "0".repeat(64) } }, "build-from:documents-mismatch"],
+    ];
+    for (const [name, spec, code] of cases) {
+      const fz = writeFrozen(join(base, `fz-876-${name}`), repo, { envelopes, ...spec });
+      if (spec.documents === "null-marker") { const v = readJson(fz); v.prompt_documents = null; writeFileSync(fz, JSON.stringify(v, null, 1)); }
+      const out = join(base, `out-876-${name}`);
+      const r = runAgent(repo, out, ["--runs", "1", "--build-from", fz], { FAKE_SPAWN_LOG: log });
+      assertRefused(r, code, log, 0, name);
+      assert.equal(r.stderr.trim().split("\n").length, 1, `${name}: 標準エラーが 1 行でない`);
+      assertNothingWritten(out, name);
+    }
+    // --make-pairs（子を起こさない）も旧い形の組を断り、対のファイルを書かない
+    const oldFz = writeFrozen(join(base, "fz-876-old-pairs"), repo, { envelopes, documents: null });
+    assertRefused(runAgent(repo, join(base, "unused"), ["--make-pairs", join(base, "pairs-876.json"), "--build-from", oldFz, "--runs", "1"], { FAKE_SPAWN_LOG: log }), "build-from:documents-missing", log, 0, "make-pairs");
+    assert.equal(existsSync(join(base, "pairs-876.json")), false);
+    // 同じ文書なら流す（子 1 本）
+    const good = writeFrozen(join(base, "fz-876-good"), repo, { envelopes });
+    const rg = runAgent(repo, join(base, "out-876-good"), ["--runs", "1", "--build-from", good], { FAKE_SPAWN_LOG: log });
+    assert.equal(rg.status, 0, rg.stderr);
+    assert.equal(spawnCount(log), 1);
+    // 計測する checkout の文書を変える（契約・語彙の意味・語彙の台帳のどれか）と、同じ組が文書の不一致で断られる（子は増えない）
+    for (const [label, rel] of [["contract", "packages/appspec-schema/contract/rules.md"], ["semantics", "packages/appspec-schema/docs/semantics.md"], ["vocabulary", "packages/appspec-schema/vocabulary.yaml"]]) {
+      const before = readFileSync(join(repo, rel));
+      appendFileSync(join(repo, rel), "#\n");
+      const out = join(base, `out-876-changed-${label}`);
+      assertRefused(runAgent(repo, out, ["--runs", "1", "--build-from", good], { FAKE_SPAWN_LOG: log }), "build-from:documents-mismatch", log, 1, `changed-${label}`);
+      assertNothingWritten(out, `changed-${label}`);
+      writeFileSync(join(repo, rel), before);
+    }
+    const rb = runAgent(repo, join(base, "out-876-back"), ["--runs", "1", "--build-from", good], { FAKE_SPAWN_LOG: log });
+    assert.equal(rb.status, 0, `文書を戻せば流す: ${rb.stderr}`);
+  });
+});
+
+// 段の再開（#875 の照合の版の documents）：新しい dist の偽物は、入口が documentsVersionOf と loadDocumentsFromFiles を出し、書き手は checkpoint の版に documents を
+// 書き、照合の関数は旗 ids が on なら版の documents と渡した期待値が 64 桁の 16 進で同じことを求める（#875 の工場と同じ規則）。FAKE_DOCS で今の文書を変える
+const DOCS_TEXT876 = "docs-a";
+const docsVersion876 = (text) => sha256(JSON.stringify([{ name: "contract-doc", text }]));
+const fakeStageLib876 = fakeStageLib713.replace(
+  '    if (!ledgerOk || JSON.stringify(cp.versions?.flags) !== JSON.stringify(input.v12.flags)) return fail("stage-input:version");\n',
+  '    if (!ledgerOk || JSON.stringify(cp.versions?.flags) !== JSON.stringify(input.v12.flags)) return fail("stage-input:version");\n' +
+    '    if (input.v12.flags.ids === true && !(hex(cp.versions?.documents) && hex(input.v12.documents) && cp.versions.documents === input.v12.documents)) return fail("stage-input:version");\n',
+);
+const fakeStageCli876 = fakeStageCli713
+  .replace("\nif (isEntry()) {", '\nif (v12 !== null && typeof idx.documentsVersionOf === "function") { try { v12.documents = await idx.documentsVersionOf(await idx.loadDocumentsFromFiles()); } catch {} }\nif (isEntry()) {')
+  .replace("flags: v12.flags, call_limits: null }", "flags: v12.flags, call_limits: null, ...(v12.documents === undefined ? {} : { documents: v12.documents }) }");
+assert.ok(fakeStageLib876 !== fakeStageLib713 && fakeStageCli876.includes("v12.documents = await") && fakeStageCli876.includes("documents: v12.documents"), "偽物の差し替えが当たらない");
+/** 新しい dist の入口の足し分。loader が false なら loadDocumentsFromFiles を出さない、"throw" なら documentsVersionOf が例外、{ value } なら任意の値を返す */
+const docsIndex876 = ({ loader = true, version = null } = {}) =>
+  'import { createHash as docsHash } from "node:crypto";\n' +
+  `export async function documentsVersionOf(d) { ${version === "throw" ? 'throw new Error("x");' : version !== null ? `return ${JSON.stringify(version.value)};` : 'return docsHash("sha256").update(JSON.stringify(d.map((x) => ({ name: x.name, text: x.text })))).digest("hex");'} }\n` +
+  (loader ? `export async function loadDocumentsFromFiles() { return [{ name: "contract-doc", text: process.env.FAKE_DOCS ?? ${JSON.stringify(DOCS_TEXT876)} }]; }\n` : "");
+function makeStageRepo876(base, name, docs = {}) {
+  const repo = makeStageRepo713(base, name, { versions: VERSIONS817 });
+  writeFileSync(join(repo, "packages/factory/dist/v11a/bundle-v11a.js"), fakeStageLib876);
+  writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeStageCli876);
+  writeFileSync(join(repo, "packages/factory/dist/index.js"), v12Index713({ versions: VERSIONS817 }) + docsIndex876(docs));
+  return repo;
+}
+/** 上流の 1 本の境界の checkpoint の版を書き換え、記録の出力ダイジェストを書き直す */
+const tamperDocuments876 = (up, dest, id, boundary, fn) => tamperUpstream(up, dest, id, (bundle) => {
+  const cpPath = join(bundle, `stage-checkpoint-${boundary}.json`), cp = readJson(cpPath);
+  fn(cp.versions);
+  writeFileSync(cpPath, JSON.stringify(cp, null, 2) + "\n");
+  const recPath = join(bundle, "stage-run.json"), rec = readJson(recPath);
+  rec.checkpoints.find((c) => c.boundary === boundary).output_digest = sha256(JSON.stringify(cp));
+  writeFileSync(recPath, JSON.stringify(rec, null, 2) + "\n");
+});
+
+test("#876 段の再開（境界 t1-t2・t2-b1）：documentsVersionOf を出さない旧 dist は文書の指紋を見ずに今までどおり正常な入力を通す。出す新 dist はその dist の loadDocumentsFromFiles() から作った期待値を documents に渡して正常な入力を通し、checkpoint の documents の欠け・不正形・今の文書との不一致は stage-from:stage-input:version（exit 4・子 0 本・何も書かない）。読み込みの関数が無い・例外・形の異常は stage:dist-unreadable", async () => {
+  await withRepo(async (base) => {
+    const log = join(base, "spawn.log"), first = IDS545[15];
+    // 互換：旧 dist（#875 の前）。照合に documents を渡さず、documents の無い checkpoint を通す
+    const old = makeStageRepo713(base, "old876", { versions: VERSIONS817 }), fzOld = frozen545(base, old);
+    const upOld = runUpstream638(old, join(base, "up-old"), fzOld, log);
+    assert.equal("documents" in readJson(join(upOld, first, "bundle", "stage-checkpoint-t1-t2.json")).versions, false);
+    for (const [start, expected] of [["test-spec", { ledger: IDS_WHOLE817, ledgerUpstream: IDS_UP817, flags: FLAGS638 }], ["write", { ledger: IDS_WHOLE817, flags: FLAGS638 }]]) {
+      const vlog = join(base, `v12-old-${start}.log`);
+      const r = runAgent(old, join(base, `old-${start}`), stageArgs638(fzOld, ["--stage-start", start, "--stage-from", upOld]), { FAKE_SPAWN_LOG: log, FAKE_VERIFY_V12_LOG: vlog });
+      assert.equal(r.status, 0, `old-${start}: ${r.stderr}`);
+      const seen = readLog(vlog);
+      assert.equal(seen.length, 15, start);
+      for (const v of seen) assert.deepEqual(v, expected, `old-${start}: documents を渡さない`);
+    }
+    // 新 dist：正常な入力は両方の境界で通り、照合の関数には今の文書から作った期待値が渡る
+    const repo = makeStageRepo876(base, "new876"), fz = frozen545(base, repo);
+    const up = runUpstream638(repo, join(base, "up"), fz, log);
+    const expectedDocs = docsVersion876(DOCS_TEXT876);
+    for (const b of ["t1-t2", "t2-b1"]) assert.equal(readJson(join(up, first, "bundle", `stage-checkpoint-${b}.json`)).versions.documents, expectedDocs, b);
+    const BOUNDARIES = [["t1-t2", "test-spec", { ledger: IDS_WHOLE817, ledgerUpstream: IDS_UP817, flags: FLAGS638, documents: expectedDocs }], ["t2-b1", "write", { ledger: IDS_WHOLE817, flags: FLAGS638, documents: expectedDocs }]];
+    for (const [b, start, expected] of BOUNDARIES) {
+      const vlog = join(base, `v12-new-${b}.log`);
+      const r = runAgent(repo, join(base, `new-${b}`), stageArgs638(fz, ["--stage-start", start, "--stage-from", up]), { FAKE_SPAWN_LOG: log, FAKE_VERIFY_V12_LOG: vlog });
+      assert.equal(r.status, 0, `new-${b}: ${r.stderr}`);
+      const seen = readLog(vlog);
+      assert.equal(seen.length, 15, b);
+      for (const v of seen) assert.deepEqual(v, expected, b);
+    }
+    // 新 dist：checkpoint の documents の欠け・不正形・不一致は、両方の境界で断る
+    const n0 = spawnCount(log);
+    for (const [b, start] of BOUNDARIES) {
+      for (const [label, fn] of [["missing", (v) => { delete v.documents; }], ["null", (v) => { v.documents = null; }], ["upper", (v) => { v.documents = expectedDocs.toUpperCase(); }], ["short", (v) => { v.documents = expectedDocs.slice(1); }], ["mismatch", (v) => { v.documents = "0".repeat(64); }]]) {
+        const tampered = tamperDocuments876(up, join(base, `up-${b}-${label}`), first, b, fn);
+        const o = join(base, `bad-${b}-${label}`);
+        assertStageRefused(runAgent(repo, o, stageArgs638(fz, ["--stage-start", start, "--stage-from", tampered]), { FAKE_SPAWN_LOG: log }), "stage-from:stage-input:version", [first], log, n0, o, `${b}-${label}`);
+      }
+      // 今の文書が上流と違う（checkpoint は書き換えない）
+      const o = join(base, `changed-${b}`);
+      assertStageRefused(runAgent(repo, o, stageArgs638(fz, ["--stage-start", start, "--stage-from", up]), { FAKE_SPAWN_LOG: log, FAKE_DOCS: "docs-b" }), "stage-from:stage-input:version", [first], log, n0, o, `${b}-changed`);
+    }
+    // 新 dist の読み取りの失敗：読み込みの関数が無い（入口にも cli.js にも）・例外・64 桁の 16 進でない値
+    for (const [label, docs] of [["no-loader", { loader: false }], ["throw", { version: "throw" }], ["upper", { version: { value: expectedDocs.toUpperCase() } }], ["number", { version: { value: 1 } }]]) {
+      writeFileSync(join(repo, "packages/factory/dist/index.js"), v12Index713({ versions: VERSIONS817 }) + docsIndex876(docs));
+      for (const [b, start] of BOUNDARIES) {
+        const o = join(base, `dist-${label}-${b}`);
+        assertRefused(runAgent(repo, o, stageArgs638(fz, ["--stage-start", start, "--stage-from", up]), { FAKE_SPAWN_LOG: log }), "stage:dist-unreadable", log, n0, `${label}-${b}`);
+        assertNothingWritten(o, `${label}-${b}`);
+      }
+    }
+  });
 });
