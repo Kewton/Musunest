@@ -508,3 +508,133 @@ body {
     color: #cfe6d4;
   }
 }
+
+/* ── 作成中の進み（Issue #870）────────────────────────────── */
+
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 0.9rem 1.1rem;
+  border: 1px solid #ded7ca;
+  border-radius: 0.85rem;
+  background: #fffdf8;
+}
+
+.progress__stage {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.progress__stages {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.progress__step {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid #ded7ca;
+  border-radius: 0.6rem;
+  background: #fffdf8;
+  color: #6d665b;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.progress__step--done {
+  color: #3d5a45;
+}
+
+.progress__step--current {
+  border-color: #3d5a45;
+  background: #e4eddf;
+  color: #2f4a37;
+  font-weight: 600;
+}
+
+.progress__figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  margin: 0;
+}
+
+.progress__figures dt {
+  font-size: 0.8rem;
+  color: #6d665b;
+}
+
+.progress__figures dd {
+  margin: 0.1rem 0 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+/* ── 公開（Issue #870）────────────────────────────────── */
+
+.publish__instance {
+  margin: 0;
+  color: #4a453d;
+}
+
+.publish__id,
+.history__instance {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.9rem;
+}
+
+.partial {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(1rem, 3vw, 1.75rem);
+}
+
+.history__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.9rem;
+  font-size: 0.8rem;
+  color: #6d665b;
+}
+
+.button--danger {
+  border-color: #b46a4a;
+  color: #7d3a1d;
+}
+
+@media (prefers-color-scheme: dark) {
+  .progress {
+    border-color: #4c463c;
+    background: #23201a;
+  }
+
+  .progress__step {
+    border-color: #4c463c;
+    background: #23201a;
+  }
+
+  .progress__step--current {
+    border-color: #8fbf9a;
+    background: #2f4034;
+  }
+
+  .progress__step--done {
+    color: #cfe6d4;
+  }
+
+  .history__meta,
+  .publish__instance,
+  .progress__figures dt {
+    color: #b8b0a1;
+  }
+
+  .button--danger {
+    border-color: #a05a3c;
+    color: #f3c3a8;
+  }
+}

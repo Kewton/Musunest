@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApiQuestionBundle, BudgetView, JobView } from "../shared/api";
+import type { ApiQuestionBundle, BudgetView, JobView, PublishSuccessRecord } from "../shared/api";
 import { App } from "./App";
 
 beforeEach(() => {
@@ -157,5 +157,173 @@ describe("App", () => {
     for (const match of widths) {
       expect(Number(match[2] ?? "0")).toBeLessThanOrEqual(375);
     }
+  });
+});
+
+// ── Issue #870：結果・了承と公開・履歴（偽の fetch。実際の時計で待つ）─────────
+
+const SHA = "0123456789abcdef".repeat(4);
+
+const resultBase = {
+  request: "割り勘を作りたい",
+  stateLabel: "結果",
+  stopReason: null,
+  stopReasonLabel: null,
+  question: null,
+  confirmation: null,
+  progress: null,
+  createdAt: 1,
+  updatedAt: 2,
+} as const;
+
+const fullResultJob = {
+  ...resultBase,
+  id: "job-full",
+  state: "result",
+  result: { verdict: "full" as const, verdictLabel: "すべて満たしました", content: ["依頼どおりに作りました。"] },
+};
+
+const partialResultJob = {
+  ...resultBase,
+  id: "job-partial",
+  state: "result",
+  manifestSha256: SHA,
+  partial: {
+    built: ["一覧を新しい順に並べる"],
+    missing: [{ what: "写真の添付", alternative: "題名に写真の名前を書く" }],
+    decided: ["画面の名前は「一覧」にする"],
+  },
+  result: {
+    verdict: "partial" as const,
+    verdictLabel: "一部だけ満たしました",
+    content: ["一覧を新しい順に並べる"],
+  },
+};
+
+const noneResultJob = {
+  ...resultBase,
+  id: "job-none",
+  state: "result",
+  result: { verdict: "none" as const, verdictLabel: "作れませんでした", content: ["写真を扱うものは作れません。"] },
+};
+
+const publishedRecord: PublishSuccessRecord = {
+  ok: true,
+  instanceId: "studio-20261111123456",
+  level: "L2",
+  manifestSha256: SHA,
+  path: "/apps/studio-20261111123456",
+};
+
+interface FakeResultOptions {
+  readonly jobs: readonly unknown[];
+  readonly publish: () => Response;
+}
+
+function installResultFetch(options: FakeResultOptions) {
+  const calls: { url: string; init: RequestInit }[] = [];
+  const fetchMock = vi.fn(async (input: string, init: RequestInit = {}) => {
+    calls.push({ url: input, init });
+    const method = init.method ?? "GET";
+    if (input === "/api/budget") return json(budget);
+    if (input === "/api/jobs" && method === "GET") return json({ jobs: options.jobs });
+    if (input.endsWith("/publish") && method === "POST") return options.publish();
+    if (input.endsWith("/approve") && method === "POST") {
+      return json({ manifest_sha256: SHA, run_id: "run-1" });
+    }
+    throw new Error(`知らない要求: ${method} ${input}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return { fetchMock, calls };
+}
+
+async function openResultFromHistory(requestText: string): Promise<void> {
+  fireEvent.click(screen.getByRole("button", { name: "履歴" }));
+  await waitFor(() => {
+    expect(screen.getByText(requestText)).toBeTruthy();
+  });
+  fireEvent.click(screen.getByRole("button", { name: new RegExp(requestText) }));
+}
+
+describe("App（結果・了承と公開・履歴）", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("full：公開の要求を 1 回だけ送り、インスタンス ID と「開いて試す」を出す", async () => {
+    document.head.innerHTML =
+      '<meta name="studio-token" content="t" /><meta name="studio-staging-origin" content="https://staging.example" />';
+    const { calls } = installResultFetch({ jobs: [fullResultJob], publish: () => json(publishedRecord) });
+
+    render(<App />);
+    await openResultFromHistory("割り勘を作りたい");
+
+    const publishButton = screen.getByRole("button", { name: "公開する" });
+    fireEvent.click(publishButton);
+    fireEvent.click(publishButton);
+    fireEvent.click(publishButton);
+
+    await waitFor(() => {
+      expect(screen.getByText("公開しました")).toBeTruthy();
+    });
+
+    expect(calls.filter((call) => call.url.endsWith("/publish"))).toHaveLength(1);
+    expect(screen.getByText("studio-20261111123456")).toBeTruthy();
+    const link = screen.getByRole("link", { name: "開いて試す" }) as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("https://staging.example/apps/studio-20261111123456");
+  });
+
+  it("オリジンが無ければ「開いて試す」を出さない", async () => {
+    document.head.innerHTML = '<meta name="studio-token" content="t" />';
+    installResultFetch({ jobs: [fullResultJob], publish: () => json(publishedRecord) });
+
+    render(<App />);
+    await openResultFromHistory("割り勘を作りたい");
+
+    fireEvent.click(screen.getByRole("button", { name: "公開する" }));
+    await waitFor(() => {
+      expect(screen.getByText("公開しました")).toBeTruthy();
+    });
+
+    expect(screen.getByText("studio-20261111123456")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "開いて試す" })).toBeNull();
+  });
+
+  it("partial：了承の前は公開のボタンが無く、了承の要求に画面の SHA をそのまま入れる", async () => {
+    document.head.innerHTML = '<meta name="studio-token" content="t" />';
+    const { calls } = installResultFetch({ jobs: [partialResultJob], publish: () => json(publishedRecord) });
+
+    render(<App />);
+    await openResultFromHistory("割り勘を作りたい");
+
+    expect(screen.queryByRole("button", { name: "公開する" })).toBeNull();
+    expect(screen.getByText(`いまの納品物の SHA（短い形）: ${SHA.slice(0, 12)}`)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "了承して公開する" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("公開しました")).toBeTruthy();
+    });
+
+    const approve = calls.find((call) => call.url.endsWith("/approve"));
+    expect(approve).toBeTruthy();
+    expect(JSON.parse(String(approve?.init.body))).toEqual({ manifestSha256: SHA });
+    expect(calls.filter((call) => call.url.endsWith("/publish"))).toHaveLength(1);
+  });
+
+  it("none：理由と「依頼を直してやり直す」を出し、押すと元の依頼文が入った依頼の画面になる", async () => {
+    document.head.innerHTML = '<meta name="studio-token" content="t" />';
+    installResultFetch({ jobs: [noneResultJob], publish: () => json(publishedRecord) });
+
+    render(<App />);
+    await openResultFromHistory("割り勘を作りたい");
+
+    expect(screen.getByText("作れませんでした")).toBeTruthy();
+    expect(screen.getByText("写真を扱うものは作れません。")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "依頼を直してやり直す" }));
+
+    const field = (await screen.findByLabelText("つくりたいもの")) as HTMLTextAreaElement;
+    expect(field.value).toBe("割り勘を作りたい");
   });
 });

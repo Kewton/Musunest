@@ -12,6 +12,7 @@
 //
 // 表示用の欄には宣言の用語（entity・computed など）を入れない（04-plan-agent.md §3）。
 // 状態・理由・結果の判定は、コードの値（英字）と表示の言葉（日本語）を分けて持つ。
+import type { PublishRecord } from "./publish.js";
 
 // ── 上限と定数（所有者の決定。2026-11-11）─────────────────────────────
 
@@ -161,6 +162,19 @@ export interface ApiProgress {
   readonly estimatedUsd: number;
 }
 
+/** できなかったこと 1 つ（partial の結果に並べる。利用者の言葉） */
+export interface ApiPartialLimitation {
+  readonly what: string;
+  readonly alternative: string;
+}
+
+/** partial の結果に並べる 3 つ（できたこと・できなかったこと・決めたこと） */
+export interface ApiPartialDetails {
+  readonly built: readonly string[];
+  readonly missing: readonly ApiPartialLimitation[];
+  readonly decided: readonly string[];
+}
+
 /** 結果（3 つの判定と中身） */
 export interface ApiResult {
   readonly verdict: ResultVerdict;
@@ -180,6 +194,16 @@ export interface JobView {
   readonly confirmation: ApiConfirmation | null;
   readonly progress: ApiProgress | null;
   readonly result: ApiResult | null;
+  /** 了承の要求にそのまま送る、納品物の manifest の SHA-256（無ければ null） */
+  readonly manifestSha256?: string | null;
+  /** partial の 3 つ（partial でなければ null） */
+  readonly partial?: ApiPartialDetails | null;
+  /** 実際に使った額（USD。終わっていなければ null） */
+  readonly spentUsd?: number | null;
+  /** 差し戻し・失敗の理由（利用者に見せる言葉） */
+  readonly note?: string | null;
+  /** 公開の結果（まだ公開していなければ null） */
+  readonly publish?: PublishRecord | null;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -260,6 +284,12 @@ export interface RunnerProgress {
 export interface RunnerResult {
   readonly verdict: ResultVerdict;
   readonly content: readonly string[];
+  /** 納品物の manifest の SHA-256（小文字の 16 進 64 桁。分かるときだけ） */
+  readonly manifestSha256?: string | null;
+  /** partial の 3 つ（走らせる役が分かるときだけ） */
+  readonly built?: readonly string[];
+  readonly missing?: readonly ApiPartialLimitation[];
+  readonly decided?: readonly string[];
 }
 
 /** 走らせる役からの通知 */

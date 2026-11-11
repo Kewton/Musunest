@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_FAKE_CONFIRMATION, DEFAULT_FAKE_QUESTION } from "./runner-fake.js";
 import type { StoredJob } from "./store.js";
@@ -81,6 +85,110 @@ describe("buildJobView の表示の言葉", () => {
       },
     });
     expect(() => buildJobView(job, 20_000)).toThrow(UserWordingError);
+  });
+
+  it("使った額と、差し戻しの理由を返す", () => {
+    const view = buildJobView(
+      makeJob({ state: "sent-back", spentUsd: 0.42, note: "仕様を決め直してください" }),
+      20_000,
+    );
+    expect(view.spentUsd).toBe(0.42);
+    expect(view.note).toBe("仕様を決め直してください");
+  });
+
+  it("結果の manifest の SHA と partial の 3 つを返す", () => {
+    const sha = "a".repeat(64);
+    const view = buildJobView(
+      makeJob({
+        state: "result",
+        question: null,
+        result: {
+          verdict: "partial",
+          content: ["一部だけ満たしました。"],
+          manifestSha256: sha,
+          built: ["一覧を新しい順に並べる"],
+          missing: [{ what: "写真の添付", alternative: "題名に写真の名前を書く" }],
+          decided: ["画面の名前は「一覧」にする"],
+        },
+      }),
+      20_000,
+    );
+
+    expect(view.manifestSha256).toBe(sha);
+    expect(view.partial).toEqual({
+      built: ["一覧を新しい順に並べる"],
+      missing: [{ what: "写真の添付", alternative: "題名に写真の名前を書く" }],
+      decided: ["画面の名前は「一覧」にする"],
+    });
+  });
+
+  it("partial の表示の言葉に宣言の用語が混ざったら例外にする", () => {
+    const job = makeJob({
+      state: "result",
+      question: null,
+      result: {
+        verdict: "partial",
+        content: [],
+        built: ["entity の一覧を出す"],
+      },
+    });
+    expect(() => buildJobView(job, 20_000)).toThrow(UserWordingError);
+  });
+});
+
+describe("buildJobView の manifest の SHA", () => {
+  it("partial の結果は、ジョブの置き場所の manifest のバイト列から SHA-256 を求める", () => {
+    const home = mkdtempSync(join(tmpdir(), "musunest-view-"));
+    const previous = process.env.STUDIO_HOME;
+    process.env.STUDIO_HOME = home;
+    try {
+      const id = "job-partial";
+      mkdirSync(join(home, "jobs", id), { recursive: true });
+      const text = '{"schema_version":"test"}';
+      writeFileSync(join(home, "jobs", id, "bundle-manifest.json"), text, "utf8");
+
+      const view = buildJobView(
+        makeJob({
+          id,
+          state: "result",
+          question: null,
+          result: { verdict: "partial", content: ["一部だけ満たしました。"] },
+        }),
+        20_000,
+      );
+
+      expect(view.manifestSha256).toBe(createHash("sha256").update(text).digest("hex"));
+    } finally {
+      if (previous === undefined) delete process.env.STUDIO_HOME;
+      else process.env.STUDIO_HOME = previous;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("保存した公開の結果を返す（履歴のインスタンス ID）", () => {
+    const home = mkdtempSync(join(tmpdir(), "musunest-view-"));
+    const previous = process.env.STUDIO_HOME;
+    process.env.STUDIO_HOME = home;
+    try {
+      const id = "job-published";
+      mkdirSync(join(home, "jobs", id), { recursive: true });
+      const record = {
+        ok: true,
+        instanceId: "studio-20261111123456",
+        level: "L2",
+        manifestSha256: "a".repeat(64),
+        path: "/apps/studio-20261111123456",
+      };
+      writeFileSync(join(home, "jobs", id, "publish.json"), JSON.stringify(record), "utf8");
+
+      const view = buildJobView(makeJob({ id, state: "result", question: null }), 20_000);
+
+      expect(view.publish).toEqual(record);
+    } finally {
+      if (previous === undefined) delete process.env.STUDIO_HOME;
+      else process.env.STUDIO_HOME = previous;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
