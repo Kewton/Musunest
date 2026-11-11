@@ -1682,6 +1682,11 @@ const groupEntriesOf = (container: HTMLElement, name: string): [string, string][
     entry.querySelector(".group-number")?.textContent ?? "",
   ]);
 
+/** `data-group-name` の組の、その位置の行の**描いたテキスト全体**（見出しと値の間の区切りまで読む） */
+const groupEntryTextOf = (container: HTMLElement, name: string, index: number): string =>
+  [...container.querySelectorAll(`[data-group-name="${name}"] .group-entry`)][index]?.textContent ??
+  "";
+
 describe("見出しごとの集計（groupBy・groups）を画面へ写す（M1.4）", () => {
   it("API が返した組をそのまま出し、enum の見出しは表示名に写す。null は「—」で見せる", async () => {
     const { container } = await renderScreen(
@@ -1718,6 +1723,20 @@ describe("見出しごとの集計（groupBy・groups）を画面へ写す（M1.
       ["2026-08", "0"],
       ["2026-09", "3"],
     ]);
+  });
+
+  it("見出しと値の間に区切りがあり、1 つの数に見えない（Issue #855）", async () => {
+    const { container } = await renderScreen(
+      groupsClient({
+        byMonth: [{ heading: "2026-11", value: 4800 }],
+        byKind: [{ heading: "practice", value: 3000 }],
+      }),
+    );
+
+    // 区切りが無いと「2026-114800」と 1 つの数に読める。描いた行のテキストでは、間に区切りがある
+    expect(groupEntryTextOf(container, "byMonth", 0)).toBe("2026-11：4800");
+    expect(groupEntryTextOf(container, "byKind", 0)).toBe("練習：3000");
+    expect(groupEntryTextOf(container, "byMonth", 0)).not.toBe("2026-114800");
   });
 
   it("**宣言が無ければ groups を描かない**（M1.1〜M1.3 の画面を変えない）", async () => {

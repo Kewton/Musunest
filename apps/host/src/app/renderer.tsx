@@ -310,6 +310,8 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
                       <span className="group-heading">
                         {groupHeadingOf(spec.spec, name, entry.heading)}
                       </span>
+                      {/* 見出しと値の区切り（Issue #855）。区切りが無いと「2026-114800」と 1 つの数に読める */}
+                      {"："}
                       <span className="group-number">{computedText(entry.value)}</span>
                     </li>
                   ))}
