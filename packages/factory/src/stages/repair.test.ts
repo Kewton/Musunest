@@ -2213,3 +2213,70 @@ describe("最後の答えの枠を取っておく（旗 v12.ids の探索 on の
   });
 });
 
+
+// ── HTTP 停止の補足を、道具付きの段の失敗まで落とさない（Issue #899）──
+
+/** 失敗の側から HTTP の補足を読む（実装前は `undefined`＝assertion の赤になる） */
+function httpOf(failure: unknown): unknown {
+  return (failure as { readonly http?: unknown }).http;
+}
+
+describe("HTTP 停止の補足を、道具付きの段の失敗まで落とさない（Issue #899）", () => {
+  it("道具付きの呼び出しが 503 で枯渇すると、段の失敗が status・実試行数・理由を持つ", async () => {
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        return Promise.reject(new Error("使わない"));
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(Object.assign(new Error("HTTP の誤り"), { kind: "http", status: 503 }));
+      },
+    };
+    const initial = await version(V1);
+    const gateway = makeGateway(client, { deadline: 10_000_000 });
+    const outcome = await runRepairStep({
+      source: SOURCE,
+      list: LIST,
+      suite: SUITE,
+      current: initial,
+      correspondences: CORRESPONDENCES,
+      documents: SAMPLE_DOCUMENTS,
+      gateway,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("http");
+    expect(httpOf(outcome.failure)).toEqual({
+      http_status: 503,
+      attempts: 2,
+      history: [
+        { attempt: 1, status: 503, kind: "http", reason: "http-5xx", retry: "started" },
+        { attempt: 2, status: 503, kind: "http", reason: "http-5xx", retry: "attempts-exhausted" },
+      ],
+    });
+  });
+
+  it("道具付きでも、HTTP ではない失敗（残高切れ）には補足を付けない", async () => {
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        return Promise.reject(new Error("使わない"));
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(Object.assign(new Error("残高切れ"), { kind: "balance" }));
+      },
+    };
+    const initial = await version(V1);
+    const outcome = await runRepairStep({
+      source: SOURCE,
+      list: LIST,
+      suite: SUITE,
+      current: initial,
+      correspondences: CORRESPONDENCES,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(client),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("balance");
+    expect(httpOf(outcome.failure)).toBeUndefined();
+  });
+});

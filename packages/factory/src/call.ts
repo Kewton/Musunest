@@ -205,6 +205,107 @@ export interface CategorizedCallError {
 }
 
 /**
+ * 再試行を決めた**理由**（固定。Issue #899）。前三者は既存の `isRetryableCallError` の分岐、
+ * 後二者は既存の `noteRetry` の分岐が印を付ける——観測側で判断し直さない。
+ */
+export const CALL_RETRY_REASONS = ["timeout", "network", "http-5xx", "shape", "content"] as const;
+export type CallRetryReason = (typeof CALL_RETRY_REASONS)[number];
+
+/**
+ * 再試行の**状態**（固定。Issue #899）。再試行を決めた時点（`planned`）・実開始（`started`）・
+ * 未開始（締切・予算・上限・timeout を伸ばせない）・再試行しない終端（`not-retryable`）・
+ * 使い切った終端（`attempts-exhausted`）を区別する。
+ */
+export const CALL_RETRY_STATES = [
+  "planned",
+  "started",
+  "not-started:deadline",
+  "not-started:budget",
+  "not-started:limit",
+  "not-started:timeout",
+  "not-retryable",
+  "attempts-exhausted",
+] as const;
+export type CallRetryState = (typeof CALL_RETRY_STATES)[number];
+
+/**
+ * 試行順の 1 行（HTTP 停止の補足。Issue #899）。**数値・固定の値・既存の安全な件数だけ**を持つ——
+ * 本文・ヘッダー・URL・`Error.message` は持たない。`status` は既存の失敗結果の数値だけで、
+ * 不正な型・非有限値は不明（`null`）とする。
+ */
+export interface CallHttpAttempt {
+  /** 実開始の通し番号（口の計と同じ時点） */
+  readonly attempt: number;
+  /** この試行の状態コード（分からなければ `null`） */
+  readonly status: number | null;
+  /** この試行の固定の誤り分類（形・中身の再試行の行は `malformed` か `null`） */
+  readonly kind: CallErrorKind | null;
+  /** この試行のあとに再試行した理由（再試行しなければ `null`） */
+  readonly reason: CallRetryReason | null;
+  /** この試行のあとの再試行の状態 */
+  readonly retry: CallRetryState;
+}
+
+/**
+ * HTTP 停止の補足（Issue #899）。失敗した論理呼び出しの**最終の状態コード**（不明は `null`）、
+ * その呼び出し内の**実開始試行数**、**試行順の歴史**を持つ。保存する記録の許可リストがこの形だけを写す。
+ */
+export interface CallHttpTrace {
+  readonly http_status: number | null;
+  readonly attempts: number;
+  readonly history: readonly CallHttpAttempt[];
+}
+
+/** 口の計の一時点（段の前後の差を取るための、HTTP 補足の材料。Issue #899） */
+export interface CallHttpSnapshot {
+  /** 実開始試行の通し数 */
+  readonly attempts: number;
+  readonly history: readonly CallHttpAttempt[];
+}
+
+/**
+ * 1 つの論理呼び出し（`#run` 1 回）に属する補足（Issue #899）。並列の束が同じ口を共有しても、
+ * 別の束の後着・割り込みの行を混ぜない——**結果そのもの**に結び付ける（共有の配列の添字で切らない）。
+ */
+const callHttpTraces = new WeakMap<object, CallHttpSnapshot>();
+
+/** 結果に結び付いた、その論理呼び出しだけの補足を読む（Issue #899） */
+export function httpTraceOfResult(result: object): CallHttpSnapshot | undefined {
+  return callHttpTraces.get(result);
+}
+
+/**
+ * 状態コードを、**数値のときだけ**採る（Issue #899）。文字列・`NaN`・`Infinity`・負・非整数は不明
+ * （`null`）——生の値をそのまま記録へ出さない。
+ */
+export function sanitizeHttpStatus(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+/** やり直してよい誤りの、再試行の理由（既存の分岐に追随する。Issue #899） */
+function retryReasonOf(error: CategorizedCallError): CallRetryReason {
+  if (error.kind === "timeout") return "timeout";
+  if (error.kind === "network") return "network";
+  return "http-5xx";
+}
+
+/** 再試行を決めた行を、次の試行が実際に始まった時点で `started` にする（Issue #899） */
+function markPendingRetryStarted(counts: GatewayCounters): void {
+  const pending = counts.pendingRetry;
+  if (pending === undefined) return;
+  pending.retry = "started";
+  counts.pendingRetry = undefined;
+}
+
+/** 再試行を決めた行を、次の試行が始まらなかった理由で閉じる（Issue #899） */
+function markPendingRetryNotStarted(counts: GatewayCounters, state: CallRetryState): void {
+  const pending = counts.pendingRetry;
+  if (pending === undefined) return;
+  pending.retry = state;
+  counts.pendingRetry = undefined;
+}
+
+/**
  * 実試行 1 回の終わりの、**口が確定した分類**（Issue #748）。観測の口へは、例外の文・要求や応答の本文・
  * ID の値を渡さない——分類と usage だけを渡す。未完了は応答の一種として分け、要求の不正は誤りの
  * `invalid-request` として分ける（`CALL_ERROR_KINDS` は未完了・要求の不正を含まないため）。
@@ -461,6 +562,21 @@ interface GatewayCounters {
   retriesContent: number;
   // 形の誤りの種類ごとの数（口の設定が on のときだけ足す。Issue #783）
   malformedKinds: Record<MalformedKindKey, number>;
+  // 実開始試行の通し数（HTTP 停止の補足の「実開始試行数」の出どころ。Issue #899）
+  traceAttempts: number;
+  // 試行順の歴史（**失敗した試行と再試行の決定だけ**。成功した試行の行は持たない。Issue #899）
+  trace: MutableHttpAttempt[];
+  // 次に始まる試行で `started` へ変える行（再試行を決めたばかりの行。Issue #899）
+  pendingRetry: MutableHttpAttempt | undefined;
+}
+
+/** 口の中だけで書き換える、試行順の 1 行（外へは `CallHttpAttempt` として読むだけ。Issue #899） */
+interface MutableHttpAttempt {
+  attempt: number;
+  status: number | null;
+  kind: CallErrorKind | null;
+  reason: CallRetryReason | null;
+  retry: CallRetryState;
 }
 
 function newGatewayCounters(): GatewayCounters {
@@ -480,6 +596,9 @@ function newGatewayCounters(): GatewayCounters {
     retriesShape: 0,
     retriesContent: 0,
     malformedKinds: Object.fromEntries(MALFORMED_KIND_KEYS.map((key) => [key, 0])) as Record<MalformedKindKey, number>,
+    traceAttempts: 0,
+    trace: [],
+    pendingRetry: undefined,
   };
 }
 
@@ -874,6 +993,23 @@ export class CallGateway {
   }
 
   /**
+   * HTTP 停止の補足の材料（いまの一時点。Issue #899）。段は呼び出しの前後でこれを取り、差を
+   * 段の失敗へ写す。**数値・固定の値・件数だけ**を写した読み取り専用の写しを返す（内部の行は共有しない）。
+   */
+  get httpTrace(): CallHttpSnapshot {
+    return {
+      attempts: this.#counts.traceAttempts,
+      history: this.#counts.trace.map((row) => ({
+        attempt: row.attempt,
+        status: row.status,
+        kind: row.kind,
+        reason: row.reason,
+        retry: row.retry,
+      })),
+    };
+  }
+
+  /**
    * 形・中身の再試行を、段が口へ**告げる口**（Issue #446・#478）。**通信**の再試行は口が自分で数えるので、
    * ここへは来ない。形・中身は口が知らない（形の検査・中身の検査は段にある）ので、段の輪が呼ぶ。
    *
@@ -883,9 +1019,23 @@ export class CallGateway {
    * 予算の予約が拒否される・直す段（⑥）の往復の上限が共通の口より前で断る）。このときもやり直しの数は
    * 1 増える（実開始数は増えない）。
    */
-  noteRetry(kind: RetryKind): void {
+  noteRetry(kind: RetryKind): CallHttpAttempt {
     if (kind === "shape") this.#counts.retriesShape += 1;
     else this.#counts.retriesContent += 1;
+    // 試行順の歴史にも、**再試行を決めた時点**の行を残す（Issue #899）。理由は既存の分岐（ここ）で決め、
+    // 観測側で判断し直さない。形の再試行は形の誤り（`malformed`）として分類し、中身は分類を持たない。
+    const row: MutableHttpAttempt = {
+      attempt: this.#counts.traceAttempts,
+      status: null,
+      kind: kind === "shape" ? "malformed" : null,
+      reason: kind,
+      retry: "planned",
+    };
+    this.#counts.trace.push(row);
+    this.#counts.pendingRetry = row;
+    // 呼ぶ側（段の窓口）が、その論理呼び出しの歴史へ同じ行を並べられるように返す。次の試行が始まれば
+    // この行は `started` へ変わる（同じ行を共有する）。
+    return row;
   }
 
   /**
@@ -922,6 +1072,27 @@ export class CallGateway {
     });
   }
 
+  /**
+   * 失敗した試行の行を作る（Issue #899）。やり直すなら `planned` にして次の開始で `started` へ、
+   * 使い切ったなら `attempts-exhausted` にする。**本文・ヘッダー・URL・例外の文は渡さない**。
+   */
+  #retryRow(
+    status: number | null,
+    kind: CallErrorKind,
+    reason: CallRetryReason | null,
+    retry: "planned" | "attempts-exhausted" | "not-retryable",
+  ): MutableHttpAttempt {
+    const row: MutableHttpAttempt = {
+      attempt: this.#counts.traceAttempts,
+      status,
+      kind,
+      reason,
+      retry,
+    };
+    if (retry === "planned") this.#counts.pendingRetry = row;
+    return row;
+  }
+
   async #run<T>(
     parts: LlmInputParts,
     maxOutputTokens: number,
@@ -933,11 +1104,33 @@ export class CallGateway {
     let lastKind: CallErrorKind = "unknown";
     let lastStatus: number | undefined;
     let previousTimeoutMs: number | undefined;
+    // **この論理呼び出しだけ**の補足（Issue #899）。共有の配列の添字で切ると、並列の別の束が割り込んだ
+    // 行まで混ざる——結果ごとに結び付けて、呼ぶ側が束ごとに読めるようにする。
+    let startedAttempts = 0;
+    const localRows: MutableHttpAttempt[] = [];
+    const attach = (result: CallResult<T>): CallResult<T> => {
+      callHttpTraces.set(result, {
+        attempts: startedAttempts,
+        history: localRows.map((row) => ({
+          attempt: row.attempt,
+          status: row.status,
+          kind: row.kind,
+          reason: row.reason,
+          retry: row.retry,
+        })),
+      });
+      return result;
+    };
+    const recordRow = (row: MutableHttpAttempt): void => {
+      localRows.push(row);
+      this.#counts.trace.push(row);
+    };
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
       const remaining = this.#deadline - this.#now();
       if (remaining <= 0) {
         this.#counts.notStartedDeadline += 1;
-        return { kind: "deadlineExceeded" };
+        markPendingRetryNotStarted(this.#counts, "not-started:deadline");
+        return attach({ kind: "deadlineExceeded" });
       }
       // 総呼び出し数の門。**共有の門があれば、生成の呼び出し・その再試行・判定の呼び出し・切り替え・
       // 再点検の合計**で照らし、この試行を数える（Issue #432）。無ければ、この口の `#calls` だけを見る。
@@ -945,39 +1138,48 @@ export class CallGateway {
         const begun = this.#gate.begin();
         if (begun === "deadline") {
           this.#counts.notStartedDeadline += 1;
-          return { kind: "deadlineExceeded" };
+          markPendingRetryNotStarted(this.#counts, "not-started:deadline");
+          return attach({ kind: "deadlineExceeded" });
         }
         if (begun === "limit") {
           this.#counts.notStartedLimit += 1;
-          return { kind: "limitExceeded", limit: "callCount", max: this.#gate.limit, actual: this.#gate.attempts() };
+          markPendingRetryNotStarted(this.#counts, "not-started:limit");
+          return attach({ kind: "limitExceeded", limit: "callCount", max: this.#gate.limit, actual: this.#gate.attempts() });
         }
       } else if (this.#counts.calls >= this.#limits.callCount) {
         this.#counts.notStartedLimit += 1;
-        return { kind: "limitExceeded", limit: "callCount", max: this.#limits.callCount, actual: this.#counts.calls };
+        markPendingRetryNotStarted(this.#counts, "not-started:limit");
+        return attach({ kind: "limitExceeded", limit: "callCount", max: this.#limits.callCount, actual: this.#counts.calls });
       }
       // 呼び出しごとの timeout は、effort の基準をやり直しごとに倍へ伸ばし、締切の残りで頭を打つ
       // （#302）。**同じ timeout ではやり直さない**——伸ばせないなら、次の試行はせずに止める。
       const timeoutMs = Math.min(this.#callTimeoutMs * 2 ** (attempt - 1), remaining);
       if (attempt > 1 && previousTimeoutMs !== undefined && timeoutMs <= previousTimeoutMs) {
         this.#counts.notStartedTimeout += 1;
+        markPendingRetryNotStarted(this.#counts, "not-started:timeout");
         break;
       }
       const reserved = this.#budget.reserve(maxCostUsd);
       if (!reserved.reserved) {
         this.#counts.notStartedBudget += 1;
-        return { kind: "budgetExceeded", maxCostUsd, remainingUsd: reserved.remainingUsd };
+        markPendingRetryNotStarted(this.#counts, "not-started:budget");
+        return attach({ kind: "budgetExceeded", maxCostUsd, remainingUsd: reserved.remainingUsd });
       }
       this.#counts.calls += 1;
       this.#counts.attemptsStarted += 1;
+      this.#counts.traceAttempts += 1;
+      startedAttempts += 1;
       if (attempt > 1) this.#counts.retries += 1;
       attempts = attempt;
+      // 再試行を決めた行は、この試行が実際に始まった時点で `started` にする（Issue #899）
+      markPendingRetryStarted(this.#counts);
       // 実試行の観測（Issue #748）。**始めた試行**だけ行を作る（未着手では呼ばない）。
       const observation = this.#observer?.beginAttempt();
       try {
         const outcome = await this.#attempt(invoke, timeoutMs, remaining, observation);
         if (outcome.kind === "deadline") {
           this.#counts.attemptsCancelledDeadline += 1;
-          return { kind: "deadlineExceeded" };
+          return attach({ kind: "deadlineExceeded" });
         }
         if (outcome.kind === "timeout") {
           // 呼び出しごとの timeout。usage は分からないので予約は残し、**拒否ではなく** `timeout` として
@@ -986,13 +1188,17 @@ export class CallGateway {
           lastKind = "timeout";
           lastStatus = undefined;
           previousTimeoutMs = timeoutMs;
+          // 試行順の歴史（Issue #899）。timeout はやり直してよい誤りなので、理由は既存の分岐に従い `timeout`。
+          recordRow(
+            this.#retryRow(null, "timeout", "timeout", attempt < this.#maxAttempts ? "planned" : "attempts-exhausted"),
+          );
           continue;
         }
         if (outcome.result.usage !== undefined) {
           this.#budget.settle(reserved.reservation, outcome.result.usage, this.#rates);
         }
         this.#counts.attemptsResponded += 1;
-        return { kind: "ok", value: outcome.result.value };
+        return attach({ kind: "ok", value: outcome.result.value });
       } catch (error) {
         // 未完了の応答は拒否と分け、**同じ要求のままやり直さない**（同じ上限ではまた切れる。§2.2）。
         // usage が分かる未完了は、成功と同じく実際の費用で精算する（§1.5）。分からなければ予約を残す。
@@ -1002,13 +1208,13 @@ export class CallGateway {
           }
           // 未完了は usage の有無によらず**応答**として数える（誤りではない。Issue #446）
           this.#counts.attemptsResponded += 1;
-          return { kind: "incomplete", reason: error.reason, usage: error.usage };
+          return attach({ kind: "incomplete", reason: error.reason, usage: error.usage });
         }
         // 要求そのものが不正な誤り（HTTP 400 など）は、拒否と分け、**同じ要求のままやり直さない**
         // ——やり直しても通らない（§2.2）。誤りの種類（code）だけを返し、本文の全文は残さない。
         if (isInvalidRequestError(error)) {
           this.#counts.attemptsErrors += 1;
-          return { kind: "invalidRequest", code: error.code };
+          return attach({ kind: "invalidRequest", code: error.code });
         }
         // adapter の誤りを種類ごとに分類する（#302）。**「拒否」は拒否のときだけ**にする。
         // やり直してよい種類（timeout・network・5xx）だけを、長くした timeout でやり直す。
@@ -1026,25 +1232,40 @@ export class CallGateway {
           this.#counts.malformedKinds[malformedKind ?? "other"] += 1;
         }
         if (!isRetryableCallError(classified)) {
-          return {
+          // 再試行しない終端。HTTP の誤り（状態コード付き）だけは、試行順の歴史に残す（Issue #899）。
+          // 残高切れ・拒否・形・道具の引数・分類できない例外は HTTP へ読み替えない——行を作らない。
+          // 状態コードが読めない HTTP の誤りも、`status: null`（不明）として行を残す。
+          if (classified.kind === "http") {
+            recordRow(this.#retryRow(sanitizeHttpStatus(classified.status), classified.kind, null, "not-retryable"));
+          }
+          return attach({
             kind: "failed",
             errorKind: classified.kind,
             attempts,
             ...(classified.status === undefined ? {} : { status: classified.status }),
             ...(malformedKind === undefined ? {} : { malformedKind }),
-          };
+          });
         }
+        // やり直す誤りの理由は、既存の `isRetryableCallError` の分岐に追随する（Issue #899）
+        recordRow(
+          this.#retryRow(
+            sanitizeHttpStatus(classified.status),
+            classified.kind,
+            retryReasonOf(classified),
+            attempt < this.#maxAttempts ? "planned" : "attempts-exhausted",
+          ),
+        );
         // 例外のときは usage が分からないので、予約は残したまま次を試す（§1.5）
         previousTimeoutMs = timeoutMs;
       }
     }
     // 使い切った・伸ばせないで止めた。**新しい終端の数は増やさない**——各試行の終端はもう数えてある。
-    return {
+    return attach({
       kind: "failed",
       errorKind: lastKind,
       attempts,
       ...(lastStatus === undefined ? {} : { status: lastStatus }),
-    };
+    });
   }
 
   /**

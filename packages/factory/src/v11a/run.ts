@@ -520,30 +520,42 @@ function stageFailureToKind(failure: { readonly kind: StageFailure["kind"] }): F
  */
 function stageFailureAttribution(stage: StageId, failure: StageFailure, withLimit = false): FailureAttribution {
   const kind = stageFailureToKind(failure);
+  // 共通の口の HTTP 停止の補足は、**選ばれた失敗そのもの**が運ぶ（Issue #899）。口の「最後に見た
+  // status」で代用しない。補足が無ければ欄を持たない（非 HTTP の失敗を HTTP へ読み替えない）。
+  const http = failure.http;
   if (withLimit && failure.kind === "callLimit") {
-    return { stage, kind, limit: { name: failure.limit, max: failure.max, actual: failure.actual } };
+    return {
+      stage,
+      kind,
+      limit: { name: failure.limit, max: failure.max, actual: failure.actual },
+      ...(http === undefined ? {} : { http }),
+    };
   }
-  if (failure.kind === "invalidRequest") return { stage, kind, code: failure.code };
+  if (failure.kind === "invalidRequest") return { stage, kind, code: failure.code, ...(http === undefined ? {} : { http }) };
   if (failure.kind === "malformed") {
     // 選ばれた失敗が形の誤りの印を持つときだけ足す（段の検査が落とした malformed〔problems あり〕は印を持たない。Issue #783）
-    if (failure.malformedKind !== undefined) return { stage, kind, malformed_kind: failure.malformedKind };
+    if (failure.malformedKind !== undefined) {
+      return { stage, kind, malformed_kind: failure.malformedKind, ...(http === undefined ? {} : { http }) };
+    }
     if (failure.problems.length > 0) {
       return {
         stage,
         kind,
         problems: failure.problems.map((problem) => ({ field: problem.field, message: problem.message })),
+        ...(http === undefined ? {} : { http }),
       };
     }
-    return { stage, kind };
+    return { stage, kind, ...(http === undefined ? {} : { http }) };
   }
   if (failure.kind === "unmet" && failure.problems.length > 0) {
     return {
       stage,
       kind,
       problems: failure.problems.map((problem) => ({ field: problem.field, message: problem.message })),
+      ...(http === undefined ? {} : { http }),
     };
   }
-  return { stage, kind };
+  return { stage, kind, ...(http === undefined ? {} : { http }) };
 }
 
 /** 要約の `assurance` */

@@ -99,6 +99,7 @@ import type { LlmClient } from "./llm.js";
 import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL, OLLAMA_STAGE_OUTPUT_LIMITS } from "./ollama.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL } from "./openai.js";
 import { createOpenRouterLlmClient, DEFAULT_OPENROUTER_MODEL } from "./openrouter.js";
+import type { FailureAttribution } from "./record.js";
 import type { EnvelopeId } from "./schema-envelope.js";
 import { runPlan, type PlanResponder, type PlanResult } from "./plan/run-plan.js";
 import {
@@ -914,6 +915,8 @@ async function runBuild(
   readonly boundaries?: readonly BoundaryMaterials[];
   /** 境界の材料を集めた走りの実効の旗（checkpoint の版の `flags`・`call_limits`。Issue #637） */
   readonly flags?: V12Flags;
+  /** 止めた段の失敗の帰属（HTTP 停止の補足を持つときだけ Build の記録へ書く。Issue #899） */
+  readonly failure: FailureAttribution | null;
 }> {
   // v1.1α は確定した仕様と組んでだけ流れる（引数の読み取りが `--plan-file` を要る。Issue #511）。v1.2 は同じ経路に
   // 旗の組を渡し、要約に旗の組を書かせる（Issue #547）。旗 v12.ids が on の走りだけ、境界の材料も集めさせる（checkpoint を書く
@@ -937,7 +940,8 @@ async function runBuild(
           ...(job.pipeline === "v1.2" ? { recordMalformedKinds: true } : {}),
         });
   const written = await writeBuildRun(deps, job, run, log);
-  return run.boundaries === undefined || flags === undefined ? written : { ...written, boundaries: run.boundaries, flags };
+  const withFailure = { ...written, failure: run.stopped ?? null };
+  return run.boundaries === undefined || flags === undefined ? withFailure : { ...withFailure, boundaries: run.boundaries, flags };
 }
 
 /** 生成の入力のうち、経路に依らない部分（v1・v1.1α・段の走りで同じ） */
@@ -1307,6 +1311,8 @@ async function runBuildFromPlanFile(
         sourceSha256: validation.sourceSha256,
         returnToPlan: build.returnToPlan,
         ...(checkpoints === undefined ? {} : { checkpoints }),
+        // HTTP 停止の補足を持つ失敗だけが、記録の `failure` 欄になる（Issue #899）
+        ...(build.failure === null ? {} : { failure: build.failure }),
       }),
     ),
   );

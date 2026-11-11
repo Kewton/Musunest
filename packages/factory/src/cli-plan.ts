@@ -14,6 +14,7 @@
 import { checkConfirmedPlan, planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
 import type { StageOutputLimits } from "./call.js";
 import type { StageModels } from "./limits.js";
+import { pickFailureForRecord, type FailureAttribution } from "./record.js";
 import type { BundleJudgeUsage } from "./bundle.js";
 import type { PlanAnswerDraft } from "./plan/answers.js";
 import type { PlanQuestion } from "./plan/questions.js";
@@ -1185,6 +1186,12 @@ export interface BuildCliRecord {
    * の走りだけが持つ（境界に届かなければ空）。ほかの経路は欄を置かない（Issue #636）
    */
   readonly checkpoints?: readonly BuildCliCheckpoint[];
+  /**
+   * 止めた段の失敗の帰属（HTTP 停止の補足を含む。Issue #899）。**HTTP 停止の補足を持つときだけ**書く
+   * ——補足の無い走りの記録は従来とバイトで同じ（旗 off の比較元を上書きしない）。保存用の許可リスト
+   * （`pickFailureForRecord`）で投影し、本文・ヘッダー・URL・任意の provider 文字列は持たない。
+   */
+  readonly failure?: FailureAttribution;
 }
 
 /** Build だけの記録が宣言する checkpoint の 1 件（段の走りの記録の `checkpoints` の 1 件と同じ形。Issue #636） */
@@ -1202,7 +1209,14 @@ export function buildBuildCliRecord(input: {
   readonly returnToPlan: boolean;
   /** 書いた境界の checkpoint（`--pipeline v1.2` の走りだけ渡す。省けば欄を置かない。Issue #636） */
   readonly checkpoints?: readonly BuildCliCheckpoint[];
+  /** 止めた段の失敗の帰属（HTTP 停止の補足を持つときだけ渡す。Issue #899） */
+  readonly failure?: FailureAttribution;
 }): BuildCliRecord {
+  // HTTP 停止の補足を持つ失敗だけを、保存用の許可リストで投影して書く（Issue #899）。補足が無ければ
+  // 欄を置かない——従来の記録とバイトで同じにする。
+  const failure = input.failure === undefined || input.failure.http === undefined
+    ? undefined
+    : pickFailureForRecord(input.failure);
   return {
     schema_version: BUILD_CLI_RECORD_SCHEMA,
     conditions: input.conditions,
@@ -1210,6 +1224,7 @@ export function buildBuildCliRecord(input: {
     source_sha256: input.sourceSha256,
     return_to_plan: input.returnToPlan,
     ...(input.checkpoints === undefined ? {} : { checkpoints: input.checkpoints }),
+    ...(failure === undefined ? {} : { failure }),
   };
 }
 
