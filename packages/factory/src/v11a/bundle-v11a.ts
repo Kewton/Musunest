@@ -50,6 +50,7 @@ import { semanticCheckTargets } from "./stages/semantic-check.js";
 import { testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
 import { UPSTREAM_LEDGER_BOUNDARY, type V12PublicFlags } from "../v12/ledger.js";
 import type { SearchEvent, SearchRepairRecord, StageSearchRepairLog, VersionViolations } from "../v12/search-repair.js";
+import type { StopDiagnostic } from "../v12/stop-diagnostics.js";
 import type { CallRequestRecord, StageSpanRecord } from "../record.js";
 import type { PromptDocument } from "../stages/prompt.js";
 
@@ -883,6 +884,11 @@ export interface StageRunOutcome {
    * 段の判定・持ち越し・採用した回の選び方には使わない。Issue #699）
    */
   readonly tableRounds?: readonly TableRoundRecord[];
+  /**
+   * C2・C3 の形の拒否の診断（一気通貫の診断と同じ形・同じ順。記録が無ければ欄を持たない。段の判定・持ち越し・
+   * checkpoint・採用する表には使わない。入口が `diagnostics/stop-diagnostics.json` に書く。Issue #898）
+   */
+  readonly stopDiagnostics?: readonly StopDiagnostic[];
   /**
    * ⑦ まで流したときだけ、判定した宣言と検証の数（範囲の中の ⑦ より前の早期停止は持たない。差し戻しの走りも ⑦ を流したので持つ。
    * 境界の材料には入れない。記録・ファイルに書くかは呼ぶ側が決める。Issue #687）

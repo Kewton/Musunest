@@ -107,6 +107,7 @@ import {
   type PlanScriptRecordSink,
 } from "./plan/script-responder.js";
 import { runGeneration } from "./run.js";
+import { buildStopDiagnosticsFile } from "./v12/stop-diagnostics.js";
 import {
   boundaryBefore,
   buildStageCheckpoint,
@@ -1603,6 +1604,15 @@ async function runStageFromPlanFile(
   // （行が無ければ何も書かず、置き場所も作らない。記録・checkpoint・要約・終了コードは変えない。Issue #699）
   if (pipeline === "v1.2" && outcome.tableRounds !== undefined && outcome.tableRounds.length > 0) {
     for (const file of buildTableRoundsFile(outcome.tableRounds)) {
+      const parent = parentOf(file.path);
+      if (parent !== "") await deps.makeDirectory(joinPath(job.outDir, parent));
+      await deps.writeFile(joinPath(job.outDir, file.path), file.text);
+    }
+  }
+  // `--pipeline v1.2` の段の走りだけ、C2・C3 の形の拒否の診断を一気通貫と同じ関数・同じ名前で診断に書く
+  // （記録が無ければ何も書かず、置き場所も作らない。記録・checkpoint・要約・終了コードは変えない。Issue #898）
+  if (pipeline === "v1.2" && outcome.stopDiagnostics !== undefined && outcome.stopDiagnostics.length > 0) {
+    for (const file of buildStopDiagnosticsFile(outcome.stopDiagnostics)) {
       const parent = parentOf(file.path);
       if (parent !== "") await deps.makeDirectory(joinPath(job.outDir, parent));
       await deps.writeFile(joinPath(job.outDir, file.path), file.text);

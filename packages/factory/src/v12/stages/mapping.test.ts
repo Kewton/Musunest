@@ -53,6 +53,7 @@ import type { RequirementList } from "../../pipeline.js";
 import { nameTableRuleDefinitionsOf } from "../../v11a/stages/name-table.js";
 import { semanticCheckTargets } from "../../v11a/stages/semantic-check.js";
 import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, PROPERTY_LEDGER_VIEW_IDS, type LedgerView, type UpstreamLedgerView } from "../ledger.js";
+import { buildStopDiagnosticsFile, type C2StopDiagnostic, type StopDiagnostic } from "../stop-diagnostics.js";
 import type { ReferenceCounts } from "../ids.js";
 import {
   MAPPING_DATA_NAMES,
@@ -96,7 +97,13 @@ const GOOD = idsResponsesOf(LIST, TABLE).mapping;
 
 async function run(
   outputs: readonly unknown[],
-  options: { previous?: MappingPrevious; table?: NameTable; list?: RequirementList; ledger?: LedgerView } = {},
+  options: {
+    previous?: MappingPrevious;
+    table?: NameTable;
+    list?: RequirementList;
+    ledger?: LedgerView;
+    onStopDiagnostic?: (record: import("../stop-diagnostics.js").StopDiagnostic) => void;
+  } = {},
 ) {
   const list = options.list ?? LIST;
   // 要件 6 件以上の初回は束ごとに同時に呼ぶので、記録した応答を束ごとに読んで絞る（要件 5 件以下は順に読むのと同じ。Issue #736）
@@ -109,6 +116,7 @@ async function run(
     rows: (options.table ?? TABLE).rows,
     ...(options.previous === undefined ? {} : { previous: options.previous }),
     ...(options.ledger === undefined ? {} : { ledger: options.ledger }),
+    ...(options.onStopDiagnostic === undefined ? {} : { onStopDiagnostic: options.onStopDiagnostic }),
   });
   return { outcome, recording };
 }
@@ -2727,5 +2735,146 @@ describe("Issue #806：旗 ids の C2 への 3 文（when・value・state-after-
     const oldRewrite = ruleTexts(mappingRewriteRuleDefinitionsOf(oldIdsView));
     expect(idsRewrite).not.toEqual(oldRewrite);
     expect(idsRewrite.map((text) => text.split(THREE.join("")).join(""))).toEqual(oldRewrite);
+  });
+});
+
+// ── 所属不備の診断（Issue #898。方法論 03 の H4。失敗のモード M-17）────────────────────
+//
+// C2' の所属の検査の拒否を、本文を保存せず、分類と安全な位置で残す。分類は発生側（`checkMappedTableSourced`）が
+// 付け、既存の `Problem` と同じ件数・同じ順に並ぶ。位置は表の行（`row_index`）と所属の添字
+// （`ownership_index`・`role_index`）を区別し、未知の ID を表の行に結び付けない。
+describe("C2 の所属不備の診断：分類と安全な位置を本文なしで残す（Issue #898）", () => {
+  const stopSink = () => {
+    const records: StopDiagnostic[] = [];
+    return { records, onStopDiagnostic: (record: StopDiagnostic) => records.push(record) };
+  };
+  /** 実際に保存する診断のファイルを組み、読み戻した記録（保存結果への assertion） */
+  const savedRecords = (records: readonly StopDiagnostic[]): readonly StopDiagnostic[] => {
+    const [file] = buildStopDiagnosticsFile(records);
+    if (file === undefined) return [];
+    return (JSON.parse(file.text) as { readonly records: readonly StopDiagnostic[] }).records;
+  };
+  const entriesOfGood = () => (GOOD["requirements"] as Entry[]).map((entry) => ({ ...entry }));
+  const r1RolesOf = () => (entriesOfGood()[0]?.["roles"] as Entry[] | undefined) ?? [];
+  const withR1Roles = (roles: readonly Entry[]) =>
+    withEntries(entriesOfGood().map((entry, index) => (index === 0 ? { ...entry, roles } : entry)));
+  const UNKNOWN_ROLE = { id: "row-does-not-exist", basis: "stated", reason: null };
+
+  /** どの要件も所属させない行を 1 つ足した表（行の形は題材の項目の行を写す） */
+  const tableWithUnownedRow = (): NameTable => {
+    const base = TABLE.rows.find((row) => row.kind === "field");
+    if (base === undefined) throw new Error("前提が壊れた：題材の表に項目の行が無い");
+    return { ...TABLE, rows: [...TABLE.rows, { ...base, id: "f.item.unowned", name: "unownedItem" }] };
+  };
+
+  it("未知の所属先は unknown-ownership-id・行の位置は null・所属の添字は保つ。所属の重複は duplicate-ownership-id で行の位置を持ち、同じ field でも別の分類になる", async () => {
+    const r1 = r1RolesOf();
+    const unknown = withR1Roles([...r1, UNKNOWN_ROLE]);
+    const duplicate = withR1Roles([...r1, r1[0]!]);
+    for (const [output, expected, rowIndexed] of [
+      [unknown, "unknown-ownership-id", false],
+      [duplicate, "duplicate-ownership-id", true],
+    ] as const) {
+      const sink = stopSink();
+      const { outcome } = await run([output, rewriteOf(GOOD, ["R1"])], { onStopDiagnostic: sink.onStopDiagnostic });
+      expect(outcome.ok).toBe(true);
+      expect(savedRecords(sink.records)).toHaveLength(1);
+      const record = savedRecords(sink.records)[0]!;
+      expect(record.kind).toBe("c2");
+      if (record.kind !== "c2") throw new Error("前提が壊れた");
+      expect(record.phase).toBe("initial");
+      expect(record.round).toBe(1);
+      expect(record.attempt).toBe(1);
+      const problem = record.problems.find((entry) => entry.class === expected);
+      if (problem === undefined) throw new Error(`分類 ${expected} が無い: ${JSON.stringify(record.problems)}`);
+      expect(problem.ownership_index).toBe(0);
+      expect(problem.role_index).toBe(r1.length);
+      if (rowIndexed) expect(problem.row_index).not.toBeNull();
+      else expect(problem.row_index).toBeNull();
+      // 未知の ID の値は記録に写らない（分類と位置だけ）
+      expect(JSON.stringify(record)).not.toContain(UNKNOWN_ROLE.id);
+    }
+  });
+
+  it("孤立行は unowned-row・行の位置だけを持ち、未知の所属先と同時に混ぜても別々に分類される。別配列は Problem と同じ件数・同じ順", async () => {
+    const table = tableWithUnownedRow();
+    const output = withR1Roles([...r1RolesOf(), UNKNOWN_ROLE]);
+    const inspected = inspectMappingSourced(LIST, table.rows, output, FIXTURE_DOCUMENTS);
+    expect(inspected.ok).toBe(false);
+    if (inspected.ok) return;
+    expect(inspected.classifications).toHaveLength(inspected.problems.length);
+    expect(inspected.positions).toHaveLength(inspected.problems.length);
+    // 分類は問題と同じ順で、位置も同じ添字に対応する
+    inspected.classifications!.forEach((classification, index) => {
+      expect(["unknown-ownership-id", "duplicate-ownership-id", "unowned-row", "other"]).toContain(classification);
+      expect(inspected.positions![index]).toBeDefined();
+    });
+    expect(inspected.classifications).toContain("unknown-ownership-id");
+    expect(inspected.classifications).toContain("unowned-row");
+
+    const sink = stopSink();
+    const recovered = withR1Roles([...r1RolesOf(), { id: "f.item.unowned", basis: "stated", reason: null }]);
+    const { outcome } = await run([output, recovered], { table, onStopDiagnostic: sink.onStopDiagnostic });
+    expect(outcome.ok).toBe(true);
+    const [record] = savedRecords(sink.records);
+    if (record?.kind !== "c2") throw new Error("C2 の記録が無い");
+    expect(record.problems).toHaveLength(inspected.problems.length);
+    const unowned = record.problems.find((entry) => entry.class === "unowned-row");
+    expect(unowned).toEqual({
+      class: "unowned-row",
+      row_index: table.rows.length - 1,
+      ownership_index: null,
+      role_index: null,
+    });
+    expect(record.problems.some((entry) => entry.class === "unknown-ownership-id" && entry.row_index === null)).toBe(true);
+  });
+
+  it("部分書き直しが未達（合併後の孤立行）：initial と merged の 2 件が残り、合併後の孤立行を unowned-row で分類し、元の問題と同じ件数・順を保つ", async () => {
+    const table = TABLE;
+    const unknown = withR1Roles([...r1RolesOf(), UNKNOWN_ROLE]);
+    const r1 = (GOOD["requirements"] as Entry[])[0]!;
+    const rewrittenR1 = { ...r1, roles: (r1["roles"] as Entry[]).filter((role) => role["id"] !== "OP1") };
+    const sink = stopSink();
+    const { outcome } = await run([unknown, { requirements: [rewrittenR1] }], { table, onStopDiagnostic: sink.onStopDiagnostic });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(sink.records.map((record) => [record.kind, record.kind === "c2" ? record.phase : null])).toEqual([
+      ["c2", "initial"],
+      ["c2", "merged"],
+    ]);
+    const merged = sink.records[1];
+    if (merged?.kind !== "c2") throw new Error("合併後の記録が無い");
+    expect(merged.problems).toHaveLength(outcome.failure.problems.length);
+    expect(merged.problems.some((entry) => entry.class === "unowned-row")).toBe(true);
+  });
+
+  it("全体再試行：帰属できない孤立行の拒否は initial → rebuild の 2 件になり、どちらも同じ位置の unowned-row を持つ", async () => {
+    const table = tableWithUnownedRow();
+    const bad = withEntries(entriesOfGood());
+    const sink = stopSink();
+    const { outcome } = await run([bad, bad], { table, onStopDiagnostic: sink.onStopDiagnostic });
+    expect(outcome.ok).toBe(false);
+    const c2 = sink.records.filter((record): record is C2StopDiagnostic => record.kind === "c2");
+    expect(c2.map((record) => [record.phase, record.attempt])).toEqual([
+      ["initial", 1],
+      ["rebuild", 2],
+    ]);
+    for (const record of c2) {
+      expect(record.problems).toEqual([
+        { class: "unowned-row", row_index: table.rows.length - 1, ownership_index: null, role_index: null },
+      ]);
+    }
+  });
+
+  it("2 回失敗：initial と merged の分類がそれぞれ残り、既存の拒否・持ち越しの期待（unmet の問題文）は変わらない", async () => {
+    const unknown = withR1Roles([...r1RolesOf(), UNKNOWN_ROLE]);
+    const sink = stopSink();
+    const { outcome } = await run([unknown, rewriteOf(unknown, ["R1"])], { onStopDiagnostic: sink.onStopDiagnostic });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(outcome.failure.problems.map((problem) => problem.message)).toContain("所属の表の ID が表に無い");
+    const c2 = sink.records.filter((record): record is C2StopDiagnostic => record.kind === "c2");
+    expect(c2.map((record) => record.phase)).toEqual(["initial", "merged"]);
+    for (const record of c2) expect(record.problems.some((entry) => entry.class === "unknown-ownership-id")).toBe(true);
   });
 });

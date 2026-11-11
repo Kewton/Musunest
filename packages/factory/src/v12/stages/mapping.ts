@@ -88,7 +88,7 @@ import {
 import {
   NAME_TABLE_VERIFICATION_KINDS,
   checkCheckTargets,
-  checkMappedTable,
+  checkMappedTableSourced,
   nameTableSha256,
   ownersByRowId,
   ownershipWithCheckTargets,
@@ -108,6 +108,14 @@ import { deriveAcceptedParts, type AcceptedPartBasis, type AcceptedParts } from 
 import { ReferenceTally, idKindOf, type ReferenceCounts } from "../ids.js";
 import type { UpstreamLedgerView } from "../ledger.js";
 import { V12_T2_BUNDLE } from "../limits.js";
+import {
+  c2StopDiagnostic,
+  reportStopDiagnostic,
+  type C2Phase,
+  type C2ProblemClass,
+  type StopDiagnostic,
+  type StopDiagnosticPosition,
+} from "../stop-diagnostics.js";
 import { bundleRequirementIds } from "../test-cases.js";
 
 /** C2 の JSON Schema の名前 */
@@ -507,6 +515,12 @@ export interface MappingInput {
   readonly acceptedParts?: AcceptedParts;
   readonly onRejected?: (candidate: MappingRejectedCandidate) => void;
   /**
+   * 所属不備の診断を受け取る任意の口（Issue #898）。C2' の検査が問題を返した局面ごとに 1 件を渡す。**省けば
+   * 何もしない。** 口の有無・例外で、要求・試行・予算・書き直し・合併・採用する表・失敗の選択は変わらない
+   * （`reportStopDiagnostic`）。記録は本文を含まず、処理対象への参照も持たない。
+   */
+  readonly onStopDiagnostic?: (record: StopDiagnostic) => void;
+  /**
    * C2' の検査（試験の口。既定は `inspectMappingSourced`）。初回の応答と、書き直しを合併した写像に**同じ検査**を掛けることを、偽物の
    * 検査で数えるためだけに差し込む（Issue #660）
    */
@@ -874,6 +888,13 @@ export type MappingInspection =
       readonly sources: readonly MappingProblemSource[];
       /** 検査した表の entry の要件 ID（所属・確かめ方・分類は同じ並び）。表を組む前に落ちたときは null */
       readonly tableRequirementIds: readonly string[] | null;
+      /**
+       * `problems` と同じ件数・同じ順の固定分類と安全な位置（Issue #898）。所属の不備は発生側
+       * （`checkMappedTableSourced`）が分類する。差し込まれた検査（`MappingInspector`）が返さないときは、
+       * 診断の側で `other`・位置なしとして扱う（値を推測しない）。
+       */
+      readonly classifications?: readonly C2ProblemClass[];
+      readonly positions?: readonly (StopDiagnosticPosition | null)[];
     };
 
 /** C2' の検査の型（`inspectMappingSourced` と同じ。試験の口で差し込む） */
@@ -916,7 +937,16 @@ export function inspectMappingSourced(
 ): MappingInspection {
   const problems: Problem[] = [];
   const shaped = (output["requirements"] as readonly unknown[]).map((item, index) => shapeOfEntry(item, `requirements[${String(index)}]`, problems, ledger));
-  if (problems.length > 0) return { ok: false, problems, sources: problems.map(() => "response"), tableRequirementIds: null };
+  if (problems.length > 0) {
+    return {
+      ok: false,
+      problems,
+      sources: problems.map(() => "response"),
+      tableRequirementIds: null,
+      classifications: problems.map((): C2ProblemClass => "other"),
+      positions: problems.map(() => null),
+    };
+  }
   // 検査の対象を照らして所属に足す（対象に問題がある要件は足さない。落ちる応答は採用しない）
   const entries = (shaped as readonly MappingEntry[]).map((entry, index) => {
     if (entry.verification.kind === "validation-expression") {
@@ -945,16 +975,52 @@ export function inspectMappingSourced(
   };
   // 整える手は C2' の前に、組んだ表へ 1 回だけ当てる（門は整えた表に今のまま掛ける。Issue #723）
   const { table, normalized } = normalizeMappedTable(built);
-  const sources: MappingProblemSource[] = problems.map(() => "response");
-  const tableProblems = checkMappedTable(list, table, documents, {
+  /** 表の検査の前までの問題（応答の形・検査の対象の照合）の数 */
+  const responseProblems = problems.length;
+  const tableChecked = checkMappedTableSourced(list, table, documents, {
     ...(ledger === undefined ? {} : { ledger }),
     ...(acceptedParts === undefined ? {} : { acceptedParts }),
   });
-  problems.push(...tableProblems);
-  sources.push(...tableProblems.map((): MappingProblemSource => "table"));
+  const sources: MappingProblemSource[] = problems.map(() => "response");
+  problems.push(...tableChecked.problems);
+  sources.push(...tableChecked.problems.map((): MappingProblemSource => "table"));
+  // 分類と位置は既存の問題と同じ件数・同じ順（応答の問題は `other`・位置なし。Issue #898）
+  const classifications: C2ProblemClass[] = [
+    ...Array.from({ length: responseProblems }, (): C2ProblemClass => "other"),
+    ...tableChecked.classifications,
+  ];
+  const positions: (StopDiagnosticPosition | null)[] = [
+    ...Array.from({ length: responseProblems }, () => null),
+    ...tableChecked.positions,
+  ];
   return problems.length > 0
-    ? { ok: false, problems, sources, tableRequirementIds: sorted.map((entry) => entry.requirementId) }
+    ? { ok: false, problems, sources, tableRequirementIds: sorted.map((entry) => entry.requirementId), classifications, positions }
     : { ok: true, table, normalized };
+}
+
+/**
+ * C2' の検査の結果を、診断の記録にする（Issue #898。純粋）。`problems` と同じ件数・同じ順の分類と位置を使う。
+ * すでに記録した問題を重ねて記録しないよう、記録するかは呼ぶ側が決める。
+ */
+function c2RecordOf(
+  phase: C2Phase,
+  round: number,
+  attempt: number | null,
+  inspection: Extract<MappingInspection, { readonly ok: false }>,
+): StopDiagnostic {
+  return c2StopDiagnostic({
+    round,
+    phase,
+    attempt,
+    problems: inspection.problems,
+    ...(inspection.classifications === undefined ? {} : { classifications: inspection.classifications }),
+    ...(inspection.positions === undefined ? {} : { positions: inspection.positions }),
+  });
+}
+
+/** 診断を渡す（口の例外で制御を変えない。Issue #898） */
+function reportC2(onStopDiagnostic: ((record: StopDiagnostic) => void) | undefined, record: StopDiagnostic): void {
+  reportStopDiagnostic(onStopDiagnostic, record);
 }
 
 /** 要件 1 件に帰属した問題（Issue #660） */
@@ -1234,6 +1300,14 @@ export async function runMapping(input: MappingInput): Promise<MappingOutcome> {
     attempts += 1;
     const inspected = inspectSourced(output);
     if (inspected.ok) return { ok: true, value: { kind: "table", table: inspected.table, normalized: inspected.normalized } };
+    // 初回の検査の拒否を 1 件残す（形の試行ごと。1 回目は initial、窓口の 2 回目は全体の再試行なので rebuild。
+    // 書き直しへ進んでも記録は残る。Issue #898）
+    const phase: C2Phase = attempts === 1 ? "initial" : "rebuild";
+    if ("skeleton" in inspected) {
+      reportC2(input.onStopDiagnostic, c2StopDiagnostic({ round: 1, phase, attempt: attempts, problems: inspected.problems }));
+    } else {
+      reportC2(input.onStopDiagnostic, c2RecordOf(phase, 1, attempts, inspected));
+    }
     if (attempts === 1 && !("skeleton" in inspected)) {
       const { groups } = attributeMappingProblems(input.list, output as Record<string, unknown>, inspected);
       if (groups !== null) return { ok: true, value: { kind: "rewrite", problems: inspected.problems, groups } };
@@ -1290,6 +1364,7 @@ async function rewriteFailedRequirements(
   const output = answer.output;
   const skeleton = skeletonProblems(output);
   if (skeleton.length > 0) {
+    reportC2(input.onStopDiagnostic, c2StopDiagnostic({ round: 1, phase: "rewrite", attempt: 2, problems: skeleton }));
     reject(2, output, skeleton);
     return { ok: false, failure: { kind: "malformed", attempts: STEP_ATTEMPTS, problems: skeleton }, references: tally.counts };
   }
@@ -1297,6 +1372,7 @@ async function rewriteFailedRequirements(
   countMappingReferences(input.list, input.rows, output, tally);
   const mismatch = checkRewriteResponse(rewrite, output as Record<string, unknown>);
   if (mismatch.length > 0) {
+    reportC2(input.onStopDiagnostic, c2StopDiagnostic({ round: 1, phase: "rewrite", attempt: 2, problems: mismatch }));
     reject(2, output, mismatch);
     return { ok: false, failure: { kind: "unmet", attempts: STEP_ATTEMPTS, problems: mismatch }, references: tally.counts };
   }
@@ -1311,6 +1387,7 @@ async function rewriteFailedRequirements(
     input.acceptedParts?.basis,
   );
   if (!inspected.ok) {
+    reportC2(input.onStopDiagnostic, c2RecordOf("merged", 1, null, inspected));
     reject(2, merged, inspected.problems);
     return { ok: false, failure: { kind: "unmet", attempts: STEP_ATTEMPTS, problems: inspected.problems }, references: tally.counts };
   }
@@ -1475,6 +1552,23 @@ async function runBundledMapping(
     };
   }
   const problems = [...(inspected.ok ? [] : inspected.problems), ...outside];
+  // 束の合併の検査の拒否を 1 件残す（所属の不備は発生側の分類。束の外の問題は `other`。Issue #898）
+  if (!inspected.ok) {
+    reportC2(
+      input.onStopDiagnostic,
+      c2StopDiagnostic({
+        round: 1,
+        phase: "initial",
+        attempt: null,
+        problems,
+        classifications: [
+          ...(inspected.classifications ?? inspected.problems.map((): C2ProblemClass => "other")),
+          ...outside.map((): C2ProblemClass => "other"),
+        ],
+        positions: [...(inspected.positions ?? inspected.problems.map(() => null)), ...outside.map(() => null)],
+      }),
+    );
+  }
   const groups = inspected.ok || outside.length > 0 ? null : attributeMappingProblems(input.list, candidate, inspected).groups;
   if (groups !== null) return rewriteFailedRequirements(input, maxOutputTokens, candidate, { kind: "rewrite", problems, groups }, tally);
   return rebuildAllRequirements(input, maxOutputTokens, candidate, problems, tally);
@@ -1502,6 +1596,7 @@ async function rebuildAllRequirements(
   const output = answer.output;
   const skeleton = skeletonProblems(output);
   if (skeleton.length > 0) {
+    reportC2(input.onStopDiagnostic, c2StopDiagnostic({ round: 1, phase: "rebuild", attempt: 2, problems: skeleton }));
     reject(2, output, skeleton);
     return { ok: false, failure: { kind: "malformed", attempts: STEP_ATTEMPTS, problems: skeleton }, references: tally.counts };
   }
@@ -1515,6 +1610,7 @@ async function rebuildAllRequirements(
     input.acceptedParts?.basis,
   );
   if (!inspected.ok) {
+    reportC2(input.onStopDiagnostic, c2RecordOf("rebuild", 1, 2, inspected));
     reject(2, output, inspected.problems);
     return { ok: false, failure: { kind: "unmet", attempts: STEP_ATTEMPTS, problems: inspected.problems }, references: tally.counts };
   }
@@ -1554,11 +1650,17 @@ async function rewriteRejectedRequirements(
   if (!answer.ok) return { ok: false, failure: answer.failure, references: tally.counts };
   const output = answer.output;
   const skeleton = skeletonProblems(output);
-  if (skeleton.length > 0) return unmet(output, skeleton);
+  if (skeleton.length > 0) {
+    reportC2(input.onStopDiagnostic, c2StopDiagnostic({ round: 2, phase: "rewrite", attempt: 1, problems: skeleton }));
+    return unmet(output, skeleton);
+  }
   // 参照の照合の数は実際の応答（書き直した k 件）を数える（保持した要件を新たな応答として数えない）
   countMappingReferences(input.list, input.rows, output, tally);
   const mismatch = checkRewriteResponse(rewrite, output as Record<string, unknown>);
-  if (mismatch.length > 0) return unmet(output, mismatch);
+  if (mismatch.length > 0) {
+    reportC2(input.onStopDiagnostic, c2StopDiagnostic({ round: 2, phase: "rewrite", attempt: 1, problems: mismatch }));
+    return unmet(output, mismatch);
+  }
   const merged = mergeRewrite(input.list, previous.response as Record<string, unknown>, rewrite, output as Record<string, unknown>);
   // 合併した写像に C2' を全部掛ける（孤立行・網羅・重複を含む。初回と同じ検査）
   const inspected = (input.inspect ?? inspectMappingSourced)(
@@ -1569,7 +1671,10 @@ async function rewriteRejectedRequirements(
     input.ledger,
     input.acceptedParts?.basis,
   );
-  if (!inspected.ok) return unmet(merged, inspected.problems);
+  if (!inspected.ok) {
+    reportC2(input.onStopDiagnostic, c2RecordOf("merged", 2, null, inspected));
+    return unmet(merged, inspected.problems);
+  }
   return {
     ok: true,
     value: { table: inspected.table, tableSha256: await nameTableSha256(inspected.table), response: merged, normalized: inspected.normalized },
