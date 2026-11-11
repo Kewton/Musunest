@@ -72,6 +72,377 @@ body {
   color: #fffdf8;
 }
 
+.studio__hint {
+  margin: 0;
+  color: #6d665b;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(1rem, 3vw, 1.75rem);
+}
+
+.page__head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.page__title {
+  margin: 0;
+  font-size: clamp(1.35rem, 5vw, 1.9rem);
+  letter-spacing: 0.02em;
+}
+
+.page__lead,
+.page__hint {
+  margin: 0;
+  color: #4a453d;
+}
+
+.page__hint {
+  font-size: 0.9rem;
+  color: #6d665b;
+}
+
+.page__form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.page__warning {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid #b46a4a;
+  border-radius: 0.75rem;
+  background: #fdf1ea;
+  color: #7d3a1d;
+}
+
+.page__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.field__label {
+  font-weight: 600;
+}
+
+.field__input {
+  width: 100%;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid #c9c2b6;
+  border-radius: 0.75rem;
+  background: #fffdf8;
+  color: inherit;
+  font: inherit;
+  resize: vertical;
+}
+
+.field__input:focus-visible {
+  outline: 2px solid #3d5a45;
+  outline-offset: 2px;
+}
+
+.field__input--request {
+  min-height: 8rem;
+}
+
+.field__count {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #6d665b;
+  text-align: right;
+}
+
+.field__count--over,
+.field__error {
+  color: #7d3a1d;
+}
+
+.field__error {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.button {
+  min-height: 3rem;
+  padding: 0.75rem 1.35rem;
+  border: 1px solid #c9c2b6;
+  border-radius: 0.85rem;
+  background: #fffdf8;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.button--primary {
+  border-color: #3d5a45;
+  background: #3d5a45;
+  color: #fffdf8;
+}
+
+.button:hover:not(:disabled),
+.button:focus-visible:not(:disabled) {
+  border-color: #8a7f6d;
+}
+
+.examples {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.examples__lead {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #6d665b;
+}
+
+.examples__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.chip {
+  padding: 0.45rem 0.95rem;
+  border: 1px solid #c9c2b6;
+  border-radius: 999px;
+  background: #fffdf8;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chip:hover,
+.chip:focus-visible {
+  border-color: #8a7f6d;
+}
+
+.notes {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+}
+
+.notes__block {
+  padding: 0.9rem 1.1rem;
+  border: 1px solid #ded7ca;
+  border-radius: 0.85rem;
+  background: #fffdf8;
+}
+
+.notes__title {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.notes__list,
+.block__list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.budget {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.9rem 1.1rem;
+  border: 1px solid #ded7ca;
+  border-radius: 0.85rem;
+  background: #fffdf8;
+}
+
+.budget__lead,
+.budget__muted {
+  margin: 0;
+  color: #6d665b;
+}
+
+.budget__figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  margin: 0;
+}
+
+.budget__figures dt {
+  font-size: 0.8rem;
+  color: #6d665b;
+}
+
+.budget__figures dd {
+  margin: 0.1rem 0 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.budget__warning {
+  margin: 0;
+  color: #7d3a1d;
+}
+
+.status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.9rem;
+  color: #4a453d;
+}
+
+.questions {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.question {
+  margin: 0;
+  padding: 1rem 1.1rem;
+  border: 1px solid #ded7ca;
+  border-radius: 0.85rem;
+  background: #fffdf8;
+}
+
+.question__title {
+  padding: 0 0.25rem;
+  font-weight: 600;
+}
+
+.question__choices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.question__choice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.question__label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.question__recommended {
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  background: #e4eddf;
+  color: #2f4a37;
+  font-size: 0.8rem;
+}
+
+.question__reason {
+  margin: 0.6rem 0 0;
+  font-size: 0.9rem;
+  color: #4a453d;
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.9rem 1.1rem;
+  border: 1px solid #ded7ca;
+  border-radius: 0.85rem;
+  background: #fffdf8;
+}
+
+.block__title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.block__empty {
+  margin: 0;
+  color: #6d665b;
+}
+
+.block__list--limitations {
+  list-style: none;
+  padding-left: 0;
+}
+
+.block__list--limitations li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.block__what {
+  font-weight: 600;
+}
+
+.block__alternative {
+  color: #4a453d;
+}
+
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history__item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  width: 100%;
+  padding: 0.85rem 1rem;
+  border: 1px solid #ded7ca;
+  border-radius: 0.85rem;
+  background: #fffdf8;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history__item:hover,
+.history__item:focus-visible {
+  border-color: #8a7f6d;
+}
+
+.history__state {
+  font-size: 0.8rem;
+  color: #6d665b;
+}
+
+.history__request {
+  display: block;
+}
+
 @media (prefers-color-scheme: dark) {
   body {
     background: #191713;
@@ -86,5 +457,54 @@ body {
   .studio__entry {
     border-color: #4c463c;
     background: #23201a;
+  }
+
+  .studio__hint,
+  .page__lead,
+  .page__hint,
+  .examples__lead,
+  .budget__lead,
+  .budget__muted,
+  .status,
+  .block__empty,
+  .field__count,
+  .question__reason,
+  .block__alternative,
+  .history__state {
+    color: #b8b0a1;
+  }
+
+  .notes__block,
+  .budget,
+  .question,
+  .block,
+  .history__item {
+    border-color: #4c463c;
+    background: #23201a;
+  }
+
+  .field__input,
+  .button,
+  .chip {
+    border-color: #4c463c;
+    background: #23201a;
+    color: #f3efe6;
+  }
+
+  .page__warning {
+    border-color: #a05a3c;
+    background: #33251d;
+    color: #f3c3a8;
+  }
+
+  .budget__warning,
+  .field__count--over,
+  .field__error {
+    color: #f3c3a8;
+  }
+
+  .question__recommended {
+    background: #2f4034;
+    color: #cfe6d4;
   }
 }
