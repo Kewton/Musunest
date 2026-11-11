@@ -49,7 +49,8 @@ export type ScriptMatchState = (typeof SCRIPT_MATCH_STATES)[number];
 
 /**
  * 問い 1 つの照合の診断（**値を持たない**。件数・真偽・有限の状態だけ。Issue #893）。台本の鍵・根拠の
- * 文・事項の文・要件の文・事項 ID は入れない。
+ * 文・事項の文・要件の文・事項 ID は入れない。**古い版の問いは台本を当てないので、件数は全部 0・
+ * `relaxed` は偽**（`v1State` だけは `stale-revision`。Issue #896）。
  */
 export interface PlanScriptMatchDiagnosis {
   /** 観点を見ずに、鍵が全部当たった項目の数（事項をまたいで添字の重複を除く。鍵は事項の文と要件の文） */
@@ -261,6 +262,20 @@ function matchedIndexes(
   return matched;
 }
 
+/**
+ * 照合していないときの診断（件数は全部 0・`relaxed` は偽。Issue #896）。古い版の問いには台本を当てないので、
+ * 件数を数えない——`v1_state` だけは古い版として返す。
+ */
+function emptyDiagnosis(v1State: ScriptMatchState): PlanScriptMatchDiagnosis {
+  return {
+    keysOnlyEntries: 0,
+    facetRejectedEntries: 0,
+    relaxed: false,
+    requirementTextNeeded: 0,
+    v1State,
+  };
+}
+
 /** 当たった項目の集合から照合の状態を決める（1 件だけなら、その答えが選択肢 1 つに決まるかを見る） */
 function resolveFromMatched(
   script: PlanScript,
@@ -290,15 +305,7 @@ function diagnose(
   matchedByV2: ReadonlySet<number>,
   v1State: ScriptMatchState,
 ): PlanScriptMatchDiagnosis {
-  if (context === undefined) {
-    return {
-      keysOnlyEntries: 0,
-      facetRejectedEntries: 0,
-      relaxed: false,
-      requirementTextNeeded: 0,
-      v1State,
-    };
-  }
+  if (context === undefined) return emptyDiagnosis(v1State);
   const keysOnly = new Set<number>();
   const facetRejected = new Set<number>();
   const requirementNeeded = new Set<number>();
@@ -386,7 +393,9 @@ export function createScriptPlanResponder(
         const v1State: ScriptMatchState = stale
           ? "stale-revision"
           : resolveFromMatched(script, question, matchedIndexes(script, context, matchesUnderV1)).state;
-        const diagnosis = diagnose(script, context, matchedV2, v1State);
+        const diagnosis = stale
+          ? emptyDiagnosis("stale-revision")
+          : diagnose(script, context, matchedV2, v1State);
         sink.match?.({
           questionId: question.id,
           revision: question.revision,

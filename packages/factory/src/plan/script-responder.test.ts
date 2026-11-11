@@ -241,6 +241,36 @@ describe("台本の答える役（当て方 v2。Issue #444・#893）", () => {
     });
   });
 
+  it("事項の観点も項目の観点も null なら、要件の文にだけ鍵がある合成でも今までどおり事項の文と要件の文に当てる", async () => {
+    // 観点が両方 null なので、v2 の緩めた経路（事項の観点 null・項目の観点 非 null）ではない。今までどおり
+    // 観点を照らし、鍵を事項の文と要件の文に当てる——要件の文にだけある鍵でも答える
+    const plan = script([{ id: "E1", facet: null, keys: ["数え"], answer: { choose: ["全員"] } }]);
+    const q = question();
+    const main = issue({
+      facetId: null,
+      text: "どのように記録するか",
+      requirement: { id: "R-1", text: "タスクを数えられる" },
+    });
+    const { outcome, matches } = await answerWith(
+      plan,
+      request({ questions: [q], issues: [{ question: q, main, alsoCloses: [] }] }),
+    );
+
+    expect(outcome).toEqual({
+      kind: "answers",
+      answers: [{ id: "A:Q1-1", questionId: "Q1-1", revision: 1, choiceId: "c1" }],
+    });
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entryIndex: 0,
+        diagnosis: diag({ keysOnlyEntries: 1, v1State: "answered" }),
+      },
+    ]);
+  });
+
   it("当たらない問いには答えない（不明）。all-recommended は返さない", async () => {
     const plan = script([{ id: "E1", facet: "aggregation", keys: ["該当しない語"], answer: { choose: ["全員"] } }]);
     const { outcome, matches } = await answerWith(plan, request());
@@ -327,7 +357,7 @@ describe("台本の答える役（当て方 v2。Issue #444・#893）", () => {
     ]);
   });
 
-  it("古い版の問いには答えない", async () => {
+  it("古い版の問いには答えない（診断の件数は全部 0・v1 も古い版）", async () => {
     const plan = script([{ id: "E1", facet: "aggregation", keys: ["数え"], answer: { choose: ["全員"] } }]);
     const { outcome, matches } = await answerWith(plan, request({ revision: 2 }));
 
@@ -338,7 +368,7 @@ describe("台本の答える役（当て方 v2。Issue #444・#893）", () => {
         revision: 1,
         state: "stale-revision",
         entryIndex: null,
-        diagnosis: diag({ keysOnlyEntries: 1, v1State: "stale-revision" }),
+        diagnosis: diag({ keysOnlyEntries: 0, v1State: "stale-revision" }),
       },
     ]);
   });
