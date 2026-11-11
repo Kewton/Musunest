@@ -10,7 +10,7 @@
 //   ③ 最初に開く画面は採点しない（判定の種類を持たない）
 // 第 4 段の決定：負の数＋降順の ranking は「少ない順」として合格（rankingOrder）。ダッシュボードの部品も「見られる」に含める。
 // 2026-11-11 開発用の組 v2（#876。所有者の決定 3）で足した 3 つ。どれも v1 の定義は使わないので、v1 の定義の判定はバイト列で変わらない：
-//   - 判定の種類 unsatisfiable：必ず偽（宣言の構造では満たせない書ける要件。D v2 の別の構造の「定員を超えたら登録できない」）
+//   - 判定の種類 unsatisfiable：必ず偽（宣言の構造では満たせない書ける要件。D v2 の別の構造の 2 つ目の判定）
 //   - setLabels：役割 → 選択肢の表示名。表示名から宣言の鍵を引いて値に入れる（highlight。宣言ごとに違う選択肢の鍵を定義に書けないため）
 //   - 構造の observe：checks と同じ形の判定を記録だけする。戻り値 observed（{ req: 真偽 }）に出し、passed・writable_total・verdict・requiresClaim に入れない（E v2 の E-c）
 import { readFileSync } from "node:fs";

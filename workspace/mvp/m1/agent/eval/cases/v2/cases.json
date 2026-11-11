@@ -450,7 +450,18 @@
         "v2": "unmatched",
         "v1": "wrong"
       },
-      "why": "D2-key-neg-capacity：鍵 K0 に当たらない（v1 は別の構造の書けない要件「定員」に当たっていた）"
+      "why": "D2-key-neg-capacity：鍵 K0 にも定員超えの鍵（定員と超えるの語の組）にも当たらない（v1 は別の構造の書けない要件「定員」に当たっていた）"
+    },
+    {
+      "subject": "D",
+      "structure": "list",
+      "text": "定員を超えても登録できる",
+      "op": "exclusion",
+      "expect": {
+        "v2": "wrong",
+        "v1": "wrong"
+      },
+      "why": "D2-key-pos-overflow（review-891 中 1）：主の構造の定員超えの判定の鍵に当たり、書ける要件の除外＝wrong（v1 は別の構造の書けない要件に当たって wrong）"
     },
     {
       "subject": "D",

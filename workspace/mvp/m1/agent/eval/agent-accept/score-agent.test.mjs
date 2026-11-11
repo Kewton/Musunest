@@ -5912,9 +5912,10 @@ test("#876 開発用の組 v2 は入口の検査を通り、id は v1 と同じ�
   const d = defV2("D"), e = defV2("E"), d1 = defOf("D"), e1 = defOf("E");
   assert.deepEqual(d.structures.map((st) => [st.id, st.checks.length, st.unwritable.length]), [[d1.structures[0].id, 7, 0], [d1.structures[1].id, 7, 0]]);
   assert.deepEqual(d.structures[1].checks.filter((c) => c.kind === "unsatisfiable").map((c) => c.req), [d1.structures[1].unwritable[0].id], "別の構造の書けない要件だったものが満たせない判定になる");
-  assert.deepEqual(d.structures.map((st) => st.checks.filter((c) => Array.isArray(c.keys)).length), [1, 1], "鍵 K0 は主の構造の新しい判定と、別の構造の既存の判定（K-a）に 1 つずつ");
-  assert.deepEqual(d.structures[1].checks.find((c) => Array.isArray(c.keys)).req, d1.structures[1].checks[0].req, "(K-a)：別の構造の 1 つ目の判定に鍵を付ける");
-  assert.deepEqual(d.structures[0].checks.find((c) => Array.isArray(c.keys)).keys, d.structures[1].checks.find((c) => Array.isArray(c.keys)).keys, "同じ鍵");
+  const v1Reqs = new Set(d1.structures[0].checks.map((c) => c.req)), zero = d.structures[0].checks.find((c) => !v1Reqs.has(c.req));
+  assert.deepEqual(d.structures[0].checks.filter((c) => Array.isArray(c.keys)).map((c) => c.req), [d1.structures[0].checks[1].req, zero.req], "主の構造の鍵は定員超えの判定（review-891 中 1）と新しい 0 人の判定（K0）");
+  assert.deepEqual(d.structures[1].checks.filter((c) => Array.isArray(c.keys)).map((c) => c.req), [d1.structures[1].checks[0].req], "(K-a)：別の構造の 1 つ目の判定にだけ鍵を付ける");
+  assert.deepEqual(d.structures[1].checks[0].keys, zero.keys, "(K-a) の鍵は K0 と同じ");
   assert.deepEqual(e.structures[0].checks, e1.structures[0].checks, "E の判定は v1 と同じ（E-c）");
   assert.deepEqual([e.structures[0].unwritable, e.structures[0].observe.length], [[], 1]);
 });
