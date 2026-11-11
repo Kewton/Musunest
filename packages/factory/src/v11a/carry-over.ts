@@ -29,7 +29,7 @@ import type { UnwritableRequirement } from "../bundle.js";
 import type { FixedTest, TestSuite } from "../fixed-test.js";
 import type { RequirementList } from "../pipeline.js";
 import { constraintIdsIn, isRecord, normalizeConstraintId, type PromptDocument } from "../stages/prompt.js";
-import type { AcceptedPartBasis } from "../v12/accepted-parts.js";
+import type { AcceptedParts } from "../v12/accepted-parts.js";
 import type { CoverageLoss } from "./coverage.js";
 import { toV1, type V1Conversion } from "./convert.js";
 import { nameTableSha256, ownersByRowId, type NameTable } from "./names.js";
@@ -326,12 +326,16 @@ export function pruneForCarryOver(
   };
 }
 
-// ── 書けない要件の申告（旗 `v12.ids` の走りだけ。Issue #807）────────────────────────
+// ── 書けない要件の申告（旗 `v12.ids` の走りだけ。Issue #807・#847）────────────────────────
 //
 // C2 の unresolved は根拠として文書の制約 ID か台帳の未対応の観測の ID を 1 件以上持ち、C2' が正規化した ID で
 // 一覧にあることを照らしている（#682・#725）。そのうち**根拠が文書の制約 ID だけ**の持ち越しを、v1 と同じ形の
 // 申告（`UnwritableRequirement`）に写す。台帳の未対応の観測の ID を根拠にした unresolved は「確かめられない」で
 // あって「書けない」ではないので写さない（観測 ID は文書の集合に無いので自然に外れる）。
+//
+// 了承済みの持ち越し（#841 の導出の結果。`acceptedCarried`）も申告に写す（#847。所有者の決定 11-10 で #807 の (d)
+// を改めた）。導き直さず、同じ値を受け取る。部分は確定した仕様のその要件の了承済みの部分の文を `parts` の順に
+// 1 部分 1 行で写す（v1 の照合の形。C2 の理由・根拠の ID は添えない）。
 
 /**
  * 文書の制約 ID だけを根拠にした unresolved の、正規化した ID の並び（文書の集合の列挙順）。
@@ -360,23 +364,48 @@ export interface UnwritableClaimsInput {
   readonly documents: readonly PromptDocument[];
   /** 最終の持ち越し（`carry-over.json` と同じ集合・同じ順） */
   readonly entries: readonly CarryOverEntry[];
-  /** 計画で了承して除いた部分の索引（全部が了承済みの要件を外す。Issue #841） */
-  readonly acceptedParts?: AcceptedPartBasis;
+  /**
+   * 計画で了承して除いた部分（Issue #841）。了承済みの持ち越しの部分の文を写す元であり、文書の根拠の規則で
+   * 全部が了承済みの要件を外す条件にも使う（Issue #847）
+   */
+  readonly acceptedParts?: AcceptedParts;
+  /**
+   * 了承済みの持ち越しの要件 ID（#841 の導出の結果。導き直さない。Issue #847）。省けば 0 件
+   */
+  readonly acceptedCarried?: readonly string[];
 }
 
 /**
- * 最終の持ち越しから、書けない要件の申告を導く（純粋。一覧の順）。根拠が文書の制約 ID だけで、出どころに
- * name-table があり、全部が了承済みの要件でないものだけを写す。部分は 1 件で、C2 の理由の末尾に
- * 「（根拠: ID・ID）」を添える（LLM に書き直させない）。
+ * 最終の持ち越しから、書けない要件の申告を導く（純粋。一覧の順）。次のどちらかに当たる要件を写す：
+ *   - 了承済みの持ち越し（`acceptedCarried`。部分は了承済みの部分の文を `parts` の順に 1 部分 1 行）
+ *   - 根拠が文書の制約 ID だけで、出どころに name-table があり、**全部が了承済みでない**持ち越し（部分は 1 件で、
+ *     C2 の理由の末尾に「（根拠: ID・ID）」を添える）
+ * LLM に書き直させない。
  */
 export function deriveUnwritableClaims(input: UnwritableClaimsInput): readonly UnwritableRequirement[] {
   const documentConstraintIds = constraintIdsIn(input.documents);
   const requirementById = new Map(input.list.requirements.map((requirement) => [requirement.id, requirement] as const));
   const verificationById = new Map(input.table.verification.map((entry) => [entry.requirementId, entry] as const));
+  const acceptedCarried = new Set(input.acceptedCarried ?? []);
+  const acceptedById = new Map(
+    (input.acceptedParts?.requirements ?? []).map((entry) => [entry.requirementId, entry] as const),
+  );
   const claims: UnwritableRequirement[] = [];
   for (const entry of input.entries) {
+    if (acceptedCarried.has(entry.requirementId)) {
+      const requirement = requirementById.get(entry.requirementId);
+      const accepted = acceptedById.get(entry.requirementId);
+      if (requirement === undefined || accepted === undefined) continue;
+      claims.push({
+        requirementId: entry.requirementId,
+        text: requirement.text,
+        quote: requirement.quote,
+        unwritable: accepted.parts.map((part) => part.text),
+      });
+      continue;
+    }
     if (!entry.reasons.some((reason) => reason.origin === "name-table")) continue;
-    if (input.acceptedParts?.byRequirement.get(entry.requirementId)?.allAccepted === true) continue;
+    if (input.acceptedParts?.basis.byRequirement.get(entry.requirementId)?.allAccepted === true) continue;
     const verification = verificationById.get(entry.requirementId);
     if (verification === undefined || verification.kind !== "unresolved") continue;
     const basis = documentBasisOf(verification.constraintIds, documentConstraintIds);
