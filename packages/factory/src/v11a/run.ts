@@ -239,6 +239,7 @@ import { VOCABULARY_BUNDLES, type ReferenceCounts } from "../v12/ids.js";
 import { isGeneratedTestId } from "../v12/generated-tests.js";
 import { runVocabularyBundle } from "../v12/stages/vocabulary.js";
 import { MAPPING_ROUNDS, rejectedRequirementIds, runMapping, type MappingOutcome, type MappingPrevious, type MappingRejectedCandidate } from "../v12/stages/mapping.js";
+import { buildStopDiagnosticsFile, type StopDiagnostic } from "../v12/stop-diagnostics.js";
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
@@ -1301,6 +1302,11 @@ async function runV11a(
   const droppedTests: DroppedNonstructuralTest[] = [];
   // 旗 `v12.ids` の C2 の回ごとの行（診断にだけ書く。段の判定・持ち越し・採用した回の選び方には使わない。Issue #699）
   const tableRounds: MutableTableRound[] = [];
+  // C2・C3 の形の拒否の診断（診断にだけ書く。checkpoint・プロンプト・段の判定・持ち越し・採用する表には使わない。Issue #898）
+  const stopDiagnostics: StopDiagnostic[] = [];
+  const onStopDiagnostic = (record: StopDiagnostic): void => {
+    stopDiagnostics.push(record);
+  };
   // 採用した回（C3 の拒否のあとの 2 回目が C2' に落ちた走りは初回）。止まった走りは null
   let adoptedTableRound: number | null = null;
   /**
@@ -1346,7 +1352,11 @@ async function runV11a(
       summary,
       bundle: null,
       stopped: attribution,
-      diagnostics: [...diagnosticsFor(attribution, record, await rejectedCandidateRows()), ...buildTableRoundsFile(tableRoundRows(true))],
+      diagnostics: [
+        ...diagnosticsFor(attribution, record, await rejectedCandidateRows()),
+        ...buildTableRoundsFile(tableRoundRows(true)),
+        ...buildStopDiagnosticsFile(stopDiagnostics),
+      ],
     };
   };
 
@@ -1431,6 +1441,8 @@ async function runV11a(
           const rounds = tableRoundRows(stopped !== null);
           return rounds.length === 0 ? {} : { tableRounds: rounds };
         })(),
+        // C2・C3 の形の拒否の診断（入口が診断に書く。記録が無ければ欄を持たない。Issue #898）
+        ...(stopDiagnostics.length === 0 ? {} : { stopDiagnostics: stopDiagnostics.slice() }),
         // ⑦ まで流したときだけ、判定した宣言と検証の数（入口が記録とファイルに書く。Issue #687）
         ...(extra.declaration === undefined ? {} : { declaration: extra.declaration }),
         ...(extra.verification === undefined ? {} : { verification: extra.verification }),
@@ -1520,6 +1532,7 @@ async function runV11a(
             documents: input.documents,
             gateway: gateway.forStage("semantic-check"),
             ...withLedger,
+            onStopDiagnostic,
             // 旗 `v12.ids`：R-sc-02 に構造の検査の読み方を足す（off は渡さない＝今の文のまま。表の targets の有無で推測しない。Issue #732）
             // 旗 `v12.ids`：対象を束に分けて同時に呼び、形のやり直しは 2 回の点検で共有した予算から使う（Issue #735）
             // 旗 `v12.ids` の 2 回目：対象を再点検の部分にし、参照の塊・R-sc-06・R-sc-07 を足す（Issue #805）
@@ -1640,6 +1653,7 @@ async function runV11a(
             ...(retry === undefined ? {} : { previous: retry }),
             ...(acceptedParts.requirements.length === 0 ? {} : { acceptedParts }),
             onRejected: rejectionSink("mapping", round),
+            onStopDiagnostic,
             ...withLedger,
           });
         } catch (error) {
@@ -2913,7 +2927,11 @@ async function runV11a(
       extraArtifacts,
     });
     // 診断（断った候補と、旗 `v12.ids` の C2 の回ごとの行）。どちらも納品物・記録・要約に入れない（Issue #501・#699）
-    const diagnostics = [...buildRejectedCandidateFiles(await rejectedCandidateRows()), ...buildTableRoundsFile(tableRoundRows(false))];
+    const diagnostics = [
+      ...buildRejectedCandidateFiles(await rejectedCandidateRows()),
+      ...buildTableRoundsFile(tableRoundRows(false)),
+      ...buildStopDiagnosticsFile(stopDiagnostics),
+    ];
     return {
       kind: "generation",
       result: withBoundaries({

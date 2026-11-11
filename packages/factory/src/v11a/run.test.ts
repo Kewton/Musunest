@@ -23,6 +23,7 @@ import {
   bundleFiles,
   type AssembledBundle,
 } from "../bundle.js";
+import { STOP_DIAGNOSTICS_FILE } from "../v12/stop-diagnostics.js";
 import type { StageOutputLimits } from "../call.js";
 import { costOfUsageUsd } from "../budget.js";
 import type { Judge, JudgeAnswer } from "../judge.js";
@@ -1197,8 +1198,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       ["ok", 0],
     ]);
     // 通る走りの診断は回ごとの行の 1 本だけ（候補が無い段のファイルは作らない。Issue #699）
-    expect(diagnosticPaths(clean.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
-    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_VOCABULARY_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(clean.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_VOCABULARY_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
     const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ stage: "vocabulary", operation: null, call: 2, round: 1, attempt: 1, kind: "shape" });
@@ -1218,7 +1219,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(result.stopped).toBeNull();
     expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(result.record.stages.filter((record) => record.stage === "mapping").map((record) => [record.status, record.retries.shape])).toEqual([["ok", 1]]);
-    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
     const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ stage: "mapping", operation: null, call: 1, round: 1, attempt: 1, kind: "shape" });
@@ -1345,7 +1346,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     ]);
     expect(countStage(carried.result, "semantic-check")).toBe(1);
     expect(carryEntriesOf(carried.result.bundle).map((entry) => entry.requirementId)).toEqual(["R3"]);
-    expect(diagnosticPaths(carried.result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(carried.result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
     const candidates = rejectedOf(carried.result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(candidates).toHaveLength(1);
     // 2 回目は拒否された R3 だけの書き直しなので、候補は書き直した要件 1・保持した要件 3 の数を持つ（ID の値は持たない。Issue #661）
@@ -1364,7 +1365,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(passed.result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
     expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
-    expect(diagnosticPaths(passed.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(passed.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
   });
 
   /**
@@ -2395,7 +2396,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const r3 = MAPPED_IDS.verification.find((entry) => entry.requirementId === "R3");
     const r3Targets = r3?.kind === "structural" ? (r3.targets ?? []).reduce((sum, target) => sum + 1 + (target.sourceId === null ? 0 : 1), 0) : 0;
     expect(records[1]?.references).toEqual({ checked: 1 + r3Roles + r3Targets, unknown_ids: 0, duplicates: 0, cross_bundle_ids: 0 });
-    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
   });
 
   /**
@@ -2654,6 +2655,47 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(stage.tableRounds).toEqual(tableRoundsOf(result));
     expect(stage.tableRounds).toHaveLength(2);
     expectNoAcceptanceMaterial([...stageRecording.structured.map((request) => JSON.stringify(request)), ...result.diagnostics.map((artifact) => artifact.text)]);
+  });
+
+  it("(898) 同じ台本の段の走り（ids on・name-table..semantic-check）の C2・C3 の診断は、一気通貫の同じ名前の診断と深く等しい。記録は束・巡・試行の添字を持ち、本文を含まない（Issue #898）", async () => {
+    const calls = [
+      ...vocabularyCalls(),
+      structured(good().mapping),
+      structured(judgments(IDS, REJECT_R3_R4)),
+      structured(onlyEntries("R3", "R4")),
+      structured(acceptAll()),
+    ];
+    const stageRecording = createCheckedRecordingClient(calls, { bundledC3: true, bundledC2: true });
+    const stage = await runStageRangeV11a({
+      ...inputOf(stageRecording.client),
+      flags: IDS_FLAGS,
+      range: { start: "name-table", end: "semantic-check" },
+    });
+    const { result } = await runScenario([...calls, ...tailFor(IDS)], { flags: IDS_FLAGS });
+    const full = diagnosticOf(result.diagnostics, STOP_DIAGNOSTICS_FILE)["records"] as readonly {
+      readonly kind: string;
+      readonly round: number;
+      readonly attempt: number | null;
+      readonly bundle_index?: number;
+      readonly targets?: readonly string[];
+      readonly missing?: readonly string[];
+      readonly problems: readonly unknown[];
+    }[];
+    expect(full.length).toBeGreaterThan(0);
+    // 型・直列化・名前は 1 か所で決め、通常 Build と段指定で同じ記録を共有する
+    expect(stage.stopDiagnostics).toEqual(full);
+    for (const record of full) {
+      expect(typeof record.round).toBe("number");
+      expect(record.problems.length === 0 || typeof record.problems[0] === "string" || typeof record.problems[0] === "object").toBe(true);
+      if (record.kind === "c3") {
+        expect(typeof record.bundle_index).toBe("number");
+        expect(typeof record.attempt).toBe("number");
+        expect(Array.isArray(record.targets)).toBe(true);
+        expect(Array.isArray(record.missing)).toBe(true);
+      } else {
+        expect(typeof record.attempt).toBe("number");
+      }
+    }
   });
 
   /**

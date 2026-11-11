@@ -13,7 +13,7 @@ import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import type { RequirementList } from "../../pipeline.js";
-import { ruleDefinitionDefects, ruleTexts, type RuleDefinition } from "../../stages/prompt.js";
+import { ruleDefinitionDefects, ruleTexts, serializeJson, type RuleDefinition } from "../../stages/prompt.js";
 import { ACCEPTANCE_MATERIAL_WORDS, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse } from "../../llm.js";
 import { estimateMaxCostUsd } from "../../budget.js";
@@ -52,6 +52,7 @@ import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView, type UpstreamLedgerView } from "../../v12/ledger.js";
 import { STRUCTURAL_ASSERTIONS } from "../../fixed-test.js";
 import { STRUCTURAL_MEANINGS, structuralReadingText, type StructuralMeaningTable } from "../../v12/structural-meanings.js";
+import { buildStopDiagnosticsFile, type C3StopDiagnostic, type StopDiagnostic } from "../../v12/stop-diagnostics.js";
 import {
   SEMANTIC_CHECK_LEDGER_RULE_ID,
   SEMANTIC_CHECK_RECHECK_RULE_DEFINITION,
@@ -2048,5 +2049,249 @@ describe("旗 ids on：C3 の 2 回目の再点検の部分（Issue #805）", ()
       expect(JSON.stringify(request.schema)).toBe(JSON.stringify(old[index]?.schema));
       expect(request.rules).toEqual([...(old[index]?.rules ?? []), SEMANTIC_CHECK_RECHECK_RULE_DEFINITION.text]);
     }
+  });
+});
+
+// ── C3 の形の拒否の診断（Issue #898。方法論 03 の H4。失敗のモード M-17）──────────────────
+//
+// 判定の欠落・未知の対象・重複を、束・巡・試行・対象 ID・欠落 ID・応答の SHA-256・回復／失敗／未開始で残す。
+// 応答を観測していない試行は SHA も欠落も捏造しない。束を逆の順で完了させても、記録の束への帰属と既存の
+// 失敗選択は同じになる。
+describe("C3 の形の拒否の診断：束・巡・試行・対象・欠落・SHA・回復を本文なしで残す（Issue #898）", () => {
+  const bigListOf = (count: number): RequirementList => ({
+    requirements: Array.from({ length: count }, (_, index) => {
+      const id = `R${String(index + 1)}`;
+      const text = `${id} の項目を一覧で見られる。`;
+      return { id, text, quote: text, position: { start: 0, end: text.length } };
+    }),
+    decisions: [],
+    unresolved: [],
+  });
+  const bigTableOf = (list: RequirementList): NameTable => {
+    const base = fixtureTable();
+    const pick = <T extends { readonly requirementId: string }>(entries: readonly T[]): T => {
+      const found = entries.find((entry) => entry.requirementId === "R1");
+      if (found === undefined) throw new Error("前提が壊れた：題材の表に R1 が無い");
+      return found;
+    };
+    const ids = list.requirements.map((requirement) => requirement.id);
+    return {
+      ...base,
+      ownership: ids.map((requirementId) => ({ ...pick(base.ownership), requirementId })),
+      verification: ids.map((requirementId) => ({ ...pick(base.verification), requirementId })),
+      classification: ids.map((requirementId) => ({ ...pick(base.classification), requirementId })),
+    };
+  };
+  const BIG = bigListOf(12);
+  const BIG_PLAN = planOf(BIG);
+  const BIG_TABLE = bigTableOf(BIG);
+  const BIG_IDS = BIG.requirements.map((requirement) => requirement.id);
+  const BUNDLES = [BIG_IDS.slice(0, 5), BIG_IDS.slice(5, 10), BIG_IDS.slice(10)];
+  const accept = (requirementId: string) => ({ requirementId, verdict: "accept", kind: null, quote: null });
+  const judgmentsOf = (ids: readonly string[], omit: readonly string[] = []) => ({
+    judgments: ids.filter((id) => !omit.includes(id)).map((id) => accept(id)),
+  });
+  const inputOf = (gateway: SemanticCheckInput["gateway"], extra: Partial<SemanticCheckInput> = {}): SemanticCheckInput => ({
+    plan: BIG_PLAN,
+    list: BIG,
+    table: BIG_TABLE,
+    documents: FIXTURE_DOCUMENTS,
+    gateway,
+    ids: true,
+    bundleConcurrency: 1,
+    ...extra,
+  });
+  /** 要求ごとに応答を組む偽物の口（届いた要求と、そのまま返した output を積む） */
+  function answerClient(answer: (request: LlmStructuredRequest, index: number) => unknown) {
+    const requests: LlmStructuredRequest[] = [];
+    const outputs: unknown[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        const index = requests.length;
+        requests.push(request);
+        const output = answer(request, index);
+        outputs.push(output);
+        return { output: output as T, usage: undefined };
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    return { client, requests, outputs };
+  }
+  const stopSink = () => {
+    const records: StopDiagnostic[] = [];
+    return { records, onStopDiagnostic: (record: StopDiagnostic) => records.push(record) };
+  };
+  const missingIn = (records: readonly StopDiagnostic[], bundle: number) =>
+    records.filter((record): record is C3StopDiagnostic => record.kind === "c3" && record.bundle_index === bundle);
+  /** 実際に保存する診断のファイルを組み、読み戻した記録（保存結果への assertion） */
+  const savedRecords = (records: readonly StopDiagnostic[]): readonly StopDiagnostic[] => {
+    const [file] = buildStopDiagnosticsFile(records);
+    if (file === undefined) return [];
+    return (JSON.parse(file.text) as { readonly records: readonly StopDiagnostic[] }).records;
+  };
+
+  it("二点測定 H4-C3-missing：2 束以上・2 巡目の応答で既知の 3 対象の判定を欠くと、束・巡・試行・対象・欠落・独立に計算した SHA が保存診断と一致する（未観測とは区別）", async () => {
+    const omitted = ["R2", "R3", "R4"];
+    const { client, outputs } = answerClient((request) => {
+      const ids = semanticRequestIds(request);
+      return judgmentsOf(ids, ids.some((id) => omitted.includes(id)) ? omitted : []);
+    });
+    const sink = stopSink();
+    const outcome = await runSemanticCheck(inputOf(makeGateway(client), { round: 2, onStopDiagnostic: sink.onStopDiagnostic }));
+    expect(outcome.ok).toBe(false);
+    // 保存する診断のファイルを読み戻して照らす（存在しないモジュールの import や型エラーを赤にしない）
+    const saved = savedRecords(sink.records);
+    expect(saved.length).toBeGreaterThan(0);
+    const first = missingIn(saved, 0);
+    // 予算（k＝3）が残るので 1 回だけやり直し、2 回とも欠落する
+    expect(first.map((record) => record.attempt)).toEqual([1, 2]);
+    expect(first.map((record) => record.round)).toEqual([2, 2]);
+    expect(first.map((record) => record.status)).toEqual(["failed", "failed"]);
+    expect(first.every((record) => record.observed)).toBe(true);
+    expect(first[0]?.targets).toEqual(BUNDLES[0]);
+    expect(first[0]?.missing).toEqual(omitted);
+    expect(first[0]?.problems.length).toBe(omitted.length);
+    expect(first[0]?.problems.every((classification) => classification === "missing-judgment")).toBe(true);
+    // 独立に計算した SHA（形の検査に渡した output を serializeJson で直列化した UTF-8）
+    expect(first[0]?.response_sha256).toBe(await sha256Hex(serializeJson(outputs[0])));
+    // ほかの束は全判定が揃い、欠落 0 で未観測と区別される
+    const others = [...missingIn(saved, 1), ...missingIn(saved, 2)];
+    expect(others.map((record) => record.status)).toEqual(["accepted", "accepted"]);
+    expect(others.every((record) => record.observed && record.missing.length === 0)).toBe(true);
+  });
+
+  it("形の再試行で回復する例：拒否された試行が回復後にも残り、回復した試行は accepted・欠落 0 になる", async () => {
+    const omitted = ["R2", "R3", "R4"];
+    const seen = new Map<string, number>();
+    const { client } = answerClient((request) => {
+      const ids = semanticRequestIds(request);
+      const head = ids[0] ?? "";
+      const count = seen.get(head) ?? 0;
+      seen.set(head, count + 1);
+      // 束 0（先頭が R1）の 1 回目だけ欠落させる（同じ束の 2 回目は全判定）
+      return judgmentsOf(ids, head === "R1" && count === 0 ? omitted : []);
+    });
+    const sink = stopSink();
+    const outcome = await runSemanticCheck(inputOf(makeGateway(client), { onStopDiagnostic: sink.onStopDiagnostic }));
+    expect(outcome.ok).toBe(true);
+    const first = missingIn(sink.records, 0);
+    expect(first.map((record) => record.attempt)).toEqual([1, 2]);
+    expect(first.map((record) => record.status)).toEqual(["recovered", "accepted"]);
+    expect(first[0]?.missing).toEqual(omitted);
+    expect(first[1]?.missing).toEqual([]);
+    expect(first[0]?.response_sha256).not.toBe(first[1]?.response_sha256);
+  });
+
+  it("予算を使い切って再試行しない例：試行は 1 回だけで failed、ほかの束は 1 回ずつ", async () => {
+    const omitted = ["R2", "R3", "R4"];
+    const { client, requests } = answerClient((request) => {
+      const ids = semanticRequestIds(request);
+      return judgmentsOf(ids, ids.some((id) => omitted.includes(id)) ? omitted : []);
+    });
+    const sink = stopSink();
+    const outcome = await runSemanticCheck(
+      inputOf(makeGateway(client), { shapeRetries: { limit: 0, used: [] }, onStopDiagnostic: sink.onStopDiagnostic }),
+    );
+    expect(outcome.ok).toBe(false);
+    expect(requests).toHaveLength(BUNDLES.length);
+    const first = missingIn(sink.records, 0);
+    expect(first.map((record) => [record.attempt, record.status])).toEqual([[1, "failed"]]);
+    expect(first[0]?.missing).toEqual(omitted);
+  });
+
+  it("0 対象：C3 を呼ばず、診断も作らない（空一覧を欠落 0 と読ませない）", async () => {
+    const { client, requests } = answerClient((request) => judgmentsOf(semanticRequestIds(request)));
+    const sink = stopSink();
+    const outcome = await runSemanticCheck(
+      inputOf(makeGateway(client), { recheck: [], onStopDiagnostic: sink.onStopDiagnostic }),
+    );
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) expect(outcome.value.targets).toEqual([]);
+    expect(requests).toHaveLength(0);
+    expect(sink.records).toEqual([]);
+  });
+
+  it("応答値がない通信失敗：未開始として残し、SHA も欠落も捏造しない", async () => {
+    const client: LlmClient = {
+      async callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        throw Object.assign(new Error("no response"), { kind: "network" });
+      },
+      async callWithTools() {
+        throw new Error("道具の呼び出しは無い");
+      },
+    };
+    const sink = stopSink();
+    const outcome = await runSemanticCheck(inputOf(makeGateway(client), { onStopDiagnostic: sink.onStopDiagnostic }));
+    expect(outcome.ok).toBe(false);
+    const first = missingIn(sink.records, 0);
+    expect(first).toHaveLength(1);
+    expect(first[0]?.status).toBe("not-started");
+    expect(first[0]?.observed).toBe(false);
+    expect(first[0]?.response_sha256).toBeNull();
+    expect(first[0]?.missing).toEqual([]);
+    expect(first[0]?.targets).toEqual(BUNDLES[0]);
+  });
+
+  it("未知の対象と判定の重複を区別し、束の完了の順を逆にしても記録の束への帰属と既存の失敗選択が同じになる", async () => {
+    const badOf = (ids: readonly string[]) => ({
+      judgments: [...judgmentsOf(ids).judgments, accept("R-unknown"), accept(ids[0] ?? "R1")],
+    });
+    /** 完成の順を逆にする偽物（束 2 → 束 0 の順に答える） */
+    const reverseClient = () => {
+      const requests: LlmStructuredRequest[] = [];
+      const gates: (() => void)[] = [];
+      let gated = false;
+      const client: LlmClient = {
+        async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+          requests.push(request);
+          const ids = semanticRequestIds(request);
+          const answer = () => ({ output: (ids[0] === "R1" ? badOf(ids) : judgmentsOf(ids)) as T, usage: undefined });
+          // 束 0 の 1 回目だけ待たせ、ほかの束を先に完了させる
+          if (ids[0] === "R1" && !gated) {
+            gated = true;
+            await new Promise<void>((resolve) => gates.push(resolve));
+          }
+          return answer();
+        },
+        async callWithTools() {
+          throw new Error("道具の呼び出しは無い");
+        },
+      };
+      return { client, requests, release: () => gates.splice(0).forEach((resolve) => resolve()) };
+    };
+    const serial = answerClient((request) => {
+      const ids = semanticRequestIds(request);
+      return ids[0] === "R1" ? badOf(ids) : judgmentsOf(ids);
+    });
+    const serialSink = stopSink();
+    const serialOutcome = await runSemanticCheck(
+      inputOf(makeGateway(serial.client), { onStopDiagnostic: serialSink.onStopDiagnostic }),
+    );
+    expect(serialOutcome.ok).toBe(false);
+    if (serialOutcome.ok) return;
+    expect(serialOutcome.failure.kind).toBe("malformed");
+
+    const reversed = reverseClient();
+    const reversedSink = stopSink();
+    const pending = runSemanticCheck(inputOf(makeGateway(reversed.client), { bundleConcurrency: 3, onStopDiagnostic: reversedSink.onStopDiagnostic }));
+    // 束 1・2 が先に終わってから束 0 を返す
+    for (let index = 0; index < 20; index += 1) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    reversed.release();
+    const reversedOutcome = await pending;
+    expect(reversedOutcome.ok).toBe(false);
+    if (reversedOutcome.ok) return;
+    // 既存の失敗選択は一覧の順で最初に落ちた束（束 0）
+    expect(reversedOutcome.failure).toEqual(serialOutcome.failure);
+    // 記録は束の順に並び、同じ内容になる（完了の順に依らない）
+    const sort = (records: readonly StopDiagnostic[]) =>
+      records
+        .filter((record): record is C3StopDiagnostic => record.kind === "c3")
+        .map((record) => [record.round, record.bundle_index, record.attempt, record.targets, record.missing, record.problems, record.status]);
+    expect(sort(reversedSink.records)).toEqual(sort(serialSink.records));
+    expect(reversedSink.records.map((record) => (record.kind === "c3" ? record.bundle_index : -1))).toEqual([0, 0, 1, 2]);
+    const first = missingIn(reversedSink.records, 0);
+    expect(first[0]?.problems).toEqual(["unknown-target", "duplicate-judgment"]);
   });
 });

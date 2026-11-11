@@ -62,6 +62,7 @@ import {
   type ShapeCheck,
 } from "../stages/prompt.js";
 import type { AcceptedPartBasis } from "../v12/accepted-parts.js";
+import type { C2ProblemClass, StopDiagnosticPosition } from "../v12/stop-diagnostics.js";
 import { BASE_VERIFICATION_KINDS, type UpstreamLedgerView, type PropertyT1 } from "../v12/ledger.js";
 
 // ── 型の値の一覧（D3。B3 の照合先は A5）────────────────────────────────
@@ -1016,8 +1017,43 @@ function checkNameTableWith(
   documents: readonly PromptDocument[],
   options: TableCheckOptions,
 ): readonly Problem[] {
+  return checkNameTableSourced(list, table, documents, options).problems;
+}
+
+/**
+ * 表の検査の結果に、問題ごとの固定分類と安全な位置を足したもの（Issue #898）。既存の検査の口（`checkNameTable`・
+ * `checkVocabularyRows`・`checkMappedTable`）は問題だけを投影する。分類は**この発生側**が付け（`field` や
+ * `message` から逆算しない）、位置は表の添字（`row_index`）と所属の添字（`ownership_index`・`role_index`）を
+ * 区別する。所属の不備でない問題は `other`・位置は null である。
+ */
+export interface NameTableCheckSourced {
+  readonly problems: readonly Problem[];
+  /** `problems` と同じ件数・同じ順の固定分類 */
+  readonly classifications: readonly C2ProblemClass[];
+  /** `problems` と同じ件数・同じ順の位置（無ければ null） */
+  readonly positions: readonly (StopDiagnosticPosition | null)[];
+}
+
+function checkNameTableSourced(
+  list: RequirementList,
+  table: NameTable,
+  documents: readonly PromptDocument[],
+  options: TableCheckOptions,
+): NameTableCheckSourced {
   const problems: Problem[] = [];
+  /** 問題 → 決まった分類（所有の不備の分岐でだけ付ける。付かなければ `other`） */
+  const classified = new Map<Problem, C2ProblemClass>();
+  /** 問題 → 安全な位置（付かなければ null） */
+  const positioned = new Map<Problem, StopDiagnosticPosition>();
+  /** 所属の不備の問題に、分類と位置を付けて返す（問題そのものは今までと同じ値） */
+  const mark = (problem: Problem, classification: C2ProblemClass, position: StopDiagnosticPosition): Problem => {
+    classified.set(problem, classification);
+    positioned.set(problem, position);
+    return problem;
+  };
   const rowById = new Map<string, NameTableRow>();
+  /** 表の行の添字（元の候補の位置へ戻した値。位置の診断に使う） */
+  const rowIndexById = new Map<string, number>();
   const rowAt = (index: number): number => options.rowOrigin?.[index] ?? index;
   const entryAt = (index: number): number => options.entryOrigin?.[index] ?? index;
   const skipSourceRows = options.skipSourceRows ?? new Set<number>();
@@ -1031,7 +1067,10 @@ function checkNameTableWith(
   // (b) id の一意
   table.rows.forEach((row, index) => {
     if (rowById.has(row.id)) problems.push({ field: `rows[${rowAt(index)}].id`, message: "表の ID が重なっている" });
-    else rowById.set(row.id, row);
+    else {
+      rowById.set(row.id, row);
+      rowIndexById.set(row.id, rowAt(index));
+    }
   });
 
   // (c) 名前の規則・名前空間・同じ場所
@@ -1163,7 +1202,13 @@ function checkNameTableWith(
     }
   });
 
-  if (options.rowsOnly === true) return problems;
+  if (options.rowsOnly === true) {
+    return {
+      problems,
+      classifications: problems.map((problem) => classified.get(problem) ?? "other"),
+      positions: problems.map((problem) => positioned.get(problem) ?? null),
+    };
+  }
 
   // (g) 要件ごとにちょうど 1 つ（所属・確かめ方・分類）
   const once = <T extends { readonly requirementId: string }>(entries: readonly T[], name: string, missing: string) => {
@@ -1199,9 +1244,25 @@ function checkNameTableWith(
     entry.roles.forEach((role, rIndex) => {
       const field = `ownership[${entryAt(oIndex)}].roles[${rIndex}]`;
       if (!rowById.has(role.id)) {
-        if (!isDroppedRow(role.id)) problems.push({ field: `${field}.id`, message: "所属の表の ID が表に無い" });
+        if (!isDroppedRow(role.id)) {
+          problems.push(
+            mark(
+              { field: `${field}.id`, message: "所属の表の ID が表に無い" },
+              "unknown-ownership-id",
+              { row_index: null, ownership_index: entryAt(oIndex), role_index: rIndex },
+            ),
+          );
+        }
       }
-      else if (seen.has(role.id)) problems.push({ field: `${field}.id`, message: "同じ要件の中で所属が重なっている" });
+      else if (seen.has(role.id)) {
+        problems.push(
+          mark(
+            { field: `${field}.id`, message: "同じ要件の中で所属が重なっている" },
+            "duplicate-ownership-id",
+            { row_index: rowIndexById.get(role.id) ?? null, ownership_index: entryAt(oIndex), role_index: rIndex },
+          ),
+        );
+      }
       seen.add(role.id);
       const shapeProblems: Problem[] = [];
       shapeOfRoleOwnership(role, field, shapeProblems);
@@ -1404,9 +1465,21 @@ function checkNameTableWith(
   });
   const owners = ownersByRowId(table);
   table.rows.forEach((row, index) => {
-    if (!owners.has(row.id) && !rowIdsOwnedByDropped.has(row.id)) problems.push({ field: `rows[${rowAt(index)}]`, message: "どの要件にも所属しない行がある" });
+    if (!owners.has(row.id) && !rowIdsOwnedByDropped.has(row.id)) {
+      problems.push(
+        mark(
+          { field: `rows[${rowAt(index)}]`, message: "どの要件にも所属しない行がある" },
+          "unowned-row",
+          { row_index: rowAt(index), ownership_index: null, role_index: null },
+        ),
+      );
+    }
   });
-  return problems;
+  return {
+    problems,
+    classifications: problems.map((problem) => classified.get(problem) ?? "other"),
+    positions: problems.map((problem) => positioned.get(problem) ?? null),
+  };
 }
 
 /** 元の候補から読める、空でない文字列の `id`（形で落ちた要素の識別に使う） */
@@ -1606,7 +1679,20 @@ export function checkMappedTable(
   documents: readonly PromptDocument[],
   options: NameTableLedgerOptions & { readonly acceptedParts?: AcceptedPartBasis } = {},
 ): readonly Problem[] {
-  return checkNameTableWith(list, table, documents, {
+  return checkMappedTableSourced(list, table, documents, options).problems;
+}
+
+/**
+ * `checkMappedTable` と同じ検査・同じ問題に、問題ごとの固定分類と安全な位置を足して返す（Issue #898。C2 の診断）。
+ * 既存の口は問題だけを投影する（`Problem` の形・値を変えない）。
+ */
+export function checkMappedTableSourced(
+  list: RequirementList,
+  table: NameTable,
+  documents: readonly PromptDocument[],
+  options: NameTableLedgerOptions & { readonly acceptedParts?: AcceptedPartBasis } = {},
+): NameTableCheckSourced {
+  return checkNameTableSourced(list, table, documents, {
     sourceless: true,
     ...(options.acceptedParts === undefined ? {} : { acceptedParts: options.acceptedParts }),
     ...(options.ledger === undefined

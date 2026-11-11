@@ -59,6 +59,7 @@ import {
   MERGE_REFUSALS,
 } from "./v12/stages/field-repair.js";
 import { REPAIR_DIAGNOSTIC_DATA_NAME } from "./stages/repair.js";
+import { STOP_DIAGNOSTICS_FILE } from "./v12/stop-diagnostics.js";
 import {
   ENVELOPE_SCHEMA,
   ENVELOPE_SCHEMA_NAME,
@@ -2378,7 +2379,7 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     expect(run.code).toBe(EXIT_OK);
     // 一気通貫の v1.2 と同じ封筒を選ぶ
     expect(run.makeClient.mock.calls).toEqual([[{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.2-ids" }]]);
-    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
     const record = await stageRecordOf(dir);
     expect(new Set(stagesOf(record))).toEqual(new Set(["vocabulary", "mapping", "semantic-check"]));
     expect(record["range"]).toEqual({ start: "name-table", end: "semantic-check" });
@@ -2770,7 +2771,7 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     const run = await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"], calls: c2Broken(), pipeline: "v1.2" });
     expect(run.code).toBe(EXIT_RUN_FAILED);
     // 形で落ちた段の走りは、記録に加えて断った候補と C2 の回ごとの行の診断を書く（Issue #683・#699）
-    expect(run.written).toEqual([STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(run.written).toEqual([STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
     const record = await stageRecordOf(dir);
     expect(record["stopped"]).toMatchObject({ stage: "mapping", kind: "unmet" });
     expect(record).toHaveProperty("test_spec", null);
@@ -2962,7 +2963,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     before[0]!.output_digest = await stageOutputDigest(checkpoint);
     expect([await sha256Hex(stageJsonText(record)), await sha256Hex(stageJsonText(checkpoint))]).toEqual(V12_STAGE_C1_RETRY_DIGESTS_BEFORE_713);
     expect(run.code).toBe(EXIT_OK);
-    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_VOCABULARY_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_VOCABULARY_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
     expect(run.lines.at(-1)).toBe(
       JSON.stringify({ stage_pass: true, reached_stage: "semantic-check", budget_scope: "stage-run", exit_code: EXIT_OK }),
     );
@@ -3012,7 +3013,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
       revert748(reverted);
       expect([await sha256Hex(stageJsonText(reverted))]).toEqual(V12_STAGE_C2_STOP_DIGESTS_BEFORE_735);
     }
-    expect(run.written).toEqual([STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(run.written).toEqual([STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
     const record = await stageRecordOf(dir);
     expect(record["stopped"]).toMatchObject({ stage: "mapping", kind: "unmet" });
     const candidates = await candidatesOf(dir, DIAGNOSTICS_REJECTED_MAPPING_FILE);
@@ -3035,6 +3036,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
       STAGE_RUN_RECORD_FILE,
       DIAGNOSTICS_REJECTED_TEST_SPEC_FILE,
       DIAGNOSTICS_TABLE_ROUNDS_FILE,
+      STOP_DIAGNOSTICS_FILE,
     ]);
     const candidates = await candidatesOf(dir, DIAGNOSTICS_REJECTED_TEST_SPEC_FILE);
     expect(candidates).toHaveLength(1);
@@ -3048,7 +3050,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     const dir = `${directory}/v12-stage-diag-none`;
     const run = await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: segment0(), pipeline: "v1.2" });
     expect(run.code).toBe(EXIT_OK);
-    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
     // 回ごとの行の 1 本だけを書き、候補のファイルは無い
     const rounds = (JSON.parse(await fs.readFile(`${dir}/${DIAGNOSTICS_TABLE_ROUNDS_FILE}`, "utf8")) as { readonly rounds: readonly unknown[] }).rounds;
     expect(rounds).toHaveLength(1);
@@ -3358,7 +3360,12 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
       return path === BUNDLE_MANIFEST_FILE ? text.replaceAll(JSON.stringify(dir), JSON.stringify("<out>")) : text;
     };
     const files: Record<string, string> = {};
-    for (const path of [...written].sort()) files[path] = await sha256Hex(await textOf(path));
+    // Issue #898：新しい診断（C2・C3 の形の拒否）はこの比較の対象外にする——追加の投影だけを除いた既存出力を
+    // 直す前の値と照らす（固定値は上書きしない）
+    for (const path of [...written].sort()) {
+      if (path === STOP_DIAGNOSTICS_FILE) continue;
+      files[path] = await sha256Hex(await textOf(path));
+    }
     const upstream: Record<string, unknown> = {};
     for (const path of written.filter((name) => name.startsWith("stage-checkpoint-"))) {
       upstream[path] = (JSON.parse(await fs.readFile(`${dir}/${path}`, "utf8")) as Record<string, any>)["versions"]["ledger_upstream"];
@@ -3556,6 +3563,8 @@ describe("部分の指紋の版 2（台帳の未対応の観測を上流の見�
         (await revertBundleFiles735(await Promise.all(run.written.map(async (path) => ({ path, text: await run.textOf(path) }))))).map((file) => [file.path, file.text] as const),
       );
       for (const path of run.written.filter((name) => !name.startsWith("stage-checkpoint-"))) {
+        // Issue #898：新しい診断（stop-diagnostics）はこの比較の対象外（追加の投影だけを除いた既存出力を照らす）
+        if (path === STOP_DIAGNOSTICS_FILE) continue;
         const text = await run.textOf(path);
         if (path !== STAGE_RUN_RECORD_FILE && path !== BUILD_CLI_RECORD_FILE) {
           reverted[path] = await sha256Hex(bundleTexts.get(path) ?? text);
@@ -6028,6 +6037,8 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     /** 段の走りの記録に search_repair・requests・stage_spans を残したままの本文（#761 の取り除きの照合） */
     const rawFiles: [string, string][] = [];
     for (const path of [...written].sort()) {
+      // Issue #898：新しい診断（stop-diagnostics）は、追加の投影だけを除いた既存出力を照らす比較の対象外
+      if (path === STOP_DIAGNOSTICS_FILE) continue;
       const ioStart = performance.now();
       const raw = await fs.readFile(`${dir}/${path}`, "utf8");
       if (timing !== undefined) timing.ioMs += performance.now() - ioStart;
