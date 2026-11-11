@@ -189,7 +189,7 @@ describe("式の上限（文字数 200・深さ 8・ノード 64）", () => {
 const noNames: ExpressionScope = { resolveName: () => null, entityName: () => null };
 
 /** 型の検査に渡す、名前 → 型（`date` は M1.3 で入った。#155） */
-type FieldTypes = Readonly<Record<string, "number" | "string" | "list" | "date">>;
+type FieldTypes = Readonly<Record<string, "number" | "string" | "list" | "date" | "boolean">>;
 
 /** 見本の expense に近い名前の環境。`ammount` のような綴りの間違いは解決しない */
 const expense = (fields: FieldTypes): ExpressionScope => ({
@@ -443,6 +443,135 @@ describe("文字列の定数（M1.3）", () => {
 
   it("文字列の定数は `len` にも渡せない（引数の型が食い違う）", () => {
     expect(analyze('len("done")', texts).codes).toEqual(["LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH"]);
+  });
+});
+
+// ── 真偽の結合（and・or・not）（Issue #854） ─────────────────────────
+//
+// 優先順位は `not` ＞ `and` ＞ `or` で、かっこで変えられる。オペランドと結果はどちらも真偽で、
+// 真偽でないものを渡せば**今ある型の不一致の診断**（`LOGIC_OPERAND_TYPE_MISMATCH`）で断る。
+// `and`・`or`・`not` は予約語であり、名前としては読まない。
+
+describe("真偽の結合（and・or・not）（Issue #854）", () => {
+  const fields: FieldTypes = {
+    amount: "number",
+    discount: "number",
+    quantity: "number",
+    payer: "string",
+    status: "string",
+    participants: "list",
+    dueDate: "date",
+    overdue: "boolean",
+  };
+
+  it("and・or は左から順に結ぶ（同じ強さである）", () => {
+    expect(parsed("amount and discount and quantity")).toMatchObject({
+      kind: "binary",
+      operator: "and",
+      left: {
+        kind: "binary",
+        operator: "and",
+        left: { kind: "name", name: "amount" },
+        right: { kind: "name", name: "discount" },
+      },
+      right: { kind: "name", name: "quantity" },
+    });
+    expect(parsed("amount or discount or quantity")).toMatchObject({
+      kind: "binary",
+      operator: "or",
+      left: { kind: "binary", operator: "or" },
+      right: { kind: "name", name: "quantity" },
+    });
+  });
+
+  it("優先順位は not ＞ and ＞ or である（かっこで変えられる）", () => {
+    expect(parsed("a or b and c")).toMatchObject({
+      kind: "binary",
+      operator: "or",
+      left: { kind: "name", name: "a" },
+      right: { kind: "binary", operator: "and" },
+    });
+    expect(parsed("a and b or c")).toMatchObject({
+      kind: "binary",
+      operator: "or",
+      left: { kind: "binary", operator: "and" },
+      right: { kind: "name", name: "c" },
+    });
+    expect(parsed("not a and b")).toMatchObject({
+      kind: "binary",
+      operator: "and",
+      left: { kind: "unary", operator: "not" },
+      right: { kind: "name", name: "b" },
+    });
+    expect(parsed("not (a or b)")).toMatchObject({
+      kind: "unary",
+      operator: "not",
+      operand: { kind: "binary", operator: "or" },
+    });
+    expect(parsed("not not a")).toMatchObject({
+      kind: "unary",
+      operator: "not",
+      operand: { kind: "unary", operator: "not" },
+    });
+  });
+
+  it("and・or・not は、名前の一部であれば演算子ではない（単語の切れ目でだけ読む）", () => {
+    expect(parsed("android")).toEqual({ kind: "name", name: "android", start: 0, end: 7 });
+    expect(parsed("notable")).toEqual({ kind: "name", name: "notable", start: 0, end: 7 });
+    expect(parsed("order")).toEqual({ kind: "name", name: "order", start: 0, end: 5 });
+  });
+
+  it("真偽どうしを and・or で結ぶと真偽になる（受入条件）", () => {
+    expect(analyze('status == "active" and dueDate < today()', fields)).toEqual({
+      type: "boolean",
+      codes: [],
+    });
+    expect(analyze("not (quantity > 10) or quantity == 0", fields)).toEqual({
+      type: "boolean",
+      codes: [],
+    });
+    expect(analyze("overdue and quantity > 0", fields)).toEqual({ type: "boolean", codes: [] });
+    expect(analyze("not overdue", fields)).toEqual({ type: "boolean", codes: [] });
+  });
+
+  it("数と真偽を and で結ぶ式は、型の不一致で断る（受入条件）", () => {
+    expect(analyze("quantity and quantity > 0", fields)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_OPERAND_TYPE_MISMATCH"],
+    });
+    expect(analyze("(quantity > 0) and amount", fields)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_OPERAND_TYPE_MISMATCH"],
+    });
+    expect(analyze("overdue or amount", fields)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_OPERAND_TYPE_MISMATCH"],
+    });
+  });
+
+  it("and を数の計算に混ぜる式は、型の不一致で断る（受入条件）", () => {
+    expect(analyze("amount + (quantity > 0)", fields)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_OPERAND_TYPE_MISMATCH"],
+    });
+    expect(analyze("(amount > 0) * 2", fields)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_OPERAND_TYPE_MISMATCH"],
+    });
+    expect(analyze("not quantity", fields)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_OPERAND_TYPE_MISMATCH"],
+    });
+  });
+
+  it("and・or・not は演算子であり、名前としては書けない（予約語）", () => {
+    for (const text of ["and", "or", "not", "amount and", "and amount"]) {
+      expect(parseExpression(text).ok, text).toBe(false);
+    }
+    const read = readExpression("and");
+    expect(read.ok).toBe(false);
+    if (read.ok) return;
+    expect(read.problems.map((problem) => problem.code)).toEqual(["LOGIC_EXPRESSION_INVALID"]);
   });
 });
 

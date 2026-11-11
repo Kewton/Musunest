@@ -38,6 +38,7 @@ U+0020 SPACE, U+0009 TAB, U+000A LF, U+000D CR.
 | `Number` | `1`, `1.5` | `\d+(?:\.\d+)?` | No sign, no exponent (`1e3` is not a number), no leading or trailing dot (`.5`, `1.` are not numbers). Value is the JavaScript `Number` of the text. |
 | `String` | `"done"` | `"` *chars-not-quote* `"` | **Double quotes only, no escape sequences.** `\` is an ordinary character; a `"` cannot appear inside. `"done"` has the value `done`. |
 | `Name` | `amount` | `[A-Za-z][A-Za-z0-9]*` | First character is an ASCII letter. See `rules.md` R-VOCAB-11 for the name pattern. |
+| boolean operator | `and` `or` `not` | — | Keywords, not names. Matched as whole words only — a longer name such as `android` or `notable` is still a `Name`. |
 | two-char operator | `>=` `<=` `==` `!=` | — | Matched before the one-char operators. |
 | one-char operator | `+` `-` `*` `/` `>` `<` | — | A single `=` is **not** an operator. |
 | punctuation | `(` `)` `,` `.` | — | `.` appears only in member access (§5). |
@@ -52,8 +53,11 @@ The whole value of the slot (after trimming whitespace) must be a single `Expres
 ```ebnf
 (* ── syntax ───────────────────────────────────────────────────────── *)
 
-Expression      = Comparison ;
+Expression      = Or ;
 
+Or              = And { "or" And } ;                           (* left-associative, loosest *)
+And             = Not { "and" Not } ;                          (* left-associative *)
+Not             = "not" Not | Comparison ;                     (* right-associative, may nest *)
 Comparison      = Additive [ ComparisonOp Additive ] ;          (* at most one comparison operator *)
 Additive        = Multiplicative { ( "+" | "-" ) Multiplicative } ;
 Multiplicative  = Unary { ( "*" | "/" ) Unary } ;
@@ -80,20 +84,24 @@ letter          = "A" | … | "Z" | "a" | … | "z" ;
 
 ## 4. Precedence and associativity
 
-From loosest (1) to tightest (5). A tighter level binds first.
+From loosest (1) to tightest (8). A tighter level binds first.
 
 | Level | Operators | Form | Associativity | Operand type | Result |
 |---|---|---|---|---|---|
-| 1 (loosest) | `>` `>=` `<` `<=` `==` `!=` | binary | **none** — at most one comparison per level | see `rules.md` R-TYPE-03 … R-TYPE-06 | `boolean` |
-| 2 | `+` `-` | binary | **left** | `number` | `number` |
-| 3 | `*` `/` | binary | **left** | `number` | `number` |
-| 4 | `-` | unary prefix | **right** (may nest: `- -x`) | `number` | `number` |
-| 5 (tightest) | `( … )`, `f( … )` | grouping, call | — | — | — |
+| 1 (loosest) | `or` | binary | **left** | `boolean` | `boolean` |
+| 2 | `and` | binary | **left** | `boolean` | `boolean` |
+| 3 | `not` | unary prefix | **right** (may nest: `not not x`) | `boolean` | `boolean` |
+| 4 | `>` `>=` `<` `<=` `==` `!=` | binary | **none** — at most one comparison per level | see `rules.md` R-TYPE-03 … R-TYPE-06 | `boolean` |
+| 5 | `+` `-` | binary | **left** | `number` | `number` |
+| 6 | `*` `/` | binary | **left** | `number` | `number` |
+| 7 | `-` | unary prefix | **right** (may nest: `- -x`) | `number` | `number` |
+| 8 (tightest) | `( … )`, `f( … )` | grouping, call | — | — | — |
 
-- **Comparison is non-associative.** `a < b < c` has no reading and is unreadable (`LOGIC_EXPRESSION_INVALID`). To compare a comparison result you must parenthesise it, but a `boolean` is not an operand of any operator, so the type check then rejects it (`rules.md` R-TYPE-07).
+- **Comparison is non-associative.** `a < b < c` has no reading and is unreadable (`LOGIC_EXPRESSION_INVALID`). To compare a comparison result you must parenthesise it, but `boolean` is an operand only of `and`, `or`, and `not` — comparison and arithmetic reject it (`rules.md` R-TYPE-07).
+- **`not` binds tighter than `and`, which binds tighter than `or`.** All three bind looser than comparison, so `not a > b` reads as `not (a > b)`, and `a or b and c` reads as `a or (b and c)`.
 - **Arithmetic is left-associative.** `8 - 3 - 2` reads as `(8 - 3) - 2`.
 - **Unary `-` binds tighter than `*` `/`**, which bind tighter than `+` `-`, which bind tighter than comparison.
-- A **call argument** is a full `Expression`, so `min(1, a > b)` is syntactically well-formed; the type check rejects it (`rules.md` R-TYPE-09).
+- A **call argument** is a full `Expression`, so `min(1, a > b)` and `min(1, a and b)` are syntactically well-formed; the type check rejects a `boolean` argument (`rules.md` R-TYPE-09).
 
 ### Worked examples (values a conforming evaluator returns)
 
@@ -108,7 +116,12 @@ From loosest (1) to tightest (5). A tighter level binds first.
 | `2 - -3` | `5` | unary `-` may nest |
 | `1 + 1 == 2` | `true` | `+` binds tighter than `==` |
 | `2 * 2 >= 4` | `true` | `*` binds tighter than `>=` |
+| `1 == 2 or 1 == 1 and 1 == 2` | `true` | `and` binds tighter than `or` |
+| `not 1 == 2` | `true` | `not` takes a comparison (`not (1 == 2)`) |
+| `not 1 == 2 and 1 == 2` | `false` | `not` binds tighter than `and` |
+| `not (1 == 1 and 1 == 2)` | `true` | parentheses group |
 | `1 / 0` | `null` (not a number) | a non-finite result is `null`, never `0` (see `rules.md` R-TYPE-14) |
+| `1 / 0 > 0 or 1 == 1` | `null` (not `true`) | a `null` operand makes the combination `null` — `false` and `null` are distinct (`rules.md` R-TYPE-07) |
 
 ## 5. Read by the parser but rejected in this version
 
@@ -125,7 +138,7 @@ The parser accepts these so that the rejection can name the actual problem. They
 ## 6. Not writable
 
 - **No boolean or null literals.** `true`, `false`, `null` match the `Name` rule, so they are ordinary names: a lone one is unresolvable, and `true + false` parses but fails name resolution (`LOGIC_REFERENCE_NOT_FOUND`). There is no way to write a boolean literal.
-- **No boolean operators.** `and`, `or`, `not` are not keywords or operators. `a and b` is unreadable; `not` alone is an ordinary name. There is no way to combine comparisons.
+- **`and`, `or`, and `not` are keywords, not names.** They combine booleans only (`rules.md` R-TYPE-07) and cannot be used as field or computed names (`rules.md` R-RESERVED). A longer name such as `android`, `notable`, or `order` is still an ordinary `Name`.
 - **No exponent notation, no unary `+`.** `1e3` and `+amount` are unreadable.
 - **No string escapes** and no string operations: a string literal can only be compared with `==` / `!=` (`rules.md` R-TYPE-05).
 - **`label` is not a name.** A display name never resolves in an expression (`rules.md` R-NAME-07).

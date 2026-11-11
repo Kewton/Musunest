@@ -1105,3 +1105,83 @@ describe("アプリ全体の集計（scope: app）（M1.4）", () => {
     });
   });
 });
+
+// ── 真偽の結合（and・or・not）（Issue #854） ────────────────────────
+//
+// **値の決まった結果にする。** 途中に `null`（0 で割るなど）が来たら、結合の結果も `null` であり、
+// `false` にも `true` にも読み替えない（`not(null)` は `true` ではない）。検査の式は今までどおり
+// **真になったときだけ**通すので、`null` は不合格として扱われる。
+//
+// 評価は式を書いた場所（検査の式・`when`）と同じ環境で行う。ここでは `when` の口（`allowsAction`）で、
+// 1 件のレコードに対して式が真になるかを見る。
+
+const LOGIC_SOURCE = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      quantity: number",
+  "      dueDate: date",
+  "      status:",
+  "        type: enum",
+  "        options:",
+  "          active: 進行中",
+  "          done: 完了",
+  "        default: active",
+  "views:",
+  "  - name: taskList",
+  "    entity: task",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "validations: []",
+  "computed: []",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+describe("真偽の結合（and・or・not）の評価（Issue #854）", () => {
+  const logicClock = fixedClock("2026-09-16T12:00:00+09:00");
+
+  const holds = async (expression: string, record: Readonly<Record<string, unknown>>): Promise<boolean> => {
+    const app = await normalized(LOGIC_SOURCE);
+    return allowsAction({ app, entity: "task", record, clock: logicClock }, expression);
+  };
+
+  it("「貸出中 かつ 期限切れ」を 1 つの式で書ける（受入条件）", async () => {
+    const expression = 'status == "active" and dueDate < today()';
+    // 差し込んだ時計は日本時間の 2026-09-16 である
+    expect(await holds(expression, { status: "active", dueDate: "2026-09-15" })).toBe(true);
+    // 返却済みには印を付けない（背景の再現。`dueDate < today()` だけでは真になっていた行である）
+    expect(await holds(expression, { status: "done", dueDate: "2026-09-15" })).toBe(false);
+    expect(await holds(expression, { status: "active", dueDate: "2026-09-30" })).toBe(false);
+  });
+
+  it("not と or を組み合わせた式（受入条件）", async () => {
+    const expression = "not (quantity > 10) or quantity == 0";
+    expect(await holds(expression, { quantity: 5 })).toBe(true);
+    expect(await holds(expression, { quantity: 10 })).toBe(true);
+    expect(await holds(expression, { quantity: 11 })).toBe(false);
+    expect(await holds(expression, { quantity: 0 })).toBe(true);
+  });
+
+  it("優先順位（not ＞ and ＞ or）とかっこで意味が変わる（受入条件）", async () => {
+    // `or` の右で `and` が先に結ばれる
+    expect(await holds("1 == 1 or 1 == 2 and 1 == 2", {})).toBe(true);
+    expect(await holds("(1 == 1 or 1 == 2) and 1 == 2", {})).toBe(false);
+    // `not` は比較より先に結ばれる（`not (1 == 2)` である）
+    expect(await holds("not 1 == 2 and 1 == 2", {})).toBe(false);
+    expect(await holds("not (1 == 2 and 1 == 2)", {})).toBe(true);
+    expect(await holds("not 1 == 2 or 1 == 2", {})).toBe(true);
+  });
+
+  it("null を含む結合は null になる（false にも true にも読み替えない。受入条件）", async () => {
+    // 0 で割ると `null`。その否定も `null` であり、`true` にはならない
+    expect(await holds("not (quantity / 0 > 0)", { quantity: 1 })).toBe(false);
+    // `null or true` も `null` である（null を false に読み替えて true にしない）
+    expect(await holds("not (quantity / 0 > 0) or 1 == 1", { quantity: 1 })).toBe(false);
+    // 同じ形でも、null を含まなければ true になる（測っているものが null の伝播であること）
+    expect(await holds("not (quantity > 0) or 1 == 1", { quantity: 1 })).toBe(true);
+  });
+});

@@ -54,7 +54,7 @@ import {
   type SourceRecords,
 } from "./aggregate.js";
 import { todayInTokyo, type Clock } from "./clock.js";
-import { isComparisonOperator, readExpression, type AstNode } from "./expression.js";
+import { isComparisonOperator, isLogicalOperator, readExpression, type AstNode } from "./expression.js";
 
 // 集計の評価に使う道具（`where` の判定・要るレコードの集め方・合計の畳み方）は src/aggregate.ts にある。
 // データを読む側（data-api）が「どの entity のレコードを渡せばよいか」を知れるように、ここから再輸出する
@@ -226,6 +226,19 @@ function callValue(name: string, args: readonly EvaluatedValue[], clock: Clock):
   return name === "min" ? Math.min(left, right) : Math.max(left, right);
 }
 
+/**
+ * 真偽の結合（`and`・`or`）と否定（`not`）の値（Issue #854）。**値の決まった結果にする**——
+ * どちらかが真偽でなければ（`null` を含む）、結果も `null` である。`false` と `null` を区別し、
+ * `not(null)` を `true` に、`null or true` を `true` に読み替えない（不変条件: 0 に読み替えない、と同じ）。
+ */
+function combineBooleans(operator: string, left: EvaluatedValue, right?: EvaluatedValue): EvaluatedValue {
+  if (operator === "not") {
+    return typeof left === "boolean" ? !left : null;
+  }
+  if (typeof left !== "boolean" || typeof right !== "boolean") return null;
+  return operator === "and" ? left && right : left || right;
+}
+
 /** AST を歩いて値を求める。**式を実行しない**（`eval` / `Function` を使わない） */
 function evaluateNode(node: AstNode, scope: EvaluationScope): EvaluatedValue {
   switch (node.kind) {
@@ -241,6 +254,8 @@ function evaluateNode(node: AstNode, scope: EvaluationScope): EvaluatedValue {
       return null;
     case "unary": {
       const operand = evaluateNode(node.operand, scope);
+      // 否定（`not`。Issue #854）。真偽でなければ `null`（`not(null)` を `true` にしない）
+      if (node.operator === "not") return combineBooleans("not", operand);
       if (!isFiniteNumber(operand)) return null;
       const value = -operand;
       return isFiniteNumber(value) ? value : null;
@@ -248,6 +263,8 @@ function evaluateNode(node: AstNode, scope: EvaluationScope): EvaluatedValue {
     case "binary": {
       const left = evaluateNode(node.left, scope);
       const right = evaluateNode(node.right, scope);
+      // 真偽の結合（`and`・`or`。Issue #854）。`null` は伝播させる（片方だけで決めない）
+      if (isLogicalOperator(node.operator)) return combineBooleans(node.operator, left, right);
       // 比較は数どうしと日付どうし（ほかは `null`）。計算は有限の数どうしだけである
       if (isComparisonOperator(node.operator)) return compare(node.operator, left, right);
       if (!isFiniteNumber(left) || !isFiniteNumber(right)) return null;

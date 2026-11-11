@@ -51,8 +51,14 @@ export const SECTION_LAYER = {
 /** entity・項目・検査・計算・一覧・操作の名前。式の中で名前として読めるように、英字で始まる英数字に限る。 */
 export const NAME_PATTERN = /^[A-Za-z][A-Za-z0-9]*$/;
 
-/** 店頭が付ける値の名前。項目と計算の名前には使えない（02 §1）。 */
-export const RESERVED_NAMES = ["id", "createdAt", "updatedAt"] as const;
+/**
+ * 店頭が付ける値の名前（02 §1）。項目と計算の名前に使えない。
+ *
+ * **`and`・`or`・`not` も予約語である**（Issue #854。2026-11-11）——式の真偽の結合と否定に使う語で、
+ * 名前として読むと「演算子か名前か」が字面だけでは決まらなくなる。項目と計算の名前に使えば、
+ * 静的チェックが `DATA_FIELD_NAME_RESERVED`・`LOGIC_COMPUTED_NAME_RESERVED` で断る。
+ */
+export const RESERVED_NAMES = ["id", "createdAt", "updatedAt", "and", "or", "not"] as const;
 
 // ── データ層 ─────────────────────────────────────────────────────
 
@@ -590,6 +596,16 @@ export const DATE_FUNCTIONS = {
 export const ARITHMETIC_OPERATORS = ["+", "-", "*", "/"] as const;
 /** 数どうしの比較。結果は真偽。 */
 export const COMPARISON_OPERATORS = [">", ">=", "<", "<=", "==", "!="] as const;
+
+/**
+ * 真偽どうしの結合（Issue #854。2026-11-11）。オペランドと結果はどちらも真偽。
+ * **使えるのは真偽を求める場所だけ**である（検査の式・`when`・`type: boolean` の計算）——
+ * 数の計算に混ぜれば、静的チェックが `LOGIC_OPERAND_TYPE_MISMATCH` で断る。
+ * 優先順位は `not` ＞ `and` ＞ `or` である（`NEGATION_OPERATOR`）。
+ */
+export const LOGICAL_OPERATORS = ["and", "or"] as const;
+/** 真偽の否定（Issue #854）。オペランドと結果は真偽。 */
+export const NEGATION_OPERATOR = "not" as const;
 
 // ── UI 層 ───────────────────────────────────────────────────────
 
