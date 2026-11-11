@@ -342,7 +342,24 @@ export interface PlanCliRoundRecord {
   readonly all_recommended: boolean;
 }
 
-/** 記録に入れる、台本の照合の結果 1 つ（**値を持たない**。Issue #444） */
+/**
+ * 記録に入れる、台本の照合 1 つぶんの診断（**値を持たない**。件数・真偽・有限の状態だけ。Issue #893）。
+ * 台本の鍵・根拠の文・事項の文・要件の文・事項 ID は入れない。
+ */
+export interface PlanCliScriptMatchDiagnosisRecord {
+  /** 観点を見ずに鍵が全部当たった項目の数 */
+  readonly keys_only_entries: number;
+  /** そのうち、v2 の観点の条件（既知の観点の不一致）で落とした項目の数 */
+  readonly facet_rejected_entries: number;
+  /** v2 の緩めた経路で当たった項目があったか */
+  readonly relaxed: boolean;
+  /** 要件の文を連結すれば鍵が全部当たるが、事項の文だけでは当たらなかった項目の数 */
+  readonly requirement_text_needed: number;
+  /** 同じ問いに v1 の条件を当てたときの状態 */
+  readonly v1_state: ScriptMatchState;
+}
+
+/** 記録に入れる、台本の照合の結果 1 つ（**値を持たない**。Issue #444・#893） */
 export interface PlanCliScriptMatchRecord {
   /** コードが振った質問 ID */
   readonly question_id: string;
@@ -352,6 +369,8 @@ export interface PlanCliScriptMatchRecord {
   readonly state: ScriptMatchState;
   /** 当たった台本の項目の添字（1 件に当たったときだけ。それ以外は `null`） */
   readonly entry_index: number | null;
+  /** 値を持たない診断（Issue #893） */
+  readonly diagnosis: PlanCliScriptMatchDiagnosisRecord;
 }
 
 /**
@@ -987,6 +1006,13 @@ export function buildPlanCliRecord(input: {
               revision: match.revision,
               state: match.state,
               entry_index: match.entryIndex,
+              diagnosis: {
+                keys_only_entries: match.diagnosis.keysOnlyEntries,
+                facet_rejected_entries: match.diagnosis.facetRejectedEntries,
+                relaxed: match.diagnosis.relaxed,
+                requirement_text_needed: match.diagnosis.requirementTextNeeded,
+                v1_state: match.diagnosis.v1State,
+              },
             })),
           },
         }),

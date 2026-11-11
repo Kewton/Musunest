@@ -385,6 +385,13 @@ interface PlanCliRecordShape {
       readonly revision: number;
       readonly state: string;
       readonly entry_index: number | null;
+      readonly diagnosis: {
+        readonly keys_only_entries: number;
+        readonly facet_rejected_entries: number;
+        readonly relaxed: boolean;
+        readonly requirement_text_needed: number;
+        readonly v1_state: string;
+      };
     }[];
   };
   readonly rounds: readonly {
@@ -3154,9 +3161,21 @@ describe("台本のファイルを渡す（04 §9・Issue #444）", () => {
     expect(record.confirmation).toBe("build");
     // 台本の照合の記録（内容の SHA-256・当て方の版・問いごとの結果）
     expect(record.script?.sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(record.script?.matcher).toBe("v1");
+    expect(record.script?.matcher).toBe("v2");
     expect(record.script?.matches).toEqual([
-      { question_id: "Q1-1", revision: 1, state: "answered", entry_index: 0 },
+      {
+        question_id: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entry_index: 0,
+        diagnosis: {
+          keys_only_entries: 1,
+          facet_rejected_entries: 0,
+          relaxed: false,
+          requirement_text_needed: 0,
+          v1_state: "answered",
+        },
+      },
     ]);
     // 台本の鍵・根拠・項目の ID の目印は、記録に写さない
     const recordText = JSON.stringify(record);
@@ -3216,6 +3235,20 @@ describe("台本のファイルを渡す（04 §9・Issue #444）", () => {
     expect(record.script?.matches).toHaveLength(9);
     expect(record.script?.matches.every((match) => match.state === "unknown" && match.entry_index === null)).toBe(true);
     expect(record.script?.matches.map((match) => match.revision)).toEqual([1, 1, 1, 2, 2, 2, 3, 3, 3]);
+    // 問いごとの行に、値を持たない診断の 5 つの欄が出る（当たりが無い合成の入力）
+    expect(
+      record.script?.matches.every(
+        (match) =>
+          match.diagnosis.keys_only_entries === 0 &&
+          match.diagnosis.facet_rejected_entries === 0 &&
+          match.diagnosis.relaxed === false &&
+          match.diagnosis.requirement_text_needed === 0 &&
+          match.diagnosis.v1_state === "unknown",
+      ),
+    ).toBe(true);
+    // 台本の照合の記録に、事項の文・要件の文も写さない
+    expect(JSON.stringify(record.script)).not.toContain("誰の分を数えるか");
+    expect(JSON.stringify(record.script)).not.toContain("タスクを記録できる");
     // F1: 上限までの往復・問数と、空の答えが、往復の記録に残る
     expect(record.rounds).toHaveLength(3);
     expect(record.rounds.every((round) => round.all_recommended === false)).toBe(true);
