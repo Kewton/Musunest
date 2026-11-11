@@ -5867,7 +5867,21 @@ describe("台本の答える役（04 §9・Issue #444）", () => {
     // 事項は、その答えで閉じる
     expect(result.plan.open_issues.find((issue) => issue.id === "OI-extra")?.resolution?.answer_id).toBe("A:Q1-1");
     // 照合の記録は answered（コードが振った質問 ID・往復の版・状態・項目の添字）
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "answered", entryIndex: 0 }]);
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entryIndex: 0,
+        diagnosis: {
+          keysOnlyEntries: 1,
+          facetRejectedEntries: 0,
+          relaxed: false,
+          requirementTextNeeded: 0,
+          v1State: "answered",
+        },
+      },
+    ]);
   });
 
   it("照合の文脈に、目録以外の事項と再質問に観点が欠けた値・要件の参照が渡る", async () => {
