@@ -9,6 +9,7 @@
 // 公開契約に Cloudflare の型は出さない。
 export const PACKAGE_NAME = "@musunest/control-plane" as const;
 
+export * from "./approval.js";
 export * from "./bundle.js";
 export * from "./bundle-publish.js";
 export * from "./contract.js";

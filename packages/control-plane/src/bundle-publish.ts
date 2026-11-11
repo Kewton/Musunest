@@ -30,6 +30,7 @@ import {
   type BundleManifestVerification,
   type BundleProblem,
 } from "./bundle.js";
+import { evaluateApproval, type OwnerApproval } from "./approval.js";
 import {
   DELIVERY_LEVELS,
   judgeAcceptance,
@@ -64,8 +65,15 @@ export const DELIVERY_BUNDLES_FIELD = "delivery_bundles" as const;
 export const DELIVERY_BUNDLE_SAMPLES = ["warikan", "task-board", "dashboard"] as const;
 export type DeliveryBundleSample = (typeof DELIVERY_BUNDLE_SAMPLES)[number];
 
-/** 比較の結果の種類。`skipped` は「その見本に値が入っていないので比較を飛ばした」。 */
-export const PIN_COMPARISON_STATUSES = ["matched", "skipped", "mismatch"] as const;
+/**
+ * 比較の結果の種類。
+ *   - `matched`：その見本の値と一致した
+ *   - `skipped`：その見本に値が入っていないので比較を飛ばした
+ *   - `mismatch`：値が入っているのに一致しない
+ *   - `not_applicable`：利用者のアプリなので**比べる対象が無い**（U-A）
+ *   - `collision`：利用者のアプリの納品物が、pins の見本の値と一致した（見本の照合を避ける穴なので断る）
+ */
+export const PIN_COMPARISON_STATUSES = ["matched", "skipped", "mismatch", "not_applicable", "collision"] as const;
 export type PinComparisonStatus = (typeof PIN_COMPARISON_STATUSES)[number];
 
 /** 比較の結果。`samples` は値が入っていた見本（＝引数の見本）、`matchedSamples` は一致した見本（`matched` のときだけ）。 */
@@ -127,6 +135,37 @@ export function compareBundleManifestToPins(
     : { status: "mismatch", samples: [sample], matchedSamples: [] };
 }
 
+/**
+ * 利用者のアプリ（U-A。Issue #865）の manifest の SHA-256 を、pins の**見本の値**と突き合わせる。
+ *
+ * 利用者のアプリには比べる対象が無いので、② は比較をせず `not_applicable` を返す。ただし
+ * **見本の照合を避ける穴を塞ぐ**ため、見本のどれかの値（`null` でないもの）と一致したら `collision` で断る。
+ * `delivery_bundles` の形が壊れていれば `BundlePinError`（安全側に倒す）。見本の一覧は固定の
+ * `DELIVERY_BUNDLE_SAMPLES` だけを見る（pins の `$comment` などの欄は読まない）。
+ */
+export function compareUserAppManifestToPins(manifestSha256: string, pins: unknown): PinComparison {
+  const deliveryBundles = isRecord(pins) ? pins[DELIVERY_BUNDLES_FIELD] : undefined;
+  if (!isRecord(deliveryBundles)) {
+    throw new BundlePinError("pins_malformed", `${DELIVERY_BUNDLES_FIELD} が写像でない`);
+  }
+  const matches: string[] = [];
+  for (const sample of DELIVERY_BUNDLE_SAMPLES) {
+    const entry = deliveryBundles[sample];
+    if (!isRecord(entry)) {
+      throw new BundlePinError("pins_malformed", `${DELIVERY_BUNDLES_FIELD}.${sample} が写像でない`);
+    }
+    const value = entry["manifest_sha256"];
+    if (value === null) continue;
+    if (typeof value !== "string") {
+      throw new BundlePinError("pins_malformed", `${DELIVERY_BUNDLES_FIELD}.${sample}.manifest_sha256 が文字列でない`);
+    }
+    if (value === manifestSha256) matches.push(sample);
+  }
+  return matches.length > 0
+    ? { status: "collision", samples: matches, matchedSamples: matches }
+    : { status: "not_applicable", samples: [], matchedSamples: [] };
+}
+
 // ── 納品物の中のファイルを読む（Node 側）────────────────────────
 
 interface NodeFs {
@@ -173,8 +212,19 @@ async function readVerificationPlanSha256(directory: string): Promise<string | n
 
 // ── 公開の入口 ────────────────────────────────────────────────────
 
-/** 止まった段。①manifest ②pins ③plan ④acceptance ⑤declaration、そして既存の publish。 */
-export const BUNDLE_PUBLISH_STAGES = ["manifest", "pins", "plan", "acceptance", "declaration", "publish"] as const;
+/**
+ * 止まった段。`request`（要求そのものの形。ファイルを読む前）→ ①manifest ②pins ③plan ④acceptance
+ * ⑤declaration、そして既存の publish。
+ */
+export const BUNDLE_PUBLISH_STAGES = [
+  "request",
+  "manifest",
+  "pins",
+  "plan",
+  "acceptance",
+  "declaration",
+  "publish",
+] as const;
 export type BundlePublishStage = (typeof BUNDLE_PUBLISH_STAGES)[number];
 
 /** publish の中身に渡す口（`publishSpec` と同じ。書き込みは偽の口で差し替えられる）。 */
@@ -187,8 +237,21 @@ export interface BundlePublishRequest {
   readonly summaryStdout: string;
   /** `pins/commandagent.json` を JSON として読んだ値（`delivery_bundles` のこの見本の値を読む） */
   readonly pins: unknown;
-  /** どの見本か（`delivery_bundles` のキー。pins の比較はこの見本の値とだけ行う） */
-  readonly sample: DeliveryBundleSample;
+  /**
+   * どの見本か（`delivery_bundles` のキー。pins の比較はこの見本の値とだけ行う）。
+   * **`userApp` と排他**（どちらか一方だけを渡す）。
+   */
+  readonly sample?: DeliveryBundleSample;
+  /**
+   * 利用者のアプリとして出す（U-A。Issue #865）。**`sample` と排他**。② は比べずに
+   * `not_applicable` を返し、pins の見本の値と一致したら `collision` で断る。
+   */
+  readonly userApp?: boolean;
+  /**
+   * 所有者の了承の記録（U-H。Issue #865）。JSON として読んだ値。**無ければ `undefined`**。
+   * 形の検査はここ（`evaluateApproval`）で行う。`full`・`none` の納品物では使わない。
+   */
+  readonly approval?: unknown;
   /** 宣言を使うインスタンスの ID */
   readonly instanceId: string;
   /** 既存インスタンスの宣言を、**はっきり差し替える**（`publishSpec` と同じ。既定は `false`） */
@@ -201,10 +264,14 @@ export interface BundlePublishSuccess {
   readonly manifestSha256: string;
   /** 受け入れの判定に使った水準（manifest の `artifact_level`） */
   readonly level: DeliveryLevel;
-  /** pins の照合の結果（`matched` か `skipped`） */
+  /** pins の照合の結果（`matched`・`skipped`、利用者のアプリなら `not_applicable`） */
   readonly pin: PinComparison;
   /** 確定した仕様（`plan.json`）の SHA-256。**無い納品物は `null`**（今の納品物と互換） */
   readonly planSha256: string | null;
+  /** 実際に使った了承（④の `verdict_not_full` を外したときだけ）。無ければ `null` */
+  readonly approval: OwnerApproval | null;
+  /** 了承は渡されたが使わなかった（`full` の納品物など）。結果に「使わなかった」を返す */
+  readonly approvalUnused: boolean;
   /** 既存の publish の中身の結果 */
   readonly publish: PublishSuccess;
 }
@@ -248,10 +315,13 @@ export interface BundlePublishFailure {
 export type BundlePublishResult = BundlePublishSuccess | BundlePublishFailure;
 
 const MESSAGES = {
+  request_target: "見本（sample）と利用者のアプリ（userApp）はどちらか一方だけを渡す（何も読まずに publish しない）",
   manifest_unreadable: "納品物の manifest を読めない、または形が違う（publish しない）",
   manifest_problems: "納品物の manifest の照合に通らない（publish しない）",
   pins_malformed: "pins の delivery_bundles を読めない（publish しない）",
   pins_mismatch: "manifest の SHA-256 が pins の値と一致しない（publish しない）",
+  user_app_pin_collision:
+    "利用者のアプリの manifest の SHA-256 が pins の見本の値と一致する（見本の照合を避ける穴になるので publish しない）",
   level_unknown: "納品物の artifact_level が L2・L3・L4 のいずれでもない（受け入れを判定できない）",
   acceptance: "headless の出力が受け入れの条件を満たさない（publish しない）",
   plan_unreadable: `納品物の中の確定した仕様（${BUNDLE_PLAN_PATH}）を読めない（publish しない）`,
@@ -290,10 +360,15 @@ const isDeliveryLevel = (value: string): value is DeliveryLevel => (DELIVERY_LEV
  * 確定した仕様の照合・受け入れの判定・宣言の静的チェック）を通したものだけを、既存の publish の中身
  * （`publishSpec`）へ渡す。
  *
- * **どれかが落ちたら publish しない。** 段（`failure.stage`）で止まった門が分かる。`pins` の段は、
- * **その見本の値**が入っているのに一致しなかったときである（その値が `null` の `skipped` は通る）。
+ * **どれかが落ちたら publish しない。** 段（`failure.stage`）で止まった門が分かる。`request` の段は、
+ * 見本と利用者のアプリの両方・どちらも無い要求を、**何も読まずに**断ったときである（U-A）。
+ * `pins` の段は、**その見本の値**が入っているのに一致しなかったときである（その値が `null` の `skipped` は通る）。
+ * 利用者のアプリでは比べず `not_applicable` を返し、pins の見本の値と一致したら `collision` で断る。
  * `plan` の段は、納品物に確定した仕様（`plan.json`）があるのに、#331 の検査・確認の SHA・manifest と
  * 検証の結果の SHA-256 のどれかが通らなかったときである（**`plan.json` が無ければこの段は飛ぶ**）。
+ *
+ * ④ は所有者の了承（U-H）が `partial` の納品物に一致するときだけ `verdict_not_full` を外す。
+ * `status`・`assurance`・①②③⑤の門は変えない。`none` は了承があっても通さない。
  *
  * 例外を外へ出さない（門の失敗は結果にする）。呼ぶ側（CLI）は、結果をそのまま安全に出せる。
  */
@@ -301,6 +376,10 @@ export async function publishBundle(
   deps: BundlePublishDeps,
   request: BundlePublishRequest,
 ): Promise<BundlePublishResult> {
+  // ⓪ 要求の形（U-A）。見本と利用者のアプリはどちらか一方だけ。**何も読まずに**断る
+  const isUserApp = request.userApp === true;
+  if ((request.sample !== undefined) === isUserApp) return fail("request", MESSAGES.request_target);
+
   // ① manifest の照合（依存の Issue #247 の部品）。ファイル単位の食い違いは problems に並ぶ
   let verified: BundleManifestVerification;
   try {
@@ -313,14 +392,23 @@ export async function publishBundle(
     return fail("manifest", MESSAGES.manifest_problems, { problems: verified.problems });
   }
 
-  // ② pins の delivery_bundles の、**その見本の値とだけ**比較する（その値が null なら飛ばす）
+  // ② pins。見本は**その見本の値とだけ**比較する（その値が null なら飛ばす）。利用者のアプリは
+  //    比べずに `not_applicable` を返し、**見本の値と一致したら**穴を塞ぐために断る（U-A）
   let pin: PinComparison;
   try {
-    pin = compareBundleManifestToPins(verified.manifestSha256, request.pins, request.sample);
+    if (isUserApp) {
+      pin = compareUserAppManifestToPins(verified.manifestSha256, request.pins);
+    } else if (request.sample !== undefined) {
+      pin = compareBundleManifestToPins(verified.manifestSha256, request.pins, request.sample);
+    } else {
+      // ⓪ で断っているはずだが、型を正直に保つ
+      return fail("request", MESSAGES.request_target);
+    }
   } catch (error) {
     return fail("pins", error instanceof BundlePinError ? error.message : MESSAGES.pins_malformed);
   }
   if (pin.status === "mismatch") return fail("pins", MESSAGES.pins_mismatch, { pin });
+  if (pin.status === "collision") return fail("pins", MESSAGES.user_app_pin_collision, { pin });
 
   // ③ 確定した仕様（plan.json）があれば、#331 の検査と SHA-256 の照合を行う（Issue #335）。
   //    **無くてよい**（今の納品物と互換）。manifest の `files` に載っていれば、① で存在とバイト列が
@@ -362,7 +450,14 @@ export async function publishBundle(
   if (!isDeliveryLevel(level)) return fail("acceptance", MESSAGES.level_unknown, { pin });
   const read = readHeadlessSummary(request.summaryStdout);
   if (!read.ok) return fail("acceptance", read.message, { pin });
-  const acceptance = judgeAcceptance(read.summary, level);
+  // U-H：了承は、**①で照合した manifest の SHA-256** と**要約の run_id** に結び付いているときだけ使える。
+  // `full`・`none` では使わない（`none` は了承があっても `verdict_not_full` のまま断る）
+  const approval = evaluateApproval(request.approval, {
+    manifestSha256: verified.manifestSha256,
+    runId: read.summary.runId,
+    verdict: read.summary.verdict,
+  });
+  const acceptance = judgeAcceptance(read.summary, level, approval);
   if (!acceptance.accepted) return fail("acceptance", MESSAGES.acceptance, { pin, acceptance });
 
   // ⑤ 納品物の中の宣言を読み、静的チェックに通す（spec-engine。publish の中身と同じ判定を使う）
@@ -384,5 +479,14 @@ export async function publishBundle(
   if (!published.ok) {
     return fail("publish", published.failure.message, { pin, acceptance, diagnostics: published.failure.diagnostics });
   }
-  return { ok: true, manifestSha256: verified.manifestSha256, level, pin, planSha256, publish: published };
+  return {
+    ok: true,
+    manifestSha256: verified.manifestSha256,
+    level,
+    pin,
+    planSha256,
+    approval: approval.kind === "used" ? approval.approval : null,
+    approvalUnused: approval.kind === "unused",
+    publish: published,
+  };
 }

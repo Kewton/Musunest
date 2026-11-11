@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   APP_INSTANCES_TABLE,
+  APPROVAL_SCHEMA_VERSION,
   APPS_TABLE,
   BUNDLE_DECLARATION_PATH,
   COMMUNITIES_TABLE,
@@ -18,6 +19,8 @@ import {
   RegistryError,
   USERS_TABLE,
   compareBundleManifestToPins,
+  compareUserAppManifestToPins,
+  evaluateApproval,
   getApp,
   getCommunity,
   getInstance,
@@ -29,6 +32,7 @@ import {
   listUserCommunities,
   publishBundle,
   readHeadlessSummary,
+  readOwnerApproval,
   registerApp,
   registerInstance,
   registerInstanceOwner,
@@ -72,6 +76,13 @@ describe("control-plane パッケージ", () => {
     expect(BUNDLE_DECLARATION_PATH).toBe("artifacts/app.spec.yaml");
     expect(typeof publishBundle).toBe("function");
     expect(typeof compareBundleManifestToPins).toBe("function");
+  });
+
+  it("利用者のアプリの比較と、所有者の了承の読み取り・照合を公開する（#865）", () => {
+    expect(APPROVAL_SCHEMA_VERSION).toBe("musunest.owner-approval/v1");
+    expect(typeof compareUserAppManifestToPins).toBe("function");
+    expect(typeof readOwnerApproval).toBe("function");
+    expect(typeof evaluateApproval).toBe("function");
   });
 
   it("identity の 4 表の名前と読み書きを公開する（#259）", () => {

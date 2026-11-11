@@ -30,6 +30,7 @@ const CONFIG_PATH = join(ROOT, DATA_API_CONFIG);
 const CONFIG = readFileSync(CONFIG_PATH, "utf8");
 const PINS_PATH = join(ROOT, PINS_FILE);
 const SUMMARY_PATH = join(ROOT, "summary.json");
+const APPROVAL_PATH = join(ROOT, "approval.json");
 
 /** 検査を通る、最小の宣言（publish.test.ts と同じ形） */
 const DECLARATION = [
@@ -219,8 +220,10 @@ async function run(
     readonly env?: Readonly<Record<string, string | undefined>>;
     readonly pins?: string;
     readonly summary?: string;
+    /** `--approval approval.json` の中身（未指定なら実ファイルを読みに行き、無ければ失敗する） */
+    readonly approval?: string;
     readonly cloudflare?: FakeCloudflare;
-    /** 差し替えると、既定の読み取り（config・pins・summary）を使わず、これを io.readFile にする */
+    /** 差し替えると、既定の読み取り（config・pins・summary・approval）を使わず、これを io.readFile にする */
     readonly readFile?: (path: string) => string;
   } = {},
 ): Promise<Run> {
@@ -233,6 +236,7 @@ async function run(
       if (path === CONFIG_PATH) return CONFIG;
       if (path === PINS_PATH) return options.pins ?? JSON.stringify(allNullPins());
       if (path === SUMMARY_PATH) return options.summary ?? SUMMARY;
+      if (path === APPROVAL_PATH && options.approval !== undefined) return options.approval;
       return readFileSync(path, "utf8");
     });
   const io: CliIo = {
@@ -248,13 +252,23 @@ async function run(
   return { code, out, err, all: [...out, ...err].join("\n"), calls: cloudflare.calls };
 }
 
-const args = (bundle: string, options: { readonly sample?: string; readonly extra?: readonly string[] } = {}): string[] => [
+const args = (
+  bundle: string,
+  options: {
+    /** `null` を渡すと `--sample` を付けない（「どちらも無い」の試験） */
+    readonly sample?: string | null;
+    readonly userApp?: boolean;
+    readonly approval?: boolean;
+    readonly extra?: readonly string[];
+  } = {},
+): string[] => [
   "--env",
   "dev",
   "--instance",
   "e2e-warikan",
-  "--sample",
-  options.sample ?? "warikan",
+  ...(options.sample === null ? [] : ["--sample", options.sample ?? "warikan"]),
+  ...(options.userApp === true ? ["--user-app"] : []),
+  ...(options.approval === true ? ["--approval", "approval.json"] : []),
   "--bundle",
   bundle,
   "--summary",
@@ -453,5 +467,165 @@ describe("公開してよい env", () => {
 
   it("runPublish と publish-bundle は別の入口である（取り違えない）", () => {
     expect(runCli).not.toBe(runPublish);
+  });
+});
+
+// ── U-A：利用者のアプリ（Issue #865）──────────────────────────────
+
+describe("利用者のアプリ（U-A）", () => {
+  it("--user-app は見本なしで通り、② は not_applicable、了承なしを出す", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run(args(bundle.root, { sample: null, userApp: true }));
+
+    expect(runResult.code).toBe(EXIT_OK);
+    expect(runResult.all).toContain("利用者のアプリ");
+    expect(runResult.all).toContain("pins not_applicable");
+    expect(runResult.all).toContain("了承 なし");
+    expect(runResult.calls.filter((call) => call.method === "PUT")).toHaveLength(2);
+    expectNothingSecret(runResult);
+  });
+
+  it("--user-app の納品物が pins の見本の値と一致すると、API を呼ばずに段 pins", async () => {
+    const bundle = await makeBundle();
+    const pins = JSON.stringify({
+      delivery_bundles: {
+        warikan: { manifest_sha256: bundle.manifestSha256, source_run: "r" },
+        "task-board": { manifest_sha256: null, source_run: null },
+        dashboard: { manifest_sha256: null, source_run: null },
+      },
+    });
+    const runResult = await run(args(bundle.root, { sample: null, userApp: true }), { pins });
+
+    expect(runResult.code).toBe(EXIT_NG);
+    expect(runResult.calls).toEqual([]);
+    expect(runResult.all).toContain("段 pins");
+    expectNothingSecret(runResult);
+  });
+
+  it("--user-app と --sample の併用は、ファイルを 1 回も読まずに断る", async () => {
+    const reads: string[] = [];
+    const runResult = await run(args("bundle", { sample: "warikan", userApp: true }), {
+      readFile: (path) => {
+        reads.push(path);
+        return "";
+      },
+    });
+
+    expect(runResult.code).toBe(EXIT_NG);
+    expect(runResult.calls).toEqual([]);
+    expect(reads).toEqual([]);
+    expect(runResult.all).toContain("併用できない");
+    expectNothingSecret(runResult);
+  });
+
+  it("--sample も --user-app も無いと、ファイルを 1 回も読まずに断る", async () => {
+    const reads: string[] = [];
+    const runResult = await run(args("bundle", { sample: null }), {
+      readFile: (path) => {
+        reads.push(path);
+        return "";
+      },
+    });
+
+    expect(runResult.code).toBe(EXIT_NG);
+    expect(runResult.calls).toEqual([]);
+    expect(reads).toEqual([]);
+    expect(runResult.all).toContain("--sample が無い");
+    expectNothingSecret(runResult);
+  });
+});
+
+// ── U-H：所有者の了承（Issue #865）──────────────────────────────────
+
+/** 手で書いた headless の要約（verdict partial） */
+const partialSummary = `${JSON.stringify({ ...(JSON.parse(SUMMARY) as Record<string, unknown>), verdict: "partial" })}\n`;
+
+/** 了承の記録の JSON（`--approval approval.json` の中身） */
+const approvalJson = (manifestSha256: string, overrides: Record<string, unknown> = {}): string =>
+  `${JSON.stringify({
+    schema_version: "musunest.owner-approval/v1",
+    manifest_sha256: manifestSha256,
+    run_id: "run-2026-09-26-001",
+    verdict: "partial",
+    approved_by: "owner",
+    approved_at: "2026-11-11T09:00:00.000Z",
+    ...overrides,
+  })}\n`;
+
+describe("所有者の了承（U-H）", () => {
+  it("partial + manifest と run_id に一致する了承は publish まで進み、了承 使用を出す", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run(args(bundle.root, { approval: true }), {
+      summary: partialSummary,
+      approval: approvalJson(bundle.manifestSha256),
+    });
+
+    expect(runResult.code, runResult.all).toBe(EXIT_OK);
+    expect(runResult.all).toContain("了承 使用");
+    expect(runResult.calls.filter((call) => call.method === "PUT")).toHaveLength(2);
+    expectNothingSecret(runResult);
+  });
+
+  it("full の納品物に了承が渡されたら使わず、了承 不使用を出す", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run(args(bundle.root, { approval: true }), { approval: approvalJson(bundle.manifestSha256) });
+
+    expect(runResult.code).toBe(EXIT_OK);
+    expect(runResult.all).toContain("了承 不使用");
+    expectNothingSecret(runResult);
+  });
+
+  it("partial + 一致しない了承は、API を呼ばずに段 acceptance", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run(args(bundle.root, { approval: true }), {
+      summary: partialSummary,
+      approval: approvalJson("0".repeat(64)),
+    });
+
+    expect(runResult.code).toBe(EXIT_NG);
+    expect(runResult.calls).toEqual([]);
+    expect(runResult.all).toContain("段 acceptance");
+    expectNothingSecret(runResult);
+  });
+
+  it("了承のファイルが読めないときは、資格情報を読む前に断る", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run(args(bundle.root, { approval: true }), {
+      env: { CLOUDFLARE_API_TOKEN: undefined, CLOUDFLARE_ACCOUNT_ID: undefined },
+    });
+
+    expect(runResult.code).toBe(EXIT_NG);
+    expect(runResult.calls).toEqual([]);
+    expect(runResult.all).toContain("了承のファイルを読めない");
+    expect(runResult.all).not.toContain("CLOUDFLARE_API_TOKEN");
+    expectNothingSecret(runResult);
+  });
+
+  it("了承のファイルが JSON でないときは、資格情報を読む前に断る", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run(args(bundle.root, { approval: true }), {
+      env: { CLOUDFLARE_API_TOKEN: undefined, CLOUDFLARE_ACCOUNT_ID: undefined },
+      approval: "{ not json\n",
+    });
+
+    expect(runResult.code).toBe(EXIT_NG);
+    expect(runResult.calls).toEqual([]);
+    expect(runResult.all).toContain("了承のファイルが JSON として読めない");
+    expect(runResult.all).not.toContain("CLOUDFLARE_API_TOKEN");
+    expectNothingSecret(runResult);
+  });
+
+  it("了承の形が違うときは、資格情報を読む前に断る", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run(args(bundle.root, { approval: true }), {
+      env: { CLOUDFLARE_API_TOKEN: undefined, CLOUDFLARE_ACCOUNT_ID: undefined },
+      approval: JSON.stringify({ verdict: "full" }),
+    });
+
+    expect(runResult.code).toBe(EXIT_NG);
+    expect(runResult.calls).toEqual([]);
+    expect(runResult.all).toContain("了承の形が違う");
+    expect(runResult.all).not.toContain("CLOUDFLARE_API_TOKEN");
+    expectNothingSecret(runResult);
   });
 });

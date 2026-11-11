@@ -11,6 +11,7 @@
 // 使う形だけを書いて**動的**に読む（bundle.test.ts と同じやり方）。
 import { afterEach, describe, expect, it } from "vitest";
 import { PLAN_SPEC_SCHEMA_VERSION, planDigest } from "@musunest/appspec-schema";
+import { APPROVAL_SCHEMA_VERSION } from "./approval.js";
 import { HEADLESS_SCHEMA_VERSION } from "./headless.js";
 import {
   BUNDLE_MANIFEST_FILE,
@@ -25,6 +26,7 @@ import {
   BUNDLE_VERIFICATION_PATH,
   PLAN_SHA256_FIELD,
   compareBundleManifestToPins,
+  compareUserAppManifestToPins,
   publishBundle,
   type BundlePublishResult,
   type DeliveryBundleSample,
@@ -334,7 +336,10 @@ async function run(
   options: {
     readonly bundleDirectory: string;
     readonly pins?: unknown;
-    readonly sample?: DeliveryBundleSample;
+    /** `null` を渡すと見本を渡さない（「どちらも無い」の試験） */
+    readonly sample?: DeliveryBundleSample | null;
+    readonly userApp?: boolean;
+    readonly approval?: unknown;
     readonly summaryStdout?: string;
     readonly instanceId?: string;
   },
@@ -347,8 +352,10 @@ async function run(
       bundleDirectory: options.bundleDirectory,
       summaryStdout: options.summaryStdout ?? summaryLine(),
       pins: options.pins ?? pinsWith(null),
-      sample: options.sample ?? "warikan",
       instanceId: options.instanceId ?? "e2e-warikan",
+      ...(options.sample === null ? {} : { sample: options.sample ?? "warikan" }),
+      ...(options.userApp === true ? { userApp: true } : {}),
+      ...(options.approval !== undefined ? { approval: options.approval } : {}),
     },
   );
   return { writer, registry, result };
@@ -683,5 +690,239 @@ describe("compareBundleManifestToPins", () => {
       }
     })();
     expect(thrown).toBeInstanceOf(BundlePinError);
+  });
+});
+
+// ── U-H：所有者の了承（Issue #865）──────────────────────────────────
+
+/** 了承の記録（`overrides` で欄を差し替える） */
+const approvalRecord = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+  schema_version: APPROVAL_SCHEMA_VERSION,
+  manifest_sha256: "a".repeat(64),
+  run_id: "run-2026-09-26-001",
+  verdict: "partial",
+  approved_by: "owner",
+  approved_at: "2026-11-11T09:00:00.000Z",
+  ...overrides,
+});
+
+describe("publishBundle — 所有者の了承（U-H）", () => {
+  it("partial は了承なしなら、段 acceptance で verdict_not_full に断り、何も書かない", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({
+      bundleDirectory: bundle.root,
+      pins: pinsWith(bundle.manifestSha256),
+      summaryStdout: summaryLine({ verdict: "partial" }),
+    });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("acceptance");
+    expect(runResult.result.acceptance?.reasons.map((reason) => reason.code)).toEqual(["verdict_not_full"]);
+    expectNoWrites(runResult);
+  });
+
+  it("partial は manifest の SHA と run_id に一致する了承があれば publish まで進む（偽の書き込み口）", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({
+      bundleDirectory: bundle.root,
+      pins: pinsWith(bundle.manifestSha256),
+      summaryStdout: summaryLine({ verdict: "partial" }),
+      approval: approvalRecord({ manifest_sha256: bundle.manifestSha256 }),
+    });
+
+    expect(runResult.result.ok).toBe(true);
+    if (!runResult.result.ok) throw new Error("通るはず");
+    expect(runResult.result.approval?.runId).toBe("run-2026-09-26-001");
+    expect(runResult.result.approvalUnused).toBe(false);
+    expect(runResult.writer.writes).toHaveLength(2);
+    expect(runResult.registry.instances.size).toBe(1);
+  });
+
+  it("了承の manifest の SHA が 1 文字違えば approval_manifest_mismatch で断る", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({
+      bundleDirectory: bundle.root,
+      pins: pinsWith(bundle.manifestSha256),
+      summaryStdout: summaryLine({ verdict: "partial" }),
+      approval: approvalRecord({ manifest_sha256: (bundle.manifestSha256[0] === "0" ? "1" : "0") + bundle.manifestSha256.slice(1) }),
+    });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("acceptance");
+    expect(runResult.result.acceptance?.reasons.map((reason) => reason.code)).toEqual(["approval_manifest_mismatch"]);
+    expectNoWrites(runResult);
+  });
+
+  it("run_id が要約と違う了承は approval_run_mismatch で断る", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({
+      bundleDirectory: bundle.root,
+      pins: pinsWith(bundle.manifestSha256),
+      summaryStdout: summaryLine({ verdict: "partial", run_id: "run-2026-09-26-001" }),
+      approval: approvalRecord({ manifest_sha256: bundle.manifestSha256, run_id: "run-other" }),
+    });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("acceptance");
+    expect(runResult.result.acceptance?.reasons.map((reason) => reason.code)).toEqual(["approval_run_mismatch"]);
+    expectNoWrites(runResult);
+  });
+
+  it("形の違う了承は approval_invalid で断る", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({
+      bundleDirectory: bundle.root,
+      pins: pinsWith(bundle.manifestSha256),
+      summaryStdout: summaryLine({ verdict: "partial" }),
+      approval: approvalRecord({ manifest_sha256: bundle.manifestSha256, verdict: "full" }),
+    });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("acceptance");
+    expect(runResult.result.acceptance?.reasons.map((reason) => reason.code)).toEqual(["approval_invalid"]);
+    expectNoWrites(runResult);
+  });
+
+  it("verdict none は、了承が一致していても verdict_not_full で断る", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({
+      bundleDirectory: bundle.root,
+      pins: pinsWith(bundle.manifestSha256),
+      summaryStdout: summaryLine({ verdict: "none" }),
+      approval: approvalRecord({ manifest_sha256: bundle.manifestSha256 }),
+    });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("acceptance");
+    expect(runResult.result.acceptance?.reasons.map((reason) => reason.code)).toEqual(["verdict_not_full"]);
+    expectNoWrites(runResult);
+  });
+
+  it("status が completed でない partial は、了承が一致していても断る", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({
+      bundleDirectory: bundle.root,
+      pins: pinsWith(bundle.manifestSha256),
+      summaryStdout: summaryLine({ verdict: "partial", status: "failed" }),
+      approval: approvalRecord({ manifest_sha256: bundle.manifestSha256 }),
+    });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.acceptance?.reasons.map((reason) => reason.code)).toEqual(["status_not_completed"]);
+    expectNoWrites(runResult);
+  });
+
+  it("assurance が足りない partial は、了承が一致していても断る", async () => {
+    const bundle = await makeBundle({ artifactLevel: "L3" });
+    const runResult = await run({
+      bundleDirectory: bundle.root,
+      pins: pinsWith(bundle.manifestSha256),
+      summaryStdout: summaryLine({ verdict: "partial", assurance: "partial" }),
+      approval: approvalRecord({ manifest_sha256: bundle.manifestSha256 }),
+    });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.acceptance?.reasons.map((reason) => reason.code)).toEqual(["assurance_insufficient"]);
+    expectNoWrites(runResult);
+  });
+
+  it("full の納品物に了承が渡されたら使わず、approvalUnused を返す", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({
+      bundleDirectory: bundle.root,
+      pins: pinsWith(bundle.manifestSha256),
+      approval: approvalRecord({ manifest_sha256: bundle.manifestSha256 }),
+    });
+
+    expect(runResult.result.ok).toBe(true);
+    if (!runResult.result.ok) throw new Error("通るはず");
+    expect(runResult.result.approval).toBeNull();
+    expect(runResult.result.approvalUnused).toBe(true);
+  });
+});
+
+// ── U-A：利用者のアプリ（Issue #865）────────────────────────────────
+
+describe("publishBundle — 利用者のアプリ（U-A）", () => {
+  it("利用者のアプリは ② で比べず not_applicable を返して通す", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({ bundleDirectory: bundle.root, sample: null, userApp: true, pins: pinsWith(null) });
+
+    expect(runResult.result.ok).toBe(true);
+    if (!runResult.result.ok) throw new Error("通るはず");
+    expect(runResult.result.pin.status).toBe("not_applicable");
+    expect(runResult.result.pin.samples).toEqual([]);
+    expect(runResult.writer.writes).toHaveLength(2);
+  });
+
+  it("利用者のアプリの manifest が pins の見本の値と一致したら、段 pins で断り、何も書かない", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({
+      bundleDirectory: bundle.root,
+      sample: null,
+      userApp: true,
+      pins: pinsWith(bundle.manifestSha256),
+    });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("pins");
+    expect(runResult.result.pin?.status).toBe("collision");
+    expect(runResult.result.pin?.samples).toEqual(["warikan"]);
+    expectNoWrites(runResult);
+  });
+
+  it("見本と利用者のアプリの両方を渡すと、manifest を読む前に段 request で断る", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({ bundleDirectory: join(bundle.root, "missing"), sample: "warikan", userApp: true });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("request");
+    expectNoWrites(runResult);
+  });
+
+  it("見本も利用者のアプリも渡さないと、manifest を読む前に段 request で断る", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({ bundleDirectory: join(bundle.root, "missing"), sample: null });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("request");
+    expectNoWrites(runResult);
+  });
+});
+
+describe("compareUserAppManifestToPins", () => {
+  const SHA = "a".repeat(64);
+
+  it("見本の値がすべて null なら not_applicable（比べる対象が無い）", () => {
+    expect(compareUserAppManifestToPins(SHA, pinsWith(null))).toEqual({
+      status: "not_applicable",
+      samples: [],
+      matchedSamples: [],
+    });
+  });
+
+  it("見本のどれかの値と一致すれば collision（一致した見本を返す）", () => {
+    expect(compareUserAppManifestToPins(SHA, pinsWith(SHA))).toEqual({
+      status: "collision",
+      samples: ["warikan"],
+      matchedSamples: ["warikan"],
+    });
+  });
+
+  it("delivery_bundles の形が壊れていれば BundlePinError", () => {
+    expect(() => compareUserAppManifestToPins(SHA, { delivery_bundles: null })).toThrow(BundlePinError);
+    expect(() =>
+      compareUserAppManifestToPins(SHA, { delivery_bundles: { warikan: { manifest_sha256: 42 } } }),
+    ).toThrow(BundlePinError);
   });
 });

@@ -6,6 +6,7 @@
 // 参照：`pins/commandagent.json`（revision 031ec74 の `headless_contract`）・
 // `workspace/mvp/m1/00-open-questions.md` §Q7。
 import { describe, expect, it } from "vitest";
+import { APPROVAL_SCHEMA_VERSION, type ApprovalOutcome, type OwnerApproval } from "./approval.js";
 import {
   ASSURANCE_FULL,
   ASSURANCE_PARTIAL,
@@ -202,5 +203,76 @@ describe("judgeAcceptance — Q7 の規則", () => {
       "verdict_not_full",
       "assurance_insufficient",
     ]);
+  });
+});
+
+// ── U-H：所有者の了承（Issue #865）──────────────────────────────────
+
+const approval: OwnerApproval = {
+  schemaVersion: APPROVAL_SCHEMA_VERSION,
+  manifestSha256: "a".repeat(64),
+  runId: "run-2026-09-26-001",
+  verdict: "partial",
+  approvedBy: "owner",
+  approvedAt: "2026-11-11T09:00:00.000Z",
+};
+
+const usedApproval: ApprovalOutcome = { kind: "used", approval };
+const rejectedApproval: ApprovalOutcome = {
+  kind: "rejected",
+  code: "approval_manifest_mismatch",
+  detail: null,
+  approval,
+};
+
+describe("judgeAcceptance — 所有者の了承（U-H）", () => {
+  const summaryWith = (overrides: Record<string, unknown> = {}) => read(summaryLine(overrides));
+
+  it("了承を渡さなければ、partial の判定は今までどおり verdict_not_full", () => {
+    const decision = judgeAcceptance(summaryWith({ verdict: "partial" }), "L2");
+    expect(decision.accepted).toBe(false);
+    expect(decision.reasons.map((reason) => reason.code)).toEqual(["verdict_not_full"]);
+    expect(decision.approval).toEqual({ kind: "absent" });
+  });
+
+  it("partial に使える了承があれば verdict_not_full を外して受け入れる", () => {
+    const decision = judgeAcceptance(summaryWith({ verdict: "partial" }), "L2", usedApproval);
+    expect(decision.accepted).toBe(true);
+    expect(decision.reasons).toEqual([]);
+    expect(decision.approval).toEqual(usedApproval);
+  });
+
+  it("合わない了承は approval_* の新しい理由で断る", () => {
+    const decision = judgeAcceptance(summaryWith({ verdict: "partial" }), "L2", rejectedApproval);
+    expect(decision.accepted).toBe(false);
+    expect(decision.reasons).toEqual([
+      { code: "approval_manifest_mismatch", field: "approval", actual: null, expected: ["partial"] },
+    ]);
+  });
+
+  it("verdict none は、使える了承を渡されても通さない", () => {
+    const decision = judgeAcceptance(summaryWith({ verdict: "none" }), "L2", usedApproval);
+    expect(decision.accepted).toBe(false);
+    expect(decision.reasons.map((reason) => reason.code)).toEqual(["verdict_not_full"]);
+  });
+
+  it("status が completed でない partial は、了承があっても断る", () => {
+    const decision = judgeAcceptance(summaryWith({ verdict: "partial", status: "failed" }), "L2", usedApproval);
+    expect(decision.accepted).toBe(false);
+    expect(decision.reasons.map((reason) => reason.code)).toEqual(["status_not_completed"]);
+  });
+
+  it("assurance が足りない partial は、了承があっても断る（L3 は full が要る）", () => {
+    const decision = judgeAcceptance(summaryWith({ verdict: "partial" }), "L3", usedApproval);
+    expect(decision.accepted).toBe(false);
+    expect(decision.reasons.map((reason) => reason.code)).toEqual(["assurance_insufficient"]);
+  });
+
+  it("full の納品物は、了承が渡されても今までどおり受け入れる（approval は unused）", () => {
+    const unused: ApprovalOutcome = { kind: "unused", approval };
+    const decision = judgeAcceptance(summaryWith(), "L2", unused);
+    expect(decision.accepted).toBe(true);
+    expect(decision.reasons).toEqual([]);
+    expect(decision.approval).toEqual(unused);
   });
 });
