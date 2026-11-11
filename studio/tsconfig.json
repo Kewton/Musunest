@@ -1,0 +1,20 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "types": ["node"]
+  },
+  "include": ["src/index.ts", "src/server/**/*"],
+  "references": [
+    {
+      "path": "../packages/appspec-schema"
+    },
+    {
+      "path": "../packages/control-plane"
+    },
+    {
+      "path": "../packages/factory"
+    }
+  ]
+}

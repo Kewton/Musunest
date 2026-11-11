@@ -6,6 +6,9 @@
 //   e2e → sdk                   … staging の e2e を host と同じ型付きクライアントで呼ぶ
 // 2026-10-09 に 1 本足した（#278。02-architecture.md §3.1）：
 //   factory → appspec-schema, spec-engine … プロダクト内の工場（宣言だけを作る）。control-plane には依存しない
+// 2026-11-11 に 1 本足した（#864。workspace/mvp/m2/studio-s1.md §3）：
+//   studio → factory, control-plane, appspec-schema … 手元の工房。e2e と同じく workspace の一員で配らない。
+//   画面は host に置かず、127.0.0.1 の Node のサーバが返す
 // 人が読む図は CLAUDE.md「依存の向き」にある。ここを変えたら、同じ PR で図も直す。
 export const ALLOWED = {
   "@musunest/appspec-schema": [],
@@ -25,6 +28,7 @@ export const ALLOWED = {
   "@musunest/gateway": ["@musunest/control-plane", "@musunest/data-api"],
   "@musunest/host": ["@musunest/sdk"],
   "@musunest/e2e": ["@musunest/sdk"],
+  "@musunest/studio": ["@musunest/appspec-schema", "@musunest/control-plane", "@musunest/factory"],
   "@musunest/template-tanstack-start": [],
 };
 
@@ -41,5 +45,6 @@ export const DIRS = {
   "@musunest/factory": "packages/factory",
   "@musunest/sdk": "packages/sdk",
   "@musunest/e2e": "e2e",
+  "@musunest/studio": "studio",
   "@musunest/template-tanstack-start": "templates/tanstack-start",
 };
