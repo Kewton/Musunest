@@ -32,6 +32,7 @@ import { parseArgs } from "node:util";
 import {
   BUNDLE_DECLARATION_PATH,
   DELIVERY_BUNDLE_SAMPLES,
+  readOwnerApproval,
   publishBundle,
   type BundlePublishResult,
   type DeliveryBundleSample,
@@ -56,19 +57,23 @@ import { ENVS, type Env } from "./sync-bindings.ts";
 /** `pins/commandagent.json`（リポジトリルートからの相対パス）。納品物の manifest の照合先。 */
 export const PINS_FILE = "pins/commandagent.json" as const;
 
-const USAGE = `usage: pnpm exec tsx infra/scripts/publish-bundle.ts --env <${PUBLISHABLE_ENVS.join("|")}> --instance <id> --sample <${DELIVERY_BUNDLE_SAMPLES.join("|")}> --bundle <dir> --summary <file>
+const USAGE = `usage: pnpm exec tsx infra/scripts/publish-bundle.ts --env <${PUBLISHABLE_ENVS.join("|")}> --instance <id> (--sample <${DELIVERY_BUNDLE_SAMPLES.join("|")}> | --user-app) --bundle <dir> --summary <file>
 
   --env <env>        ${PUBLISHABLE_ENVS.join(" / ")} だけ。${ENVS.filter((e) => !PUBLISHABLE_ENVS.includes(e)).join(" / ")} は書き込みの前に断る
   --instance <id>    宣言を使うインスタンスの ID（${INSTANCE_PATTERN.source}）
-  --sample <sample>  どの見本か（${DELIVERY_BUNDLE_SAMPLES.join(" / ")}）。**必須。** この見本の値とだけ pins を比べる
+  --sample <sample>  どの見本か（${DELIVERY_BUNDLE_SAMPLES.join(" / ")}）。この見本の値とだけ pins を比べる。**--user-app と排他**
+  --user-app         利用者のアプリとして出す（見本が無い）。② は比べずに「比べる対象が無い」を返す。**--sample と排他**
+  --approval <file>  所有者の了承の記録（JSON。partial を公開してよいという決定）。資格情報を読む前に検める
   --bundle <dir>     工場の納品物のディレクトリ（直下に bundle-manifest.json）
   --summary <file>   headless の stdout の全文（--summary-json の最終行を含む）を保存したファイル
   --replace          既存インスタンスの宣言を、**はっきり差し替える**（既定は差し替えない）
 
-① manifest の照合 → ② pins の delivery_bundles の**その見本の値**との比較 → ③ headless の出力の受け入れの判定 →
+① manifest の照合 → ② pins の delivery_bundles の**その見本の値**との比較（利用者のアプリは比べない）→
+③ headless の出力の受け入れの判定（--approval が manifest と run_id に一致すれば partial を通す）→
 ④ 納品物の中の宣言（${BUNDLE_DECLARATION_PATH}）の静的チェック、の 4 つがすべて通ったときだけ、
 既存の publish の中身（publishSpec）へ渡す。どれかが落ちれば、R2 にも D1 にも書かない。
 ${PINS_FILE} の delivery_bundles のうち、その見本の値を使う（値が null なら比較を飛ばす）。
+利用者のアプリの納品物が pins の見本の値と一致したら断る（見本の照合を避ける穴を塞ぐ）。
 資格情報は環境変数 CLOUDFLARE_API_TOKEN（D1 Write・Workers R2 Storage: Edit）と CLOUDFLARE_ACCOUNT_ID（アカウント①）。
 成功は exit ${EXIT_OK}、失敗は exit ${EXIT_NG}。トークン・Account ID・バケット名・R2 のキー・URL・ホスト名は出さない。`;
 
@@ -96,6 +101,8 @@ function parseCliArgs(argv: readonly string[]) {
         env: { type: "string" },
         instance: { type: "string" },
         sample: { type: "string" },
+        "user-app": { type: "boolean" },
+        approval: { type: "string" },
         bundle: { type: "string" },
         summary: { type: "string" },
         replace: { type: "boolean" },
@@ -141,15 +148,23 @@ async function run(argv: readonly string[], io: CliIo): Promise<number> {
   if (!INSTANCE_PATTERN.test(instanceId)) {
     throw new PublishError("--instance は英字で始まる英数字と . _ - で書く（値は表示しない）");
   }
-  // 見本は必須（追記 1）。**ファイルを 1 回も読まずに**、ここで検める（知らない値・省略は断る）
+  // 見本か利用者のアプリの**どちらか一方**（U-A）。**ファイルを 1 回も読まずに**、ここで検める
+  const userApp = values["user-app"] === true;
   const sampleArg = values.sample;
-  if (sampleArg === undefined || sampleArg === "") {
-    throw new PublishError(`--sample が無い（見本。${DELIVERY_BUNDLE_SAMPLES.join(" / ")}）\n${USAGE}`);
+  if (userApp && sampleArg !== undefined) {
+    throw new PublishError(`--user-app と --sample は併用できない（どちらか一方だけ。値は表示しない）\n${USAGE}`);
   }
-  if (!isDeliveryBundleSample(sampleArg)) {
-    throw new PublishError(`未知の sample（${DELIVERY_BUNDLE_SAMPLES.join(" / ")} のいずれか。値は表示しない）`);
+  let sample: DeliveryBundleSample | undefined;
+  if (!userApp) {
+    // 見本は必須（追記 1）。知らない値・省略は断る（今までの文言を保つ）
+    if (sampleArg === undefined || sampleArg === "") {
+      throw new PublishError(`--sample が無い（見本。${DELIVERY_BUNDLE_SAMPLES.join(" / ")} か、利用者のアプリなら --user-app）\n${USAGE}`);
+    }
+    if (!isDeliveryBundleSample(sampleArg)) {
+      throw new PublishError(`未知の sample（${DELIVERY_BUNDLE_SAMPLES.join(" / ")} のいずれか。値は表示しない）`);
+    }
+    sample = sampleArg;
   }
-  const sample = sampleArg;
   const bundleArg = values.bundle;
   if (bundleArg === undefined || bundleArg === "") throw new PublishError(`--bundle が無い（納品物のディレクトリ）\n${USAGE}`);
   const summaryArg = values.summary;
@@ -160,12 +175,15 @@ async function run(argv: readonly string[], io: CliIo): Promise<number> {
   const bundleDirectory = resolvePath(io, bundleArg);
   const summaryPath = resolvePath(io, summaryArg);
   const summaryStdout = readText(io, summaryPath, "summary を読めない（--summary のパス。値は表示しない）");
+  // 了承は**資格情報を読む前に**検める（読めない・形が違うは、API を呼ばずに断る）
+  const approval = values.approval === undefined ? undefined : readApproval(io, resolvePath(io, values.approval));
   const pins = readPins(io);
   const target = readPublishTarget(readConfig(io), env);
   const credentials = readCredentials(io.env);
 
+  const targetLabel = userApp ? "利用者のアプリ" : `見本 ${sample ?? ""}`;
   io.out(
-    `publish-bundle: env=${env} の R2（BUNDLES）と D1（CONTROL_DB）へ、見本 ${sample} の納品物を 4 つの門を通して置く` +
+    `publish-bundle: env=${env} の R2（BUNDLES）と D1（CONTROL_DB）へ、${targetLabel} の納品物を 4 つの門を通して置く` +
       (replace ? "（--replace: 既存インスタンスの宣言を差し替える）" : ""),
   );
 
@@ -176,9 +194,18 @@ async function run(argv: readonly string[], io: CliIo): Promise<number> {
       // 差し替えのときだけ、前の原本を読む口を渡す（差し替えない経路に R2 の読み取りを足さない）
       ...(replace ? { readSpec: cloudflareSpecReader(io, credentials, target.bucketName) } : {}),
     },
-    { bundleDirectory, summaryStdout, pins, sample, instanceId, ...(replace ? { replace: true } : {}) },
+    {
+      bundleDirectory,
+      summaryStdout,
+      pins,
+      instanceId,
+      ...(sample !== undefined ? { sample } : {}),
+      ...(userApp ? { userApp: true } : {}),
+      ...(approval !== undefined ? { approval } : {}),
+      ...(replace ? { replace: true } : {}),
+    },
   );
-  return report(io, env, sample, result);
+  return report(io, env, targetLabel, result);
 }
 
 /** 引数のパスを決める。リポジトリの直下からの相対はそれを基準にし、絶対パスはそのまま使う。 */
@@ -192,6 +219,24 @@ function readText(io: CliIo, path: string, message: string): string {
   } catch {
     throw new PublishError(message);
   }
+}
+
+/**
+ * 了承の記録を読んで検める（U-H。Issue #865）。**資格情報を読む前に**呼ぶ。
+ * 読めない・JSON でない・形が違うは、値（パス・run_id・approved_by）を出さずに断る。
+ * 門（publishBundle）には **JSON として読んだ値をそのまま**渡す（照合は門が行い、判定を複製しない）。
+ */
+function readApproval(io: CliIo, path: string): unknown {
+  const text = readText(io, path, "了承のファイルを読めない（--approval のパス。値は表示しない）");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    throw new PublishError("了承のファイルが JSON として読めない（値は表示しない）");
+  }
+  const read = readOwnerApproval(parsed);
+  if (!read.ok) throw new PublishError(`了承の形が違う（${read.code}。値は表示しない）`);
+  return parsed;
 }
 
 /** pins を読んで JSON として解釈する。読めなければ、API を呼ぶ前に止める。 */
@@ -212,13 +257,17 @@ function readConfig(io: CliIo): string {
   }
 }
 
-/** 結果を安全に出す。診断は #97 の 1 行（`<宣言>:<行>:<列>: <コード>: <説明>`）で出す。 */
-function report(io: CliIo, env: Env, sample: DeliveryBundleSample, result: BundlePublishResult): number {
+/**
+ * 結果を安全に出す。診断は #97 の 1 行（`<宣言>:<行>:<列>: <コード>: <説明>`）で出す。
+ * 成功の 1 行には、② の状態と**了承の有無**（使用・不使用・なし）を足す（U-A・U-H）。
+ */
+function report(io: CliIo, env: Env, targetLabel: string, result: BundlePublishResult): number {
   if (result.ok) {
+    const approvalLabel = result.approval !== null ? "使用" : result.approvalUnused ? "不使用" : "なし";
     io.out(
-      `publish-bundle: OK  env=${env}: 見本 ${sample} / manifest SHA ${result.manifestSha256} / 版 ${result.publish.app.schemaVersion}` +
+      `publish-bundle: OK  env=${env}: ${targetLabel} / manifest SHA ${result.manifestSha256} / 版 ${result.publish.app.schemaVersion}` +
         ` / 原本 SHA ${result.publish.app.sourceSha256} / インスタンス ${result.publish.instance.instanceId}` +
-        ` / 水準 ${result.level} / pins ${result.pin.status}`,
+        ` / 水準 ${result.level} / pins ${result.pin.status} / 了承 ${approvalLabel}`,
     );
     if (result.publish.replacedSourceSha256 !== null) {
       io.out(

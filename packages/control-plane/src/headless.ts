@@ -33,6 +33,7 @@ import {
   type HeadlessSchemaVersion,
   type HeadlessSummary,
 } from "@musunest/appspec-schema";
+import { ABSENT_APPROVAL, APPROVAL_REJECTION_CODES, APPROVAL_VERDICT, type ApprovalOutcome } from "./approval.js";
 
 // 公開している名前を保つ（control-plane からの再公開。Issue #283）。
 export {
@@ -187,18 +188,21 @@ export const ASSURANCE_FULL = "full" as const;
 /** `assurance` が部分を表す値（L2 だけ受け入れる）。 */
 export const ASSURANCE_PARTIAL = "partial" as const;
 
-/** 受け入れない理由のコード。 */
+/**
+ * 受け入れない理由のコード。`approval_*` は所有者の了承（U-H。Issue #865）が合わないときの理由である。
+ */
 export const ACCEPTANCE_REASON_CODES = [
   "status_not_completed",
   "verdict_not_full",
   "assurance_insufficient",
+  ...APPROVAL_REJECTION_CODES,
 ] as const;
 export type AcceptanceReasonCode = (typeof ACCEPTANCE_REASON_CODES)[number];
 
 /** 受け入れない理由。**どの欄が何だったか**（`field`・`actual`）と、要る値（`expected`）を持つ。 */
 export interface AcceptanceReason {
   readonly code: AcceptanceReasonCode;
-  readonly field: "status" | "verdict" | "assurance";
+  readonly field: "status" | "verdict" | "assurance" | "approval";
   /** 要約の実際の値（無ければ `null`） */
   readonly actual: string | null;
   /** 受け入れに要る値 */
@@ -210,6 +214,8 @@ export interface AcceptanceDecision {
   readonly level: DeliveryLevel;
   /** 受け入れない理由。**受け入れるときは空** */
   readonly reasons: readonly AcceptanceReason[];
+  /** 了承の使い道（渡されていなければ `absent`） */
+  readonly approval: ApprovalOutcome;
 }
 
 /** 水準ごとに受け入れる `assurance`。L2 は `partial` 以上、L3/L4 は `full` だけ（Q7）。 */
@@ -220,8 +226,16 @@ const acceptedAssurance = (level: DeliveryLevel): readonly string[] =>
  * Q7 の規則で受け入れを判定する。**終了コードは見ない**（`exit_code: 0` は「プロセスが完了した」だけ）。
  *
  * 受け入れない理由は、満たさない欄ごとに集める（`status` → `verdict` → `assurance` の順）。
+ *
+ * 第 3 引数は所有者の了承の使い道（U-H。Issue #865）。**渡さなければ今までの判定とまったく同じ**である。
+ * `used` のときだけ、partial の `verdict_not_full` を外す。**`status`・`assurance` の条件は変えない**。
+ * 使えない了承は `approval_*` の理由で断る。`none` は `unused` になるので、`verdict_not_full` のまま断る。
  */
-export function judgeAcceptance(summary: HeadlessSummary, level: DeliveryLevel): AcceptanceDecision {
+export function judgeAcceptance(
+  summary: HeadlessSummary,
+  level: DeliveryLevel,
+  approval: ApprovalOutcome = ABSENT_APPROVAL,
+): AcceptanceDecision {
   const reasons: AcceptanceReason[] = [];
 
   if (summary.status !== STATUS_COMPLETED) {
@@ -233,8 +247,21 @@ export function judgeAcceptance(summary: HeadlessSummary, level: DeliveryLevel):
     });
   }
 
-  if (summary.verdict !== VERDICT_FULL) {
-    reasons.push({ code: "verdict_not_full", field: "verdict", actual: summary.verdict, expected: [VERDICT_FULL] });
+  // 了承で verdict の条件を外せるのは **partial のときだけ**（none は了承があっても通さない）
+  const approvalAccepted = approval.kind === "used" && summary.verdict === APPROVAL_VERDICT;
+  if (summary.verdict !== VERDICT_FULL && !approvalAccepted) {
+    // partial に了承が渡されたが合わないときは、**新しい理由のコード**で断る（`verdict_not_full` の代わり）。
+    // それ以外（了承なし・none・full で使わなかった了承）は、今までどおり `verdict_not_full` である
+    if (summary.verdict === APPROVAL_VERDICT && approval.kind === "rejected") {
+      reasons.push({
+        code: approval.code,
+        field: "approval",
+        actual: approval.detail,
+        expected: [APPROVAL_VERDICT],
+      });
+    } else {
+      reasons.push({ code: "verdict_not_full", field: "verdict", actual: summary.verdict, expected: [VERDICT_FULL] });
+    }
   }
 
   const expectedAssurance = acceptedAssurance(level);
@@ -247,5 +274,5 @@ export function judgeAcceptance(summary: HeadlessSummary, level: DeliveryLevel):
     });
   }
 
-  return { accepted: reasons.length === 0, level, reasons };
+  return { accepted: reasons.length === 0, level, reasons, approval };
 }
