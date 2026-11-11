@@ -152,6 +152,52 @@ const assertUserWording = (field: string, text: string): string => {
   return text;
 };
 
+/**
+ * 要件を固めきれなかった理由の符号を、利用者の言葉の分類に閉じる（Issue #886 の目的・3）。
+ * 表に無い符号・空の並びは 4。符号が複数なら、番号の小さい分類が勝つ。
+ * **分類の文には符号・事項 ID・要件 ID・宣言の用語を入れない。**
+ */
+export const CONFIRM_CATEGORY_LABELS = {
+  1: "質問の回数の中で決めきれないことが残りました",
+  2: "できるかどうかを確かめきれない部分がありました",
+  3: "依頼の読み取りに食い違いが残りました",
+  4: "理由を分類できませんでした",
+} as const satisfies Record<1 | 2 | 3 | 4, string>;
+
+const CONFIRM_CATEGORY_CODES = {
+  1: ["question-limit", "round-trip-limit", "critical-no-question", "noncritical-without-default", "open_issue", "open_critical"],
+  2: ["not-stated", "low-confidence", "unknown"],
+  3: [
+    "duplicate-open-issue",
+    "quote-not-found",
+    "position-mismatch",
+    "uncovered-source",
+    "uncovered-answer",
+    "origin-not-answer",
+    "unknown_reference",
+    "accepted_outside_parts",
+    "accepted_not_removal",
+    "resolution_without_basis",
+  ],
+} as const satisfies Record<1 | 2 | 3, readonly string[]>;
+
+function categoryNumberOf(code: string): 1 | 2 | 3 | 4 {
+  for (const category of [1, 2, 3] as const) {
+    if ((CONFIRM_CATEGORY_CODES[category] as readonly string[]).includes(code)) return category;
+  }
+  return 4;
+}
+
+/** 理由の符号の並びから、利用者の言葉の分類を 1 つ決める */
+export function confirmCategoryOf(codes: readonly string[]): string {
+  let chosen: 1 | 2 | 3 | 4 = 4;
+  for (const code of codes) {
+    const category = categoryNumberOf(code);
+    if (category < chosen) chosen = category;
+  }
+  return CONFIRM_CATEGORY_LABELS[chosen];
+}
+
 const buildQuestionBundle = (job: StoredJob): ApiQuestionBundle | null => {
   if (job.question === null) return null;
   return {
@@ -222,6 +268,7 @@ export function buildJobView(job: StoredJob, now: number): JobView {
     stateLabel: JOB_STATE_LABELS[job.state],
     stopReason: job.stopReason,
     stopReasonLabel: job.stopReason === null ? null : STOP_REASON_LABELS[job.stopReason],
+    stopReasonCategory: job.stopReason === "cannot-confirm" ? confirmCategoryOf(job.stopReasonCodes) : null,
     question: buildQuestionBundle(job),
     confirmation: job.confirmation === null ? null : buildConfirmation(job.confirmation),
     progress: buildProgress(job, now),

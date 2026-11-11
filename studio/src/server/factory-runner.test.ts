@@ -9,9 +9,11 @@ import {
   type FactoryChildHandle,
   type FactoryChildStartMessage,
 } from "./factory-runner.js";
+import type { FactoryChildOutcome } from "./factory-child.js";
 import { Jobs } from "./jobs.js";
 import { Ledger } from "./ledger.js";
 import type { RunnerEvent } from "./runner.js";
+import { JobStore } from "./store.js";
 
 interface FakeChild {
   readonly handle: FactoryChildHandle;
@@ -225,5 +227,68 @@ describe("ジョブとの組み合わせ", () => {
     const view = jobs.get(started.id);
     expect(view?.state).toBe("sent-back");
     expect(view?.stateLabel).toBe("差し戻し");
+  });
+});
+
+describe("子の止まり方をジョブに写す（Issue #886）", () => {
+  let now: number;
+
+  beforeEach(() => {
+    now = new Date(2026, 10, 11, 12, 0, 0).getTime();
+  });
+
+  const runOutcome = (outcome: FactoryChildOutcome) => {
+    const dir = mkdtempSync(join(tmpdir(), "musunest-factory-outcome-"));
+    try {
+      const fake = makeFakeChild();
+      const runner = createFactoryRunner({ home: dir, env: {}, spawn: () => fake.handle });
+      const jobs = new Jobs({ home: dir, runner, now: () => now });
+      const started = jobs.start("一覧を作って");
+      fake.emitMessage({ type: "result", outcome });
+      return { view: jobs.get(started.id), stored: new JobStore(dir).load(started.id) };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("要件を固めきれなかった走りは「止めた」になり、符号を記録に残す", () => {
+    const { view, stored } = runOutcome({
+      kind: "stopped",
+      reason: "cannot-confirm",
+      spentUsd: 0.6,
+      codes: ["noncritical-without-default"],
+    });
+
+    expect(view?.state).toBe("stopped");
+    expect(view?.stopReason).toBe("cannot-confirm");
+    expect(view?.stopReasonLabel).toBe("要件を固めきれませんでした");
+    expect(view?.stopReasonCategory).toBe("質問の回数の中で決めきれないことが残りました");
+    expect(stored?.stopReason).toBe("cannot-confirm");
+    expect(stored?.stopReasonCodes).toEqual(["noncritical-without-default"]);
+  });
+
+  it("費用の上限は budget、時間切れ・締切は timeout で止まる", () => {
+    const budget = runOutcome({ kind: "stopped", reason: "budget", spentUsd: 0.6, codes: [] });
+    expect(budget.view?.state).toBe("stopped");
+    expect(budget.view?.stopReason).toBe("budget");
+    expect(budget.view?.stopReasonLabel).toBe("費用の上限");
+
+    for (const reason of ["timeout", "deadline"] as const) {
+      const result = runOutcome({ kind: "stopped", reason, spentUsd: 0.6, codes: [] });
+      expect(result.view?.state).toBe("stopped");
+      expect(result.view?.stopReason).toBe("timeout");
+      expect(result.view?.stopReasonLabel).toBe("時間切れ");
+    }
+  });
+
+  it("子の failed と Plan の段の失敗は「失敗」「工場の失敗」のまま", () => {
+    const failed = runOutcome({ kind: "failed", reason: "factory-failure", spentUsd: 0.6 });
+    expect(failed.view?.state).toBe("failed");
+    expect(failed.view?.stopReason).toBe("factory-failure");
+
+    const planFailure = runOutcome({ kind: "stopped", reason: "factory-failure", spentUsd: 0.6, codes: [] });
+    expect(planFailure.view?.state).toBe("failed");
+    expect(planFailure.view?.stopReason).toBe("factory-failure");
+    expect(planFailure.view?.stopReasonLabel).toBe("工場の失敗");
   });
 });

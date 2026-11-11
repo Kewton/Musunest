@@ -84,6 +84,39 @@ describe("ジョブの状態の移り", () => {
   });
 });
 
+describe("要件を固めきれなかった止まり（Issue #886）", () => {
+  it("「止めた」になり、理由の符号を記録に残す", () => {
+    const runner = new FakeRunner();
+    const jobs = makeJobs(runner);
+    const started = jobs.start("日付順の一覧を作って");
+
+    runner.stop(started.id, "cannot-confirm", ["noncritical-without-default"]);
+
+    const view = jobs.get(started.id);
+    expect(view?.state).toBe("stopped");
+    expect(view?.stopReason).toBe("cannot-confirm");
+    expect(view?.stopReasonLabel).toBe("要件を固めきれませんでした");
+
+    const stored = new JobStore(home).load(started.id);
+    expect(stored?.stopReasonCodes).toEqual(["noncritical-without-default"]);
+  });
+
+  it("確認で「やめる」を選んだジョブは、子があとから止まっても「止めた」「取り消し」のまま", () => {
+    const runner = new FakeRunner();
+    const jobs = makeJobs(runner);
+    const started = jobs.start("日付順の一覧を作って");
+    jobs.answer(started.id, answer);
+    jobs.confirm(started.id, "stop");
+
+    runner.stop(started.id, "cancel", []);
+
+    const view = jobs.get(started.id);
+    expect(view?.state).toBe("stopped");
+    expect(view?.stopReason).toBe("cancel");
+    expect(view?.stopReasonLabel).toBe("取り消し");
+  });
+});
+
 describe("同時に走るジョブは 1 本だけ", () => {
   it("2 本目の開始は断られ、1 本目が終われば通る", () => {
     const jobs = makeJobs(new FakeRunner());

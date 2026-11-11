@@ -36,6 +36,11 @@ export interface StoredJob {
   readonly request: string;
   readonly state: JobState;
   readonly stopReason: StopReason | null;
+  /**
+   * 止めた理由の符号の並び（Issue #886 の目的・2）。ジョブの記録にだけ残し、画面へは出さない。
+   * 符号の欄の無い古い記録は空の並びとして読む。
+   */
+  readonly stopReasonCodes: readonly string[];
   readonly createdAt: number;
   readonly updatedAt: number;
   /** 答えの期限の時刻（ミリ秒。質問待ち・確認待ちでだけ値を持つ） */
@@ -56,8 +61,10 @@ export interface StoredJob {
   readonly note: string | null;
 }
 
-/** `job.json` に書く中身（依頼文は別のファイル） */
-type SerializedJob = Omit<StoredJob, "request">;
+/** `job.json` に書く中身（依頼文は別のファイル。符号の欄は古い記録に無いことがある） */
+type SerializedJob = Omit<StoredJob, "request" | "stopReasonCodes"> & {
+  readonly stopReasonCodes?: readonly string[];
+};
 
 const JOB_ID = /^[A-Za-z0-9-]+$/;
 
@@ -136,6 +143,7 @@ const isStoredJob = (value: unknown): value is SerializedJob => {
   if (value.stopReason !== null && !(STOP_REASONS as readonly string[]).includes(value.stopReason as string)) {
     return false;
   }
+  if (value.stopReasonCodes !== undefined && !isStringArray(value.stopReasonCodes)) return false;
   if (typeof value.createdAt !== "number" || typeof value.updatedAt !== "number") return false;
   if (typeof value.reservedUsd !== "number" || typeof value.estimatedUsd !== "number") return false;
   if (value.answerDeadlineAt !== null && typeof value.answerDeadlineAt !== "number") return false;
@@ -170,6 +178,7 @@ export class JobStore {
       id: job.id,
       state: job.state,
       stopReason: job.stopReason,
+      stopReasonCodes: job.stopReasonCodes,
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,
       answerDeadlineAt: job.answerDeadlineAt,
@@ -202,7 +211,11 @@ export class JobStore {
     }
     if (!isStoredJob(parsed) || parsed.id !== id) return null;
 
-    return { ...parsed, request: readFileSync(requestPath, "utf8") };
+    return {
+      ...parsed,
+      stopReasonCodes: parsed.stopReasonCodes ?? [],
+      request: readFileSync(requestPath, "utf8"),
+    };
   }
 
   /** 保存されているすべてのジョブ（新しい順） */
