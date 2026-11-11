@@ -131,4 +131,36 @@ describe("createApiClient", () => {
       "質問が新しくなっています",
     );
   });
+
+  it("了承と公開の要求にも合言葉を付け、画面の SHA をそのまま送る", async () => {
+    const calls: RecordedCall[] = [];
+    const client = createApiClient({ token: () => "t", fetchImpl: recordingFetch(calls) });
+    const sha = "a".repeat(64);
+
+    await client.approveJob("job 1", sha);
+    await client.publishJob("job 1");
+
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(headerOf(call.init, TOKEN_HEADER)).toBe("t");
+      expect(headerOf(call.init, "accept")).toBe("application/json");
+    }
+    expect(calls[0]?.url).toBe("/api/jobs/job%201/approve");
+    expect(calls[0]?.init.method).toBe("POST");
+    expect(calls[0]?.init.body).toBe(JSON.stringify({ manifestSha256: sha }));
+    expect(calls[1]?.url).toBe("/api/jobs/job%201/publish");
+    expect(calls[1]?.init.method).toBe("POST");
+  });
+
+  it("了承・公開の誤りに直し方を返す", () => {
+    expect(messageForApiError(new ApiRequestError(409, "approval-required", "no"))).toContain(
+      "了承してから公開",
+    );
+    expect(messageForApiError(new ApiRequestError(409, "already-published", "done"))).toContain(
+      "公開済み",
+    );
+    expect(messageForApiError(new ApiRequestError(409, "approval-sha-mismatch", "sha"))).toContain(
+      "画面を読み込み直",
+    );
+  });
 });

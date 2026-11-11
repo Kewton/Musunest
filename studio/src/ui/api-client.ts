@@ -1,7 +1,18 @@
-// 画面からサーバの口を呼ぶ共通の入口（Issue #869 の目的・6）。
+// 画面からサーバの口を呼ぶ共通の入口（Issue #869 の目的・6・Issue #870）。
 // すべての API の要求に合言葉のヘッダを付ける。合言葉は画面の HTML の meta に置かれたものを使い、
 // コードには埋めない（禁止事項）。
-import type { AnswersRequest, BudgetView, ConfirmOutcome, JobView } from "../shared/api";
+//
+// 公開と了承の口（Issue #868）もここから呼ぶ。**オリジンは受け取らない**——公開の応答は
+// 経路の後半（`/apps/<インスタンス>`）だけを返し、「開いて試す」のオリジンは画面の HTML の meta
+// （`studio-staging-origin`）から読む（Issue #870 の目的・7）。
+import type {
+  AnswersRequest,
+  ApprovalRecord,
+  BudgetView,
+  ConfirmOutcome,
+  JobView,
+  PublishRecord,
+} from "../shared/api";
 
 export const TOKEN_HEADER = "x-studio-token";
 
@@ -36,6 +47,10 @@ export interface ApiClient {
   answerQuestions(id: string, answers: AnswersRequest): Promise<JobView>;
   confirmJob(id: string, outcome: ConfirmOutcome): Promise<JobView>;
   cancelJob(id: string): Promise<JobView>;
+  /** partial の結果に了承を記録する。画面が見せた SHA をそのまま送る */
+  approveJob(id: string, manifestSha256: string): Promise<ApprovalRecord>;
+  /** 結果を staging のインスタンスへ公開する。成功・失敗のどちらも 200 で返る */
+  publishJob(id: string): Promise<PublishRecord>;
 }
 
 const ERROR_HINTS: Record<string, string> = {
@@ -49,6 +64,19 @@ const ERROR_HINTS: Record<string, string> = {
   "not-awaiting-confirm": "確認の受付が終わっています。状態を読み込み直してください。",
   "unknown-question": "質問が新しくなっています。画面を読み込み直してください。",
   "unknown-choice": "選べない選択肢です。画面を読み込み直してください。",
+  "not-ready": "まだ結果が出ていません。作成が終わってから公開してください。",
+  "not-partial": "この結果は了承の要らないものです。そのまま公開してください。",
+  "nothing-to-publish": "作れなかった結果は公開できません。依頼を直してやり直してください。",
+  "already-published": "このジョブは公開済みです。",
+  "approval-required": "partial の結果は、了承してから公開してください。",
+  "approval-sha-mismatch": "画面の SHA がいまの納品物と違います。画面を読み込み直してください。",
+  "approval-stale": "了承の SHA がいまの納品物と違います。画面を読み込み直してください。",
+  "approval-invalid": "了承の記録を読めませんでした。画面を読み込み直してください。",
+  "manifest-unreadable": "納品物を読めませんでした。もう一度作成してください。",
+  "summary-invalid": "結果の要約を読めませんでした。もう一度作成してください。",
+  "summary-unreadable": "結果の要約を読めませんでした。もう一度作成してください。",
+  "production-account": "本番のアカウントへは公開しません。手元の環境を確かめてください。",
+  "publish-unavailable": "公開の口が用意されていません。工房の起動を確かめてください。",
 };
 
 /** 利用者に出す文。直し方が分かるものを先に返す */
@@ -83,6 +111,8 @@ const errorFromResponse = async (response: Response): Promise<ApiRequestError> =
   return new ApiRequestError(response.status, code, message);
 };
 
+const jobPath = (id: string): string => `/api/jobs/${encodeURIComponent(id)}`;
+
 export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   const baseUrl = options.baseUrl ?? "";
   const readToken = options.token ?? tokenFromDocument;
@@ -104,8 +134,6 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     return (await response.json()) as T;
   };
 
-  const jobPath = (id: string): string => `/api/jobs/${encodeURIComponent(id)}`;
-
   return {
     getBudget: () => request<BudgetView>("GET", "/api/budget"),
     listJobs: async () => {
@@ -117,6 +145,9 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     answerQuestions: (id, answers) => request<JobView>("POST", `${jobPath(id)}/answers`, answers),
     confirmJob: (id, outcome) => request<JobView>("POST", `${jobPath(id)}/confirm`, { outcome }),
     cancelJob: (id) => request<JobView>("POST", `${jobPath(id)}/cancel`),
+    approveJob: (id, manifestSha256) =>
+      request<ApprovalRecord>("POST", `${jobPath(id)}/approve`, { manifestSha256 }),
+    publishJob: (id) => request<PublishRecord>("POST", `${jobPath(id)}/publish`),
   };
 }
 
