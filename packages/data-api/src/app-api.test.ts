@@ -122,22 +122,15 @@ function missingReferences(
   data: RecordData,
   expectations: readonly ReferenceExpectation[],
 ): string[] {
+  const exists = (expectation: ReferenceExpectation, id: unknown): boolean =>
+    typeof id === "string" &&
+    rows.find((row) => row.entity === expectation.to && row.id === id) !== undefined;
   return expectations
     .filter((expectation) => {
       const value = data[expectation.field];
-      const ids = expectation.list
-        ? Array.isArray(value)
-          ? value
-          : []
-        : typeof value === "string" && value !== ""
-          ? [value]
-          : [];
-      return (
-        ids.length === 0 ||
-        ids.some(
-          (id) => rows.find((row) => row.entity === expectation.to && row.id === id) === undefined,
-        )
-      );
+      // **参照の並びは空（0 件）でもよい**（Issue #853）。要素が 0 件なら実在を見る要素が無い
+      if (expectation.list) return !Array.isArray(value) || !value.every((id) => exists(expectation, id));
+      return !exists(expectation, value);
     })
     .map((expectation) => expectation.field);
 }
@@ -1252,6 +1245,122 @@ describe("warikan の採点のシナリオ（参照と文言。M1.2）", () => {
     expect(result.failure.validations).toEqual(["positiveAmount"]);
     // 欄そのものを持たない（#102 の応答を変えない）
     expect(Object.hasOwn(result.failure, "validationMessages")).toBe(false);
+  });
+});
+
+// ── 空の参照の並び（Issue #853） ──────────────────────────────────────
+//
+// 参照の並び（`of` を持つ list）は「最初は 0 件で作り、あとから足す」を書ける。**追加の操作で保存でき、
+// 一覧で読める**ことを、data-api の追加の経路で確かめる。見本 warikan は `someoneShares`
+// （`len(participants) > 0`）を宣言しているので、空はそこで断られる——ここでは検査の無い最小の宣言を
+// 使い、**言語の型・参照の実在・保存の境界**だけを見る（warikan の断りは別の試験が持つ）。
+
+const EMPTY_REF_LIST_SOURCE = [
+  "entities:",
+  "  - name: member",
+  "    fields:",
+  "      name: string",
+  "  - name: expense",
+  "    fields:",
+  "      description: string",
+  "      participants:",
+  "        type: list",
+  "        of: member",
+  "views:",
+  "  - name: expenseList",
+  "    entity: expense",
+  "  - name: memberList",
+  "    entity: member",
+  "actions:",
+  "  - name: addExpense",
+  "    entity: expense",
+  "validations: []",
+  "computed: []",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+const emptyRefListNormalized = await normalizeSpec(EMPTY_REF_LIST_SOURCE);
+if (!emptyRefListNormalized.ok) throw new Error("空の参照の並びの宣言が静的チェックに通らない");
+
+const EMPTY_REF_LIST_APP: NormalizedAppSpec = emptyRefListNormalized.app;
+const EMPTY_REF_LIST_JSON = emptyRefListNormalized.json;
+
+/** 空の参照の並びを含む宣言を R2 に置き、登録（D1）も同じ宣言を指すようにする */
+function withEmptyRefListDeclaration(h: Harness): void {
+  h.registry.registration = {
+    sourceSha256: EMPTY_REF_LIST_APP.sourceSha256,
+    schemaVersion: EMPTY_REF_LIST_APP.schemaVersion,
+    sourceKey: `specs/${EMPTY_REF_LIST_APP.sourceSha256}/app.spec.yaml`,
+    normalizedKey: `specs/${EMPTY_REF_LIST_APP.sourceSha256}/normalized.json`,
+    createdAt: "2026-09-19T00:00:00.000Z",
+  };
+  h.specs.text = EMPTY_REF_LIST_JSON;
+}
+
+describe("空の参照の並び（Issue #853）", () => {
+  it("追加の操作で空の参照の並びを送ると保存され、一覧で読める（受入条件）", async () => {
+    const h = harness();
+    withEmptyRefListDeclaration(h);
+
+    const created = await createFromAction(h.deps, INSTANCE, "addExpense", {
+      description: "これから",
+      participants: [],
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.status).toBe(API_CREATED_STATUS);
+    expect(rowOf(created.body).fields).toEqual({ description: "これから", participants: [] });
+    expect(h.records.rows).toHaveLength(1);
+
+    const list = await getView(h.deps, INSTANCE, "expenseList");
+    expect(list.ok).toBe(true);
+    if (!list.ok) return;
+    expect(list.body.rows).toHaveLength(1);
+    expect(list.body.rows[0]?.fields["participants"]).toEqual([]);
+  });
+
+  it("参照の並びの重複は今までどおり断る", async () => {
+    const h = harness();
+    withEmptyRefListDeclaration(h);
+
+    const result = await createFromAction(h.deps, INSTANCE, "addExpense", {
+      description: "これから",
+      participants: ["m1", "m1"],
+    });
+    expect(result).toEqual({
+      ok: false,
+      failure: { error: "INPUT_REJECTED", fields: ["participants"], validations: [] },
+    });
+    expect(h.records.rows).toEqual([]);
+  });
+
+  it("項目が欠けていれば今までどおり断る（空の並びは「0 件」という値である）", async () => {
+    const h = harness();
+    withEmptyRefListDeclaration(h);
+
+    const result = await createFromAction(h.deps, INSTANCE, "addExpense", { description: "これから" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.failure.fields).toEqual(["participants"]);
+    expect(h.records.rows).toEqual([]);
+  });
+
+  it("参照先に無い ID は今までどおり断る", async () => {
+    const h = harness();
+    withEmptyRefListDeclaration(h);
+
+    const result = await createFromAction(h.deps, INSTANCE, "addExpense", {
+      description: "これから",
+      participants: ["nobody"],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.failure.fields).toEqual(["participants"]);
+    expect(h.records.rows).toEqual([]);
   });
 });
 

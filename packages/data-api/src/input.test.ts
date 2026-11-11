@@ -271,8 +271,16 @@ describe("参照（ref）と参照 list（checkInputTypes）", () => {
     expect(refFieldsOf({ ...VALID_REF, payer: null })).toEqual(["payer"]);
   });
 
-  it("参照 list は空の並びを断る（Q18-2 を参照の並びでも保つ）", () => {
-    expect(refFieldsOf({ ...VALID_REF, participants: [] })).toEqual(["participants"]);
+  it("参照 list は空の並びを受け取る（0 件。Issue #853）", () => {
+    const result = checkInputTypes(REF_EXPENSE, { ...VALID_REF, participants: [] });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data["participants"]).toEqual([]);
+  });
+
+  it("参照 list の項目が欠けていれば断る（空の並びは「0 件」という値である）", () => {
+    const missing: Record<string, unknown> = { ...VALID_REF };
+    delete missing["participants"];
+    expect(refFieldsOf(missing)).toEqual(["participants"]);
   });
 
   it("参照 list は同じ ID が 2 回ある並びを断る", () => {
@@ -291,10 +299,11 @@ describe("参照（ref）と参照 list（checkInputTypes）", () => {
   });
 
   it("型で断ったら、参照の検査に進む値を作らない（checkInput は型で止まる）", () => {
+    // 重複は型の検査が断る（空の並びは型を通るので、型で止まる例には使えない。Issue #853）
     const decided = checkInput({
       app: warikanApp(),
       entity: REF_EXPENSE,
-      input: { ...VALID_REF, participants: [] },
+      input: { ...VALID_REF, participants: ["m1", "m1"] },
       clock: CLOCK,
     });
     expect(decided).toEqual({ ok: false, fields: ["participants"], validations: [] });

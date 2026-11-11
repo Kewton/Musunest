@@ -382,6 +382,31 @@ describe("有限の数でなくなった計算", () => {
     });
   });
 
+  it("参照の並び（of を持つ list）が空なら、len は 0 になる（Issue #853）", () => {
+    const app: NormalizedAppSpec = {
+      schemaVersion: APPSPEC_SCHEMA_VERSION,
+      sourceSha256: "0".repeat(64),
+      spec: {
+        entities: [
+          { name: "member", fields: { name: "string" } },
+          { name: "expense", fields: { amount: "number", participants: { type: "list", of: "member" } } },
+        ],
+        views: [],
+        actions: [],
+        validations: [],
+        computed: [{ name: "headcount", entity: "expense", expression: "len(participants)", type: "number" }],
+        permissions: [],
+        minIdentity: { mode: "anonymous" },
+      },
+    };
+    const headcountOf = (participants: readonly string[]): unknown =>
+      evaluateRecord({ app, entity: "expense", record: { amount: 900, participants }, clock: scoringClock })
+        .computed["headcount"];
+    expect(headcountOf([])).toBe(0);
+    // 選べば、これまでどおり要素の数である
+    expect(headcountOf(["m1", "m2"])).toBe(2);
+  });
+
   it("不正な計算値を 0 に読み替えない（0 なら通る検査が、不合格のままである）", async () => {
     const app = await appOf(
       declaration({

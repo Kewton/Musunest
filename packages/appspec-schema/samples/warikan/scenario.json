@@ -49,7 +49,7 @@
       "name": "割る人が空なら断る",
       "action": "addExpense",
       "input": { "description": "昼食", "amount": 3000, "payer": "$A", "participants": [] },
-      "expect": { "rejected": { "fields": ["participants"], "validations": [] } }
+      "expect": { "rejected": { "fields": [], "validations": ["someoneShares"] } }
     },
     {
       "name": "割る人が重なっていたら断る",

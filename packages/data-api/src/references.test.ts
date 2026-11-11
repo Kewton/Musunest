@@ -82,6 +82,40 @@ describe("参照の検査（checkReferences）", () => {
     ).toEqual({ ok: false, fields: ["participants"] });
   });
 
+  it("参照の並びが空なら、確かめる要素が無いので通る（Issue #853）", async () => {
+    const records = source();
+    expect(
+      await checkReferences({
+        entity: EXPENSE,
+        data: expense({ payer: "m1", participants: [] }),
+        records,
+      }),
+    ).toEqual({ ok: true });
+    // 参照の項目そのものは在るので、参照先の一覧は読む（空の並びだけを特別扱いしない）
+    expect(records.read).toEqual(["member"]);
+  });
+
+  it("参照の並びの項目が欠けていれば、その項目の名前を返す（空の並びとは別である）", async () => {
+    expect(
+      await checkReferences({
+        entity: EXPENSE,
+        data: expense({ payer: "m1" }),
+        records: source(),
+      }),
+    ).toEqual({ ok: false, fields: ["participants"] });
+  });
+
+  it("参照の並びの要素が文字列でなければ、その項目の名前を返す（空の並びとは別である）", async () => {
+    expect(
+      await checkReferences({
+        entity: EXPENSE,
+        // 型の検査を通っていない値が参照の実在の検査へ届いた場合を測る（JSON には型が無い）
+        data: expense({ payer: "m1", participants: [1] } as unknown as RecordData),
+        records: source(),
+      }),
+    ).toEqual({ ok: false, fields: ["participants"] });
+  });
+
   it("別 entity の ID は、参照先の一覧に無いので断る", async () => {
     // `expense` の ID（e1）を `member` の参照に渡している
     expect(

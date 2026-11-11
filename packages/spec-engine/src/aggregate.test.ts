@@ -388,6 +388,24 @@ describe("集計の道具", () => {
     expect(matchesWhere({ participants: { op: "equals" } }, data, "m1", clock)).toBe(false);
   });
 
+  it("participants が空の参照の並びは、contains のどの this にも合わない（Issue #853）", () => {
+    const clock = fixedClock("2026-09-15T12:00:00+09:00");
+    const empty = { participants: [] };
+    expect(matchesWhere({ participants: { op: "contains" } }, empty, "m1", clock)).toBe(false);
+    // 空の並びを「全部を含む」と読み替えない（含む要素が 0 件である）
+    expect(matchesWhere({ participants: { op: "contains" } }, empty, "", clock)).toBe(false);
+  });
+
+  it("participants が空の支出は、どのメンバーの owed にも数えられない（Issue #853）", () => {
+    // A が払ったが、割る人はまだ 0 件——paid には入るが、owed の集計（contains: this）には入らない
+    const EMPTY = row("e-empty", { description: "これから", amount: 5000, payer: "m1", participants: [] });
+    expect(evaluateMember(WARIKAN, A, [DINNER, EMPTY]).computed).toEqual({
+      paid: 11000,
+      owed: 2000,
+      balance: 9000,
+    });
+  });
+
   it("matchesWhere は、期間の条件（within）を、差し込んだ時計の日本時間で見る（M1.4。Issue #178）", () => {
     const where = { paidOn: { op: "within", period: "this_month" } } as const;
     const clock = fixedClock("2026-09-15T12:00:00+09:00");
