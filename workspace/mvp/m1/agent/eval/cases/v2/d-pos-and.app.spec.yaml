@@ -1,0 +1,75 @@
+# D v2（#876）：定員の 2 つの検査を and の 1 つに
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: 名前
+  - name: game
+    fields:
+      date:
+        type: date
+        label: 日付
+      place:
+        type: string
+        label: 場所
+      capacity:
+        type: number
+        label: 定員
+      attendees:
+        type: list
+        of: member
+        label: 参加する人
+computed:
+  - name: attendeeCount
+    entity: game
+    expression: len(attendees)
+    type: number
+    label: 参加人数
+  - name: remaining
+    entity: game
+    expression: capacity - attendeeCount
+    type: number
+    label: 残り
+  - name: gamesJoined
+    entity: member
+    aggregate:
+      count: game
+      where:
+        attendees:
+          contains: this
+    type: number
+    label: 参加した回数
+views:
+  - name: games
+    type: table
+    entity: game
+    show: [date, place, attendeeCount, capacity, remaining]
+  - name: members
+    type: table
+    entity: member
+    show: [name, gamesJoined]
+actions:
+  - name: addMember
+    entity: member
+  - name: addGame
+    entity: game
+    kind: create
+  - name: editGame
+    entity: game
+    kind: update
+  - name: deleteGame
+    entity: game
+    kind: delete
+validations:
+  - name: capacityRule
+    entity: game
+    expression: capacity >= 1 and len(attendees) <= capacity
+    message: 定員を確かめてください
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

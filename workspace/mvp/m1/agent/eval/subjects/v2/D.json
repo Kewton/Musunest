@@ -1,0 +1,406 @@
+{
+  "id": "D",
+  "version": 2,
+  "title": "フットサルの出欠",
+  "note": "開発用の組 dev-p1-p10 v2 の定義（#876）。v1 は subjects/D.json（バイト列で残す）。v1 と v2 の成績を比較しない",
+  "patterns": [
+    "P7",
+    "P8"
+  ],
+  "structures": [
+    {
+      "id": "list",
+      "note": "参加者を試合の中の参照の並びで持つ（第 1 段の人の実現例の構造）。#853 以後、参照の並びは空で登録できる（開発用の組 v2。#876）",
+      "roles": {
+        "match": {
+          "entity": {}
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "attendees": {
+          "field": {
+            "of": "match",
+            "type": "list",
+            "to": "member"
+          }
+        },
+        "capacity": {
+          "field": {
+            "of": "match",
+            "type": "number"
+          }
+        },
+        "date": {
+          "field": {
+            "of": "match",
+            "type": "date"
+          }
+        },
+        "place": {
+          "field": {
+            "of": "match",
+            "type": "string"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "人と試合を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "match"
+          ]
+        },
+        {
+          "req": "定員を超えたら登録できない",
+          "kind": "validation",
+          "entity": "match",
+          "cases": [
+            {
+              "set": {
+                "capacity": 2,
+                "attendees": [
+                  "m1",
+                  "m2",
+                  "m3"
+                ]
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 2,
+                "attendees": [
+                  "m1",
+                  "m2"
+                ]
+              },
+              "valid": true
+            }
+          ],
+          "keys": [
+            "定員.{0,20}(超|上回|より多|オーバー)",
+            "(超|上回).{0,20}定員"
+          ]
+        },
+        {
+          "req": "定員は 1 人以上",
+          "kind": "validation",
+          "entity": "match",
+          "cases": [
+            {
+              "set": {
+                "capacity": 0,
+                "attendees": []
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 1,
+                "attendees": [
+                  "m1"
+                ]
+              },
+              "valid": true
+            }
+          ],
+          "note": "負例（定員 0・参加 0 人）は、「参加者 0 人で登録できる」に合格した宣言でだけ定員の検査を見分ける（長さ 1 以上の検査でも落ちるため。判定は v1 のまま）"
+        },
+        {
+          "req": "参加者 0 人で登録できる",
+          "kind": "validation",
+          "entity": "match",
+          "cases": [
+            {
+              "set": {
+                "capacity": 2,
+                "attendees": []
+              },
+              "valid": true
+            }
+          ],
+          "keys": [
+            "(参加|来る人|参加者).{0,20}(0\\s*人|０\\s*人|ゼロ|誰も|いなく|選ばず|空).{0,20}(登録|作れ|作成|作る)",
+            "(登録|作れ|作成|作る).{0,20}(参加|来る人|参加者).{0,20}(0\\s*人|０\\s*人|ゼロ|誰も|いなく|選ばず|空)",
+            "(参加|来る人|参加者).{0,10}(を|は).{0,5}(任意|必須でな|選ばなくても)"
+          ]
+        },
+        {
+          "req": "参加人数が見られる",
+          "kind": "computedVisible",
+          "entity": "match",
+          "probes": [
+            {
+              "set": {
+                "capacity": 5,
+                "attendees": [
+                  "m1",
+                  "m2"
+                ]
+              },
+              "expect": 2
+            }
+          ]
+        },
+        {
+          "req": "残りの枠が見られる",
+          "kind": "computedVisible",
+          "entity": "match",
+          "probes": [
+            {
+              "set": {
+                "capacity": 5,
+                "attendees": [
+                  "m1",
+                  "m2"
+                ]
+              },
+              "expect": 3
+            }
+          ]
+        },
+        {
+          "req": "人ごとの参加回数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "match": [
+              {
+                "set": {
+                  "attendees": [
+                    "m1"
+                  ]
+                }
+              },
+              {
+                "set": {
+                  "attendees": [
+                    "m1"
+                  ]
+                }
+              },
+              {
+                "set": {
+                  "attendees": [
+                    "m2"
+                  ]
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        }
+      ],
+      "unwritable": []
+    },
+    {
+      "id": "attendance",
+      "note": "出欠を別の entity（試合とメンバーを参照）にした構造。v2（#876・2026-11-11 所有者の決定 3 の (iv)＋(K-a)）：主の構造が全部書けるので、この構造は書ける要件「定員を超えたら登録できない」を設計で落とす形になる。満たせない判定として数え、必ず落ちる（申告では合格にならない）",
+      "roles": {
+        "match": {
+          "entity": {
+            "hasFieldTypes": [
+              "number",
+              "date",
+              "string"
+            ]
+          }
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "att": {
+          "entity": {}
+        },
+        "attMatch": {
+          "field": {
+            "of": "att",
+            "type": "ref",
+            "to": "match"
+          }
+        },
+        "attMember": {
+          "field": {
+            "of": "att",
+            "type": "ref",
+            "to": "member"
+          }
+        },
+        "capacity": {
+          "field": {
+            "of": "match",
+            "type": "number"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "人と試合を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "match"
+          ],
+          "keys": [
+            "(参加|来る人|参加者).{0,20}(0\\s*人|０\\s*人|ゼロ|誰も|いなく|選ばず|空).{0,20}(登録|作れ|作成|作る)",
+            "(登録|作れ|作成|作る).{0,20}(参加|来る人|参加者).{0,20}(0\\s*人|０\\s*人|ゼロ|誰も|いなく|選ばず|空)",
+            "(参加|来る人|参加者).{0,10}(を|は).{0,5}(任意|必須でな|選ばなくても)"
+          ]
+        },
+        {
+          "req": "定員を超えたら登録できない",
+          "kind": "unsatisfiable",
+          "note": "出欠の行の追加で試合の定員を見る手段が無い（式は同じ entity の項目と計算しか見ない）"
+        },
+        {
+          "req": "参加を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "att"
+          ]
+        },
+        {
+          "req": "定員は 1 人以上",
+          "kind": "validation",
+          "entity": "match",
+          "cases": [
+            {
+              "set": {
+                "capacity": 0
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 1
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "参加人数が見られる",
+          "kind": "computedVisible",
+          "entity": "match",
+          "sources": {
+            "att": [
+              {
+                "set": {
+                  "attMatch": "g1",
+                  "attMember": "m1"
+                }
+              },
+              {
+                "set": {
+                  "attMatch": "g1",
+                  "attMember": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "g1",
+              "set": {
+                "capacity": 5
+              },
+              "expect": 2
+            }
+          ]
+        },
+        {
+          "req": "残りの枠が見られる",
+          "kind": "computedVisible",
+          "entity": "match",
+          "sources": {
+            "att": [
+              {
+                "set": {
+                  "attMatch": "g1",
+                  "attMember": "m1"
+                }
+              },
+              {
+                "set": {
+                  "attMatch": "g1",
+                  "attMember": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "g1",
+              "set": {
+                "capacity": 5
+              },
+              "expect": 3
+            }
+          ]
+        },
+        {
+          "req": "人ごとの参加回数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "att": [
+              {
+                "set": {
+                  "attMember": "m1",
+                  "attMatch": "g1"
+                }
+              },
+              {
+                "set": {
+                  "attMember": "m1",
+                  "attMatch": "g2"
+                }
+              },
+              {
+                "set": {
+                  "attMember": "m2",
+                  "attMatch": "g1"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        }
+      ],
+      "unwritable": []
+    }
+  ],
+  "clock": "2026-10-08T12:00:00+09:00",
+  "today": "2026-10-08"
+}

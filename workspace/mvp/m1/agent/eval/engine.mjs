@@ -9,6 +9,10 @@
 //      要件が選択肢を固定している場合の enum の代わりの entity は、構造として定義しない（＝役割が見つからず不合格）
 //   ③ 最初に開く画面は採点しない（判定の種類を持たない）
 // 第 4 段の決定：負の数＋降順の ranking は「少ない順」として合格（rankingOrder）。ダッシュボードの部品も「見られる」に含める。
+// 2026-11-11 開発用の組 v2（#876。所有者の決定 3）で足した 3 つ。どれも v1 の定義は使わないので、v1 の定義の判定はバイト列で変わらない：
+//   - 判定の種類 unsatisfiable：必ず偽（宣言の構造では満たせない書ける要件。D v2 の別の構造の 2 つ目の判定）
+//   - setLabels：役割 → 選択肢の表示名。表示名から宣言の鍵を引いて値に入れる（highlight。宣言ごとに違う選択肢の鍵を定義に書けないため）
+//   - 構造の observe：checks と同じ形の判定を記録だけする。戻り値 observed（{ req: 真偽 }）に出し、passed・writable_total・verdict・requiresClaim に入れない（E v2 の E-c）
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 
@@ -67,6 +71,12 @@ function bindRoles(spec, roles) {
 
 // 定義の値（役割の名前をキーにした set）を、宣言の項目の名前に直す
 const setFor = (B, set = {}) => Object.fromEntries(Object.entries(set).map(([role, v]) => [B[role].name, v]));
+// 定義の setLabels（役割 → 選択肢の表示名）を、宣言の項目の名前 → 選択肢の鍵に直す。表示名に当たる鍵が無ければ例外（判定は偽・注記）
+const labelSetFor = (B, labels = {}) => Object.fromEntries(Object.entries(labels).map(([role, label]) => {
+  const key = keyByLabel(B[role], label);
+  if (key === undefined) throw new Error(`選択肢の表示名に当たる鍵が無い（${role}）`);
+  return [B[role].name, key];
+}));
 
 function recordFor(e, today, over = {}) {
   const r = {};
@@ -148,7 +158,7 @@ function makeKinds(engine, app, spec, B, clock, today) {
       return boards.some((bd) => {
         const hl = spec.computed.find((c) => c.entity === owner && c.name === bd.highlight);
         if (!hl?.expression) return false;
-        const on = (d) => engine.holdsExpression({ app, entity: owner, record: recordFor(ent(ownerRole), today, { [f.name]: d, ...setFor(B, a.set) }), clock }, hl.expression);
+        const on = (d) => engine.holdsExpression({ app, entity: owner, record: recordFor(ent(ownerRole), today, { [f.name]: d, ...setFor(B, a.set), ...labelSetFor(B, a.setLabels) }), clock }, hl.expression);
         return a.trueOn.every(on) && !a.falseOn.some(on);
       });
     },
@@ -163,6 +173,8 @@ function makeKinds(engine, app, spec, B, clock, today) {
       // required：要件が順位の部品そのものを求める（「多い順のランキング」）。部品が無ければ偽。書けない要件（B の「少ない順」）では付けない
       return { ok: wrong.length === 0 && (a.required !== true || rankings.length > 0), written, note: written && rankings.some((w) => by(w, a.more) < 0) ? "少ない順を負の数で書いた（画面に負の数の列が出る）" : "" };
     },
+    // 必ず偽：その構造では満たせない書ける要件（#876。別の構造が書ける要件を設計で落とした分を、分母に残して落とす）
+    unsatisfiable: () => false,
   };
 }
 
@@ -177,13 +189,23 @@ function scoreStructure(engine, app, spec, def, st, B) {
     if (typeof r === "object") { checks[c.req] = r.ok; if (c.writes) written[c.writes] = r.written; if (r.note) notes.push(r.note); }
     else checks[c.req] = r;
   }
-  return { checks, written, note: notes.join(" / ") };
+  // 記録だけの判定（observe。#876 の E-c）：合否・充足・当てはめの選択に入れない。注記にも混ぜない（v1 と同じ note を保つ）
+  const observed = {};
+  for (const c of st.observe ?? []) {
+    let r;
+    try { r = kinds[c.kind](c); } catch { r = false; }
+    observed[c.req] = typeof r === "object" ? r.ok : r;
+  }
+  return { checks, written, note: notes.join(" / "), observed };
 }
 
 export async function score(engine, file, def) {
   const n = await engine.normalizeSpec(readFileSync(file, "utf8"));
+  // observe を持つ定義（#876）だけ observed の欄を出す（持たない定義の戻り値は今までと同じ形）
+  const observes = def.structures.some((st) => Array.isArray(st.observe));
+  const observedOf = (o) => (observes ? { observed: o } : {});
   const base = { file: basename(file), subject: def.id };
-  if (!n.ok) return { ...base, verdict: "STATIC_NG", codes: [...new Set(n.diagnostics.map((d) => d.code))], structure: null, checks: {}, written: {}, note: "", requiresClaim: false };
+  if (!n.ok) return { ...base, verdict: "STATIC_NG", codes: [...new Set(n.diagnostics.map((d) => d.code))], structure: null, checks: {}, written: {}, note: "", requiresClaim: false, ...observedOf({}) };
   const app = n.app, spec = app.spec;
   let best = null;
   for (const [i, st] of def.structures.entries()) {
@@ -197,12 +219,12 @@ export async function score(engine, file, def) {
   }
   if (!best) {
     const total = def.structures[0].checks.length;
-    return { ...base, verdict: "FAIL", codes: [], structure: null, checks: { 役割が見つかる: false }, written: {}, note: "", requiresClaim: false, fulfilled: 0, writable_total: total };
+    return { ...base, verdict: "FAIL", codes: [], structure: null, checks: { 役割が見つかる: false }, written: {}, note: "", requiresClaim: false, fulfilled: 0, writable_total: total, ...observedOf({}) };
   }
   const failed = Object.values(best.checks).filter((ok) => !ok).length;
   const requiresClaim = best.index > 0; // 決定②：別の構造は、書けない要件を正しく申告したときだけ合格
   const verdict = failed > 0 ? "FAIL" : requiresClaim ? "PASS_NEEDS_CLAIM" : "PASS";
-  return { ...base, verdict, codes: [], structure: best.st.id, checks: best.checks, written: best.written, note: best.note, requiresClaim, fulfilled: best.passed, writable_total: best.st.checks.length };
+  return { ...base, verdict, codes: [], structure: best.st.id, checks: best.checks, written: best.written, note: best.note, requiresClaim, fulfilled: best.passed, writable_total: best.st.checks.length, ...observedOf(best.observed) };
 }
 
 export const loadDef = (path) => JSON.parse(readFileSync(path, "utf8"));
