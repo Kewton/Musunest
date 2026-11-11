@@ -827,3 +827,108 @@ describe("実試行の行と段全体の span（Issue #748）：行は開始の�
     ]);
   });
 });
+
+// ── HTTP 停止の補足は、保存する記録の許可リストで投影し、headless へは写さない（Issue #899）──
+
+describe("HTTP 停止の補足の許可リスト（Issue #899）", () => {
+  const httpFailure = (http: unknown): RunRecord["failure"] =>
+    ({
+      stage: "write",
+      kind: "http",
+      http,
+    }) as RunRecord["failure"];
+
+  const safeHttp = {
+    http_status: 503,
+    attempts: 2,
+    history: [
+      { attempt: 1, status: 503, kind: "http", reason: "http-5xx", retry: "started" },
+      { attempt: 2, status: 503, kind: "http", reason: "http-5xx", retry: "attempts-exhausted" },
+    ],
+  };
+
+  it("保存する記録は、数値・固定値・件数だけの補足を残す", () => {
+    const built = buildRunRecord({ ...record(), failure: httpFailure(safeHttp) });
+    expect(built.failure).toEqual({ stage: "write", kind: "http", http: safeHttp });
+  });
+
+  it("許可外の欄を混ぜても写さない（本文・ヘッダー・URL・任意の provider 文字列・余分な属性）", () => {
+    const raw = {
+      http_status: 503,
+      attempts: 2,
+      history: [
+        {
+          attempt: 1,
+          status: 503,
+          kind: "http",
+          reason: "http-5xx",
+          retry: "started",
+          body: "BODY-SENTINEL",
+          headers: { authorization: "HEADER-SENTINEL" },
+          url: "URL-SENTINEL",
+          provider: "PROVIDER-SENTINEL",
+        },
+      ],
+      body: "BODY-SENTINEL",
+      provider: "PROVIDER-SENTINEL",
+    };
+    const built = buildRunRecord({ ...record(), failure: httpFailure(raw) });
+    expect(built.failure).toEqual({
+      stage: "write",
+      kind: "http",
+      http: {
+        http_status: 503,
+        attempts: 2,
+        history: [{ attempt: 1, status: 503, kind: "http", reason: "http-5xx", retry: "started" }],
+      },
+    });
+    expect(JSON.stringify(built)).not.toContain("SENTINEL");
+  });
+
+  it("状態コードは数値のときだけ採り、任意の文字列・NaN は不明（null）にする", () => {
+    for (const status of ["503", Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      const built = buildRunRecord({
+        ...record(),
+        failure: httpFailure({ http_status: status, attempts: 1, history: [{ attempt: 1, status, kind: "http", reason: null, retry: "not-retryable" }] }),
+      });
+      const http = built.failure?.http;
+      expect(http?.http_status).toBeNull();
+      expect(http?.history[0]?.status).toBeNull();
+    }
+  });
+
+  it("固定の一覧に無い理由・状態・誤り分類の行は落とす（生の任意文字列を出さない）", () => {
+    const built = buildRunRecord({
+      ...record(),
+      failure: httpFailure({
+        http_status: 503,
+        attempts: 1,
+        history: [{ attempt: 1, status: 503, kind: "http", reason: "PROVIDER-REASON", retry: "PROVIDER-STATE" }],
+      }),
+    });
+    // 行が 1 つも残らないが、状態コードは残るので補足そのものは残る
+    expect(built.failure?.http).toEqual({ http_status: 503, attempts: 1, history: [] });
+  });
+
+  it("headless の要約には HTTP の補足を写さない（型・schema_version・欄・値は従来のまま）", () => {
+    const built = buildSummary({ ...record(), failure: httpFailure(safeHttp) }, {
+      run_id: "run-1",
+      verdict: "none",
+      assurance: "none",
+      duration_secs: 1,
+      provider_cost_usd: 0,
+      stop_class: "http",
+      exit_code: 1,
+    });
+    expect(built.failure).toEqual({ stage: "write", kind: "http" });
+    expect("http" in (built.failure ?? {})).toBe(false);
+    expect(built.schema_version).toBe(HEADLESS_SCHEMA_VERSION);
+    expect(acceptsHeadlessSummaryWire(built)).toBe(true);
+  });
+
+  it("補足を持たない失敗は、保存する記録でも従来どおり（欄を足さない）", () => {
+    const built = buildRunRecord({ ...record(), failure: { stage: "write", kind: "balance" } });
+    expect(built.failure).toEqual({ stage: "write", kind: "balance" });
+    expect("http" in (built.failure ?? {})).toBe(false);
+  });
+});

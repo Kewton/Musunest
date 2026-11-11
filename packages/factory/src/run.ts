@@ -247,6 +247,8 @@ function stageFailureToKind(failure: StageFailure): FailureKind {
  */
 function stageFailureAttribution(stage: StageId, failure: StageFailure): FailureAttribution {
   const kind = stageFailureToKind(failure);
+  // 補足は **v1.2 の段の走り**（v11a/run.ts）が写す。v1 の記録は従来の形のまま——既存の比較元を
+  // 上書きしない（Issue #899）。
   if (failure.kind === "invalidRequest") return { stage, kind, code: failure.code };
   if ((failure.kind === "malformed" || failure.kind === "unmet") && failure.problems.length > 0) {
     return {

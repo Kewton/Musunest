@@ -4518,6 +4518,34 @@ describe("Build だけの記録の checkpoints（`--pipeline v1.2` の走りだ�
     expect(buildBuildCliRecord({ ...base, checkpoints: [] }).checkpoints).toEqual([]);
   });
 
+  it("HTTP 停止の補足を持つ失敗だけを failure 欄に置き、許可リストで投影する（Issue #899）", () => {
+    type Failure = NonNullable<Parameters<typeof buildBuildCliRecord>[0]["failure"]>;
+    const http = {
+      http_status: 503,
+      attempts: 2,
+      history: [
+        { attempt: 1, status: 503, kind: "http", reason: "http-5xx", retry: "started" },
+        { attempt: 2, status: 503, kind: "http", reason: "http-5xx", retry: "attempts-exhausted" },
+      ],
+    };
+    const plain = buildBuildCliRecord(base);
+    expect("failure" in plain).toBe(false);
+    const withHttp = buildBuildCliRecord({
+      ...base,
+      failure: {
+        stage: "write",
+        kind: "http",
+        http: { ...http, body: "BODY-SENTINEL", provider: "PROVIDER-SENTINEL" },
+      } as unknown as Failure,
+    });
+    expect(Object.keys(withHttp)).toEqual([...Object.keys(plain), "failure"]);
+    expect(withHttp.failure).toEqual({ stage: "write", kind: "http", http });
+    expect(JSON.stringify(withHttp)).not.toContain("SENTINEL");
+    // 補足を持たない失敗は欄を置かない（従来の記録とバイト列で同じ）
+    const withoutHttp = buildBuildCliRecord({ ...base, failure: { stage: "write", kind: "balance" } });
+    expect("failure" in withoutHttp).toBe(false);
+  });
+
   it("v1 の `--plan-file` の走り（--pipeline 省略）の記録に checkpoints が無く、checkpoint を書かない", async () => {
     const dir = `${directory}/plan-file-no-checkpoints`;
     const planPath = `${dir}-plan.json`;

@@ -17,7 +17,7 @@
 //     SHA-256 を付けない。§4）
 //   - 往復の上限に触れたら、最後に静的チェックを通った版と、その版の流し直しの結果を返す（§1.5）
 import { sha256Hex } from "@musunest/spec-engine";
-import type { CallGateway, CallResult } from "../call.js";
+import { httpTraceOfResult, type CallGateway, type CallHttpAttempt, type CallResult } from "../call.js";
 import { AGENT_LIMITS, checkDeclarationBytes, checkLimit, type AgentLimits, type LimitName } from "../limits.js";
 import type { LlmToolRequest, LlmToolResponse, LlmToolResult, LlmTurn } from "../llm.js";
 import type {
@@ -54,6 +54,7 @@ import {
   mapCallErrorKind,
   serializeJson,
   STEP_ATTEMPTS,
+  withHttpTrace,
   type Problem,
   type PromptData,
   type PromptDocument,
@@ -440,6 +441,9 @@ function shapeProblemInput(base: string, problems: readonly Problem[]): string {
 export async function runRepairStep(input: RepairStepInput): Promise<StageOutcome<RepairResult>> {
   const testIds = new Set(input.suite.tests.map((test) => test.id));
   const toolCallsAtStart = input.gateway.toolCalls;
+  // HTTP 停止の補足の材料（**この論理呼び出しだけ**。共有の配列の添字で切らない。Issue #899）
+  let httpAttempts = 0;
+  const httpHistory: CallHttpAttempt[] = [];
   const plan: ToolPlan = {
     instructions: COMMON_RULES.join("\n"),
     documents: input.documents.map((document) => `${document.name}\n${document.text}`),
@@ -517,7 +521,21 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
       // 印の無い往復の要求は今と同じ（欄を足さない。Issue #768）
       ...(finalAnswerOnly ? { finalAnswerOnly: true } : {}),
     });
-    if (result.kind !== "ok") return finish({ ok: false, failure: mapGatewayFailure(result) });
+    // この結果（1 つの論理呼び出し）に属する補足だけを足す（並列の束の行を混ぜない。Issue #899）
+    const trace = httpTraceOfResult(result);
+    if (trace !== undefined) {
+      httpAttempts += trace.attempts;
+      httpHistory.push(...trace.history);
+    }
+    if (result.kind !== "ok") {
+      // 道具付きの呼び出しにも、共通の口の HTTP 停止の補足を運ぶ（Issue #899）。
+      const failure = withHttpTrace(
+        mapGatewayFailure(result),
+        { attempts: httpAttempts, history: httpHistory },
+        result.kind === "failed" ? result.status : undefined,
+      );
+      return finish({ ok: false, failure });
+    }
     const response = result.value;
     responses += 1;
     // 印付きの要求に対し、共通の口から成功して受け取った応答だけを数える（再送・遅着・未着手は数えない）
@@ -531,7 +549,7 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
       }
       // 1 回だけ、問題を返して直させる（予算・回数・締切の上限は、呼ぶたびに共通の口が当てる）。
       // 最後の答えの形の誤りで**やり直す**ことを、共通の口へ告げる（Issue #446）。
-      input.gateway.noteRetry("shape");
+      httpHistory.push(input.gateway.noteRetry("shape"));
       shapeRetries += 1;
       answerInput = shapeProblemInput(plan.input, checked.problems);
       continue;
