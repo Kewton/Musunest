@@ -1,0 +1,401 @@
+{
+  "schema": "musunest-eval/regression-cases/v2",
+  "specs": [
+    {
+      "file": "r6-pos-full.json",
+      "subject": "R6",
+      "expect": {
+        "verdict": "PASS",
+        "structure": "main",
+        "failed": [],
+        "fulfilled": 7,
+        "total": 7
+      }
+    },
+    {
+      "file": "r6-neg-filter-without-who.json",
+      "subject": "R6",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "main",
+        "failed": [
+          "R6:C5"
+        ],
+        "fulfilled": 6,
+        "total": 7
+      }
+    },
+    {
+      "file": "r6-neg-default-packed.json",
+      "subject": "R6",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "main",
+        "failed": [
+          "R6:C1"
+        ],
+        "fulfilled": 6,
+        "total": 7
+      }
+    },
+    {
+      "file": "r6-neg-no-title.json",
+      "subject": "R6",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": null,
+        "failed": [
+          "役割が見つかる"
+        ],
+        "fulfilled": 0,
+        "total": 7
+      }
+    },
+    {
+      "file": "r6-neg-quantity-gt-zero.json",
+      "subject": "R6",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "main",
+        "failed": [
+          "R6:C6"
+        ],
+        "fulfilled": 6,
+        "total": 7
+      }
+    },
+    {
+      "file": "r6-neg-sum-instead-of-count.json",
+      "subject": "R6",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "main",
+        "failed": [
+          "R6:C7"
+        ],
+        "fulfilled": 6,
+        "total": 7
+      }
+    },
+    {
+      "file": "r6-neg-action-condition.json",
+      "subject": "R6",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "main",
+        "failed": [
+          "R6:C2"
+        ],
+        "fulfilled": 6,
+        "total": 7
+      }
+    },
+    {
+      "file": "r6-neg-action-set.json",
+      "subject": "R6",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "main",
+        "failed": [
+          "R6:C2"
+        ],
+        "fulfilled": 6,
+        "total": 7
+      }
+    },
+    {
+      "file": "r6-neg-board.json",
+      "subject": "R6",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "main",
+        "failed": [
+          "R6:C3"
+        ],
+        "fulfilled": 6,
+        "total": 7
+      }
+    },
+    {
+      "file": "r6-neg-create.json",
+      "subject": "R6",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "main",
+        "failed": [
+          "R6:C4"
+        ],
+        "fulfilled": 6,
+        "total": 7
+      }
+    },
+    {
+      "file": "r4-pos-list-empty.json",
+      "subject": "R4",
+      "expect": {
+        "verdict": "PASS",
+        "structure": "list",
+        "failed": [],
+        "fulfilled": 7,
+        "total": 7
+      },
+      "v1": {
+        "verdict": "PASS",
+        "fulfilled": 6,
+        "total": 6,
+        "failed": []
+      }
+    },
+    {
+      "file": "r4-pos-list-and.json",
+      "subject": "R4",
+      "expect": {
+        "verdict": "PASS",
+        "structure": "list",
+        "failed": [],
+        "fulfilled": 7,
+        "total": 7
+      }
+    },
+    {
+      "file": "r4-neg-list-without-capacity-check.json",
+      "subject": "R4",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "list",
+        "failed": [
+          "定員を超えたら登録できない"
+        ],
+        "fulfilled": 6,
+        "total": 7
+      }
+    },
+    {
+      "file": "r4-neg-list-capacity-gt-zero.json",
+      "subject": "R4",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "list",
+        "failed": [
+          "定員は 1 人以上"
+        ],
+        "fulfilled": 6,
+        "total": 7
+      }
+    },
+    {
+      "file": "r4-neg-list-overflow.json",
+      "subject": "R4",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "list",
+        "failed": [
+          "定員を超えたら登録できない"
+        ],
+        "fulfilled": 6,
+        "total": 7
+      }
+    },
+    {
+      "file": "r4-neg-list-nonempty.json",
+      "subject": "R4",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "list",
+        "failed": [
+          "R4:list:C4"
+        ],
+        "fulfilled": 6,
+        "total": 7
+      },
+      "v1": {
+        "verdict": "PASS",
+        "fulfilled": 6,
+        "total": 6,
+        "failed": []
+      }
+    },
+    {
+      "file": "r4-neg-list-false-claim.json",
+      "subject": "R4",
+      "expect": {
+        "verdict": "PASS",
+        "structure": "list",
+        "failed": [],
+        "fulfilled": 7,
+        "total": 7,
+        "claims": {
+          "correct": 0,
+          "missed": 0,
+          "false_claims": 1
+        },
+        "final": "PASS"
+      }
+    },
+    {
+      "file": "r4-alt-claimed.json",
+      "subject": "R4",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "attendance",
+        "failed": [
+          "定員を超えたら登録できない"
+        ],
+        "fulfilled": 6,
+        "total": 7,
+        "claims": {
+          "correct": 0,
+          "missed": 0,
+          "false_claims": 1
+        },
+        "final": "FAIL"
+      }
+    },
+    {
+      "file": "r4-alt-unclaimed.json",
+      "subject": "R4",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "attendance",
+        "failed": [
+          "定員を超えたら登録できない"
+        ],
+        "fulfilled": 6,
+        "total": 7,
+        "claims": {
+          "correct": 0,
+          "missed": 0,
+          "false_claims": 0
+        },
+        "final": "FAIL"
+      }
+    },
+    {
+      "file": "r4-alt-capacity-gt-zero.json",
+      "subject": "R4",
+      "expect": {
+        "verdict": "FAIL",
+        "structure": "attendance",
+        "failed": [
+          "定員を超えたら登録できない",
+          "定員は 1 人以上"
+        ],
+        "fulfilled": 5,
+        "total": 7,
+        "claims": {
+          "correct": 0,
+          "missed": 0,
+          "false_claims": 1
+        },
+        "final": "FAIL"
+      }
+    }
+  ],
+  "acceptance": [
+    {
+      "subject": "R4",
+      "structure": "list",
+      "text": "参加する人が 0 人でも登録できる",
+      "op": "exclusion",
+      "expect": "wrong",
+      "id": "R4:K1"
+    },
+    {
+      "subject": "R4",
+      "structure": "attendance",
+      "text": "参加する人が 0 人でも登録できる",
+      "op": "exclusion",
+      "expect": "wrong",
+      "id": "R4:K2"
+    },
+    {
+      "subject": "R4",
+      "structure": "attendance",
+      "text": "参加する人が 0 人でも登録できる",
+      "op": "change",
+      "expect": "unevaluated",
+      "unevaluated_checks": [
+        "人とゲーム会を登録できる"
+      ],
+      "id": "R4:K3"
+    },
+    {
+      "subject": "R4",
+      "structure": "list",
+      "text": "参加がゼロのメンバーは一覧に出さない",
+      "op": "exclusion",
+      "expect": "unmatched",
+      "id": "R4:K4"
+    },
+    {
+      "subject": "R4",
+      "structure": "list",
+      "text": "定員は必ず入れる",
+      "op": "exclusion",
+      "expect": "unmatched",
+      "id": "R4:K5"
+    },
+    {
+      "subject": "R4",
+      "structure": "list",
+      "text": "定員を超えても登録できる",
+      "op": "exclusion",
+      "expect": "wrong",
+      "id": "R4:K6"
+    },
+    {
+      "subject": "R4",
+      "structure": "list",
+      "text": "参加者の入力を任意にする",
+      "op": "exclusion",
+      "expect": "wrong",
+      "id": "R4:K7"
+    },
+    {
+      "subject": "R4",
+      "structure": "attendance",
+      "text": "参加者の入力を任意にする",
+      "op": "exclusion",
+      "expect": "wrong",
+      "id": "R4:K8"
+    },
+    {
+      "subject": "R4",
+      "structure": "list",
+      "text": "ゲーム会を先に作り、来る人は後から足す。最初は誰もいなくても登録できる",
+      "op": "exclusion",
+      "expect": "wrong",
+      "id": "R4:K9"
+    },
+    {
+      "subject": "R4",
+      "structure": "list",
+      "text": "参加する人が 0 人でも登録できる",
+      "op": "change",
+      "expect": "unevaluated",
+      "id": "R4:K10",
+      "unevaluated_checks": [
+        "R4:list:C4"
+      ]
+    },
+    {
+      "subject": "R4",
+      "structure": "list",
+      "text": "定員を超えても登録できる",
+      "op": "change",
+      "expect": "unevaluated",
+      "id": "R4:K11",
+      "unevaluated_checks": [
+        "定員を超えたら登録できない"
+      ]
+    },
+    {
+      "id": "R4:K12",
+      "subject": "R4",
+      "structure": "list",
+      "text": "速度を超えると断る",
+      "op": "exclusion",
+      "expect": "unmatched"
+    }
+  ]
+}

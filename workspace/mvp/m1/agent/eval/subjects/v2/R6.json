@@ -1,0 +1,170 @@
+{
+  "id": "R6",
+  "title": "天体観測の撮影準備",
+  "patterns": [
+    "P1",
+    "P2"
+  ],
+  "note": "regression-r1 v2 の P1・P2。2026-11-11 所有者の決定 5（#876）。型と書ける範囲の対応を保ち、題材の中身は独立させる",
+  "structures": [
+    {
+      "id": "main",
+      "roles": {
+        "main": {
+          "entity": {}
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "who": {
+          "field": {
+            "of": "main",
+            "type": "ref",
+            "to": "member"
+          }
+        },
+        "kind": {
+          "field": {
+            "of": "main",
+            "type": "enum",
+            "labels": [
+              "惑星",
+              "星雲",
+              "星団"
+            ]
+          }
+        },
+        "status": {
+          "field": {
+            "of": "main",
+            "type": "enum",
+            "labels": [
+              "未撮影",
+              "撮影済み"
+            ]
+          }
+        },
+        "qty": {
+          "field": {
+            "of": "main",
+            "type": "number"
+          }
+        },
+        "name": {
+          "field": {
+            "of": "main",
+            "type": "string"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "R6:C1",
+          "kind": "enumDefault",
+          "field": "status",
+          "label": "未撮影"
+        },
+        {
+          "req": "R6:C2",
+          "kind": "advanceAction",
+          "field": "status",
+          "from": "未撮影",
+          "to": "撮影済み"
+        },
+        {
+          "req": "R6:C3",
+          "kind": "boardColumns",
+          "field": "status"
+        },
+        {
+          "req": "R6:C4",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "main"
+          ]
+        },
+        {
+          "req": "R6:C5",
+          "kind": "listFilters",
+          "entity": "main",
+          "fields": [
+            "kind",
+            "who"
+          ]
+        },
+        {
+          "req": "R6:C6",
+          "kind": "validation",
+          "entity": "main",
+          "cases": [
+            {
+              "set": {
+                "qty": 0
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "qty": 0.5
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "qty": 1
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "R6:C7",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "main": [
+              {
+                "set": {
+                  "who": "m1",
+                  "qty": 3
+                }
+              },
+              {
+                "set": {
+                  "who": "m1",
+                  "qty": 7
+                }
+              },
+              {
+                "set": {
+                  "who": "m2",
+                  "qty": 4
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        }
+      ],
+      "unwritable": []
+    }
+  ],
+  "clock": "2026-10-08T12:00:00+09:00",
+  "today": "2026-10-08",
+  "version": 2
+}
