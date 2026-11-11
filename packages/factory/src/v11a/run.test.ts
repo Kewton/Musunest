@@ -110,6 +110,7 @@ import {
   stageOutputDigest,
   stagesInRange,
   stageVersionsAt,
+  documentsVersionOf,
   verifyStageInput,
   type BoundaryMaterials,
   type ResumeMaterials,
@@ -3002,15 +3003,19 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(JSON.stringify(after.requests)).not.toBe(JSON.stringify(before.requests));
   });
 
-  /** 台帳の行から工場の照合の版を出す（全体の指紋・上流の台帳の部分の指紋・旗の組。Issue #713） */
+  /**
+   * 台帳の行から工場の照合の版を出す（全体の指紋・上流の台帳の部分の指紋・旗の組。Issue #713）。旗 ids の組なので、段へ渡す
+   * 文書の中身の指紋も足す（工場どうしで同じ文書。Issue #875）
+   */
   const factoryVersionsOf = async (rows: readonly PropertyRow[] = PROPERTY_LEDGER) => ({
     ledger: await propertyLedgerSha256(rows),
     ledgerUpstream: await upstreamLedgerSha256(rows),
     flags: toPublicV12Flags({ ledger: true, searchRepair: true, ids: true }),
+    documents: await documentsVersionOf(FIXTURE_DOCUMENTS),
   });
   /** 境界の材料から、その工場が書く v1.2 の checkpoint と記録（境界ごとの版） */
   const writtenBy = async (factory: Awaited<ReturnType<typeof factoryVersionsOf>>, materials: BoundaryMaterials) => {
-    const base = { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0", ledger: factory.ledger, flags: factory.flags, call_limits: null };
+    const base = { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0", ledger: factory.ledger, flags: factory.flags, call_limits: null, documents: factory.documents };
     const versions = stageVersionsAt(base, materials.boundary, factory.ledgerUpstream);
     const checkpoint = JSON.parse(stageJsonText(buildStageCheckpoint({ materials, versions, planSha256: "a".repeat(64), sourceSha256: "b".repeat(64) }))) as Record<string, unknown>;
     const record = { schema_version: STAGE_RUN_RECORD_SCHEMA, checkpoints: [{ boundary: materials.boundary, path: "cp.json", output_digest: await stageOutputDigest(checkpoint) }] };

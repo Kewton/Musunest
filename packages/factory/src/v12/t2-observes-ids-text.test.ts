@@ -13,6 +13,7 @@
 import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import { fixtureTable } from "../v11a/__tests__/fixtures.js";
+import { withOldValidationExpressionTexts } from "./__tests__/ledger.js";
 import type { NameTable } from "../v11a/names.js";
 import { checkEvaluabilityByLedger, checkTestSpecOutput, testSpecRuleDefinitionsOf } from "../v11a/stages/test-spec.js";
 import { expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
@@ -193,18 +194,23 @@ describe("(4) 場合の schema：observes の enum は base（value・empty-aggr
 // ── (5)(6) 指紋・要求 ──────────────────────────────────────────────
 
 describe("(5)(6) 指紋と要求：ids の全体は変わり、T2 の文を旧に戻すと base に戻る。off・上流は変わらない", () => {
-  it("(5) ids の全体の指紋は #816 の値から変わり、T2 の文を戻すと #816 の値に等値。off の全体・上流と ids の上流は base と同じ", async () => {
+  it("(5) ids の全体の指紋は #816 の値から変わり、T2 の文を戻すと #816 の値に等値。off の全体・上流は base と同じ。ids の上流は #875 で変わり、#875 の文を旧に戻すと base と同じ", async () => {
     const off = fromPublicV12Flags({});
     const now = await propertyLedgerSha256(PROPERTY_LEDGER, IDS);
-    expect(now).toBe("65c1f276c2f72cc7fbe947397ee214da740dcdbd1680bdd001f61f889d141487");
+    // Issue #875 で検査の式の行の文を文書の式の文法に委ねたので、今の値は #832 の値（65c1f276…）から変わる。#875 の文を
+    // 旧の文に戻すと #832 の値に戻る（以下の #832 の照合はその戻した台帳で続ける）
+    expect(now).toBe("044963891242397e3120016c9e6e8e1c1daa9b1d0c0be46e767cd2836dbc881e");
+    expect(await propertyLedgerSha256(withOldValidationExpressionTexts(), IDS)).toBe("65c1f276c2f72cc7fbe947397ee214da740dcdbd1680bdd001f61f889d141487");
     // Issue #816 の値（この Issue の前）。T2 の文だけを旧の文に戻すとこの値に戻る
     const base816 = "fac851157c424650e597a3fe8c8e0b4156ec983c835d7f3e90b1f147284d27e4";
     expect(now).not.toBe(base816);
-    expect(await propertyLedgerSha256(withOldT2(), IDS)).toBe(base816);
+    expect(await propertyLedgerSha256(withOldT2(withOldValidationExpressionTexts()), IDS)).toBe(base816);
     // off の全体・上流と ids の上流は変えない（上流の見方は T2 の文を読まない）
     expect(await propertyLedgerSha256(PROPERTY_LEDGER, off)).toBe("fd0adc6ddc5bf82c48ff8be3930a74fe86f469b623359aedb64af5bdfe1e08f5");
     expect(await upstreamLedgerSha256(PROPERTY_LEDGER, off)).toBe("421d105d258f0d810cc44173edcad4720e391c63760348308f7a97187dd88d42");
-    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, IDS)).toBe("dc21dd0177557eec5af22eafe2355a41f99884ab4e063d6745e30ae9c554c110");
+    // ids の上流は #875 で変わる（T1 の文・T1'' の受理条件の文を読む）。旧の文に戻すと #832 の値に戻る
+    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, IDS)).toBe("a24dade1c8030cdfea05f14514a012ffcdf124d14035c370134f16e379264e19");
+    expect(await upstreamLedgerSha256(withOldValidationExpressionTexts(), IDS)).toBe("dc21dd0177557eec5af22eafe2355a41f99884ab4e063d6745e30ae9c554c110");
   });
 
   it("(6) ids の T2 の要求（R-tsp-16）の指紋は変わり、旧の文に戻す復元で base の指紋と等値", async () => {
