@@ -420,6 +420,10 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
       {view !== null && action !== undefined && view.permissions.write && (
         <section className="add" aria-label="追加">
           <AddForm
+            // 追加のフォームは view を切り替えても同じ位置に描かれる。`key` に追加の action を渡し、
+            // **entity が変わったら作り直す**——そうしないと入力の状態（`useState` の初期値）を使い回し、
+            // 2 つ目の entity にしかない項目が空になって既定値（`enum` の `default`）が入らない（Issue #851）
+            key={action.name}
             action={action.name}
             fields={formFields(spec.spec, view.entity ?? "", references)}
             guidance={guidanceOf(spec.spec, view.entity ?? "")}
