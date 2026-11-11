@@ -3331,3 +3331,130 @@ describe("画面から届くこと（M1.4。Issue #201）", () => {
     expect(messagesOf(result, code)).toContain(where);
   });
 });
+
+// ── 真偽の結合（and・or・not）（Issue #854） ───────────────────────
+//
+// 式に真偽の結合 `and`・`or` と否定 `not` を足した。**使えるのは真偽を求める場所だけ**である——
+// 検査の式・`when`・`type: boolean` の計算。数の計算に混ぜれば、今ある型の不一致
+// （`LOGIC_OPERAND_TYPE_MISMATCH`）で断る。`and`・`or`・`not` は予約語なので、項目と計算の名前に
+// 使えば**分かる形**（`DATA_FIELD_NAME_RESERVED`・`LOGIC_COMPUTED_NAME_RESERVED`）で断る。
+//
+// 評価（値）は evaluate.test.ts、実経路（data-api）は app-api.test.ts が見る。ここは宣言の側だけ。
+
+describe("真偽の結合（and・or・not）（Issue #854）", () => {
+  const LOGIC_ENTITY = [
+    "  - name: task",
+    "    fields:",
+    "      quantity: number",
+    "      dueDate: date",
+    "      status:",
+    "        type: enum",
+    "        options:",
+    "          active: 進行中",
+    "          done: 完了",
+    "        default: active",
+  ].join("\n");
+
+  const logicDeclaration = (parts: { validations?: string; computed?: string; actions?: string } = {}): string =>
+    declaration({
+      entities: LOGIC_ENTITY,
+      views: ["  - name: taskList", "    entity: task"].join("\n"),
+      actions: parts.actions ?? ["  - name: addTask", "    entity: task"].join("\n"),
+      validations: parts.validations ?? "[]",
+      computed: parts.computed ?? "[]",
+    });
+
+  const validationOf = (expression: string): string =>
+    ["  - name: onlyActive", "    entity: task", `    expression: ${expression}`].join("\n");
+
+  const computedOf = (type: string, expression: string): string =>
+    ["  - name: flag", "    entity: task", `    expression: ${expression}`, `    type: ${type}`].join("\n");
+
+  it("検査の式に and を書ける（受入条件）", () => {
+    const result = checkSpec(logicDeclaration({ validations: validationOf('status == "active" and dueDate < today()') }));
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+  });
+
+  it("not と or を組み合わせた検査の式を書ける（受入条件）", () => {
+    const result = checkSpec(logicDeclaration({ validations: validationOf("not (quantity > 10) or quantity == 0") }));
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+  });
+
+  it("type: boolean の計算に and を書ける（受入条件）", () => {
+    const result = checkSpec(
+      logicDeclaration({ computed: computedOf("boolean", 'status == "active" and dueDate < today()') }),
+    );
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) return;
+    expect(result.spec.computed[0]).toEqual({
+      name: "flag",
+      entity: "task",
+      expression: 'status == "active" and dueDate < today()',
+      type: "boolean",
+    });
+  });
+
+  it("操作の条件（when）に and を書ける（受入条件）", () => {
+    const actions = [
+      "  - name: addTask",
+      "    entity: task",
+      "  - name: close",
+      "    entity: task",
+      "    kind: update",
+      "    set:",
+      "      status: done",
+      '    when: status == "active" and dueDate < today()',
+    ].join("\n");
+    const result = checkSpec(logicDeclaration({ actions }));
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+  });
+
+  it("数と真偽を and で結ぶ式は、型の不一致で断る（受入条件）", () => {
+    const text = logicDeclaration({ validations: validationOf("quantity and quantity > 0") });
+    expect(codesOf(failure(checkSpec(text)))).toEqual(["LOGIC_OPERAND_TYPE_MISMATCH"]);
+  });
+
+  it("and を数の計算に混ぜる式は、型の不一致で断る（受入条件）", () => {
+    const text = logicDeclaration({ computed: computedOf("number", "quantity + (quantity > 0)") });
+    expect(codesOf(failure(checkSpec(text)))).toEqual(["LOGIC_OPERAND_TYPE_MISMATCH"]);
+  });
+
+  it("not は真偽にだけ付く（数に付けば型の不一致）", () => {
+    const text = logicDeclaration({ validations: validationOf("not quantity") });
+    expect(codesOf(failure(checkSpec(text)))).toEqual(["LOGIC_OPERAND_TYPE_MISMATCH"]);
+  });
+
+  it("優先順位（not ＞ and ＞ or）とかっこは、宣言の検査を通る（値は evaluate が見る）", () => {
+    for (const expression of [
+      "1 == 1 or 1 == 2 and 1 == 2",
+      "(1 == 1 or 1 == 2) and 1 == 2",
+      "not 1 == 2 and 1 == 2",
+      "not (1 == 2 and 1 == 2)",
+    ]) {
+      expect(codesOf(checkSpec(logicDeclaration({ validations: validationOf(expression) }))), expression).toEqual([]);
+    }
+  });
+
+  it("and・or・not は予約語である（項目と計算の名前に使えば、分かる形で断る）", () => {
+    const field = declaration({
+      entities: `${LOGIC_ENTITY}\n      and: number`,
+      views: ["  - name: taskList", "    entity: task"].join("\n"),
+      actions: ["  - name: addTask", "    entity: task"].join("\n"),
+      validations: "[]",
+      computed: "[]",
+    });
+    expect(codesOf(failure(checkSpec(field)))).toEqual(["DATA_FIELD_NAME_RESERVED"]);
+
+    for (const name of ["and", "or", "not"]) {
+      const computed = logicDeclaration({
+        computed: [`  - name: ${name}`, "    entity: task", "    expression: quantity", "    type: number"].join("\n"),
+      });
+      const codes = codesOf(failure(checkSpec(computed)));
+      expect(codes, name).toContain("LOGIC_COMPUTED_NAME_RESERVED");
+      expect(codes, name).not.toContain("LOGIC_COMPUTED_TYPE_MISMATCH");
+    }
+  });
+});

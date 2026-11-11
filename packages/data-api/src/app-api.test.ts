@@ -3233,3 +3233,188 @@ describe("所属の検査（M2.1。Issue #262）", () => {
     }
   });
 });
+
+// ── 真偽の結合（and・or・not）を含む宣言の実経路（Issue #854） ──────────────
+//
+// **式に書けただけでは足りない。** 正規化した JSON を data-api が読み（`getSpec`・`getView` が `ok`）、
+// 操作の条件（`when`）と検査の式がその式で効くことを確かめる（受入条件）。
+// `highlight` が指す `type: boolean` の計算も、Data API が行ごとに解いて一覧の行に載せる。
+
+const LOGIC_SOURCE = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      quantity: number",
+  "      dueDate: date",
+  "      status:",
+  "        type: enum",
+  "        options:",
+  "          active: 進行中",
+  "          done: 完了",
+  "        default: active",
+  "views:",
+  "  - name: taskBoard",
+  "    entity: task",
+  "    type: board",
+  "    columns: status",
+  "    highlight: overdue",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "  - name: close",
+  "    entity: task",
+  "    kind: update",
+  "    set:",
+  "      status: done",
+  '    when: status == "active" and dueDate < today()',
+  "validations:",
+  "  - name: quantitySane",
+  "    entity: task",
+  "    expression: not (quantity > 10) or quantity == 0",
+  "computed:",
+  "  - name: overdue",
+  "    entity: task",
+  '    expression: status == "active" and dueDate < today()',
+  "    type: boolean",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+const LOGIC_OVERDUE = 'status == "active" and dueDate < today()';
+const LOGIC_QUANTITY = "not (quantity > 10) or quantity == 0";
+
+const logicNormalized = await normalizeSpec(LOGIC_SOURCE);
+if (!logicNormalized.ok) throw new Error("and を含む宣言が静的チェックに通らない");
+
+const LOGIC_APP: NormalizedAppSpec = logicNormalized.app;
+const LOGIC_JSON = logicNormalized.json;
+
+/** and を含む宣言を R2 に置き、登録（D1）も同じ宣言を指すようにする */
+function withLogicDeclaration(h: Harness): void {
+  h.registry.registration = {
+    sourceSha256: LOGIC_APP.sourceSha256,
+    schemaVersion: LOGIC_APP.schemaVersion,
+    sourceKey: `specs/${LOGIC_APP.sourceSha256}/app.spec.yaml`,
+    normalizedKey: `specs/${LOGIC_APP.sourceSha256}/normalized.json`,
+    createdAt: "2026-09-19T00:00:00.000Z",
+  };
+  h.specs.text = LOGIC_JSON;
+}
+
+/** task を 1 件足して、その行の ID を返す */
+async function addLogicTask(
+  h: Harness,
+  input: { readonly title: string; readonly quantity: number; readonly dueDate: string; readonly status: string },
+): Promise<string> {
+  const result = await createFromAction(h.deps, INSTANCE, "addTask", input);
+  if (!result.ok) throw new Error(`足せなかった: ${JSON.stringify(result.failure)}`);
+  return rowOf(result.body).id;
+}
+
+const logicRows = async (h: Harness): Promise<readonly ApiRow[]> => {
+  const result = await getView(h.deps, INSTANCE, "taskBoard");
+  if (!result.ok) throw new Error(`一覧を読めなかった: ${result.failure.error}`);
+  return result.body.rows;
+};
+
+describe("真偽の結合（and・or・not）を含む宣言の実経路（Issue #854）", () => {
+  it("getSpec が ok で返し、and を含む when・検査・boolean の計算を保つ（受入条件）", async () => {
+    const h = harness();
+    withLogicDeclaration(h);
+
+    const result = await getSpec(h.deps, INSTANCE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.status).toBe(API_READ_STATUS);
+    expect(result.body.spec.computed).toContainEqual({
+      name: "overdue",
+      entity: "task",
+      expression: LOGIC_OVERDUE,
+      type: "boolean",
+    });
+    expect(result.body.spec.validations).toContainEqual({
+      name: "quantitySane",
+      entity: "task",
+      expression: LOGIC_QUANTITY,
+    });
+    expect(result.body.spec.actions).toContainEqual({
+      name: "close",
+      entity: "task",
+      kind: "update",
+      set: { status: "done" },
+      when: LOGIC_OVERDUE,
+    });
+  });
+
+  it("readNormalizedApp が、and を含む正規化 JSON を読む（受入条件）", () => {
+    expect(readNormalizedApp(LOGIC_JSON)).toEqual(LOGIC_APP);
+  });
+
+  it("getView が ok で返し、and の計算値が行に載る（受入条件）", async () => {
+    const h = harness();
+    withLogicDeclaration(h);
+    // 差し込んだ時計は日本時間の 2026-09-16 である（CLOCK）
+    await addLogicTask(h, { title: "期限切れ", quantity: 1, dueDate: "2026-09-15", status: "active" });
+    await addLogicTask(h, { title: "返却済み", quantity: 1, dueDate: "2026-09-15", status: "done" });
+    await addLogicTask(h, { title: "これから", quantity: 1, dueDate: "2026-09-30", status: "active" });
+
+    const rows = await logicRows(h);
+    // 返却済み・期限前の行には印を付けない（and の両方が真の行だけが真になる）
+    expect(rows.map((row) => row.computed["overdue"])).toEqual([true, false, false]);
+  });
+
+  it("when が and の式でも効く（真の行は通り、偽の行は断る。受入条件）", async () => {
+    const h = harness();
+    withLogicDeclaration(h);
+    const overdue = await addLogicTask(h, {
+      title: "期限切れ",
+      quantity: 1,
+      dueDate: "2026-09-15",
+      status: "active",
+    });
+    const done = await addLogicTask(h, { title: "返却済み", quantity: 1, dueDate: "2026-09-15", status: "done" });
+
+    const blocked = await createFromAction(h.deps, INSTANCE, "close", { id: done });
+    expect(blocked.ok).toBe(false);
+    if (blocked.ok) return;
+    expect(blocked.failure.error).toBe("ACTION_NOT_ALLOWED");
+    expect(blocked.failure.when).toBe(LOGIC_OVERDUE);
+    // 断ったら書き換えない
+    expect(h.records.rows.find((row) => row.id === done)?.data["status"]).toBe("done");
+
+    const allowed = await createFromAction(h.deps, INSTANCE, "close", { id: overdue });
+    expect(allowed.ok).toBe(true);
+    expect(h.records.rows.find((row) => row.id === overdue)?.data["status"]).toBe("done");
+  });
+
+  it("検査の式が not を含んでも効く（11 は断り、0 は通る。受入条件）", async () => {
+    const h = harness();
+    withLogicDeclaration(h);
+
+    const rejected = await createFromAction(h.deps, INSTANCE, "addTask", {
+      title: "多すぎ",
+      quantity: 11,
+      dueDate: "2026-09-30",
+      status: "active",
+    });
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) return;
+    expect(rejected.failure.error).toBe("INPUT_REJECTED");
+    expect(rejected.failure.validations).toContain("quantitySane");
+
+    // `not (quantity > 10)` は偽だが、`or quantity == 0` が真なので通る
+    const accepted = await createFromAction(h.deps, INSTANCE, "addTask", {
+      title: "空",
+      quantity: 0,
+      dueDate: "2026-09-30",
+      status: "active",
+    });
+    expect(accepted.ok).toBe(true);
+  });
+});

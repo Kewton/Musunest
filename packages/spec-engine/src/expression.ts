@@ -11,6 +11,8 @@ import {
   BUILTIN_FUNCTIONS,
   COMPARISON_OPERATORS,
   DATE_FUNCTIONS,
+  LOGICAL_OPERATORS,
+  NEGATION_OPERATOR,
   type ExpressionType,
 } from "@musunest/appspec-schema";
 import type { Diagnostic, DiagnosticCode, DiagnosticPosition } from "./diagnostics.js";
@@ -89,7 +91,8 @@ export interface UnaryNode {
   readonly kind: "unary";
   readonly start: number;
   readonly end: number;
-  readonly operator: "-";
+  /** 符号の `-` か、真偽の否定の `not`（Issue #854） */
+  readonly operator: "-" | "not";
   readonly operand: AstNode;
 }
 
@@ -124,6 +127,17 @@ export const isArithmeticOperator = (operator: string): boolean =>
 
 export const isComparisonOperator = (operator: string): boolean =>
   (COMPARISON_OPERATORS as readonly string[]).includes(operator);
+
+/** 真偽どうしの結合（`and`・`or`。Issue #854） */
+export const isLogicalOperator = (operator: string): boolean =>
+  (LOGICAL_OPERATORS as readonly string[]).includes(operator);
+
+/**
+ * 真偽の演算子（`and`・`or`・`not`。Issue #854）。**予約語である**——名前としては読まない
+ * （項目と計算の名前に使えば、静的チェックが `DATA_FIELD_NAME_RESERVED` などで断る）。
+ */
+const isBooleanOperator = (text: string): boolean =>
+  text === NEGATION_OPERATOR || isLogicalOperator(text);
 
 // ── 字句 ───────────────────────────────────────────────────────
 
@@ -198,8 +212,16 @@ function tokenize(text: string): { tokens: Token[]; error: ExpressionError | nul
     }
     const name = NAME_TEXT.exec(rest);
     if (name) {
-      tokens.push({ kind: "name", text: name[0], start: index, end: index + name[0].length });
-      index += name[0].length;
+      const text = name[0];
+      // `and`・`or`・`not` は演算子である（Issue #854）。**単語の切れ目でだけ**読む——
+      // `android`・`notable`・`order` は 1 つの名前のままである（`NAME_TEXT` が最長一致する）
+      tokens.push({
+        kind: isBooleanOperator(text) ? "operator" : "name",
+        text,
+        start: index,
+        end: index + text.length,
+      });
+      index += text.length;
       continue;
     }
     const punctuation: Readonly<Record<string, TokenKind>> = {
@@ -218,7 +240,7 @@ function tokenize(text: string): { tokens: Token[]; error: ExpressionError | nul
       tokens,
       error: {
         offset: index,
-        message: `${character} は式に書けない（数と文字列の定数・項目と計算の名前・+ - * / > >= < <= == != ・min max len today・かっこ だけを書ける）`,
+        message: `${character} は式に書けない（数と文字列の定数・項目と計算の名前・+ - * / > >= < <= == != ・min max len today・and or not・かっこ だけを書ける）`,
       },
     };
   }
@@ -246,7 +268,7 @@ class Parser {
   }
 
   parse(): AstNode {
-    const node = this.#comparison();
+    const node = this.#or();
     const rest = this.#peek();
     if (rest !== undefined) throw new ParseFailure(`${rest.text} が式の終わりに余分にある`, rest.start);
     return node;
@@ -273,6 +295,44 @@ class Parser {
       throw new ParseFailure(`${what}が閉じていない`, this.#offsetForError());
     }
     return token;
+  }
+
+  /** 真偽の結合の一番弱い段（`or`。Issue #854）。左から順に結ぶ */
+  #or(): AstNode {
+    let node = this.#and();
+    for (;;) {
+      const operator = this.#peek();
+      if (operator === undefined || operator.kind !== "operator" || operator.text !== "or") return node;
+      this.#position += 1;
+      const right = this.#and();
+      node = { kind: "binary", operator: operator.text, left: node, right, start: node.start, end: right.end };
+    }
+  }
+
+  /** 真偽の結合の強い段（`and`。Issue #854）。左から順に結ぶ */
+  #and(): AstNode {
+    let node = this.#not();
+    for (;;) {
+      const operator = this.#peek();
+      if (operator === undefined || operator.kind !== "operator" || operator.text !== "and") return node;
+      this.#position += 1;
+      const right = this.#not();
+      node = { kind: "binary", operator: operator.text, left: node, right, start: node.start, end: right.end };
+    }
+  }
+
+  /**
+   * 真偽の否定（`not`。Issue #854）。**一番強い**（`not a and b` は `(not a) and b`）。
+   * オペランドは比較まで含む（`not a > b` は `not (a > b)`）。入れ子にできる（`not not a`）。
+   */
+  #not(): AstNode {
+    const token = this.#peek();
+    if (token !== undefined && token.kind === "operator" && token.text === NEGATION_OPERATOR) {
+      this.#position += 1;
+      const operand = this.#not();
+      return { kind: "unary", operator: NEGATION_OPERATOR, operand, start: token.start, end: operand.end };
+    }
+    return this.#comparison();
   }
 
   #comparison(): AstNode {
@@ -357,7 +417,7 @@ class Parser {
           return { kind: "call", name: token.text, args, start: token.start, end: close?.end ?? token.end };
         }
         for (;;) {
-          args.push(this.#comparison());
+          args.push(this.#or());
           const separator = this.#next();
           if (separator === undefined) {
             throw new ParseFailure("関数の `)` が閉じていない", this.#offsetForError());
@@ -372,7 +432,7 @@ class Parser {
       return { kind: "name", name: token.text, start: token.start, end: token.end };
     }
     if (token.kind === "open") {
-      const inner = this.#comparison();
+      const inner = this.#or();
       this.#expectClose("かっこ");
       return inner;
     }
@@ -554,6 +614,9 @@ const isOrderedComparison = (operator: string): boolean =>
 const isOperandCompatible = (type: SpecType, expected: SpecType): boolean =>
   type === "unknown" || type === expected;
 
+/** 真偽の演算子（`and`・`or`・`not`）のオペランド。決められない型（`unknown`）は食い違わない */
+const isBooleanCompatible = (type: SpecType): boolean => type === "unknown" || type === "boolean";
+
 /**
  * 式に書ける関数の定義。**正本は appspec-schema の 2 つの表を合わせたもの**である——
  * `min`・`max`・`len`（M1.1）と `today`（M1.3）。表が分かれているのは、M1.1 の関数の一覧
@@ -604,6 +667,18 @@ export function analyzeExpression(ast: AstNode, scope: ExpressionScope): Express
       }
       case "unary": {
         const operand = visit(node.operand);
+        // 否定（`not`。Issue #854）は真偽にだけ付ける。結果は真偽である
+        if (node.operator === NEGATION_OPERATOR) {
+          if (!isBooleanCompatible(operand)) {
+            problems.push({
+              offset: node.operand.start,
+              code: "LOGIC_OPERAND_TYPE_MISMATCH",
+              message: `not は真偽に付ける（${typeName(operand)}が来ている）`,
+            });
+            return "unknown";
+          }
+          return "boolean";
+        }
         if (!isNumberCompatible(operand)) {
           problems.push({
             offset: node.operand.start,
@@ -617,6 +692,27 @@ export function analyzeExpression(ast: AstNode, scope: ExpressionScope): Express
       case "binary": {
         const left = visit(node.left);
         const right = visit(node.right);
+        // 真偽の結合（`and`・`or`。Issue #854）は真偽どうしだけを結ぶ。結果は真偽である
+        if (isLogicalOperator(node.operator)) {
+          let mismatch = false;
+          if (!isBooleanCompatible(left)) {
+            mismatch = true;
+            problems.push({
+              offset: node.left.start,
+              code: "LOGIC_OPERAND_TYPE_MISMATCH",
+              message: `${node.operator} は真偽どうしを結ぶに使う（左が${typeName(left)}）`,
+            });
+          }
+          if (!isBooleanCompatible(right)) {
+            mismatch = true;
+            problems.push({
+              offset: node.right.start,
+              code: "LOGIC_OPERAND_TYPE_MISMATCH",
+              message: `${node.operator} は真偽どうしを結ぶに使う（右が${typeName(right)}）`,
+            });
+          }
+          return mismatch ? "unknown" : "boolean";
+        }
         const comparison = isComparisonOperator(node.operator);
         // 計算は数どうしだけである。比較は、同じ型どうし（数・日付・文字列）だけを許す（M1.3）
         const expected = comparison ? comparisonOperand(left, right) : "number";
