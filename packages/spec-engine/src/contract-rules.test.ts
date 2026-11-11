@@ -777,6 +777,20 @@ const specCases: readonly SpecCase[] = [
     edits: [["computed:\n", "computed:\n  - name: id\n    entity: expense\n    type: number\n    expression: amount\n"]],
     codes: ["LOGIC_COMPUTED_NAME_RESERVED"],
   },
+  {
+    rule: "R-RESERVED-01",
+    what: "項目名に and を使う（境界・真偽の演算子は予約語）",
+    base: FIXTURE,
+    edits: [["      spentOn: date", "      spentOn: date\n      and: number"]],
+    codes: ["DATA_FIELD_NAME_RESERVED"],
+  },
+  {
+    rule: "R-RESERVED-02",
+    what: "計算の名前に and を使う（境界・真偽の演算子は予約語）",
+    base: FIXTURE,
+    edits: [["computed:\n", "computed:\n  - name: and\n    entity: expense\n    type: number\n    expression: amount\n"]],
+    codes: ["LOGIC_COMPUTED_NAME_RESERVED"],
+  },
 
   // ── §6 閉じた語彙（R-VOCAB） ─────────────────────────────────
   {
@@ -1274,6 +1288,10 @@ const exprCases: readonly ExprCase[] = [
   { rule: "R-TYPE-06", what: "list を演算子の相手にできない（負例）", expression: "participants == 1", codes: ["LOGIC_OPERAND_TYPE_MISMATCH"] },
   { rule: "R-TYPE-06", what: "len の結果を 0 と比べる（境界）", expression: "len(participants) == 0", type: "boolean" },
   { rule: "R-TYPE-07", what: "boolean は演算子の相手にできない（負例・+）", expression: "(amount > 0) + 1", codes: ["LOGIC_OPERAND_TYPE_MISMATCH"] },
+  { rule: "R-TYPE-07", what: "and は真偽を 2 つ取り、真偽を返す（正例）", expression: "(amount > 0) and (discount > 0)", type: "boolean" },
+  { rule: "R-TYPE-07", what: "not は真偽を 1 つ取り、真偽を返す（正例）", expression: "not (amount > 0)", type: "boolean" },
+  { rule: "R-TYPE-07", what: "数は and のオペランドにならない（負例）", expression: "amount and (discount > 0)", codes: ["LOGIC_OPERAND_TYPE_MISMATCH"] },
+  { rule: "R-TYPE-07", what: "or も真偽どうしだけを結ぶ（境界）", expression: '(description == "") or (amount > 0)', type: "boolean" },
   { rule: "R-TYPE-07", what: "boolean どうしも比べられない（境界）", expression: "(amount > 0) == (discount > 0)", codes: ["LOGIC_OPERAND_TYPE_MISMATCH"] },
   { rule: "R-TYPE-08", what: "min/max は数の 2 引数（正例）", expression: "max(1, headcount)", type: "number" },
   { rule: "R-TYPE-08", what: "min に引数が足りない（負例）", expression: "min(amount)", codes: ["LOGIC_FUNCTION_ARITY_MISMATCH"] },

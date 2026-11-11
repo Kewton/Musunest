@@ -11,7 +11,7 @@
   },
   "appspec_schema": {
     "version": "community.app-spec/v0.2",
-    "sha256": "6078c3884c087f275f55710e8d0ee0c8a0178c701c05d10db8c44504ea3a7379",
+    "sha256": "497b6f42938590de4f60c3ef4c29ba71cf49da090706cd02e06e362c4a04ae5c",
     "source_path": "packages/appspec-schema/contract",
     "$comment": "AppSpec スキーマの契約は platform-owned で、MUSUNEST 側の packages/appspec-schema/contract/ が正本である。M1.5 で草案から固めた版 community.app-spec/v0.2 にし、**同じコミット**でこのピンを差し替えた（Issue #217。README.md「版の表記」・00-open-questions.md Q9）。version は packages/appspec-schema/src/spec.ts の APPSPEC_SCHEMA_VERSION と一致する。sha256 は契約（contract/ の全ファイル。app-spec.schema.json・expression-grammar.md・rules.md を名前の昇順に混ぜたもの）の exact bytes に対する SHA-256（小文字の 16 進 64 桁）で、digest は手で書いていない——`pnpm --filter @musunest/appspec-schema contract:hash` の出力をそのまま転記した。契約を直したら、その後に digest を取り直してこの値を差し替える。"
   },
