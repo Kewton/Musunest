@@ -1093,6 +1093,96 @@ describe("選択肢（enum）の入力欄", () => {
   });
 });
 
+// ── view を別の entity へ切り替えたときの追加フォーム（Issue #851） ────────────
+//
+// 追加の `AddForm` は view を切り替えても同じ位置に描かれるため、`key` が無いと入力の状態
+// （`useState` の初期値）を最初の entity のまま使い回す。2 つ目の entity にしかない項目は
+// 状態に無いので空になり、`enum` の既定値が選ばれない（保存も断られる）。
+// **直すフォームには `key={editing.id}` がある**ので起きない——そちらの挙動は変えない。
+
+const SWITCH_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: {
+    ...SPEC.spec,
+    entities: [
+      { name: "expense", fields: { memo: "string", amount: "number" } },
+      {
+        name: "task",
+        fields: {
+          // 1 つ目の entity と**同じ名前**の項目を持つ（切り替えても入力が残らないことを見る）
+          memo: "string",
+          status: { type: "enum", options: { todo: "未着手", doing: "進行中", done: "完了" }, default: "todo" },
+        },
+      },
+    ],
+    views: [
+      { name: "expenseList", entity: "expense" },
+      { name: "taskList", entity: "task" },
+    ],
+    actions: [
+      { name: "addExpense", entity: "expense" },
+      { name: "addTask", entity: "task" },
+    ],
+    validations: [],
+    computed: [],
+  },
+  actions: [
+    { name: "addExpense", entity: "expense" },
+    { name: "addTask", entity: "task" },
+  ],
+};
+
+const SWITCH_EXPENSE_VIEW: ApiViewBody = {
+  ...VIEW,
+  view: "expenseList",
+  entity: "expense",
+  fields: ["memo", "amount"],
+  computed: [],
+  rows: [],
+  actions: [{ name: "addExpense", entity: "expense" }],
+};
+
+const SWITCH_TASK_VIEW: ApiViewBody = {
+  ...VIEW,
+  view: "taskList",
+  entity: "task",
+  fields: ["memo", "status"],
+  computed: [],
+  rows: [],
+  actions: [{ name: "addTask", entity: "task" }],
+};
+
+/** entity の違う 2 つの view を持つ宣言を返す client（最初に開くのは 1 つ目の view） */
+function switchClient(parts: Parameters<typeof makeClient>[0] = {}): MusunestClient {
+  return makeClient({
+    spec: () => Promise.resolve(okResult(SWITCH_SPEC)),
+    view: (_instanceId, name) =>
+      Promise.resolve(okResult(name === "expenseList" ? SWITCH_EXPENSE_VIEW : SWITCH_TASK_VIEW)),
+    ...parts,
+  });
+}
+
+describe("view を別の entity へ切り替えたときの追加フォーム（Issue #851）", () => {
+  it("2 つ目の entity の enum は、既定値を最初から選んでいる", async () => {
+    await renderScreen(switchClient());
+    await screen.findByLabelText("memo");
+    fireEvent.click(screen.getByRole("button", { name: "taskList" }));
+
+    const select = (await screen.findByLabelText("status")) as HTMLSelectElement;
+    expect(select.value).toBe("todo");
+  });
+
+  it("切り替える前の入力は、別の entity のフォームに残らない", async () => {
+    await renderScreen(switchClient());
+    fill("memo", "1 つ目の entity の入力");
+    await screen.findByDisplayValue("1 つ目の entity の入力");
+    fireEvent.click(screen.getByRole("button", { name: "taskList" }));
+
+    await screen.findByLabelText("status");
+    expect((screen.getByLabelText("memo") as HTMLInputElement).value).toBe("");
+  });
+});
+
 // ── 日付（date）の入力欄（M1.3。Issue #155） ─────────────────────────
 //
 // `formFields` が**宣言を入力欄へ写す**ことを見る。`form.test.ts` は入力欄の部品だけを見ていて、
