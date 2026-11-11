@@ -1,12 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createFactoryRunner } from "./factory-runner.js";
 import { createToken } from "./guard.js";
 import { resolveStudioHome } from "./home.js";
 import { BIND_HOST, DEFAULT_PORT, createRequestHandler, listen } from "./http.js";
 import { Jobs } from "./jobs.js";
 import { handleApiRequest } from "./routes.js";
-import { createFakeRunner } from "./runner-fake.js";
+import type { Runner } from "./runner.js";
 
 // 工房の起動。環境ファイルはこのコードではなく、`pnpm start` の `node --env-file-if-exists` が読む。
 const here = dirname(fileURLToPath(import.meta.url));
@@ -25,6 +26,8 @@ export interface StudioAppOptions {
   readonly home: string;
   /** いまの時刻（試験は固定する） */
   readonly now?: () => number;
+  /** 走らせる役（既定は子プロセスで工場を走らせる本物。試験は偽物を差し込む） */
+  readonly runner?: Runner;
 }
 
 export interface StudioApp {
@@ -35,12 +38,15 @@ export interface StudioApp {
 /**
  * `/api/jobs`・`/api/budget` の口を足した工房のサーバを作る（`node:http` だけ）。
  * 合言葉・Host・Origin の守りは `http.ts` の静的ファイルの扱いと、`routes.ts` の API の扱いの
- * 両方で同じものを使う。走らせる役は、この Issue では偽物だけ（工場は呼ばない）。
+ * 両方で同じものを使う。走らせる役の既定は、工場を子プロセスで走らせる本物である。
  */
 export function createStudioAppServer(options: StudioAppOptions): StudioApp {
+  const runner =
+    options.runner ??
+    createFactoryRunner({ home: options.home, env: process.env });
   const jobs = new Jobs({
     home: options.home,
-    runner: createFakeRunner(),
+    runner,
     ...(options.now === undefined ? {} : { now: options.now }),
   });
 
