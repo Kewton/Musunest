@@ -4,9 +4,10 @@
 // 守りは http.ts と同じ（Host・合言葉・Origin）。既存の `GET /api/health` と静的ファイルは
 // このモジュールの外（main.ts の合成）がそのまま扱う。
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { AnswersRequest, ConfirmOutcome, SubmittedAnswer } from "./runner.js";
+import type { AnswersRequest, ConfirmOutcome, JobView, SubmittedAnswer } from "./runner.js";
 import { guardRequest, pathname } from "./guard.js";
 import { ApiError, type Jobs } from "./jobs.js";
+import type { PublishJob, StudioPublisher } from "./publish.js";
 import { UserWordingError } from "./view.js";
 
 /** 本文の上限（依頼文・答えは小さいので、壊れた入力を読まないための線） */
@@ -21,6 +22,8 @@ export interface ApiHandlerOptions {
   readonly jobs: Jobs;
   readonly token: string;
   readonly port: number;
+  /** 公開の口（設定されていれば `approve`・`publish` を使える） */
+  readonly publisher?: StudioPublisher;
 }
 
 const sendJson = (response: ServerResponse, status: number, body: unknown): void => {
@@ -105,6 +108,28 @@ const parseConfirm = (value: unknown): ConfirmOutcome => {
   return value.outcome;
 };
 
+/** 了承の要求から、画面が見せた manifest の SHA-256 を読む。 */
+const parseApprovalSha = (value: unknown): string => {
+  if (!isRecord(value)) throw badRequest("本文が写像ではない");
+  const raw = value["manifestSha256"] ?? value["manifest_sha256"] ?? value["sha256"];
+  if (typeof raw !== "string") throw badRequest("manifestSha256 が文字列ではない");
+  return raw;
+};
+
+/** 公開の口へ渡す、ジョブの最小の姿。 */
+const publishJobOf = (job: JobView): PublishJob => ({
+  id: job.id,
+  state: job.state,
+  verdict: job.result?.verdict ?? null,
+});
+
+const requirePublisher = (options: ApiHandlerOptions): StudioPublisher => {
+  if (options.publisher === undefined) {
+    throw new ApiError(500, "publish-unavailable", "公開の口が設定されていない");
+  }
+  return options.publisher;
+};
+
 const decodeId = (raw: string): string => {
   try {
     return decodeURIComponent(raw);
@@ -113,7 +138,7 @@ const decodeId = (raw: string): string => {
   }
 };
 
-const JOB_PATH = /^\/api\/jobs(?:\/([^/]+))?(?:\/(answers|confirm|cancel))?$/;
+const JOB_PATH = /^\/api\/jobs(?:\/([^/]+))?(?:\/(answers|confirm|cancel|approve|publish))?$/;
 
 const route = async (
   request: IncomingMessage,
@@ -168,6 +193,20 @@ const route = async (
   }
   if (action === "confirm") {
     sendJson(response, 200, options.jobs.confirm(id, parseConfirm(await readJson(request))));
+    return;
+  }
+  if (action === "approve") {
+    const job = options.jobs.get(id);
+    if (job === null) throw new ApiError(404, "not_found", `ジョブが無い: ${id}`);
+    const publisher = requirePublisher(options);
+    sendJson(response, 200, await publisher.approve(publishJobOf(job), parseApprovalSha(await readJson(request))));
+    return;
+  }
+  if (action === "publish") {
+    const job = options.jobs.get(id);
+    if (job === null) throw new ApiError(404, "not_found", `ジョブが無い: ${id}`);
+    const publisher = requirePublisher(options);
+    sendJson(response, 200, await publisher.publish(publishJobOf(job)));
     return;
   }
   sendJson(response, 200, options.jobs.cancel(id));
