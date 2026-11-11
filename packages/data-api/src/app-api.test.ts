@@ -2480,7 +2480,7 @@ describe("一覧（list）と絞り込み（filters）を含む宣言の配信�
 // 件数・状態・担当・列の中身は時計に依らないので、同じ値になる。
 //
 // §3.2/§3.3 からの差分（いまの語彙で書ける形に落とした結果。見本のコメントと同じ）:
-//   - 式の論理（`and`）が無いので、`overdue` は `due < today()` である（「完了は除く」は書けない）
+//   - `overdue` は `and` を使って「期限を過ぎていて、完了していない」にした（#856）
 //   - 集計の `where` に `not` が無いので、`openTasks` は**担当している数**である（状態で絞れない）
 
 const TASK_BOARD_INSTANCE = "inst-task-board";
@@ -2588,10 +2588,22 @@ describe("task-board の採点のシナリオ（M1.3）", () => {
       ["レンタカー", false],
     ]);
 
-    // 時計を 2026-09-30 に進めると、9/20 と 9/25 も期限切れになる（同じデータでも値が変わる）
+    // 時計を 2026-09-30 に進めると、9/20 と 9/25 も期限を過ぎる（同じデータでも値が変わる）。
+    // ただし完了した レンタカー は強調しない（「期限を過ぎていて、完了していない」が真の行だけ）
     const later = await runTaskBoard(fixedClock("2026-09-30T12:00:00+09:00"));
     const after = await boardRowsOf(later, "board");
-    expect(after.map((row) => row.computed["overdue"])).toEqual([true, true, true]);
+    expect(after.map((row) => row.computed["overdue"])).toEqual([true, true, false]);
+  });
+
+  it("完了したタスクには、期限を過ぎていても強調が付かない（#856）", async () => {
+    // 時計を 2026-09-30 に進めると 3 件とも期限を過ぎる。未完了の 2 件だけが強調される
+    const run = await runTaskBoard(fixedClock("2026-09-30T12:00:00+09:00"));
+    const board = await boardRowsOf(run, "board");
+    expect(board.map((row) => [row.fields["title"], row.fields["status"], row.computed["overdue"]])).toEqual([
+      ["宿の予約", "doing", true],
+      ["しおり作り", "todo", true],
+      ["レンタカー", "done", false],
+    ]);
   });
 
   it("board の宣言（columns・highlight）と、真偽の計算は列に出ないことを保つ", async () => {
