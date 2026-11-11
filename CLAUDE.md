@@ -48,8 +48,13 @@ data-api      → sdk, spec-engine, app-do, control-plane, appspec-schema
 control-plane → spec-engine, appspec-schema
 factory       → spec-engine, appspec-schema
 e2e           → sdk
+studio        → factory, control-plane, appspec-schema
 sdk・spec-engine・app-do・connector → appspec-schema
 ```
+
+- 足した 1 本：`studio → factory, control-plane, appspec-schema`（2026-11-11。#864。手元の工房。
+  `studio/` は e2e と同じく workspace の一員で配らない。画面は host に置かず、手元の Node のサーバが
+  127.0.0.1 で返す。`workspace/mvp/m2/studio-s1.md` §3）
 
 - 足した 1 本：`factory → spec-engine, appspec-schema`（プロダクト内の工場。`packages/factory`。
   control-plane には依存しない。`workspace/mvp/m1/agent/02-architecture.md` §3.1）

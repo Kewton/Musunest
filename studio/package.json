@@ -1,0 +1,38 @@
+{
+  "name": "@musunest/studio",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "手元の工房（S1）。127.0.0.1 の Node のサーバと、依頼・質問・確認・結果を触る小さな React の画面。配らない",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty && tsc -p tsconfig.ui.json --pretty",
+    "lint": "oxlint src",
+    "test": "vitest run --passWithNoTests",
+    "start": "node --env-file-if-exists=../.env dist/server/main.js"
+  },
+  "dependencies": {
+    "@musunest/appspec-schema": "workspace:*",
+    "@musunest/control-plane": "workspace:*",
+    "@musunest/factory": "workspace:*",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "jsdom": "^30.0.1",
+    "vite": "^8.3.0"
+  }
+}
