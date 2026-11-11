@@ -3191,6 +3191,90 @@ describe("台本のファイルを渡す（04 §9・Issue #444）", () => {
     ]);
   });
 
+  it("記録への写しで、観点の不一致で落とした件数と要件の文が要る件数を、0 でない異なる値で残す（Issue #896）", async () => {
+    // 主の事項は目録の事項（観点 counted-state・要件 R-1）、一緒に閉じる事項は目録に無い事項（観点 null・
+    // 要件 R-2）。前者で facet_rejected_entries、後者で requirement_text_needed を作る——2 つを取り違えて
+    // 写すと、値が違うので落ちる
+    const groupedSurface = {
+      ambiguities: [{ id: "OI-1", requirementId: "R-2", text: "いつ締め切るか", critical: true }],
+      unwritable: [],
+    };
+    const groupedQuestions = {
+      questions: [
+        {
+          id: "Q-1",
+          openIssueId: "OI:catalog:R-1:counted-state",
+          alsoCloses: ["OI-1"],
+          text: "どの状態のものを数えますか",
+          choices: [
+            { id: "c1", text: "全員" },
+            { id: "c2", text: "自分のみ" },
+          ],
+          recommended: { choiceId: "c1", reason: "依頼に沿う" },
+          allowFreeText: true,
+        },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(groupedSurface),
+      structured(groupedQuestions),
+      structured(SURFACE_CLEAR),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogUnspecifiedFor({ "R-1": ["counted-state"] }),
+      ...coverAnswers(["A:Q1-1"]),
+    });
+    const dir = `${directory}/script-diagnosis-copy`;
+    const text = scriptText([
+      // 主の事項の文に当たり、観点が違う 2 件（facet_rejected_entries）
+      { id: "E1", facet: "include-zero", keys: ["要件"], answer: { choose: ["全員"] }, basis: "b" },
+      { id: "E2", facet: "aggregation", keys: ["どの状態"], answer: { choose: ["全員"] }, basis: "b" },
+      // 主の事項に当たって答える 1 件（観点が主の事項と一致する）
+      { id: "E3", facet: "counted-state", keys: ["どの状態のもの"], answer: { choose: ["自分のみ"] }, basis: "b" },
+      // 一緒に閉じる事項の要件の文にだけ当たる 1 件（requirement_text_needed）
+      { id: "E4", facet: "period", keys: ["件数を合計できる"], answer: { choose: ["全員"] }, basis: "b" },
+    ]);
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--script", "script.json"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === "script.json" ? text : SOURCE_TEXT),
+      writeFile: async (path, file) => {
+        await fs.writeFile(path, file, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).not.toBe(EXIT_USAGE);
+    const record = await readPlanRecord(dir);
+    expect(record.script?.matches).toEqual([
+      {
+        question_id: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entry_index: 2,
+        diagnosis: {
+          keys_only_entries: 4,
+          facet_rejected_entries: 2,
+          relaxed: false,
+          requirement_text_needed: 1,
+          v1_state: "answered",
+        },
+      },
+    ]);
+  });
+
   it("不明が残る走りでは、確認の役も Build も呼ばれず、問いごとに不明の状態が残る", async () => {
     const recording = createRecordingClient([
       structured(REQUIREMENT_LIST_OUTPUT),
