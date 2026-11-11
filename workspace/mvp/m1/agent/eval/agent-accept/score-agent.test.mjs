@@ -2638,7 +2638,9 @@ test("#513 (e) 計測 → 予算の停止 → 採点：上限 0.60 は n=1・片
       return { pattern: pid, envelope: { path: `envelopes/${pid}.json`, sha256: sha256(bytes) }, plan_sha256: env.plan_sha256, source_sha256: env.source_sha256 };
     });
     const fz = join(fzDir, "frozen-plan-set.json");
-    writeFileSync(fz, JSON.stringify({ schema: "musunest-eval/frozen-plan-set/v1", id: "t", version: 1, origin: "frozen-plan", rule: null, set: { path: DEFAULT_SET_PATH, sha256: set.sha256, id: set.set.id, version: set.set.version }, adopted, missing: [] }));
+    // #876：組は作成時の文書の指紋を持つ（候補の checkout の今の文書。指紋の無い旧い形の組は --build-from が断る）
+    const { promptDocumentsOfCheckout } = await import("./freeze-plan-set.mjs");
+    writeFileSync(fz, JSON.stringify({ schema: "musunest-eval/frozen-plan-set/v1", id: "t", version: 1, origin: "frozen-plan", rule: null, set: { path: DEFAULT_SET_PATH, sha256: set.sha256, id: set.set.id, version: set.set.version }, prompt_documents: await promptDocumentsOfCheckout(cand), adopted, missing: [] }));
     const runAgentFile = join(here, "run-agent.mjs");
     const pairs = join(base, "pairs.json");
     const mp = spawnSync(process.execPath, [runAgentFile, cand, join(base, "unused"), "--make-pairs", pairs, "--build-from", fz, "--runs", "3"], { encoding: "utf8", env: { ...process.env, JEV_API_KEY: "" } });

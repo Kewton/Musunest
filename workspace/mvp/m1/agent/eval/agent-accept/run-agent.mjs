@@ -106,7 +106,7 @@ import { DEFAULT_SET_PATH, FACTORY_VERDICTS, SCRIPT_MODE, fingerprintDir, loadEv
 import { BUILD_STAGE_IDS, COMPARE_GROUPS, COMPARE_PAIRS_COPY, COMPARE_RUN_PREFIX, COMPARE_RUN_SCHEMA, COMPARISON_FILE, COMPARISON_SCHEMA, PIPELINES, SCORING_COST_USD, launchAllowed, limitsApproved, makePairs, outputLimitsOf, pairsProblem } from "./score-agent.mjs";
 import { CONDITIONS_V8, sameFlags } from "./score-agent.mjs";
 import { CONDITIONS_V6, FAILURE_KINDS as RECORD_FAILURE_KINDS, STAGE_INPUT_DIR, STAGE_COMPARE_GROUPS, STAGE_COMPARE_ROLES, STAGE_COMPARISON_SCHEMA, STAGE_PAIRS_SCHEMA, STAGE_RUN_MODE, conditionsSignature, loadConditions, makeStagePairs, pairsShapeProblem, stagePairsProblem } from "./score-agent.mjs";
-import { PLAN_FILE_CHECKS, PLAN_FILE_ERROR_SCHEMA, PLAN_FILE_REJECT_SCHEMA, checkEnvelope, loadFrozenSet, loadPlanFileChecks, refusalLine } from "./freeze-plan-set.mjs";
+import { PLAN_FILE_CHECKS, PLAN_FILE_ERROR_SCHEMA, PLAN_FILE_REJECT_SCHEMA, checkEnvelope, loadFrozenSet, loadPlanFileChecks, promptDocumentsOfFiles, refusalLine, samePromptDocuments } from "./freeze-plan-set.mjs";
 import { FROZEN_STAGE_SET_FILE, FROZEN_STAGE_SET_KIND, loadFrozenStageSet } from "./freeze-stage-input.mjs";
 
 const args = process.argv.slice(2);
@@ -338,6 +338,8 @@ if (only && buildFrom === null) {
 if (makePairsOut !== null && !stageMode) {
   const fz = loadFrozenSet(resolve(buildFrom));
   if (fz.status === "missing") refuseCode("build-from:frozen-missing");
+  // #876：文書の指紋（prompt_documents）の欠けた旧い形の組・形の違う指紋は、ほかの形の違いと別の符号で断る
+  if (fz.status === "documents-missing" || fz.status === "documents-invalid") refuseCode(`build-from:${fz.status}`);
   if (fz.status !== "ok") refuseCode("build-from:frozen-invalid");
   if (!Number.isInteger(RUNS) || RUNS < 1) refuseCode("flags:conflict");
   if (existsSync(makePairsOut)) refuseCode("compare:pairs-exists");
@@ -415,8 +417,15 @@ const envelopeBytes = new Map();
 if (buildFrom !== null) {
   const fz = loadFrozenSet(resolve(buildFrom));
   if (fz.status === "missing") refuseCode("build-from:frozen-missing");
+  // #876：文書の指紋（prompt_documents）の欠けた旧い形の組・形の違う指紋は、ほかの形の違いと別の符号で断る
+  if (fz.status === "documents-missing" || fz.status === "documents-invalid") refuseCode(`build-from:${fz.status}`);
   if (fz.status !== "ok") refuseCode("build-from:frozen-invalid");
   fzLoaded = fz;
+  // #876：組の文書の指紋（作成時の計測の条件から写した値）が、計測する checkout の今の文書（条件の prompt_documents と同じ取り方）と同じ。
+  // 違えば子を起こす前に断る（比較元の checkout の文書は compare:fingerprint-differs が候補と照らす）
+  let currentDocuments = null;
+  try { currentDocuments = promptDocumentsOfFiles(main.schemaFiles); } catch { currentDocuments = null; }
+  if (!samePromptDocuments(fz.set.prompt_documents, currentDocuments)) refuseCode("build-from:documents-mismatch");
   // 組に書いた定義ファイルの SHA-256 と今の定義ファイル
   if (fz.set.set.sha256 !== evalSet.sha256) refuseCode("build-from:set-sha256");
   const adoptedIds = fz.set.adopted.map((a) => a.pattern), missingIds = fz.set.missing.map((m) => m.pattern);
@@ -490,7 +499,20 @@ const codeOf = (lib, code) => (Array.isArray(lib.STAGE_INPUT_CODES) && lib.STAGE
 // 出すなら、その dist の V12_PIPELINE_FLAGS をそのまま渡して全体と上流の指紋を読む（読み手で旗を組まない）。例外・どちらかが 64 桁の 16 進でなければ
 // dist の読み取りの失敗。公開の関数が無い dist（#816 の前）に限り、今までの旗なしの呼び出し（propertyLedgerSha256・upstreamLedgerSha256）に戻る
 const SHA256_HEX = /^[0-9a-f]{64}$/;
-const v12Of = async (entry, lib) => {
+// #876：dist の package の入口が公開の関数 documentsVersionOf（#875）を出すなら、その dist の loadDocumentsFromFiles()（入口に無ければ cli.js）の結果から
+// 段へ渡す文書の中身の指紋の今の値を作り、照合の版の documents に渡す（checkpoint の自己申告の値を期待値にしない）。読み込みの関数が無い・例外・
+// 64 桁の 16 進でなければ dist の読み取りの失敗（子を起こす前）。公開の関数が無い dist（#875 の前）に限り、今までの照合のまま（documents を渡さない）
+const documentsOf = async (entry, ctx) => {
+  if (typeof entry?.documentsVersionOf !== "function") return {};
+  const load = typeof entry.loadDocumentsFromFiles === "function" ? entry.loadDocumentsFromFiles : ctx?.factory?.loadDocumentsFromFiles;
+  if (typeof load !== "function") refuseCode("stage:dist-unreadable");
+  let documents = null;
+  try { documents = await entry.documentsVersionOf(await load()); } catch { documents = null; }
+  if (typeof documents !== "string" || !SHA256_HEX.test(documents)) refuseCode("stage:dist-unreadable");
+  return { documents };
+};
+const v12Of = async (entry, lib, ctx) => ({ ...(await v12LedgerOf(entry, lib)), ...(await documentsOf(entry, ctx)) });
+const v12LedgerOf = async (entry, lib) => {
   if (!isFlagMap(entry?.V12_PIPELINE_FLAGS)) refuseCode("stage:dist-unreadable");
   const flags = JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS));
   const first = stageBoundary === lib.STAGE_BOUNDARIES[0];
@@ -531,7 +553,7 @@ if (stageMode && stageBoundary !== null && existsSync(join(resolve(stageFromArg)
   for (const [pid, input] of loaded.inputs) if (input.checkpointFile !== stageLib.stageCheckpointFile(stageBoundary) || !recordNames.includes(input.recordFile)) refuseStage("stage-from:set-invalid", { ids: [pid] });
   const uncovered = [...new Set(jobs.map((j) => j.pid))].filter((pid) => !set.adopted.some((a) => a.pattern === pid) && !set.missing.some((m) => m.pattern === pid));
   if (uncovered.length > 0) refuseStage("stage-from:set-pattern", { ids: uncovered });
-  const v12s = pipeline === V12_PIPELINE ? [await v12Of(v12Entry, libs[0]), ...(baseline === null ? [] : [await v12Of(baselineEntry, libs[1])])] : null;
+  const v12s = pipeline === V12_PIPELINE ? [await v12Of(v12Entry, libs[0], ctxs[0]), ...(baseline === null ? [] : [await v12Of(baselineEntry, libs[1], ctxs[1])])] : null;
   const verifiedPatterns = new Set();
   for (const job of jobs) {
     const id = idOf(job), input = loaded.inputs.get(job.pid);
@@ -576,7 +598,7 @@ if (stageMode && stageBoundary !== null && existsSync(join(resolve(stageFromArg)
   if (!passesBoundary(stageLib, upRange, stageBoundary)) refuseStage("stage-from:range");
   stageFrom = { conditions_sha256: sha256(readFileSync(join(root, "conditions.json"))), signature: upCond.signature, range: upRange };
   const checkpointFile = stageLib.stageCheckpointFile(stageBoundary);
-  const v12s = pipeline === V12_PIPELINE ? [await v12Of(v12Entry, libs[0]), ...(baseline === null ? [] : [await v12Of(baselineEntry, libs[1])])] : null;
+  const v12s = pipeline === V12_PIPELINE ? [await v12Of(v12Entry, libs[0], ctxs[0]), ...(baseline === null ? [] : [await v12Of(baselineEntry, libs[1], ctxs[1])])] : null;
   // #830：入力なしの判定に使う境界より前の段（v1.2 ids on だけ dist の stagesInRange から導く）
   const absentStages = absentStagesFor(stageLib, upRange, stageBoundary, upCond.params.v12_flags);
   for (const job of jobs) {

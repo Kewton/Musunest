@@ -8,7 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { loadConditions, loadEvalSet, reconcile, sha256, validatePlanned } from "./score-agent.mjs";
+import { fingerprintDir, loadConditions, loadEvalSet, reconcile, sha256, validatePlanned } from "./score-agent.mjs";
 
 /** 凍結した組の版。人が作る (a) も同じ形（origin が human、author が owner か scorer） */
 export const FROZEN_SET_SCHEMA = "musunest-eval/frozen-plan-set/v1";
@@ -35,6 +35,32 @@ const isObj = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
 const HEX64 = /^[0-9a-f]{64}$/;
 const PID = /^P\d+$/;
 const RUN_ID = /^P\d+(-r\d+)?$/;
+
+// ── 文書の指紋（#876）：(b) の組に、出どころの計測の条件の prompt_documents（契約・語彙の意味・語彙の台帳）を写す。今の文書から取り直さない。
+// 組を読む側（loadFrozenSet）は欠け・不正形を断り、--build-from は計測する checkout の今の文書と照らして、違えば子を起こす前に断る（API を呼ばない）
+/** 組の prompt_documents の欄（どれも 64 桁の 16 進） */
+export const PROMPT_DOCUMENT_KEYS = ["contract", "semantics", "vocabulary"];
+/** 欄がちょうど 3 つで、どれも 64 桁の 16 進 */
+export const isPromptDocuments = (v) => isObj(v) && Object.keys(v).length === PROMPT_DOCUMENT_KEYS.length && PROMPT_DOCUMENT_KEYS.every((k) => typeof v[k] === "string" && HEX64.test(v[k]));
+export const samePromptDocuments = (a, b) => isPromptDocuments(a) && isPromptDocuments(b) && PROMPT_DOCUMENT_KEYS.every((k) => a[k] === b[k]);
+/** 計測の条件の prompt_documents（run-agent.mjs の conditionsFor が書く形）から指紋の組を取る。形が違えば null */
+export function promptDocumentsOfConditions(cond) {
+  const pd = isObj(cond) ? cond.prompt_documents : null;
+  const v = isObj(pd) ? { contract: pd.contract?.fingerprint, semantics: pd.semantics?.sha256, vocabulary: pd.vocabulary?.sha256 } : null;
+  return isPromptDocuments(v) ? v : null;
+}
+/**
+ * checkout の appspec-schema の files（packages/appspec-schema/dist/files.js の公開の値）から、今の文書の指紋の組を作る（conditionsFor の prompt_documents と
+ * 同じ取り方：契約のディレクトリの指紋・語彙の意味と語彙の台帳のファイルの SHA-256）。読めなければ例外
+ */
+export function promptDocumentsOfFiles(files) {
+  const contractDir = fileURLToPath(files.packageFile(`${files.CONTRACT_DIR}/`));
+  return { contract: fingerprintDir(contractDir).fingerprint, semantics: sha256(readFileSync(fileURLToPath(files.semanticsFile()))), vocabulary: sha256(readFileSync(fileURLToPath(files.vocabularyFile()))) };
+}
+/** checkout の今の文書の指紋の組（試験の合成の組と道具が同じ取り方を使う） */
+export async function promptDocumentsOfCheckout(checkout) {
+  return promptDocumentsOfFiles(await import(pathToFileURL(join(checkout, "packages/appspec-schema/dist/files.js")).href));
+}
 
 /**
  * 断りの 1 行（標準エラー）：固定の符号と、本の ID（P<n> か P<n>-r<n> の形のものだけ）・件数だけ。入力の文字列は通さない。
@@ -73,6 +99,7 @@ export async function checkEnvelope(checks, bytes, sourceText) {
 
 /**
  * 凍結した組のファイルを読む（run-agent.mjs --build-from）。無ければ missing、JSON でなければ unreadable、形が違えば invalid（理由は数だけ。値を書かない）。
+ * ほかの形が正しく文書の指紋（prompt_documents。#876）だけが無ければ documents-missing、形が違えば documents-invalid（指紋の無い旧い形の組を受けない）。
  * 通れば組・SHA-256・置き場所と、採用した P ごとの包みの写しの絶対パス
  */
 export function loadFrozenSet(path) {
@@ -98,6 +125,8 @@ export function loadFrozenSet(path) {
   }
   if (!Array.isArray(set.missing) || !set.missing.every((m) => isObj(m) && typeof m.pattern === "string" && PID.test(m.pattern) && !seen.has(m.pattern))) bad.push("missing");
   if (bad.length > 0) return { status: "invalid" };
+  if (!("prompt_documents" in set)) return { status: "documents-missing" };
+  if (!isPromptDocuments(set.prompt_documents)) return { status: "documents-invalid" };
   const dir = dirname(path);
   return { status: "ok", set, bytes, sha256: sha256(bytes), path, dir, envelopeOf: new Map(adopted.map((a) => [a.pattern, resolve(dir, a.envelope.path)])) };
 }
@@ -118,6 +147,9 @@ export async function freezePlanSet({ repo, outRoot, id, version }) {
   if (validatePlanned(cond).length > 0) return { code: "freeze:planned" };
   if (cond.source?.dirty !== false) return { code: "freeze:dirty" };
   if (typeof cond.source?.commit !== "string" || cond.source.commit === "") return { code: "freeze:commit" };
+  // 出どころの計測の条件の文書の指紋（#876）。今の文書から取り直さない。欠け・形の違う条件からは凍結しない
+  const promptDocuments = promptDocumentsOfConditions(cond);
+  if (promptDocuments === null) return { code: "freeze:documents" };
   const evalSet = typeof cond.set?.path === "string" ? loadEvalSet(resolve(repo, cond.set.path)) : { status: "missing" };
   if (evalSet.status !== "ok") return { code: "freeze:set-unreadable" };
   if (evalSet.sha256 !== cond.set.sha256) return { code: "freeze:set-sha256" };
@@ -157,6 +189,7 @@ export async function freezePlanSet({ repo, outRoot, id, version }) {
   const frozen = {
     schema: FROZEN_SET_SCHEMA, id, version, origin: "frozen-plan", rule: FREEZE_RULE,
     set: { path: cond.set.path, sha256: cond.set.sha256, id: cond.set.id, version: cond.set.version },
+    prompt_documents: promptDocuments,
     source_measurement: {
       measurement_id: cond.measurement_id ?? null, signature: cond.signature ?? null, conditions_sha256: sha256(readFileSync(join(outRoot, "conditions.json"))),
       commit: cond.source.commit, factory_fingerprint: cond.factory?.fingerprint ?? null, model: p.model ?? null, effort: p.effort ?? null,
