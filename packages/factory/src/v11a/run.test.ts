@@ -129,6 +129,8 @@ import {
   type GenerationInputV11a,
 } from "./run.js";
 import { bindTestsById, requiredValidationsOf, type RequiredValidation } from "./bind-by-id.js";
+import { deriveUnwritableClaims, type CarryOverEntry } from "./carry-over.js";
+import { deriveAcceptedParts } from "../v12/accepted-parts.js";
 import * as declCheckStage from "./stages/decl-check.js";
 import {
   DECL_CHECK_IDS_R03_DEFINITION,
@@ -10679,7 +10681,18 @@ describe("(9) 了承して除いた部分を持つ計画の走り（C2・C2'・�
     expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
     const carryOver = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.carryOver);
     expect(carryOver["accepted_removals"]).toEqual(["R3"]);
-    expect(carryOver["entries"]).toEqual([{ requirementId: "R3", reasons: [{ origin: "name-table", reason: "宣言で書けない" }] }]);
+    // 了承済みの持ち越しは申告に写し、持ち越しの要件ごとに reported が付く（Issue #847）
+    expect(carryOver["entries"]).toEqual([
+      { requirementId: "R3", reasons: [{ origin: "name-table", reason: "宣言で書けない" }], reported: true },
+    ]);
+    expect(artifactOf(result.bundle, UNWRITABLE_FILE)["unwritable"]).toEqual([
+      {
+        requirementId: "R3",
+        text: requirementsFromPlan(acceptedR3Plan()).requirements.find((requirement) => requirement.id === "R3")?.text,
+        quote: requirementsFromPlan(acceptedR3Plan()).requirements.find((requirement) => requirement.id === "R3")?.quote,
+        unwritable: [acceptedR3Plan().requirements.find((requirement) => requirement.id === "R3")?.parts[0]?.text],
+      },
+    ]);
   });
 
   it("(i) 1 回目から無効：混在の要件の了承済みの部分だけを根拠にした応答は、形のやり直しでも C2 で止まる（none・exit 1・bundle null）", async () => {
@@ -10970,7 +10983,7 @@ describe("(10) 根拠が文書の制約 ID だけの持ち越しを申告に写�
     expect(artifactOf(result.bundle, VERIFICATION_FILE)["partial_reasons"]).toMatchObject({ unwritable_requirements: { count: 0, requirement_ids: [] } });
   });
 
-  it("(5) 全部が了承済みの要件だけの持ち越しは申告 0 件：根拠が文書の ID なら partial・理由なし（了承済みの部分 ID は full＝先行 Issue）", async () => {
+  it("(5) 全部が了承済みの要件だけの持ち越しは、根拠が文書の ID なら今のまま申告 0 件で partial・理由なし（反例 (c)）。了承済みの部分 ID の根拠は full で、#847 から申告に写る", async () => {
     const acceptedPlan: ConfirmedPlan = {
       ...PLAN,
       requirements: PLAN.requirements.map((requirement) =>
@@ -10990,7 +11003,16 @@ describe("(10) 根拠が文書の制約 ID だけの持ち越しを申告に写�
 
     const partBasis = await runScenario(claimCalls(["R3-p1"]), { flags: IDS_FLAGS, plan: acceptedPlan });
     expect(partBasis.result.outcome).toEqual({ result: "pass", verdict: "full" });
-    expect(artifactOf(partBasis.result.bundle, UNWRITABLE_FILE)["unwritable"]).toEqual([]);
+    // 了承済みの持ち越しを申告に写す（部分は確定した仕様の了承済みの部分の文。Issue #847）
+    const acceptedList = requirementsFromPlan(acceptedPlan).requirements.find((requirement) => requirement.id === "R3");
+    expect(artifactOf(partBasis.result.bundle, UNWRITABLE_FILE)["unwritable"]).toEqual([
+      {
+        requirementId: "R3",
+        text: acceptedList?.text,
+        quote: acceptedList?.quote,
+        unwritable: [acceptedPlan.requirements.find((requirement) => requirement.id === "R3")?.parts[0]?.text],
+      },
+    ]);
   });
 
   it("(5) 最終の宣言が静的チェックに落ちる台本：申告は納品物に載るが verdict は none・理由なし", async () => {
@@ -11082,6 +11104,307 @@ describe("(10) 根拠が文書の制約 ID だけの持ち越しを申告に写�
     );
   });
 });
+
+// ── (12) 了承済みの持ち越しを申告に写す（Issue #847）──────────────────────────
+
+/**
+ * 了承済みの持ち越しを申告に写す走りの、判定・材料・段の走り・指紋（Issue #847）。
+ * 部品は (9) と (10) の台本を共有し、判定の材料の 2 つの数が base と同じであることを見る。
+ *
+ * 変異の証跡（この describe と unwritable-claims.test.ts の (1)(2)(5) で赤になる）：
+ *   - `deriveUnwritableClaims` の了承済みの持ち越しの枝を外す → 10 本が赤（(1)(3)(4)(6) の導出）
+ *   - `run.ts` の `acceptedUnwritable` を 0 にする → 6 本が赤（(3) の判定が partial に変わる）
+ *   - 文書の根拠の規則で全部が了承済みの要件を外す条件を消す → 6 本が赤（(1) の反例 (c) が申告になる）
+ *   - 了承済みの申告の部分を C2 の理由にする → 6 本が赤（(2) の形）
+ */
+describe("(12) 了承済みの持ち越しを申告に写し、判定の材料では差し引く（旗 v12.ids の走り。Issue #847）", () => {
+  const IDS_FLAGS = { ledger: true, searchRepair: true, ids: true };
+  const baseResponses = () => idsResponsesOf(LIST, TABLE_IDS, PROPERTY_LEDGER_VIEW_IDS);
+  const c1Calls = () => {
+    const { entities, fields, behaviors } = baseResponses();
+    return [structured(entities), structured(fields), structured(behaviors)];
+  };
+  /** R3 の確かめ方を unresolved（根拠は渡した ID）にした C2 の応答 */
+  const withR3Unresolved = (constraintIds: readonly string[]) => ({
+    requirements: (baseResponses().mapping as { requirements: readonly Record<string, unknown>[] }).requirements.map((entry) =>
+      entry["requirementId"] === "R3"
+        ? {
+            ...entry,
+            verification: { ...(entry["verification"] as Record<string, unknown>), kind: "unresolved", value: null, reason: "宣言で書けない", checks: null, constraintIds },
+          }
+        : entry,
+    ),
+  });
+  /** 締める操作を外した宣言（R3 を持ち越す走りの B1。`RUN_YAML` から `closeItem` を落とす） */
+  const NO_CLOSE_YAML = fixtureYaml({ closeItem: false }).replace("show: [title, amount, kind]", "show: [title, owner, amount, day, kind]");
+  const REMAINING = ["R1", "R2", "R4"] as const;
+  const remainingT2 = () => renamed(idsT2Response([...r1Tests(), ...r4Tests()], REMAINING));
+  /** R3 が了承済みの部分 ID を根拠に持ち越す完走の台本（C1 3・C2・C3・T2・B1・B3'） */
+  const acceptedCalls = (constraintIds: readonly string[] = ["R3-p1"]): RecordedCall[] => [
+    ...c1Calls(),
+    structured(withR3Unresolved(constraintIds)),
+    structured(acceptAll(REMAINING)),
+    structured(remainingT2()),
+    structured({ declaration: NO_CLOSE_YAML }),
+    structured(acceptAll(REMAINING)),
+  ];
+  /** R3 の 1 つの部分（planOf が付ける `R3-p1`）を了承して除いた計画 */
+  const acceptedPlan = (): ConfirmedPlan => ({
+    ...PLAN,
+    requirements: PLAN.requirements.map((requirement) =>
+      requirement.id === "R3"
+        ? {
+            ...requirement,
+            parts: requirement.parts.map((part) => ({ ...part, disposition: "accepted_removal" as const })),
+          }
+        : requirement,
+    ),
+    accepted_unwritable: [
+      { part_id: "R3-p1", alternative_id: "R3", basis: { doc_version: "v1", location: "1", constraint_id: "c" } },
+    ],
+  });
+  /** 了承済みの部分を 2 つ持つ計画（部分の文は計画の値。R3-p1 と R3-p2） */
+  const twoPartPlan = (): ConfirmedPlan => ({
+    ...PLAN,
+    requirements: PLAN.requirements.map((requirement) =>
+      requirement.id === "R3"
+        ? {
+            ...requirement,
+            parts: [
+              { id: "R3-p1", text: "部分の文 A。", disposition: "accepted_removal" as const },
+              { id: "R3-p2", text: "部分の文 B。", disposition: "accepted_removal" as const },
+            ],
+          }
+        : requirement,
+    ),
+    accepted_unwritable: [
+      { part_id: "R3-p1", alternative_id: "R3", basis: { doc_version: "v1", location: "1", constraint_id: "c" } },
+      { part_id: "R3-p2", alternative_id: "R3", basis: { doc_version: "v1", location: "2", constraint_id: "c" } },
+    ],
+  });
+  /** 納品物から読める申告の数（verification.json の数と unwritable.json の行数） */
+  const claimCountsOf = (result: { bundle: AssembledBundle | null }) => {
+    const verification = artifactOf(result.bundle, VERIFICATION_FILE) as Record<string, unknown>;
+    const unwritable = artifactOf(result.bundle, UNWRITABLE_FILE) as { readonly unwritable: readonly unknown[] };
+    return {
+      unwritable_requirements: (verification["partial_reasons"] as { readonly unwritable_requirements: { readonly count: number } })
+        .unwritable_requirements.count,
+      claims: unwritable.unwritable.length,
+    };
+  };
+
+  it("(3) 了承済みの持ち越しだけの台本は full のまま、unwritable に申告 1 件・verification に同じ ID・carry-over に reported: true（base は申告 0 件＝赤）", async () => {
+    const { result } = await runScenario(acceptedCalls(), { flags: IDS_FLAGS, plan: acceptedPlan() });
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const unwritable = artifactOf(result.bundle, UNWRITABLE_FILE);
+    expect(unwritable["unwritable"]).toEqual([
+      {
+        requirementId: "R3",
+        text: requirementsFromPlan(acceptedPlan()).requirements.find((requirement) => requirement.id === "R3")?.text,
+        quote: requirementsFromPlan(acceptedPlan()).requirements.find((requirement) => requirement.id === "R3")?.quote,
+        unwritable: [acceptedPlan().requirements.find((requirement) => requirement.id === "R3")?.parts[0]?.text],
+      },
+    ]);
+    expect(artifactOf(result.bundle, VERIFICATION_FILE)["partial_reasons"]).toMatchObject({
+      unwritable_requirements: { count: 1, requirement_ids: ["R3"] },
+    });
+    expect(carryEntriesOf(result.bundle)).toEqual([
+      { requirementId: "R3", reasons: [{ origin: "name-table", reason: "宣言で書けない" }], reported: true },
+    ]);
+    // 判定の材料：unwritableRequirements（申告）1・acceptedUnwritable（了承済み）1。full がその差し引きを裏づける
+    expect(claimCountsOf(result)).toEqual({ unwritable_requirements: 1, claims: 1 });
+    // base（#847 の前。了承済みの持ち越しを申告に写さない）は申告 0 件＝赤
+    const before = deriveUnwritableClaims({
+      list: requirementsFromPlan(acceptedPlan()),
+      table: MAPPED_IDS,
+      documents: FIXTURE_DOCUMENTS,
+      entries: carryEntriesOf(result.bundle) as readonly CarryOverEntry[],
+      acceptedParts: deriveAcceptedParts(acceptedPlan()),
+    });
+    expect(before).toEqual([]);
+  });
+
+  it("(3) 了承済みと文書の根拠が並ぶ台本は partial で、部分案の理由は base と同じ。判定の材料の 2 つの数はすべての台本で base と同じ値", async () => {
+    // R3 は了承済みの部分 ID、R4 は文書の制約 ID を根拠に持ち越す台本（2 件の申告）
+    const mapping = {
+      requirements: (baseResponses().mapping as { requirements: readonly Record<string, unknown>[] }).requirements.map((entry) =>
+        entry["requirementId"] === "R3"
+          ? { ...entry, verification: { ...(entry["verification"] as Record<string, unknown>), kind: "unresolved", value: null, reason: "宣言で書けない", checks: null, constraintIds: ["R3-p1"] } }
+          : entry["requirementId"] === "R4"
+            ? { ...entry, verification: { ...(entry["verification"] as Record<string, unknown>), kind: "unresolved", value: null, reason: "宣言で書けない", checks: null, constraintIds: [FIXTURE_CONSTRAINT_ID] } }
+            : entry,
+      ),
+    };
+    // R3（締める操作）と R4（率・区分ごと・月ごと・まとめの画面）の行を外した宣言（残る R1・R2 の要素だけ）
+    const R3_R4_CARRIED_YAML = [
+      "entities:",
+      "  - name: member",
+      "    fields:",
+      "      title:",
+      "        type: string",
+      "  - name: item",
+      "    fields:",
+      "      title:",
+      "        type: string",
+      "      owner:",
+      "        type: ref",
+      "        to: member",
+      "      amount:",
+      "        type: number",
+      "      day:",
+      "        type: date",
+      "      kind:",
+      "        type: enum",
+      "        options:",
+      "          alpha: アルファ",
+      "          beta: ベータ",
+      "computed:",
+      "  - name: itemCount",
+      "    entity: member",
+      "    aggregate:",
+      "      count: item",
+      "      where:",
+      "        owner: this",
+      "    type: number",
+      "views:",
+      "  - name: items",
+      "    type: table",
+      "    entity: item",
+      "    show: [title, owner, amount, day, kind]",
+      "  - name: members",
+      "    type: table",
+      "    entity: member",
+      "    show: [title, itemCount]",
+      "actions:",
+      "  - name: addItem",
+      "    entity: item",
+      "validations:",
+      "  - name: amount",
+      "    entity: item",
+      "    expression: amount > 0",
+      "permissions:",
+      "  - name: read",
+      "    subject: minIdentity",
+      "  - name: write",
+      "    subject: minIdentity",
+      "minIdentity:",
+      "  mode: anonymous",
+      "",
+    ].join("\n");
+    const bothRemaining = ["R1", "R2"] as const;
+    const calls = [
+      ...c1Calls(),
+      structured(mapping),
+      structured(acceptAll(bothRemaining)),
+      structured(renamed(idsT2Response([...r1Tests()], bothRemaining))),
+      structured({ declaration: R3_R4_CARRIED_YAML }),
+      structured(acceptAll(bothRemaining)),
+    ];
+    const { result } = await runScenario(calls, { flags: IDS_FLAGS, plan: acceptedPlan() });
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial", reason: "Plan の見落とし" });
+    // 2 つの数：unwritableRequirements（了承済み 1＋文書の根拠 1＝2）・acceptedUnwritable（了承済み 1）
+    expect(claimCountsOf(result)).toEqual({ unwritable_requirements: 2, claims: 2 });
+    // 文書の根拠だけの R4 は今までどおり「C2 の理由＋（根拠: …）」の形
+    const unwritable = artifactOf(result.bundle, UNWRITABLE_FILE)["unwritable"] as readonly { readonly requirementId: string }[];
+    expect(unwritable.map((claim) => claim.requirementId)).toEqual(["R3", "R4"]);
+  });
+
+  it("(2) 了承済みの部分を 2 つ持つ要件の申告は、確定した仕様の部分の文 2 行で parts の順・文字列が一致し、根拠の表記揺れ・重複・逆順でも同じ申告になる", async () => {
+    const first = await runScenario(acceptedCalls(["R3-p1", "R3-p2"]), { flags: IDS_FLAGS, plan: twoPartPlan() });
+    const shuffled = await runScenario(acceptedCalls(["`R3-p2`", "R3-p1", "R3-p2"]), { flags: IDS_FLAGS, plan: twoPartPlan() });
+    const claimOf = (result: typeof first.result) =>
+      (artifactOf(result.bundle, UNWRITABLE_FILE)["unwritable"] as readonly { readonly requirementId: string; readonly unwritable: readonly string[] }[]).find(
+        (claim) => claim.requirementId === "R3",
+      );
+    const claim = claimOf(first.result);
+    expect(claim?.unwritable).toEqual(["部分の文 A。", "部分の文 B。"]);
+    // C2 が根拠を表記揺れ・重複・逆順で挙げても同じ申告
+    expect(claimOf(shuffled.result)).toEqual(claim);
+    // 要件 ID・文・引用は有効な一覧と一致する
+    const listed = requirementsFromPlan(twoPartPlan()).requirements.find((requirement) => requirement.id === "R3");
+    expect(claim).toMatchObject({ requirementId: "R3" });
+    expect((claim as { readonly text?: string }).text).toBe(listed?.text);
+  });
+
+  it("(4) ⑦ まで流す走りと、t1-t2・t2-b1 の checkpoint から再開する走りで、判定と材料が一気通貫の値と一致し、返り値に申告の欄が無い", async () => {
+    const calls = acceptedCalls();
+    const whole = await runScenario(calls, { flags: IDS_FLAGS, plan: acceptedPlan() });
+    const full = await runStageScenario(calls, { flags: IDS_FLAGS, plan: acceptedPlan() });
+    expect(full.result.judgeVerdict).toBe(whole.result.outcome.verdict);
+    expect(full.result.judgeVerdict).toBe("full");
+    expect("unwritable" in full.result).toBe(false);
+    expect("reported" in full.result).toBe(false);
+    expect(claimCountsOf(whole.result)).toEqual({ unwritable_requirements: 1, claims: 1 });
+
+    /** 境界の材料を checkpoint に書き、既存の照合（`verifyStageInput`）を通して再開の材料にする */
+    const resumeFromCheckpoint = async (materials: BoundaryMaterials, start: "test-spec" | "write"): Promise<ResumeMaterials> => {
+      const versions = { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0" };
+      const checkpoint = buildStageCheckpoint({ materials, versions, planSha256: "a".repeat(64), sourceSha256: "b".repeat(64) });
+      const record = {
+        schema_version: STAGE_RUN_RECORD_SCHEMA,
+        checkpoints: [{ boundary: materials.boundary, path: "cp.json", output_digest: await stageOutputDigest(checkpoint) }],
+      };
+      const verified = await verifyStageInput({
+        start,
+        checkpointText: stageJsonText(checkpoint),
+        recordText: JSON.stringify(record),
+        checkpointFile: "cp.json",
+        plan: acceptedPlan(),
+        planSha256: "a".repeat(64),
+        sourceSha256: "b".repeat(64),
+        vocabularyVersion: "v1",
+        contractVersion: "v0.2",
+      });
+      if (!verified.ok) throw new Error(`前提が壊れた：checkpoint の照合が落ちた（${verified.code}）`);
+      return verified.resume;
+    };
+    for (const [boundary, start, consumed] of [
+      ["t1-t2", "test-spec", 5],
+      ["t2-b1", "write", 6],
+    ] as const) {
+      const found = full.result.boundaries.find((entry) => entry.boundary === boundary);
+      if (found === undefined) throw new Error(`前提が壊れた：${boundary} の境界が無い`);
+      const resume = await resumeFromCheckpoint(found, start);
+      const resumed = await runStageRangeV11a({
+        ...inputOf(createCheckedRecordingClient(calls.slice(consumed)).client),
+        flags: IDS_FLAGS,
+        plan: acceptedPlan(),
+        range: { start, end: "judge" },
+        resume,
+      });
+      expect(resumed.stopped).toBeNull();
+      expect(resumed.judgeVerdict).toBe(whole.result.outcome.verdict);
+      expect(resumed.finalCarryOver).toEqual(full.result.finalCarryOver);
+      expect(resumed.verification).toEqual(full.result.verification);
+      expect("unwritable" in resumed).toBe(false);
+    }
+  });
+
+  it("(6) 指紋：了承済みの申告を持つ台本の納品物のダイジェストは、了承済みの申告と派生の欄を旧の形に戻した復元で base の値と一致する", async () => {
+    const { result } = await runScenario(acceptedCalls(), { flags: IDS_FLAGS, plan: acceptedPlan() });
+    if (result.bundle === null) throw new Error("前提が壊れた：納品物が無い");
+    const files = bundleFiles(result.bundle).map((file) => ({ path: file.path, text: file.text }));
+    const digestOf = (list: readonly { readonly path: string; readonly text: string }[]) => sha256Hex(JSON.stringify(list));
+    const restored = await restoreClaimsAndDerived(files);
+    const current = await digestOf(files);
+    const old = await digestOf(restored);
+    expect(current).not.toBe(old);
+    // 旧の形に戻した納品物のダイジェストは、直す前の値（Issue #847 で取り直す前の値。旧 216b50d1...）と一致する
+    expect(old).toBe(BEFORE_847_RESTORED_DIGEST);
+    expect(restored.filter((file) => !RESTORED_PATHS.includes(file.path))).toEqual(
+      files.filter((file) => !RESTORED_PATHS.includes(file.path)),
+    );
+  });
+});
+
+/**
+ * 了承済みの申告を持つ台本の納品物から、申告と派生の欄（unwritable・partial_reasons.unwritable_requirements・
+ * 部分案の理由・carry-over.json の reported・manifest のダイジェスト）を旧の形に戻したときのダイジェスト（Issue #847）。
+ * 了承済みの申告がある走りで変わるのはこの派生の欄だけであり、旧の形に戻すと同じ表・同じ持ち越し・同じ計画からは
+ * 直す前と同じ納品物になる（#735・#807 の作法）。
+ */
+const BEFORE_847_RESTORED_DIGEST = "3227e87ce5a4ee1bc5a7ec10ae1d455d20a9315ab57c2c0a5d37ec26fe1a9e30";
 
 // ── (11) 旗 v12.ids の外では申告・了承済みの持ち越しを導かない（Issue #844）──────────
 

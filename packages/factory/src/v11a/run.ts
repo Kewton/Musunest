@@ -2743,14 +2743,16 @@ async function runV11a(
     const acceptedCarriedSet = new Set(acceptedCarried);
     const carriedIds = carry.entries.map((entry) => entry.requirementId);
     const unresolvedCarriedIds = carriedIds.filter((id) => !acceptedCarriedSet.has(id));
-    // 書けない要件の申告（根拠が文書の制約 ID だけの name-table の持ち越し。Issue #807）。段の走りも同じ材料を使う
+    // 書けない要件の申告（根拠が文書の制約 ID だけの name-table の持ち越しと、了承済みの持ち越し。Issue #807・#847）。
+    // 段の走りも同じ材料を使う
     const claims = flags.ids
       ? deriveUnwritableClaims({
           list,
           table,
           documents: input.documents,
           entries: carry.entries,
-          acceptedParts: acceptedParts.basis,
+          acceptedParts,
+          acceptedCarried,
         })
       : [];
     const materials: JudgeMaterials = {
@@ -2758,8 +2760,8 @@ async function runV11a(
       correspondenceMisses: final.report.correspondence === null ? 1 : final.report.correspondence.misses.length,
       testMismatches: final.report.testRun === null ? 1 : final.report.testRun.mismatches.length,
       testUnresolved: countUnresolvedTests(unresolved, final.report.testRun) + stalledCorrespondenceMisses,
-      // 申告の数＋了承済みの持ち越しの数（了承済みは未解決から除いたまま。Issue #841・#807）
-      unwritableRequirements: acceptedCarried.length + claims.length,
+      // 申告の数（了承済みの申告を含む）と、そのうちの了承済みの数。2 つの集合は重ならず、数は base と同じ（Issue #847）
+      unwritableRequirements: claims.length,
       acceptedUnwritable: acceptedCarried.length,
       limitReached,
       carriedOver: { reverseCheck: [], testSuite: unresolvedCarriedIds },
