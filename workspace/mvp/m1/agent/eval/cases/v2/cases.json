@@ -1,0 +1,503 @@
+{
+  "note": "開発用の組 dev-p1-p10 v2 の合成の正例・負例（#876）。採点の定義は subjects/v2/D.json・E.json を明示して当てる（run-cases.mjs は subjects/<題材>.json を名前で引くので、ここは cases/cases.json に入れない）。expect.v1 は同じ宣言・文に v1 の定義（subjects/D.json・E.json）を当てた結果（二点）。試験は agent-accept/score-agent.test.mjs",
+  "specs": [
+    {
+      "file": "d-pos-empty.app.spec.yaml",
+      "subject": "D",
+      "expect": {
+        "v2": {
+          "verdict": "PASS",
+          "structure": "list",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7
+        },
+        "v1": {
+          "verdict": "PASS",
+          "structure": "list",
+          "failed": [],
+          "fulfilled": 6,
+          "total": 6
+        }
+      },
+      "why": "長さの検査が無ければ 0 人で登録でき、v2 で 7/7"
+    },
+    {
+      "file": "d-pos-and.app.spec.yaml",
+      "subject": "D",
+      "expect": {
+        "v2": {
+          "verdict": "PASS",
+          "structure": "list",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7
+        },
+        "v1": {
+          "verdict": "PASS",
+          "structure": "list",
+          "failed": [],
+          "fulfilled": 6,
+          "total": 6
+        }
+      },
+      "why": "定員の 2 つの検査を and の 1 つで書いても 7/7"
+    },
+    {
+      "file": "d-neg-len.app.spec.yaml",
+      "subject": "D",
+      "expect": {
+        "v2": {
+          "verdict": "FAIL",
+          "structure": "list",
+          "failed": [
+            "参加者 0 人で登録できる"
+          ],
+          "fulfilled": 6,
+          "total": 7
+        },
+        "v1": {
+          "verdict": "PASS",
+          "structure": "list",
+          "failed": [],
+          "fulfilled": 6,
+          "total": 6
+        }
+      },
+      "why": "長さ 1 以上の検査は 0 人の登録を断る。v1 では見分けられなかった（旧の穴）"
+    },
+    {
+      "file": "d-neg-len-nocap.app.spec.yaml",
+      "subject": "D",
+      "expect": {
+        "v2": {
+          "verdict": "FAIL",
+          "structure": "list",
+          "failed": [
+            "参加者 0 人で登録できる"
+          ],
+          "fulfilled": 6,
+          "total": 7
+        },
+        "v1": {
+          "verdict": "PASS",
+          "structure": "list",
+          "failed": [],
+          "fulfilled": 6,
+          "total": 6
+        }
+      },
+      "why": "定員の検査が無くても「定員は 1 人以上」は合格のまま（負例が空の並びを使うため）。0 人の判定と組でしか効かないことを固定する"
+    },
+    {
+      "file": "d-neg-nocap.app.spec.yaml",
+      "subject": "D",
+      "expect": {
+        "v2": {
+          "verdict": "FAIL",
+          "structure": "list",
+          "failed": [
+            "定員は 1 人以上"
+          ],
+          "fulfilled": 6,
+          "total": 7
+        },
+        "v1": {
+          "verdict": "FAIL",
+          "structure": "list",
+          "failed": [
+            "定員は 1 人以上"
+          ],
+          "fulfilled": 5,
+          "total": 6
+        }
+      },
+      "why": "定員 1 以上の検査が無い"
+    },
+    {
+      "file": "d-pos-empty.app.spec.yaml",
+      "subject": "D",
+      "log": "d-neg-false-claim.log.json",
+      "expect": {
+        "v2": {
+          "verdict": "PASS",
+          "structure": "list",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7,
+          "final": "PASS",
+          "claims": {
+            "correct": 0,
+            "missed": 0,
+            "false_claims": 1
+          }
+        },
+        "v1": {
+          "verdict": "PASS",
+          "structure": "list",
+          "failed": [],
+          "fulfilled": 6,
+          "total": 6,
+          "final": "PASS",
+          "claims": {
+            "correct": 1,
+            "missed": 0,
+            "false_claims": 0
+          }
+        }
+      },
+      "why": "0 人で登録できないという申告は、v2 では誤った申告（v1 では正しい申告）"
+    },
+    {
+      "file": "../d2-pos-attendance-claimed.app.spec.yaml",
+      "subject": "D",
+      "log": "../d2-pos-attendance-claimed.log.json",
+      "expect": {
+        "v2": {
+          "verdict": "FAIL",
+          "structure": "attendance",
+          "failed": [
+            "定員を超えたら登録できない"
+          ],
+          "fulfilled": 6,
+          "total": 7,
+          "final": "FAIL",
+          "claims": {
+            "correct": 0,
+            "missed": 0,
+            "false_claims": 1
+          }
+        },
+        "v1": {
+          "verdict": "PASS_NEEDS_CLAIM",
+          "structure": "attendance",
+          "failed": [],
+          "fulfilled": 6,
+          "total": 6,
+          "final": "PASS",
+          "claims": {
+            "correct": 1,
+            "missed": 0,
+            "false_claims": 0
+          }
+        }
+      },
+      "why": "(iv)＋(K-a)：別の構造は定員超えを満たせない判定で落ち、分母は主の構造と同じ 7。書けない要件が無くなるので、定員超えの申告は誤った申告に数える（定義の書けない要件から外したための帰結）"
+    },
+    {
+      "file": "e-pos-and.app.spec.yaml",
+      "subject": "E",
+      "expect": {
+        "v2": {
+          "verdict": "PASS",
+          "structure": "main",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7,
+          "observed": {
+            "返却済みの貸し出しには印を付けない": true
+          }
+        },
+        "v1": {
+          "verdict": "PASS",
+          "structure": "main",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7
+        }
+      },
+      "why": "貸出中に限る印。判定は v1 と同じで、観測は真"
+    },
+    {
+      "file": "e-pos-and-nodefault.app.spec.yaml",
+      "subject": "E",
+      "expect": {
+        "v2": {
+          "verdict": "FAIL",
+          "structure": "main",
+          "failed": [
+            "登録したときの状態",
+            "返す日を過ぎたものに印"
+          ],
+          "fulfilled": 5,
+          "total": 7,
+          "observed": {
+            "返却済みの貸し出しには印を付けない": true
+          }
+        },
+        "v1": {
+          "verdict": "FAIL",
+          "structure": "main",
+          "failed": [
+            "登録したときの状態",
+            "返す日を過ぎたものに印"
+          ],
+          "fulfilled": 5,
+          "total": 7
+        }
+      },
+      "why": "E-c は既存の判定を変えない（setLabels を足さない）ので v1 と同じ 2 つが落ちる。観測は setLabels で状態を固定するので真"
+    },
+    {
+      "file": "e-pos-not.app.spec.yaml",
+      "subject": "E",
+      "expect": {
+        "v2": {
+          "verdict": "PASS",
+          "structure": "main",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7,
+          "observed": {
+            "返却済みの貸し出しには印を付けない": true
+          }
+        },
+        "v1": {
+          "verdict": "PASS",
+          "structure": "main",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7
+        }
+      },
+      "why": "返却済みでないことを not で書く"
+    },
+    {
+      "file": "e-neg-date-only.app.spec.yaml",
+      "subject": "E",
+      "expect": {
+        "v2": {
+          "verdict": "PASS",
+          "structure": "main",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7,
+          "observed": {
+            "返却済みの貸し出しには印を付けない": false
+          }
+        },
+        "v1": {
+          "verdict": "PASS",
+          "structure": "main",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7
+        }
+      },
+      "why": "日付だけの印（2026-11-11 の P9・P10 の形）。決定 3 を保つので合格のまま、観測は偽"
+    },
+    {
+      "file": "e-neg-or.app.spec.yaml",
+      "subject": "E",
+      "expect": {
+        "v2": {
+          "verdict": "FAIL",
+          "structure": "main",
+          "failed": [
+            "返す日を過ぎたものに印"
+          ],
+          "fulfilled": 6,
+          "total": 7,
+          "observed": {
+            "返却済みの貸し出しには印を付けない": false
+          }
+        },
+        "v1": {
+          "verdict": "FAIL",
+          "structure": "main",
+          "failed": [
+            "返す日を過ぎたものに印"
+          ],
+          "fulfilled": 6,
+          "total": 7
+        }
+      },
+      "why": "or は既存の判定（貸出中・当日で真）でも観測（返却済み・過ぎた日で真）でも落ちる"
+    },
+    {
+      "file": "e-neg-status-only.app.spec.yaml",
+      "subject": "E",
+      "expect": {
+        "v2": {
+          "verdict": "FAIL",
+          "structure": "main",
+          "failed": [
+            "返す日を過ぎたものに印"
+          ],
+          "fulfilled": 6,
+          "total": 7,
+          "observed": {
+            "返却済みの貸し出しには印を付けない": true
+          }
+        },
+        "v1": {
+          "verdict": "FAIL",
+          "structure": "main",
+          "failed": [
+            "返す日を過ぎたものに印"
+          ],
+          "fulfilled": 6,
+          "total": 7
+        }
+      },
+      "why": "状態だけの印は既存の判定で落ち、観測は真"
+    },
+    {
+      "file": "e-pos-keys.app.spec.yaml",
+      "subject": "E",
+      "expect": {
+        "v2": {
+          "verdict": "PASS",
+          "structure": "main",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7,
+          "observed": {
+            "返却済みの貸し出しには印を付けない": true
+          }
+        },
+        "v1": {
+          "verdict": "PASS",
+          "structure": "main",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7
+        }
+      },
+      "why": "選択肢の鍵が別の英字の綴りでも、setLabels が表示名から鍵を引く"
+    },
+    {
+      "file": "e-pos-keys-ja.app.spec.yaml",
+      "subject": "E",
+      "expect": {
+        "v2": {
+          "verdict": "PASS",
+          "structure": "main",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7,
+          "observed": {
+            "返却済みの貸し出しには印を付けない": true
+          }
+        },
+        "v1": {
+          "verdict": "PASS",
+          "structure": "main",
+          "failed": [],
+          "fulfilled": 7,
+          "total": 7
+        }
+      },
+      "why": "選択肢の鍵が日本語でも同じ"
+    }
+  ],
+  "acceptance": [
+    {
+      "subject": "D",
+      "structure": "list",
+      "text": "参加する人が 0 人でも登録できる",
+      "op": "exclusion",
+      "expect": {
+        "v2": "wrong",
+        "v1": "expected"
+      },
+      "why": "D2-accept-wrong：主の構造で 0 人の登録を除外で了承した。v2 では書ける要件の除外"
+    },
+    {
+      "subject": "D",
+      "structure": "attendance",
+      "text": "参加する人が 0 人でも登録できる",
+      "op": "exclusion",
+      "expect": {
+        "v2": "wrong",
+        "v1": "wrong"
+      },
+      "why": "D2-alt-accept-wrong：別の構造で同じ除外。v2 は (K-a) の鍵（人と試合を登録できる）に当たる。v1 は他の構造の書けない要件に当たる"
+    },
+    {
+      "subject": "D",
+      "structure": "attendance",
+      "text": "参加する人が 0 人でも登録できる",
+      "op": "change",
+      "expect": {
+        "v2": "unevaluated",
+        "v1": "wrong"
+      },
+      "unevaluated_checks": {
+        "v2": [
+          "人と試合を登録できる"
+        ]
+      },
+      "why": "D2-alt-change：(K-a) の副作用。変更が当たると「人と試合を登録できる」が未評価になる"
+    },
+    {
+      "subject": "D",
+      "structure": "list",
+      "text": "参加がゼロのメンバーは一覧に出さない",
+      "op": "exclusion",
+      "expect": {
+        "v2": "unmatched",
+        "v1": "expected"
+      },
+      "why": "D2-key-neg-include-zero：登録・作成の語が無いので鍵 K0 に当たらない（台本 D:per-member-count:include-zero の事項）"
+    },
+    {
+      "subject": "D",
+      "structure": "list",
+      "text": "定員は必ず入れる",
+      "op": "exclusion",
+      "expect": {
+        "v2": "unmatched",
+        "v1": "wrong"
+      },
+      "why": "D2-key-neg-capacity：鍵 K0 に当たらない（v1 は別の構造の書けない要件「定員」に当たっていた）"
+    },
+    {
+      "subject": "D",
+      "structure": "list",
+      "text": "参加者の入力を任意にする",
+      "op": "exclusion",
+      "expect": {
+        "v2": "wrong",
+        "v1": "expected"
+      },
+      "why": "D2-key-pos-optional：任意にする形の除外は K0 に当たる"
+    },
+    {
+      "subject": "D",
+      "structure": "attendance",
+      "text": "参加者の入力を任意にする",
+      "op": "exclusion",
+      "expect": {
+        "v2": "wrong",
+        "v1": "wrong"
+      },
+      "why": "D2-key-pos-optional を別の構造で"
+    },
+    {
+      "subject": "D",
+      "structure": "list",
+      "text": "試合を先に作り、来る人は後から足す。最初は誰もいなくても登録できる",
+      "op": "exclusion",
+      "expect": {
+        "v2": "wrong",
+        "v1": "expected"
+      },
+      "why": "D2-key-pos-later：後から足す形の除外も K0 に当たる"
+    },
+    {
+      "subject": "E",
+      "structure": "main",
+      "text": "貸出中のものだけに印",
+      "op": "exclusion",
+      "expect": {
+        "v2": "unmatched",
+        "v1": "unmatched"
+      },
+      "observed_exclusion": {
+        "v2": true
+      },
+      "why": "E2-accept-wrong（E-c）：observe の鍵は了承の照合に使わないので判定不能のまま（E-a と同じ）。observed_exclusions に記録するだけ"
+    }
+  ]
+}

@@ -1,0 +1,197 @@
+{
+  "id": "E",
+  "version": 2,
+  "title": "共用品の貸し出し",
+  "note": "開発用の組 dev-p1-p10 v2 の定義（#876）。判定（checks）は v1 の subjects/E.json と同じ。observe は記録だけ。v1 と v2 の成績を比較しない",
+  "patterns": [
+    "P9",
+    "P10"
+  ],
+  "structures": [
+    {
+      "id": "main",
+      "roles": {
+        "loan": {
+          "entity": {}
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "equipment": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "borrower": {
+          "field": {
+            "of": "loan",
+            "type": "ref",
+            "to": "member"
+          }
+        },
+        "item": {
+          "field": {
+            "of": "loan",
+            "type": "ref",
+            "to": "equipment"
+          }
+        },
+        "status": {
+          "field": {
+            "of": "loan",
+            "type": "enum",
+            "labels": [
+              "貸出中",
+              "返却済み"
+            ]
+          }
+        },
+        "due": {
+          "field": {
+            "of": "loan",
+            "type": "date"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "登録したときの状態",
+          "kind": "enumDefault",
+          "field": "status",
+          "label": "貸出中"
+        },
+        {
+          "req": "状態を進めるボタンと条件",
+          "kind": "advanceAction",
+          "field": "status",
+          "from": "貸出中",
+          "to": "返却済み"
+        },
+        {
+          "req": "状態の列のボード",
+          "kind": "boardColumns",
+          "field": "status"
+        },
+        {
+          "req": "メンバーと備品と貸し出しを登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "equipment",
+            "loan"
+          ]
+        },
+        {
+          "req": "返す日を過ぎたものに印",
+          "kind": "highlight",
+          "field": "due",
+          "trueOn": [
+            "2026-10-07"
+          ],
+          "falseOn": [
+            "2026-10-08",
+            "2026-10-09"
+          ]
+        },
+        {
+          "req": "備品ごとの回数が見られる",
+          "kind": "computedVisible",
+          "entity": "equipment",
+          "aggregateOnly": true,
+          "sources": {
+            "loan": [
+              {
+                "set": {
+                  "item": "m1"
+                }
+              },
+              {
+                "set": {
+                  "item": "m1"
+                }
+              },
+              {
+                "set": {
+                  "item": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        },
+        {
+          "req": "メンバーごとの回数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "loan": [
+              {
+                "set": {
+                  "borrower": "m1"
+                }
+              },
+              {
+                "set": {
+                  "borrower": "m1"
+                }
+              },
+              {
+                "set": {
+                  "borrower": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        }
+      ],
+      "unwritable": [],
+      "observe": [
+        {
+          "req": "返却済みの貸し出しには印を付けない",
+          "kind": "highlight",
+          "field": "due",
+          "setLabels": {
+            "status": "返却済み"
+          },
+          "trueOn": [],
+          "falseOn": [
+            "2026-10-07"
+          ],
+          "keys": [
+            "返却済み.{0,20}(印|目立|強調)",
+            "(貸出中|返していない|返してない).{0,10}(だけ|のみ|に限)"
+          ],
+          "note": "記録だけ（E-c。2026-11-11 所有者の決定 3）。合否・充足・了承の照合に入れない。決定 3（2026-10-08。返却済みに印が残っても要件は破らない）は保つ"
+        }
+      ]
+    }
+  ],
+  "clock": "2026-10-08T12:00:00+09:00",
+  "today": "2026-10-08"
+}

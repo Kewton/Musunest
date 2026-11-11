@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
-import { PLAN_TABLE_OUTCOMES, planBuildTables, ABSENT_REASONS, ACCEPTANCE_STATUSES, CATALOG_FACET_IDS, CONDITIONS_SCHEMAS, DEFAULT_SET_PATH, EVAL_SET_SCHEMA, JUDGEMENTS, PLAN_SCRIPT_SCHEMA, PLAN_SPEC_SCHEMA, SCORING_FILES, SCRIPT_MODE, SCRIPT_RUN_STATUSES, UNVERIFIED_SOURCES, VERDICT_UNEVALUATED, WRONG_ACCEPTANCE_EVALUATION, acceptanceMatcher, anonymize, applyScript, fingerprintDir, judgeDisposition, loadEvalSet, loadPlan, loadScript, planTexts, questionFacets, readAcceptance, reconcile, scoringFingerprint, scriptSummary, scriptsFingerprint, sha256, validatePlanShape, validatePlanned, validateScript } from "./score-agent.mjs";
+import { PLAN_TABLE_OUTCOMES, planBuildTables, ABSENT_REASONS, ACCEPTANCE_STATUSES, CATALOG_FACET_IDS, CONDITIONS_SCHEMAS, DEFAULT_SET_PATH, EVAL_SET_SCHEMA, JUDGEMENTS, PLAN_SCRIPT_SCHEMA, PLAN_SPEC_SCHEMA, SCORING_FILES, SCRIPT_MODE, SCRIPT_RUN_STATUSES, UNVERIFIED_SOURCES, VERDICT_UNEVALUATED, WRONG_ACCEPTANCE_EVALUATION, acceptanceMatcher, anonymize, applyScript, observedExclusions, fingerprintDir, judgeDisposition, loadEvalSet, loadPlan, loadScript, planTexts, questionFacets, readAcceptance, reconcile, scoringFingerprint, scriptSummary, scriptsFingerprint, sha256, validatePlanShape, validatePlanned, validateScript } from "./score-agent.mjs";
 import { BUILD_RECORD_PATH, ENVELOPE_REASONS, checkPlanResult, EXIT_CLASSES, PLAN_ONLY_RESULT_SCHEMA, PLAN_RESULT_PATH, SCRIPT_MATCH_STATES, evaluationOf, frozenProblem, stat4 } from "./score-agent.mjs";
 import { DEFAULT_ALLOWED, finalVerdict, scoreClaims } from "../score-claims.mjs";
 import { loadDef, score } from "../engine.mjs";
@@ -5848,4 +5848,159 @@ test("#837 README：§10.8 の本文の #830 の項目に、比較の採点が s
   for (const w of words) assert.ok(!part.includes(w), w);
   assert.doesNotMatch(part, /[¥￥]\s?\d|\d\s?円|\$\d/);
   assert.equal(text.slice(text.indexOf("\n#### 10.8.4 ")).indexOf("\n#", 1), -1, "§10.8.4 が末尾のまま");
+});
+
+// ── 開発用の組 v2（#876。2026-11-11 所有者の決定 3：D は (iv)＋(K-a)、E は E-c、既定の組は v1 のまま）。README §10.7.1。
+// 宣言・申告・了承の部分の文は cases/v2/ に置き、索引 cases/v2/cases.json の期待で照らす（題材の言葉をここに書かない）。
+// 採点の定義は subjects/v2/<題材>.json を明示して当てる。v1 の定義（subjects/<題材>.json）を同じ入力に当てた期待も索引に持つ（二点）
+const V2_SET = join(ev, "sets/dev-p1-p10.v2.json");
+const V2_CASES = join(ev, "cases/v2");
+const V2_INDEX = JSON.parse(readFileSync(join(V2_CASES, "cases.json"), "utf8"));
+const defV2 = (s) => JSON.parse(readFileSync(join(ev, "subjects/v2", `${s}.json`), "utf8"));
+const defV = (version, s) => (version === "v2" && (s === "D" || s === "E") ? defV2(s) : defOf(s));
+/** v1 の定義のファイル・組・台本・正例の索引の SHA-256（#876 の前の値。v2 を別のファイルに置き、v1 をバイト列で残したことを固定する。総合の指紋は照らさない） */
+const V1_FILE_SHA256 = {
+  "subjects/A.json": "bc6b8b5a1625a5e1bc8a86e109f0774bfce94869df117a5ae622882fb516b1ec",
+  "subjects/B.json": "17fd97ab0fa5818a9067ca2a9d6bac0bf8468c79cbf39185ca454571ecebcb24",
+  "subjects/C.json": "a10d827eff477dda51394bff96faa0f9c42631cb818a1653098446bc979bfe70",
+  "subjects/D.json": "6f996f4837681bba92516c6a1e12ae9044b63bcb28d14d28bdc8d00aa1702bfe",
+  "subjects/E.json": "904e07be4d6d50fb05519ed56d86dc641199a038fc0a62b41b1a2f8409bbf3dc",
+  "subjects/R1.json": "73d6b45882921bd9402a5dd15e4733830ecfe2ae1b54025e70f3981eb384fde9",
+  "subjects/R2.json": "446b0b38c8023c0e7a32fecea157a2a8fed6492cdd7de2a6ac3573d362577ff4",
+  "subjects/R3.json": "76b174eef6f56c489f85408282d4396aaf53070b90c54fff4c6b6b7f908896bb",
+  "subjects/R4.json": "0ee875fe9b6c28d12a242718a56018465663518e92eb11f33a96c26444dc350c",
+  "subjects/R5.json": "dac694245fcca85387c42306cae4f6d8a813727adfcf020f67b22aa657bd95a3",
+  "sets/dev-p1-p10.json": "bf54feabfbe601ddf59f0c6ea926012cbcb85cae16db2cc1bfeee8de3ae7c4ca",
+  "sets/scripts/D.json": "24170578c0e4a7080e98ff11928aa1193651b708785cf2a5ca278e1945529982",
+  "sets/scripts/E.json": "84cfb00b9a150fbd86a6421d29970e84e76b519a1580f60fae458e386ea956f0",
+  "cases/cases.json": "5bd250662068a663b54bb1e2b60a460e64158605e4b1223d5d6b8f6870c3d267",
+};
+
+test("#876 v1 をバイト列で残す：subjects/{A..E,R1..R5}.json・v1 の組と台本・正例の索引の SHA-256 は前のまま。採点の指紋の files[] の題材の SHA と v1 の組の definition:<題材> の SHA も同じで、subjects/v2/ は files[] に入らない。既定の組は v1 のまま（D1）", () => {
+  for (const [rel, digest] of Object.entries(V1_FILE_SHA256)) assert.equal(sha256(readFileSync(join(ev, rel))), digest, rel);
+  assert.equal(DEFAULT_SET_PATH, "workspace/mvp/m1/agent/eval/sets/dev-p1-p10.json", "既定の組は v1（v2 は --set で明示する）");
+  const v1 = loadEvalSet(join(repo, DEFAULT_SET_PATH)), v2 = loadEvalSet(V2_SET);
+  const fp1 = scoringFingerprint(ev, undefined, v1.definitions), fp2 = scoringFingerprint(ev, undefined, v2.definitions);
+  for (const fp of [fp1, fp2]) {
+    assert.deepEqual(fp.missing, []);
+    assert.deepEqual(fp.files.filter((f) => f.path.startsWith("subjects/")).map((f) => [f.path, f.sha256]), Object.entries(V1_FILE_SHA256).filter(([rel]) => rel.startsWith("subjects/")), "subjects/ 直下の 10 ファイルだけを数え、SHA は前のまま");
+  }
+  for (const s of ["A", "B", "C", "D", "E"]) assert.deepEqual(fileOf(fp1, `definition:${s}`), { path: `definition:${s}`, source: `subjects/${s}.json`, sha256: V1_FILE_SHA256[`subjects/${s}.json`] }, s);
+  for (const s of ["A", "B", "C"]) assert.deepEqual(fileOf(fp2, `definition:${s}`), fileOf(fp1, `definition:${s}`), `v2 の組の ${s} は v1 と同じ定義`);
+  for (const s of ["D", "E"]) {
+    const f = fileOf(fp2, `definition:${s}`);
+    assert.equal(f.source, `subjects/v2/${s}.json`);
+    assert.notEqual(f.sha256, V1_FILE_SHA256[`subjects/${s}.json`]);
+  }
+  assert.notEqual(fp2.fingerprint, fp1.fingerprint, "組の参照する定義が違えば採点の指紋も違う");
+});
+
+test("#876 開発用の組 v2 は入口の検査を通り、id は v1 と同じ・版 2・言語の根拠を持つ。P7・P8 が書ける本になり（書ける 8・一部不可能 2）、D・E は subjects/v2 と sets/scripts/v2 を指す。依頼文・書き方は v1 と同じ", () => {
+  const v1 = loadEvalSet(join(repo, DEFAULT_SET_PATH)), v2 = loadEvalSet(V2_SET);
+  assert.equal(v2.status, "ok", v2.reasons.join("、"));
+  assert.deepEqual([v2.set.id, v2.set.version, v2.set.role], [v1.set.id, 2, "development"]);
+  assert.ok(typeof v2.set.basis?.language === "string" && typeof v2.set.basis?.documents_commit === "string", "言語の根拠の欄");
+  assert.deepEqual(v2.items.map((it) => [it.id, it.subject, it.style, it.requestText]), v1.items.map((it) => [it.id, it.subject, it.style, it.requestText]), "本・題材・書き方・依頼文は v1 と同じ");
+  assert.deepEqual(v2.items.filter((it) => !it.writable).map((it) => it.subject), ["B", "B"], "一部不可能は B の 2 本だけ");
+  assert.deepEqual(v1.items.filter((it) => !it.writable).map((it) => it.subject), ["B", "B", "D", "D"], "v1 は B・D の 4 本のまま");
+  for (const s of ["D", "E"]) {
+    assert.equal(v2.definitions.get(s).rel, `../subjects/v2/${s}.json`);
+    assert.equal(v2.scripts.get(s).rel, `scripts/v2/${s}.json`);
+    assert.equal(v2.scripts.get(s).script.version, 2);
+  }
+  // D：主の構造は書けない要件を持たず判定 7。別の構造は (iv)＋(K-a)：書けない要件を持たず、満たせない判定を足して 7。E：判定は v1 と同じ 7・observe 1 つ
+  const d = defV2("D"), e = defV2("E"), d1 = defOf("D"), e1 = defOf("E");
+  assert.deepEqual(d.structures.map((st) => [st.id, st.checks.length, st.unwritable.length]), [[d1.structures[0].id, 7, 0], [d1.structures[1].id, 7, 0]]);
+  assert.deepEqual(d.structures[1].checks.filter((c) => c.kind === "unsatisfiable").map((c) => c.req), [d1.structures[1].unwritable[0].id], "別の構造の書けない要件だったものが満たせない判定になる");
+  assert.deepEqual(d.structures.map((st) => st.checks.filter((c) => Array.isArray(c.keys)).length), [1, 1], "鍵 K0 は主の構造の新しい判定と、別の構造の既存の判定（K-a）に 1 つずつ");
+  assert.deepEqual(d.structures[1].checks.find((c) => Array.isArray(c.keys)).req, d1.structures[1].checks[0].req, "(K-a)：別の構造の 1 つ目の判定に鍵を付ける");
+  assert.deepEqual(d.structures[0].checks.find((c) => Array.isArray(c.keys)).keys, d.structures[1].checks.find((c) => Array.isArray(c.keys)).keys, "同じ鍵");
+  assert.deepEqual(e.structures[0].checks, e1.structures[0].checks, "E の判定は v1 と同じ（E-c）");
+  assert.deepEqual([e.structures[0].unwritable, e.structures[0].observe.length], [[], 1]);
+});
+
+test("#876 cases/v2 の宣言の正例・負例：subjects/v2 を明示して当てた判定・構造・落ちる判定・充足・観測・申告が索引のとおり。v1 の定義を同じ宣言に当てた結果も索引のとおり（二点）。E は判定・充足が v1 と同じで（E-c）、observed は v2 にだけある", async () => {
+  const engine = await import(pathToFileURL(join(repo, "packages/spec-engine/dist/index.js")).href);
+  assert.ok(V2_INDEX.specs.length >= 15);
+  for (const c of V2_INDEX.specs) {
+    const got = {};
+    for (const version of ["v2", "v1"]) {
+      const def = defV(version, c.subject), want = c.expect[version], label = `${c.file} ${c.log ?? ""} ${version}`;
+      const r = await score(engine, join(V2_CASES, c.file), def);
+      got[version] = r;
+      assert.equal(r.verdict, want.verdict, label);
+      assert.equal(r.structure, want.structure, label);
+      assert.deepEqual(Object.entries(r.checks).filter(([, ok]) => !ok).map(([k]) => k), want.failed, label);
+      assert.deepEqual([r.fulfilled, r.writable_total], [want.fulfilled, want.total], label);
+      if (want.observed !== undefined) assert.deepEqual(r.observed, want.observed, label);
+      else assert.ok(!("observed" in r), `${label}：observe の無い定義の戻り値は今までの形`);
+      if (c.log !== undefined) {
+        const claims = scoreClaims(JSON.parse(readFileSync(join(V2_CASES, c.log), "utf8")), def, r.structure, r.written);
+        assert.deepEqual({ correct: claims.correct, missed: claims.missed, false_claims: claims.false_claims.length }, want.claims, label);
+        assert.equal(finalVerdict(r, claims), want.final, label);
+      }
+    }
+    if (c.subject === "E") {
+      const pick = (r) => ({ verdict: r.verdict, structure: r.structure, checks: r.checks, fulfilled: r.fulfilled, writable_total: r.writable_total, requiresClaim: r.requiresClaim });
+      assert.deepEqual(pick(got.v2), pick(got.v1), `${c.file}：E-c の判定は E-a（v1 の判定）と同じ`);
+    }
+  }
+});
+
+test("#876 cases/v2 の了承の部分の文：v2 の定義の鍵で除外・変更が索引のとおりに当たる（D の 0 人の除外は書ける要件の除外＝wrong・(K-a) の副作用・鍵の負例）。v1 の定義の期待も索引のとおり。E の observe の鍵は照合に使わず observed_exclusions に記録するだけ", async () => {
+  for (const c of V2_INDEX.acceptance) {
+    const parts = c.op === "exclusion" ? [part("P:1", c.text)] : [part("P:1", c.text, "alternative", "R:alt:1")];
+    const plan = await planFixture({ requirements: [req("R1", "MARK_REQ", { parts }), ...(c.op === "change" ? [altReq("R:alt:1", "MARK_ALT")] : [])] });
+    for (const version of ["v2", "v1"]) {
+      const def = defV(version, c.subject), label = `${c.text} ${c.structure} ${version}`;
+      const a = readAcceptance(plan, acceptanceMatcher(def, c.structure, DEFAULT_ALLOWED));
+      const entry_ = c.op === "exclusion" ? a.exclusions : a.changed;
+      assert.equal(entry_.length, 1, label);
+      assert.equal(entry_[0].judged, c.expect[version], label);
+      if (c.unevaluated_checks?.[version] !== undefined) assert.deepEqual(a.unevaluated_checks, c.unevaluated_checks[version], label);
+      assert.deepEqual(observedExclusions(plan, def, c.structure), c.observed_exclusion?.[version] === true ? ["P:1"] : [], label);
+      if (version === "v2" && c.op === "exclusion" && c.expect.v2 === "wrong") assert.deepEqual(a.accepted_unwritable_ids, [], `${label}：了承済みの書けない要件に入らない`);
+    }
+  }
+});
+
+test("#876 組 v2 で採点する（--set）：書ける 8 本・一部不可能 2 本（B だけ）の分母、D の申告の期待は 0 件、E の行だけに observed と observed_exclusions が出る。E の行の判定・了承後の判定・充足・誤った除外の数は、E を v1 の定義に替えた組（E-a）と同じ", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    const specOf = (f) => readFileSync(join(V2_CASES, f));
+    const E_TEXT = V2_INDEX.acceptance.find((c) => c.subject === "E").text;
+    const runs = { P1: PASS_A, P2: PASS_A, P3: PASS_A, P4: PASS_A, P5: PASS_A, P6: PASS_A, P7: specOf("d-pos-empty.app.spec.yaml"), P8: specOf("d-neg-len.app.spec.yaml"), P9: specOf("e-neg-date-only.app.spec.yaml"), P10: specOf("e-pos-and.app.spec.yaml") };
+    for (const [p, spec] of Object.entries(runs)) addRun(out, `${p}-r1`, { spec });
+    // P9：了承で「貸出中に限る」を除外した確定した仕様（E-c では判定不能のまま、observed_exclusions に残る）
+    await addPlan(out, "P9-r1", { plan: planFixture({ requirements: [req("R1", "MARK_REQ", { parts: [part("P:1", E_TEXT)] })] }), record: { outcome: "confirmed" } });
+    const ids = Object.keys(runs).map((p) => `${p}-r1`);
+    planConditions(out, ids);
+    scoreRun(out, ["--set", V2_SET]);
+    const full = readScore(out);
+    assert.deepEqual(full.rows.map((r) => [r.subject, r.writable]), [["A", true], ["A", true], ["B", false], ["B", false], ["C", true], ["C", true], ["D", true], ["D", true], ["E", true], ["E", true]]);
+    const total = (s) => defV("v2", s).structures[0].checks.length;
+    const denom = (str) => Number(str.split("（")[0].split("/")[1]);
+    assert.equal(denom(full.fulfillment.v2.partial), 2 * total("B"), "一部不可能の分母は B だけ（16）");
+    assert.equal(denom(full.fulfillment.v2.writable), 2 * (total("A") + total("C") + total("D") + total("E")), "書ける本の分母は A・C・D・E（60）");
+    assert.equal(denom(full.fulfillment.v2.all), 76);
+    assert.equal(denom(full.metrics.fulfillment_partial), 2 * total("B"), "v1 の数え方の fulfillment_partial も B だけ");
+    for (const id of ["P7-r1", "P8-r1"]) assert.deepEqual(rowOf(full, id).claims.expected, [], `${id}：D の申告の期待は 0 件`);
+    assert.deepEqual(rowOf(full, "P8-r1").failed, [V2_INDEX.specs.find((c) => c.file === "d-neg-len.app.spec.yaml").expect.v2.failed[0]]);
+    for (const r of full.rows) assert.equal("observed" in r, r.subject === "E", `${r.run}：observed は observe を持つ定義の行だけ`);
+    const p9 = rowOf(full, "P9-r1"), p10 = rowOf(full, "P10-r1");
+    assert.deepEqual(p9.observed_exclusions, ["P:1"]);
+    assert.deepEqual(p9.acceptance.counts.exclusions, zeroCounts({ unmatched: 1 }), "observe の鍵は了承の照合に入らない");
+    assert.deepEqual(p10.observed_exclusions, [], "確定した仕様の無い本は空");
+    assert.deepEqual([p9.observed, p10.observed], [V2_INDEX.specs.find((c) => c.file === "e-neg-date-only.app.spec.yaml").expect.v2.observed, V2_INDEX.specs.find((c) => c.file === "e-pos-and.app.spec.yaml").expect.v2.observed]);
+    // E-a：同じ出力を、E だけ v1 の定義（と v1 の台本）に替えた組で採点し直す
+    const v2set = JSON.parse(readFileSync(V2_SET, "utf8"));
+    const eaSet = writeJson(join(base, "set/ea.json"), { ...v2set, items: v2set.items.map((it) => ({ ...it, scoring: it.subject === "E" ? realScoring("E") : resolve(dirname(V2_SET), it.scoring), script: it.script === null ? null : resolve(dirname(V2_SET), it.subject === "E" ? "scripts/E.json" : it.script) })) });
+    scoreRun(out, ["--set", eaSet]);
+    const ea = readScore(out);
+    const pick = (r) => ({ verdict: r.verdict, verdict_accepted: r.verdict_accepted, failed: r.failed, fulfillment_v2: r.fulfillment_v2, fulfillment_accepted: r.fulfillment_accepted, wrong: r.acceptance.counts?.exclusions.wrong ?? null, exclusions: r.acceptance.exclusions ?? null });
+    for (const id of ["P9-r1", "P10-r1"]) {
+      assert.deepEqual(pick(rowOf(full, id)), pick(rowOf(ea, id)), `${id}：E-c と E-a で判定・充足・除外が同じ`);
+      assert.ok(!("observed" in rowOf(ea, id)) && !("observed_exclusions" in rowOf(ea, id)), `${id}：v1 の定義の行に観測の欄は出ない`);
+    }
+  });
 });
