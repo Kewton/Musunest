@@ -27,9 +27,25 @@ STUDIO_PORT=4500 pnpm --filter @musunest/studio start
 
 - `GET /` … 束ねた画面（`dist/client/index.html`）。起動ごとの合言葉を HTML に埋める
 - `GET /api/health` … `{ ok: true, service: "@musunest/studio" }`
+- `POST /api/jobs/:id/approve` … partial の結果に所有者の了承を記録する（本文の `manifestSha256` が、いまの納品物の SHA と一致するときだけ）
+- `POST /api/jobs/:id/publish` … 結果を staging の `studio-<YYYYMMDDHHmmss>` へ公開する
 
 `/api/` の要求には合言葉のヘッダ `x-studio-token` が要る。合言葉は `index.html` の
 `<meta name="studio-token">` に入っている。
+
+## 公開（staging）
+
+公開は必ず門（`packages/control-plane/src/bundle-publish.ts` の `publishBundle`）を通す。工房は Cloudflare の
+adapter も門の判定も持たず、手元の公開の入口 `infra/scripts/publish-bundle.ts` を**子プロセス**で呼ぶだけである。
+
+- 公開先は staging に固定する。インスタンスは `studio-<YYYYMMDDHHmmss>` だけ（画面から決めさせない）
+- 利用者のアプリとして出す（`--user-app`）。partial は、画面が見せた manifest の SHA に一致する了承の記録があるときだけ `--approval` を渡す
+- 子へ渡す環境は `CLOUDFLARE_API_TOKEN`・`CLOUDFLARE_ACCOUNT_ID`・`CLOUDFLARE_ACCOUNT_ID_PROD` と実行に要る最小のものだけ。LLM の鍵は渡さない
+- 子の出力は 32 桁の 16 進・`workers.dev`・URL を伏せてから保存する。`/api/` の応答・記録・標準出力にオリジンは出さない
+- 同じジョブの 2 回目の公開は 409。production の Account ID が渡ると、子を起こす前に断る
+
+**工房はリポジトリの checkout の中から起動する**（公開の子が `infra/scripts` の入口を `tsx` で起こすため。
+依存の向きの照合の外の結び付きである）。
 
 ## 守り
 

@@ -6,6 +6,7 @@ import { createToken } from "./guard.js";
 import { resolveStudioHome } from "./home.js";
 import { BIND_HOST, DEFAULT_PORT, createRequestHandler, listen } from "./http.js";
 import { Jobs } from "./jobs.js";
+import { createStudioPublisher, type StudioPublisher } from "./publish.js";
 import { handleApiRequest } from "./routes.js";
 import type { Runner } from "./runner.js";
 
@@ -28,6 +29,10 @@ export interface StudioAppOptions {
   readonly now?: () => number;
   /** 走らせる役（既定は子プロセスで工場を走らせる本物。試験は偽物を差し込む） */
   readonly runner?: Runner;
+  /** 起動時の環境（子へ渡す変数の allowlist に使う。既定は `process.env`） */
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  /** 公開の口（既定は子プロセスで publish-bundle を起こす本物。試験は偽物を差し込む） */
+  readonly publisher?: StudioPublisher;
 }
 
 export interface StudioApp {
@@ -41,14 +46,16 @@ export interface StudioApp {
  * 両方で同じものを使う。走らせる役の既定は、工場を子プロセスで走らせる本物である。
  */
 export function createStudioAppServer(options: StudioAppOptions): StudioApp {
+  const env = options.env ?? process.env;
   const runner =
     options.runner ??
-    createFactoryRunner({ home: options.home, env: process.env });
+    createFactoryRunner({ home: options.home, env });
   const jobs = new Jobs({
     home: options.home,
     runner,
     ...(options.now === undefined ? {} : { now: options.now }),
   });
+  const publisher = options.publisher ?? createStudioPublisher({ home: options.home, env });
 
   let staticHandler: ((request: IncomingMessage, response: ServerResponse) => void) | null = null;
 
@@ -64,7 +71,7 @@ export function createStudioAppServer(options: StudioAppOptions): StudioApp {
       });
     }
     const fallback = staticHandler;
-    void handleApiRequest(request, response, { jobs, token: options.token, port })
+    void handleApiRequest(request, response, { jobs, token: options.token, port, publisher })
       .then((handled) => {
         if (!handled) fallback(request, response);
       })

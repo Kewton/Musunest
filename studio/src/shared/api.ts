@@ -6,3 +6,12 @@
 // すると TS6307 で typecheck が落ちる。`studio/tsconfig.json` はこの Issue の変更範囲の外なので、
 // 共有の型は `src/server` の中で実行時の依存を持たない file に置き、この file から再輸出する。
 export * from "../server/runner.js";
+
+// 公開の口の型（Issue #868）。**型だけ**を再輸出する——`publish.ts` は Node の子プロセスを扱うので、
+// 画面の束ねたコードへ実行時の依存を持ち込まない（`export type` は消える）。
+export type { ApprovalRecord } from "../server/approval.js";
+export type {
+  PublishFailureRecord,
+  PublishRecord,
+  PublishSuccessRecord,
+} from "../server/publish.js";
