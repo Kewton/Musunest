@@ -1551,7 +1551,7 @@ test("回帰用の題材の定義・依頼文・正例負例に、開発用の�
   const texts = reg.items.map((it) => [`request:${it.id}`, it.requestText]);
   for (const s of reg.subjects) texts.push([`subjects/${s}.json`, readFileSync(join(ev, "subjects", `${s}.json`), "utf8")]);
   texts.push(["sets/regression-r1.json", readFileSync(REG_SET, "utf8")]);
-  for (const f of readdirSync(REG_CASES)) texts.push([`cases/regression/${f}`, readFileSync(join(REG_CASES, f), "utf8")]);
+  for (const f of readdirSync(REG_CASES).filter((f) => f !== "v2")) texts.push([`cases/regression/${f}`, readFileSync(join(REG_CASES, f), "utf8")]);
   for (const [name, text] of texts) for (const w of words) assert.ok(!text.includes(w), `${name} に開発用の題材の語（${words.indexOf(w) + 1} 番目）が入っている`);
 });
 
@@ -1608,7 +1608,7 @@ test("R1 の採点の定義は主役に名前用の string の項目を求める
 test("回帰用の題材の正例・負例（cases/regression）は、凍結した v5 で索引どおりに採点される：最終の判定だけでなく、当てはまる構造・落ちる判定の集合・静的 NG の診断コード・written・申告の判定と挙げ漏れの数まで一致する。索引とファイルが一致し、どの題材にも正例と負例がある", async () => {
   const engine = await import(pathToFileURL(join(repo, "packages/spec-engine/dist/index.js")).href);
   const index = JSON.parse(readFileSync(join(REG_CASES, "cases.json"), "utf8"));
-  assert.deepEqual(readdirSync(REG_CASES).filter((f) => f !== "cases.json").sort(), index.map((c) => c.file).sort(), "索引と置き場所のファイルが一致する");
+  assert.deepEqual(readdirSync(REG_CASES).filter((f) => f !== "cases.json" && f !== "v2").sort(), index.map((c) => c.file).sort(), "索引と置き場所のファイルが一致する");
   const reg = loadEvalSet(REG_SET);
   await withOut(async (base) => {
     const seen = new Map();
@@ -6003,5 +6003,189 @@ test("#876 組 v2 で採点する（--set）：書ける 8 本・一部不可能
       assert.deepEqual(pick(rowOf(full, id)), pick(rowOf(ea, id)), `${id}：E-c と E-a で判定・充足・除外が同じ`);
       assert.ok(!("observed" in rowOf(ea, id)) && !("observed_exclusions" in rowOf(ea, id)), `${id}：v1 の定義の行に観測の欄は出ない`);
     }
+  });
+});
+
+
+// regression-r1 v2（#876・2026-11-11 所有者の決定 4・5）。文はデータから読む。
+const REG_V2_SET = join(ev, "sets/regression-r1.v2.json");
+const REG_V2_CASES = join(REG_CASES, "v2");
+const REG_V2_INDEX = JSON.parse(readFileSync(join(REG_V2_CASES, "cases.json"), "utf8"));
+const REG_V2_MIRROR = { A: "R6", B: "R2", C: "R3", D: "R4", E: "R5" };
+const regV2Def = (id) => loadDef(loadEvalSet(REG_V2_SET).definitions.get(id).path);
+const v1Files = JSON.parse(readFileSync(join(here, "regression-v1.sha256.json"), "utf8"));
+
+test("#876 r1 v2: v1 の題材・組・台本・cases の個々の SHA-256 とファイル集合を固定する。総合の指紋は固定しない", () => {
+  const files = [
+    ...readdirSync(join(ev, "subjects")).filter((f) => f.endsWith(".json")).map((f) => `subjects/${f}`),
+    ...readdirSync(join(ev, "sets/scripts")).filter((f) => f.endsWith(".json")).map((f) => `sets/scripts/${f}`),
+    "sets/dev-p1-p10.json", "sets/regression-r1.json",
+    ...readdirSync(CASES, { withFileTypes: true }).filter((f) => f.isFile()).map((f) => `cases/${f.name}`),
+    ...readdirSync(REG_CASES, { withFileTypes: true }).filter((f) => f.isFile()).map((f) => `cases/regression/${f.name}`),
+  ].sort();
+  assert.deepEqual(files, Object.keys(v1Files).sort());
+  assert.deepEqual(readdirSync(REG_CASES, { withFileTypes: true }).filter((f) => f.isDirectory()).map((f) => f.name), ["v2"], "既存の試験で区別するディレクトリは v2 だけ");
+  for (const [rel, digest] of Object.entries(v1Files)) assert.equal(sha256(readFileSync(join(ev, rel))), digest, rel);
+  const v1 = loadEvalSet(REG_SET), v2 = loadEvalSet(REG_V2_SET);
+  const fp1 = scoringFingerprint(ev, undefined, v1.definitions), fp2 = scoringFingerprint(ev, undefined, v2.definitions);
+  for (const id of v1.subjects) {
+    const rel = `subjects/${id}.json`;
+    assert.equal(fileOf(fp1, `definition:${id}`).sha256, v1Files[rel], id);
+    assert.equal(fileOf(fp2, rel).sha256, v1Files[rel], id);
+  }
+  for (const id of ["R4", "R6"]) assert.deepEqual(fileOf(fp2, `definition:${id}`), { path: `definition:${id}`, source: `subjects/v2/${id}.json`, sha256: sha256(readFileSync(join(ev, "subjects/v2", `${id}.json`))) }, id);
+  assert.notEqual(fp1.fingerprint, fp2.fingerprint);
+});
+
+test("#876 r1 v2: 開発用 v2 と本・書き方・書ける範囲の位置関係が同じ。R1 を外し R6 を同じ 2 本に入れ、R4 を v2 に向ける", () => {
+  const dev = loadEvalSet(V2_SET), reg = loadEvalSet(REG_V2_SET), v1 = loadEvalSet(REG_SET);
+  assert.equal(reg.status, "ok", reg.reasons.join("、"));
+  assert.deepEqual([reg.set.id, reg.set.version, reg.set.role], [v1.set.id, 2, "regression"]);
+  assert.ok(reg.set.basis.language && reg.set.basis.documents_commit && reg.set.basis.decision);
+  assert.equal(reg.items.length, 10);
+  assert.deepEqual(Object.keys(reg.set.styles), Object.keys(dev.set.styles));
+  assert.deepEqual(reg.items.map((it) => [it.id, it.style, it.writable]), dev.items.map((it) => [it.id, it.style, it.writable]));
+  assert.deepEqual(reg.items.map((it) => it.subject), dev.items.map((it) => REG_V2_MIRROR[it.subject]));
+  assert.deepEqual(reg.subjects, Object.values(REG_V2_MIRROR));
+  assert.deepEqual(reg.items.filter((it) => !it.writable).map((it) => it.subject), ["R2", "R2"]);
+  assert.equal(reg.scripts.size, 0);
+  for (const id of reg.subjects) {
+    const [a, b] = reg.items.filter((it) => it.subject === id);
+    assert.notEqual(a.requestText, b.requestText, id);
+    assert.equal(a.scoringPath, b.scoringPath, id);
+    const devDef = loadDef(dev.definitions.get(Object.keys(REG_V2_MIRROR).find((s) => REG_V2_MIRROR[s] === id)).path);
+    const def = loadDef(reg.definitions.get(id).path);
+    assert.deepEqual([def.clock, def.today], [devDef.clock, devDef.today], `${id}: 時計`);
+    assert.equal(def.structures.length, devDef.structures.length, id);
+    def.structures.forEach((st, i) => {
+      const dst = devDef.structures[i];
+      assert.deepEqual(st.checks.map((c) => [c.kind, c.aggregateOnly ?? null, c.widgets ?? null]), dst.checks.map((c) => [c.kind, c.aggregateOnly ?? null, c.widgets ?? null]), `${id}/${st.id}`);
+      assert.deepEqual(st.unwritable.map((u) => [u.keys, u.optionalIfWritten !== undefined]), dst.unwritable.map((u) => [u.keys, u.optionalIfWritten !== undefined]), `${id}/${st.id}`);
+    });
+  }
+  for (const it of reg.items.filter((it) => ["R2", "R3", "R4", "R5"].includes(it.subject))) assert.equal(it.requestText, v1.byId.get(it.id).requestText, it.id);
+});
+
+test("#876 r1 v2: R4/list と R4/attendance は分母 7。R4:list:C4・鍵 K0 と /checks/1 の鍵を持ち、境界の小数・集計の入力を保つ", () => {
+  const def = regV2Def("R4"), old = defOf("R4"), dev = defV2("D");
+  assert.deepEqual(def.structures.map((st) => [st.id, st.checks.length, st.unwritable.length]), [["list", 7, 0], ["attendance", 7, 0]]);
+  const [main, alt] = def.structures;
+  assert.equal(main.checks[3].req, "R4:list:C4");
+  assert.deepEqual(main.checks[3].cases, [{ set: { capacity: 2, attendees: [] }, valid: true }]);
+  assert.deepEqual(main.checks[3].keys, dev.structures[0].checks[3].keys);
+  assert.deepEqual(main.checks[1].keys, dev.structures[0].checks[1].keys);
+  assert.deepEqual(alt.checks[0].keys, main.checks[3].keys);
+  assert.equal(alt.checks[1].kind, "unsatisfiable");
+  assert.equal(alt.checks[1].req, old.structures[1].unwritable[0].id);
+  assert.deepEqual(main.checks[2].cases, old.structures[0].checks[2].cases);
+  assert.deepEqual(alt.checks[3].cases, old.structures[1].checks[2].cases);
+  assert.deepEqual(main.checks[6].sources, old.structures[0].checks[5].sources);
+});
+
+test("#876 r1 v2: R6 は指定の型構成・境界の小数・count と sum を区別する入力を持ち、開発用から独立した文を使う", () => {
+  const def = regV2Def("R6"), st = def.structures[0];
+  assert.equal(def.structures.length, 1);
+  assert.deepEqual(st.unwritable, []);
+  const roles = Object.entries(st.roles);
+  const [numberRole, number] = roles.find(([, r]) => r.field?.type === "number");
+  const mainRole = number.field.of;
+  const [refRole, ref] = roles.find(([, r]) => r.field?.of === mainRole && r.field.type === "ref");
+  assert.equal(roles.filter(([, r]) => r.entity).length, 2);
+  assert.deepEqual(roles.filter(([, r]) => r.field?.of === mainRole).map(([, r]) => r.field.type).sort(), ["enum", "enum", "number", "ref", "string"]);
+  const defaultRole = st.checks.find((c) => c.kind === "enumDefault").field;
+  const [, otherEnum] = roles.find(([role, r]) => r.field?.of === mainRole && r.field.type === "enum" && role !== defaultRole);
+  assert.deepEqual([otherEnum.field.labels.length, st.roles[defaultRole].field.labels.length], [3, 2]);
+  assert.deepEqual(st.roles[ref.field.to].entity.hasFieldTypes, ["string"]);
+  assert.deepEqual(st.checks[5].cases.map((c) => [c.set[numberRole], c.valid]), [[0, false], [0.5, false], [1, true]]);
+  const count = st.checks[6];
+  assert.equal(count.aggregateOnly, true);
+  for (const probe of count.probes) {
+    const rows = count.sources[mainRole].filter((r) => r.set[refRole] === probe.recordId);
+    assert.equal(rows.length, probe.expect);
+    assert.notEqual(rows.reduce((sum, r) => sum + r.set[numberRole], 0), probe.expect);
+  }
+  const reg = loadEvalSet(REG_V2_SET);
+  const words = [...new Set([...Object.keys(REG_V2_MIRROR), "R1"].flatMap((id) => defOf(id).title.split(/[のと・]/)).filter((w) => w.length >= 2))];
+  assert.ok(words.length >= 8, "題名の語が少なすぎる");
+  const paths = [REG_V2_SET, join(ev, "subjects/v2/R4.json"), join(ev, "subjects/v2/R6.json"), ...readdirSync(REG_V2_CASES).map((f) => join(REG_V2_CASES, f))];
+  for (const path of paths) {
+    const text = readFileSync(path, "utf8");
+    for (const w of words) assert.ok(!text.includes(w), `${relative(ev, path)}: 語 ${words.indexOf(w) + 1}`);
+  }
+  assert.ok(reg.items.every((it) => it.subject !== "R1"));
+});
+
+test("#876 r1 v2: cases/regression/v2 は明示した v2 定義で判定・構造・失敗 ID・分母・申告が索引と一致し、各題材の正例と負例を含む", async () => {
+  const engine = await import(pathToFileURL(join(repo, "packages/spec-engine/dist/index.js")).href);
+  assert.deepEqual(readdirSync(REG_V2_CASES).sort(), ["cases.json", ...REG_V2_INDEX.specs.map((c) => c.file)].sort());
+  const seen = new Map();
+  await withOut(async (base) => {
+    for (const c of REG_V2_INDEX.specs) {
+      const data = JSON.parse(readFileSync(join(REG_V2_CASES, c.file), "utf8"));
+      const path = join(base, c.file + ".app.spec.yaml");
+      writeFileSync(path, data.spec.join("\n") + "\n");
+      const def = regV2Def(c.subject), want = c.expect, r = await score(engine, path, def);
+      assert.deepEqual({ verdict: r.verdict, structure: r.structure, failed: Object.entries(r.checks).filter(([, ok]) => !ok).map(([id]) => id), fulfilled: r.fulfilled, total: r.writable_total }, { verdict: want.verdict, structure: want.structure, failed: want.failed, fulfilled: want.fulfilled, total: want.total }, c.file);
+      assert.deepEqual(r.codes, [], c.file);
+      if (want.claims) {
+        const claims = scoreClaims(data.log, def, r.structure, r.written);
+        assert.deepEqual({ correct: claims.correct, missed: claims.missed, false_claims: claims.false_claims.length }, want.claims, c.file);
+        assert.deepEqual(claims.expected, [], c.file);
+        assert.equal(finalVerdict(r, claims), want.final, c.file);
+      }
+      if (c.v1) {
+        const old = await score(engine, path, defOf(c.subject));
+        assert.deepEqual({ verdict: old.verdict, fulfilled: old.fulfilled, total: old.writable_total, failed: Object.entries(old.checks).filter(([, ok]) => !ok).map(([id]) => id) }, c.v1, c.file);
+      }
+      if (!seen.has(c.subject)) seen.set(c.subject, new Set());
+      seen.get(c.subject).add(r.verdict);
+    }
+  });
+  for (const id of ["R4", "R6"]) assert.deepEqual([...seen.get(id)].sort(), ["FAIL", "PASS"], id);
+});
+
+test("#876 r1 v2: R4 の鍵の正例・負例を除外と変更に当て、了承済みの書けない要件へ入れない", async () => {
+  for (const c of REG_V2_INDEX.acceptance) {
+    const parts = c.op === "exclusion" ? [part("P:1", c.text)] : [part("P:1", c.text, "alternative", "R:alt:1")];
+    const plan = await planFixture({ requirements: [req("R:1", "MARK_REQ", { parts }), ...(c.op === "change" ? [altReq("R:alt:1", "MARK_ALT")] : [])] });
+    const a = readAcceptance(plan, acceptanceMatcher(regV2Def(c.subject), c.structure, DEFAULT_ALLOWED));
+    const entries = c.op === "exclusion" ? a.exclusions : a.changed;
+    assert.equal(entries.length, 1, c.id);
+    assert.equal(entries[0].judged, c.expect, c.id);
+    assert.deepEqual(a.accepted_unwritable_ids, [], c.id);
+    if (c.unevaluated_checks) assert.deepEqual(a.unevaluated_checks, c.unevaluated_checks, c.id);
+  }
+});
+
+test("#876 r1 v2: --set の採点は 10 本を全充足し、分母は全体 76・writable 60・partial 16。R4 は生成失敗も分母 7、別の構造は申告で救済しない", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out"), reg = loadEvalSet(REG_V2_SET);
+    const fixtures = { R6: join(REG_V2_CASES, "r6-pos-full.json"), R2: join(REG_CASES, "r2-pos-table-claimed.json"), R3: join(REG_CASES, "r3-pos-dashboard.json"), R4: join(REG_V2_CASES, "r4-pos-list-empty.json"), R5: join(REG_CASES, "r5-pos-full.json") };
+    for (const it of reg.items) {
+      const data = JSON.parse(readFileSync(fixtures[it.subject], "utf8"));
+      const unwritable = data.log ? { unwritable: data.log.attempts.at(-1).unwritable.map((u) => ({ text: u.requirement, quote: "", unwritable: [u.reason] })) } : null;
+      addRun(out, `${it.id}-r1`, { spec: data.spec.join("\n") + "\n", unwritable });
+    }
+    const ids = reg.items.map((it) => `${it.id}-r1`);
+    conditions(out, ids);
+    scoreRun(out, ["--set", REG_V2_SET]);
+    const full = readScore(out);
+    assert.deepEqual([full.set.id, full.set.version], ["regression-r1", 2]);
+    assert.deepEqual(full.rows.map((r) => [r.subject, r.writable, r.verdict]), reg.items.map((it) => [it.subject, it.writable, "PASS"]));
+    startsWith(full.fulfillment.v2.all, "76/76（");
+    startsWith(full.fulfillment.v2.writable, "60/60（");
+    startsWith(full.fulfillment.v2.partial, "16/16（");
+    for (const id of ["P7-r1", "P8-r1"]) assert.deepEqual(rowOf(full, id).claims.expected, [], id);
+    addRun(out, "P7-r1");
+    const data = JSON.parse(readFileSync(join(REG_V2_CASES, "r4-alt-claimed.json"), "utf8"));
+    addRun(out, "P8-r1", { spec: data.spec.join("\n") + "\n", unwritable: { unwritable: data.log.attempts.at(-1).unwritable.map((u) => ({ text: u.requirement, quote: "", unwritable: [u.reason] })) } });
+    rmSync(join(out, "P7-r1/bundle/artifacts/app.spec.yaml"));
+    scoreRun(out, ["--set", REG_V2_SET]);
+    const failed = readScore(out);
+    assert.deepEqual(rowOf(failed, "P7-r1").fulfillment_v2, { fulfilled: 0, total: 7, total_from: "definition:list" });
+    assert.equal(rowOf(failed, "P8-r1").verdict, "FAIL");
+    assert.deepEqual(rowOf(failed, "P8-r1").fulfillment_v2, { fulfilled: 6, total: 7, total_from: "structure:attendance" });
+    assert.equal(rowOf(failed, "P8-r1").claims.false_claims.length, 1);
+    startsWith(failed.fulfillment.v2.all, "68/76（");
   });
 });
