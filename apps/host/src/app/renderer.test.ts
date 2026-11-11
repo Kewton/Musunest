@@ -559,6 +559,26 @@ describe("参照の表示（warikan の形）", () => {
     });
   });
 
+  it("参照の並びを 1 つも選ばずに保存すると、空の並びが送られる（Issue #853）", async () => {
+    const addRecord = vi.fn(() => Promise.resolve(okResult(WARIKAN_EXPENSE_VIEW.rows[0] as ApiRow)));
+    await renderScreen(makeWarikanClient({ add: addRecord }));
+
+    await screen.findByText("夕食");
+    fill("description", "これから");
+    fill("amount", "3000");
+    fireEvent.change(screen.getByLabelText("payer"), { target: { value: "m1" } });
+    // チェックを 1 つも選ばない（未選択のまま保存する）
+    submit();
+
+    await waitFor(() => expect(addRecord).toHaveBeenCalledTimes(1));
+    expect(addRecord).toHaveBeenCalledWith("inst-1", "addExpense", {
+      description: "これから",
+      amount: 3000,
+      payer: "m1",
+      participants: [],
+    });
+  });
+
   it("候補が 0 件なら、架空の ID を作らず、先に登録するよう案内する", async () => {
     const { container } = await renderScreen(makeWarikanClient({ members: { ...MEMBER_VIEW, rows: [] } }));
 

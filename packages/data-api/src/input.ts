@@ -14,7 +14,13 @@
 // ここは Cloudflare にもストレージにも触れない（呼ぶ側が渡す値だけで決まる）。
 
 import type { Entity, FieldDeclaration, NormalizedAppSpec } from "@musunest/appspec-schema";
-import { DATE_VALUE_PATTERN, enumDefault, fieldKind, isEnumField } from "@musunest/appspec-schema";
+import {
+  DATE_VALUE_PATTERN,
+  enumDefault,
+  fieldKind,
+  fieldTarget,
+  isEnumField,
+} from "@musunest/appspec-schema";
 import type { RecordData, RecordValue } from "@musunest/app-do";
 import type { Clock } from "@musunest/spec-engine";
 import { evaluateRecord } from "@musunest/spec-engine";
@@ -97,7 +103,10 @@ function readValue(field: FieldDeclaration, value: unknown): RecordValue | null 
         ? value
         : null;
     case "list": {
-      if (!Array.isArray(value) || value.length === 0) return null;
+      if (!Array.isArray(value)) return null;
+      // **文字列の並びは空を受け取らない**（Q18-2）。参照の並び（`of` を持つ list）は
+      // 「最初は 0 件」を書けるように空を受け取る（Issue #853）。重複はどちらも断る
+      if (fieldTarget(field) === null && value.length === 0) return null;
       if (!value.every((item): item is string => typeof item === "string")) return null;
       // 同じ文字列が 2 回ある並びは受け取らない
       if (new Set<string>(value).size !== value.length) return null;

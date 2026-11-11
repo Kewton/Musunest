@@ -387,6 +387,47 @@ describe("宣言の entity のレコード（workerd 上の実機）", () => {
     expect(await listed("guarded-create", "expense")).toHaveLength(1);
   });
 
+  it("参照の並びが空でも書ける（確かめる要素が無い。Issue #853）", async () => {
+    await createdGuarded("guarded-empty-list", "member", { name: "A" }, [], { now: T1, id: "m1" });
+    const empty = await createdGuarded(
+      "guarded-empty-list",
+      "expense",
+      { amount: 1000, payer: "m1", participants: [] },
+      memberExpectations,
+      { now: T1, id: "e1" },
+    );
+    expect(empty.ok).toBe(true);
+    if (empty.ok) expect(empty.record.data["participants"]).toEqual([]);
+    expect(await listed("guarded-empty-list", "expense")).toHaveLength(1);
+  });
+
+  it("参照の並びの項目が欠けていれば断る（空の並びは「0 件」という値である）", async () => {
+    await createdGuarded("guarded-missing-list", "member", { name: "A" }, [], { now: T1, id: "m1" });
+    const missing = await createdGuarded(
+      "guarded-missing-list",
+      "expense",
+      { amount: 1000, payer: "m1" },
+      memberExpectations,
+      { now: T1, id: "e1" },
+    );
+    expect(missing).toEqual({ ok: false, reason: "REFERENCE_NOT_FOUND", fields: ["participants"] });
+    expect(await listed("guarded-missing-list", "expense")).toEqual([]);
+  });
+
+  it("参照の並びに文字列でない要素があれば断る（空の並びとは別である）", async () => {
+    await createdGuarded("guarded-nonstring-list", "member", { name: "A" }, [], { now: T1, id: "m1" });
+    const nonstring = await createdGuarded(
+      "guarded-nonstring-list",
+      "expense",
+      // 型の検査を通っていない値が保存の境界へ届いた場合を測る（JSON には型が無い）
+      { amount: 1000, payer: "m1", participants: [1] } as unknown as RecordData,
+      memberExpectations,
+      { now: T1, id: "e1" },
+    );
+    expect(nonstring).toEqual({ ok: false, reason: "REFERENCE_NOT_FOUND", fields: ["participants"] });
+    expect(await listed("guarded-nonstring-list", "expense")).toEqual([]);
+  });
+
   it("参照が無ければ消せて、行が 1 つ減る", async () => {
     const member = await created("guarded-free", "member", { name: "A" }, { now: T1, id: "m1" });
     const result = await removedGuarded("guarded-free", "member", "m1", memberGuards);

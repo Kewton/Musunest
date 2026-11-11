@@ -228,15 +228,17 @@ function missingReferences(
   const fields: string[] = [];
   for (const expectation of expectations) {
     const value = data[expectation.field];
-    const ids = expectation.list
-      ? Array.isArray(value)
-        ? value
-        : []
-      : typeof value === "string" && value !== ""
-        ? [value]
-        : [];
-    // 1 件も指していない（型の検査が先に断る値である）か、1 つでも実在しなければ通らない
-    if (ids.length === 0 || ids.some((id) => selectRecord(sql, expectation.to, id) === null)) {
+    if (expectation.list) {
+      // **参照の並びは空（0 件）でもよい**（Issue #853）。要素が 0 件なら、実在を見る要素が無い。
+      // 並びでない値・文字列でない要素・実在しない ID は今までどおり断る（重複は型の検査が断る）
+      const valid =
+        Array.isArray(value) &&
+        value.every((id) => typeof id === "string" && selectRecord(sql, expectation.to, id) !== null);
+      if (!valid) fields.push(expectation.field);
+      continue;
+    }
+    const id = typeof value === "string" && value !== "" ? value : null;
+    if (id === null || selectRecord(sql, expectation.to, id) === null) {
       fields.push(expectation.field);
     }
   }

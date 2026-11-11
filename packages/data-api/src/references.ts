@@ -46,11 +46,9 @@ function pointsAtExistingRecord(
   ids: ReadonlySet<string>,
 ): boolean {
   if (fieldKind(field) === "ref") return typeof value === "string" && ids.has(value);
-  return (
-    Array.isArray(value) &&
-    value.length > 0 &&
-    value.every((item) => typeof item === "string" && ids.has(item))
-  );
+  // **参照の並びは空（0 件）でもよい**（Issue #853）。要素が 0 件なら、実在を見る要素が無い。
+  // 並びでない値・文字列でない要素・実在しない ID は今までどおり断る（重複は型の検査が断る）
+  return Array.isArray(value) && value.every((item) => typeof item === "string" && ids.has(item));
 }
 
 /**
