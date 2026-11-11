@@ -6055,6 +6055,7 @@ test("#876 r1 v2: 開発用 v2 と本・書き方・書ける範囲の位置関�
     assert.equal(a.scoringPath, b.scoringPath, id);
     const devDef = loadDef(dev.definitions.get(Object.keys(REG_V2_MIRROR).find((s) => REG_V2_MIRROR[s] === id)).path);
     const def = loadDef(reg.definitions.get(id).path);
+    assert.deepEqual([def.clock, def.today], [devDef.clock, devDef.today], `${id}: 時計`);
     assert.equal(def.structures.length, devDef.structures.length, id);
     def.structures.forEach((st, i) => {
       const dst = devDef.structures[i];
@@ -6085,20 +6086,27 @@ test("#876 r1 v2: R6 は指定の型構成・境界の小数・count と sum を
   const def = regV2Def("R6"), st = def.structures[0];
   assert.equal(def.structures.length, 1);
   assert.deepEqual(st.unwritable, []);
-  assert.equal(Object.values(st.roles).filter((r) => r.entity).length, 2);
-  assert.deepEqual(Object.values(st.roles).filter((r) => r.field?.of === "main").map((r) => r.field.type).sort(), ["enum", "enum", "number", "ref", "string"]);
-  assert.deepEqual([st.roles.kind.field.labels.length, st.roles.status.field.labels.length], [3, 2]);
-  assert.deepEqual(st.roles.member.entity.hasFieldTypes, ["string"]);
-  assert.deepEqual(st.checks[5].cases.map((c) => [c.set.qty, c.valid]), [[0, false], [0.5, false], [1, true]]);
+  const roles = Object.entries(st.roles);
+  const [numberRole, number] = roles.find(([, r]) => r.field?.type === "number");
+  const mainRole = number.field.of;
+  const [refRole, ref] = roles.find(([, r]) => r.field?.of === mainRole && r.field.type === "ref");
+  assert.equal(roles.filter(([, r]) => r.entity).length, 2);
+  assert.deepEqual(roles.filter(([, r]) => r.field?.of === mainRole).map(([, r]) => r.field.type).sort(), ["enum", "enum", "number", "ref", "string"]);
+  const defaultRole = st.checks.find((c) => c.kind === "enumDefault").field;
+  const [, otherEnum] = roles.find(([role, r]) => r.field?.of === mainRole && r.field.type === "enum" && role !== defaultRole);
+  assert.deepEqual([otherEnum.field.labels.length, st.roles[defaultRole].field.labels.length], [3, 2]);
+  assert.deepEqual(st.roles[ref.field.to].entity.hasFieldTypes, ["string"]);
+  assert.deepEqual(st.checks[5].cases.map((c) => [c.set[numberRole], c.valid]), [[0, false], [0.5, false], [1, true]]);
   const count = st.checks[6];
   assert.equal(count.aggregateOnly, true);
   for (const probe of count.probes) {
-    const rows = count.sources.main.filter((r) => r.set.who === probe.recordId);
+    const rows = count.sources[mainRole].filter((r) => r.set[refRole] === probe.recordId);
     assert.equal(rows.length, probe.expect);
-    assert.notEqual(rows.reduce((sum, r) => sum + r.set.qty, 0), probe.expect);
+    assert.notEqual(rows.reduce((sum, r) => sum + r.set[numberRole], 0), probe.expect);
   }
   const reg = loadEvalSet(REG_V2_SET);
-  const words = [...new Set(Object.keys(REG_V2_MIRROR).flatMap((id) => defOf(id).title.split(/[のと・]/)).filter((w) => w.length >= 2))];
+  const words = [...new Set([...Object.keys(REG_V2_MIRROR), "R1"].flatMap((id) => defOf(id).title.split(/[のと・]/)).filter((w) => w.length >= 2))];
+  assert.ok(words.length >= 8, "題名の語が少なすぎる");
   const paths = [REG_V2_SET, join(ev, "subjects/v2/R4.json"), join(ev, "subjects/v2/R6.json"), ...readdirSync(REG_V2_CASES).map((f) => join(REG_V2_CASES, f))];
   for (const path of paths) {
     const text = readFileSync(path, "utf8");
