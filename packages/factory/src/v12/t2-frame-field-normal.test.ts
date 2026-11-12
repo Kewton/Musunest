@@ -432,8 +432,9 @@ describe("台帳の全体・上流の指紋（off は base と同じ。ids on �
     // （65c1f276…・dc21dd01…）に戻る
     // Issue #902：規則の 2 セルだけを #875 の前の文に戻したので、ids の全体は変わり（since の履歴を足すため）、上流は
     // b511936 の値（dc21dd01…）に戻る。旧の文に戻す照合（下の 2 行）は今までどおり
-    expect(await propertyLedgerSha256(PROPERTY_LEDGER, ids)).toBe("555f169b3bbd1d6bd1d4032e14e99566e3dbc039710111841b25e3e334a01c3f");
-    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, ids)).toBe("dc21dd0177557eec5af22eafe2355a41f99884ab4e063d6745e30ae9c554c110");
+    // Issue #906：規則の 2 セルに比較を and・or・not で結んだ 1 つの入力の条件を足したので ids の全体・上流が変わる
+    expect(await propertyLedgerSha256(PROPERTY_LEDGER, ids)).toBe("1d174d9d9029b71b766a0e0096fb757a80d84043779736bc491c9121ee0dc379");
+    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, ids)).toBe("b62f975c58906d1b45ee6279ab1d9b003029efc6cd248e4f00a6caccacf38c84");
     expect(await propertyLedgerSha256(withOldValidationExpressionTexts(), ids)).toBe("65c1f276c2f72cc7fbe947397ee214da740dcdbd1680bdd001f61f889d141487");
     expect(await upstreamLedgerSha256(withOldValidationExpressionTexts(), ids)).toBe("dc21dd0177557eec5af22eafe2355a41f99884ab4e063d6745e30ae9c554c110");
   });
