@@ -10,6 +10,7 @@ import type {
   PlanConfirmationView,
   PlanConfirmOutcome,
   PlanResponder,
+  PlanTranscript,
 } from "@musunest/factory";
 import { toRunnerConfirmation } from "./confirm-view.js";
 import type {
@@ -31,6 +32,8 @@ export interface PlanResponderChannel {
 
 export interface PlanResponderOptions {
   readonly channel: PlanResponderChannel;
+  /** 往復の記録（問い・答え・全部推奨か・確認の答え。ジョブの置き場に書く。Issue #885） */
+  readonly transcript: PlanTranscript;
   /** いまの時刻（試験は固定する） */
   readonly now?: () => number;
   /** Plan の締切（絶対時刻。ミリ秒） */
@@ -95,6 +98,7 @@ export function createPlanResponder(options: PlanResponderOptions): WaitingPlanR
     async answer(request: PlanAnswerRequest): Promise<PlanAnswerOutcome> {
       const response = await options.channel.ask(toQuestionBundle(request));
       if (response.kind === "all-recommended") {
+        options.transcript.rounds.push({ questions: request.questions, answers: [], allRecommended: true });
         return { kind: "all-recommended" };
       }
       const answers: PlanAnswerDraft[] = [];
@@ -102,16 +106,17 @@ export function createPlanResponder(options: PlanResponderOptions): WaitingPlanR
         const draft = toAnswerDraft(answer, request.revision);
         if (draft !== undefined) answers.push(draft);
       }
+      options.transcript.rounds.push({ questions: request.questions, answers, allRecommended: false });
       return { kind: "answers", answers };
     },
 
     async confirm(view: PlanConfirmationView): Promise<PlanConfirmOutcome> {
       const outcome = await options.channel.confirm(toRunnerConfirmation(view));
-      if (options.deadline !== undefined && now() >= options.deadline) {
-        timedOut = true;
-        return "stop";
-      }
-      return outcome === "build" ? "build" : "stop";
+      const expired = options.deadline !== undefined && now() >= options.deadline;
+      if (expired) timedOut = true;
+      const decision: PlanConfirmOutcome = expired ? "stop" : outcome === "build" ? "build" : "stop";
+      options.transcript.confirmation = decision;
+      return decision;
     },
   };
 }

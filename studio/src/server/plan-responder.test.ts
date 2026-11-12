@@ -1,4 +1,5 @@
 import type { PlanAnswerRequest, PlanConfirmationView, PlanQuestion } from "@musunest/factory";
+import { createPlanTranscript } from "@musunest/factory";
 import { describe, expect, it } from "vitest";
 import type {
   ConfirmOutcome,
@@ -77,7 +78,8 @@ const view: PlanConfirmationView = {
 describe("画面の答えを待つ答え役", () => {
   it("質問を通知し、答えが届くまで Plan が進まない", async () => {
     const channel = new TestChannel();
-    const responder = createPlanResponder({ channel });
+    const transcript = createPlanTranscript();
+    const responder = createPlanResponder({ channel, transcript });
 
     let settled = false;
     const pending = responder.answer(request(1));
@@ -100,7 +102,8 @@ describe("画面の答えを待つ答え役", () => {
 
   it("2 往復目の質問の版が上がる", async () => {
     const channel = new TestChannel();
-    const responder = createPlanResponder({ channel });
+    const transcript = createPlanTranscript();
+    const responder = createPlanResponder({ channel, transcript });
 
     const first = responder.answer(request(1));
     channel.answer({ kind: "answers", revision: 1, answers: [{ questionId: "Q1-1", freeText: "新しい順" }] });
@@ -116,7 +119,8 @@ describe("画面の答えを待つ答え役", () => {
 
   it("「全部推奨」が工場へそのまま渡る", async () => {
     const channel = new TestChannel();
-    const responder = createPlanResponder({ channel });
+    const transcript = createPlanTranscript();
+    const responder = createPlanResponder({ channel, transcript });
 
     const pending = responder.answer(request(1));
     channel.answer({ kind: "all-recommended", revision: 1 });
@@ -125,7 +129,8 @@ describe("画面の答えを待つ答え役", () => {
 
   it("確認の答えを画面の型にして送り、やめるなら stop を返す", async () => {
     const channel = new TestChannel();
-    const responder = createPlanResponder({ channel });
+    const transcript = createPlanTranscript();
+    const responder = createPlanResponder({ channel, transcript });
 
     const pending = responder.confirm(view);
     await Promise.resolve();
@@ -140,6 +145,29 @@ describe("画面の答えを待つ答え役", () => {
     channel.answerConfirm("stop");
     await expect(pending).resolves.toBe("stop");
   });
+
+  it("2 往復（全部推奨・個別の答え）の問いと答えが、往復の記録に 2 つ積まれる", async () => {
+    const channel = new TestChannel();
+    const transcript = createPlanTranscript();
+    const responder = createPlanResponder({ channel, transcript });
+
+    const first = responder.answer(request(1));
+    channel.answer({ kind: "all-recommended", revision: 1 });
+    await first;
+
+    const second = responder.answer(request(2));
+    channel.answer({ kind: "answers", revision: 2, answers: [{ questionId: "Q2-1", choiceId: "oldest" }] });
+    await second;
+
+    expect(transcript.rounds).toHaveLength(2);
+    expect(transcript.rounds[0]?.allRecommended).toBe(true);
+    expect(transcript.rounds[0]?.answers).toHaveLength(0);
+    expect(transcript.rounds[0]?.questions.map((entry) => entry.id)).toEqual(["Q1-1"]);
+    expect(transcript.rounds[1]?.allRecommended).toBe(false);
+    expect(transcript.rounds[1]?.answers).toHaveLength(1);
+    expect(transcript.rounds[1]?.answers[0]?.choiceId).toBe("oldest");
+    expect(transcript.rounds[1]?.questions.map((entry) => entry.id)).toEqual(["Q2-1"]);
+  });
 });
 
 describe("確認の締切", () => {
@@ -147,7 +175,8 @@ describe("確認の締切", () => {
     const channel = new TestChannel();
     const deadline = 10_000_000;
     let now = deadline - 60_000;
-    const responder = createPlanResponder({ channel, now: () => now, deadline });
+    const transcript = createPlanTranscript();
+    const responder = createPlanResponder({ channel, transcript, now: () => now, deadline });
 
     const pending = responder.confirm(view);
     await Promise.resolve();
@@ -162,7 +191,8 @@ describe("確認の締切", () => {
     const channel = new TestChannel();
     const deadline = 10_000_000;
     let now = deadline - 60_000;
-    const responder = createPlanResponder({ channel, now: () => now, deadline });
+    const transcript = createPlanTranscript();
+    const responder = createPlanResponder({ channel, transcript, now: () => now, deadline });
 
     const pending = responder.confirm(view);
     await Promise.resolve();
