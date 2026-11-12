@@ -6833,3 +6833,80 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
   });
 });
 
+
+// ── Issue #910：申告の独立点検に、初回と差分の両方で文書の全体と今の全要件を渡す ──────────────
+//
+// 偽物の判定で、**点検へ送った要求の材料**だけを確かめる（意味の判断の効き目の証明ではない）。
+
+describe("申告の独立点検の材料（Issue #910）", () => {
+  it("初回と差分の点検の両方に、文書の全体と今の全要件（id・text）を渡し、代わりの案の要件・了承除外の印・過去の判断は渡さない", async () => {
+    const inScope = { id: "U-9", requirementId: "R:A:Q1-1", part: "差分の部分", constraintIds: ["記録"], reason: "差分の理由", alternative: "差分の代案" };
+    const mixed = {
+      ambiguities: [{ id: "OI-new", requirementId: "R:A:Q1-1", text: "新しい曖昧", critical: true }],
+      unwritable: [inScope],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(BASE_SURFACE),
+      structured(questionsFor("OI-1")),
+      structured(mixed),
+      structured(questionsFor("OI-new")),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const fake = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const requests: JudgeRequest[] = [];
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        requests.push(request);
+        return fake.judge(request);
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 初回の U-0 と差分の U-9 が受理される（偽の判定の下で今までどおり）
+    expect(result.plan.accepted_unwritable.map((entry) => entry.part_id)).toEqual(["P:U-0", "P:U-9"]);
+    const checks = requests.filter((request) =>
+      Object.keys(request.questions).some((name) => name.startsWith("plan-triage:") || name.startsWith("plan-support:")),
+    );
+    // 初回（仕分け・裏付け）と差分（仕分け・裏付け）の 4 要求
+    expect(checks.map((request) => Object.keys(request.questions))).toEqual([
+      ["plan-triage:0"],
+      ["plan-support:0"],
+      ["plan-triage:0"],
+      ["plan-support:0"],
+    ]);
+    const documents = SAMPLE_DOCUMENTS.map((document) => ({ name: document.name, text: document.text }));
+    const materialIds = checks.map((request) =>
+      ((request.state as { requirements?: readonly { id: string; text: string }[] }).requirements ?? []).map((entry) => entry.id),
+    );
+    // 初回：P1 の全要件
+    expect(materialIds[0]).toEqual(REQUIREMENT_LIST_OUTPUT.requirements.map((requirement) => requirement.id));
+    expect(materialIds[1]).toEqual(materialIds[0]);
+    // 差分：**その時点の**全要件（答え由来の要件を含む）。代わりの案の要件（R:alt:U-0）は渡さない
+    expect(materialIds[2]).toEqual([...REQUIREMENT_LIST_OUTPUT.requirements.map((requirement) => requirement.id), "R:A:Q1-1"]);
+    expect(materialIds[3]).toEqual(materialIds[2]);
+    for (const request of checks) {
+      expect((request.state as { documents?: unknown }).documents).toEqual(documents);
+      const material = JSON.stringify(request.state);
+      expect(material).not.toContain("R:alt:");
+      expect(material).not.toContain("accepted_removal");
+      // 過去の判断（代わりの案の文）は材料に載らない
+      expect(material).not.toContain("代案");
+      expect(Object.keys(request.state)).toEqual(["documents", "requirements"]);
+    }
+    // 要件の文は id と text だけ（出典・部分は載せない）
+    const diffState = (checks[2]?.state ?? {}) as { requirements?: readonly Record<string, unknown>[] };
+    const firstRequirement = diffState.requirements?.[0];
+    expect(Object.keys(firstRequirement ?? {})).toEqual(["id", "text"]);
+  });
+});
