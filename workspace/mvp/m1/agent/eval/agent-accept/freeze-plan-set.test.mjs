@@ -231,6 +231,11 @@ test("凍結の断る条件：それぞれ符号つきの exit 3 で、組を書
       ["envelope-parse", (o) => edit(join(o, "P1-r1/bundle/plan-result.json"), (e) => { delete e.stop; }), "freeze:envelope-unreadable:plan-file-required"],
       ["envelope-conditions", (o) => edit(join(o, "P1-r1/bundle/plan-result.json"), (e) => { e.conditions.model = "other-model"; }), "freeze:envelope-conditions"],
       ["started-at", (o) => edit(join(o, "P1-r1/summary.line.json"), (sl) => { delete sl.started_at; }), "freeze:started-at"],
+      // #876：出どころの計測の条件の文書の指紋が欠ける・形が違う（今の文書から取り直さない）
+      ["documents-missing", (o) => edit(join(o, "conditions.json"), (c) => { delete c.prompt_documents; }), "freeze:documents"],
+      ["documents-semantics", (o) => edit(join(o, "conditions.json"), (c) => { delete c.prompt_documents.semantics.sha256; }), "freeze:documents"],
+      ["documents-contract", (o) => edit(join(o, "conditions.json"), (c) => { c.prompt_documents.contract.fingerprint = null; }), "freeze:documents"],
+      ["documents-vocabulary", (o) => edit(join(o, "conditions.json"), (c) => { c.prompt_documents.vocabulary.sha256 = "X".repeat(64); }), "freeze:documents"],
     ];
     for (const [name, tweak, code] of cases) {
       const o = join(base, `case-${name}`);
@@ -309,5 +314,52 @@ test("#513 v5 の Plan 計測（今の run-agent.mjs が書く条件）から凍
     cpSync(out, v6, { recursive: true });
     edit(join(v6, "conditions.json"), (c) => { c.schema = "musunest-factory/agent-accept-conditions/v6"; });
     assertFreezeRefused(base, (env) => freeze(repo, v6, join(base, "fz-v6"), undefined, env), "freeze:conditions-schema", { input: v6, dest: join(base, "fz-v6") });
+  });
+});
+
+test("#876 (b) の組は出どころの計測の条件の prompt_documents（契約・語彙の意味・語彙の台帳）を写し、今の文書から取り直さない。--build-from は指紋の欠けた旧い形の組・形の違う指紋・計測する checkout の今の文書と違う指紋を子を起こす前に exit 3 で断り（API を呼ばない）、同じ文書なら流す", async () => {
+  await withBase(async (base) => {
+    const repo = makeRepo(base);
+    const out = join(base, "plan-eval");
+    measure(repo, out, ["--only", "P1,P2", "--runs", "1", "--concurrency", "1"]);
+    const cond = readJson(join(out, "conditions.json"));
+    const fromCond = { contract: cond.prompt_documents.contract.fingerprint, semantics: cond.prompt_documents.semantics.sha256, vocabulary: cond.prompt_documents.vocabulary.sha256 };
+    for (const v of Object.values(fromCond)) assert.match(v, /^[0-9a-f]{64}$/);
+    const dest = join(base, "fz");
+    assert.equal(freeze(repo, out, dest).status, 0);
+    assert.deepEqual(readJson(join(dest, FROZEN_SET_FILE)).prompt_documents, fromCond);
+    // 計測する checkout の文書を変えてから凍結しても、組の指紋は条件の値のまま（取り直さない）
+    const vocab = join(repo, "packages/appspec-schema/vocabulary.yaml"), vocabBefore = readFileSync(vocab);
+    writeFileSync(vocab, "words: [changed]\n");
+    const dest2 = join(base, "fz-after-change");
+    assert.equal(freeze(repo, out, dest2).status, 0);
+    assert.deepEqual(readJson(join(dest2, FROZEN_SET_FILE)).prompt_documents, fromCond, "今の文書から取り直さない");
+    // 文書の違う checkout では、その組を --build-from が子を起こす前に断る
+    const log = join(base, "spawn-876.log");
+    const build = (fzFile, name) => runNode(runAgentFile, [repo, join(base, name), "--runs", "1", "--build-from", fzFile], { FAKE_SPAWN_LOG: log });
+    const assertBuildRefused = (r, code, name) => {
+      assert.equal(r.status, 3, `${name}: ${r.stderr}`);
+      assert.ok(r.stderr.includes(`[${code}]`), `${name}: 符号が違う: ${r.stderr}`);
+      assert.equal(existsSync(log), false, `${name}: 子を起こした`);
+      assert.ok(!existsSync(join(base, name)) || readdirSync(join(base, name)).length === 0, `${name}: 出力先に書いた`);
+    };
+    assertBuildRefused(build(join(dest2, FROZEN_SET_FILE), "build-changed"), "build-from:documents-mismatch", "build-changed");
+    writeFileSync(vocab, vocabBefore);
+    // 指紋の無い旧い形の組・形の違う指紋
+    for (const [name, fn, code] of [
+      ["old-format", (v) => { delete v.prompt_documents; }, "build-from:documents-missing"],
+      ["null", (v) => { v.prompt_documents = null; }, "build-from:documents-invalid"],
+      ["short", (v) => { v.prompt_documents.vocabulary = v.prompt_documents.vocabulary.slice(1); }, "build-from:documents-invalid"],
+      ["mismatch", (v) => { v.prompt_documents.contract = "0".repeat(64); }, "build-from:documents-mismatch"],
+    ]) {
+      const d = join(base, `fz-${name}`);
+      cpSync(dest, d, { recursive: true });
+      edit(join(d, FROZEN_SET_FILE), fn);
+      assertBuildRefused(build(join(d, FROZEN_SET_FILE), `build-${name}`), code, `build-${name}`);
+    }
+    // 同じ文書なら流す（採用の 2 P × 1 回）
+    const ok = build(join(dest, FROZEN_SET_FILE), "build-ok");
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n").sort(), ["P1-r1", "P2-r1"]);
   });
 });

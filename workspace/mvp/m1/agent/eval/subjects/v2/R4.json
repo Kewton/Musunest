@@ -1,0 +1,421 @@
+{
+  "id": "R4",
+  "title": "ボードゲーム会の参加者",
+  "patterns": [
+    "P7",
+    "P8"
+  ],
+  "note": "regression-r1 v2。2026-11-11 所有者の決定 4・5（#876）。v1 は subjects/R4.json に残す。版をまたいで比較しない",
+  "structures": [
+    {
+      "id": "list",
+      "note": "R4/list v2。#853 以後の判定。v1 の境界と集計の入力を保つ",
+      "roles": {
+        "event": {
+          "entity": {}
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "attendees": {
+          "field": {
+            "of": "event",
+            "type": "list",
+            "to": "member"
+          }
+        },
+        "capacity": {
+          "field": {
+            "of": "event",
+            "type": "number"
+          }
+        },
+        "date": {
+          "field": {
+            "of": "event",
+            "type": "date"
+          }
+        },
+        "place": {
+          "field": {
+            "of": "event",
+            "type": "string"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "人とゲーム会を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "event"
+          ]
+        },
+        {
+          "req": "定員を超えたら登録できない",
+          "kind": "validation",
+          "entity": "event",
+          "cases": [
+            {
+              "set": {
+                "capacity": 2,
+                "attendees": [
+                  "m1",
+                  "m2",
+                  "m3"
+                ]
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 2,
+                "attendees": [
+                  "m1",
+                  "m2"
+                ]
+              },
+              "valid": true
+            }
+          ],
+          "keys": [
+            "定員.{0,20}(超|上回|より多|オーバー)",
+            "(超|上回).{0,20}定員"
+          ]
+        },
+        {
+          "req": "定員は 1 人以上",
+          "kind": "validation",
+          "entity": "event",
+          "cases": [
+            {
+              "set": {
+                "capacity": 0,
+                "attendees": []
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 0.5,
+                "attendees": []
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 1,
+                "attendees": [
+                  "m1"
+                ]
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "R4:list:C4",
+          "kind": "validation",
+          "entity": "event",
+          "cases": [
+            {
+              "set": {
+                "capacity": 2,
+                "attendees": []
+              },
+              "valid": true
+            }
+          ],
+          "keys": [
+            "(参加|来る人|参加者).{0,20}(0\\s*人|０\\s*人|ゼロ|誰も|いなく|選ばず|空).{0,20}(登録|作れ|作成|作る)",
+            "(登録|作れ|作成|作る).{0,20}(参加|来る人|参加者).{0,20}(0\\s*人|０\\s*人|ゼロ|誰も|いなく|選ばず|空)",
+            "(参加|来る人|参加者).{0,10}(を|は).{0,5}(任意|必須でな|選ばなくても)"
+          ]
+        },
+        {
+          "req": "参加人数が見られる",
+          "kind": "computedVisible",
+          "entity": "event",
+          "probes": [
+            {
+              "set": {
+                "capacity": 5,
+                "attendees": [
+                  "m1",
+                  "m2"
+                ]
+              },
+              "expect": 2
+            }
+          ]
+        },
+        {
+          "req": "残りの枠が見られる",
+          "kind": "computedVisible",
+          "entity": "event",
+          "probes": [
+            {
+              "set": {
+                "capacity": 5,
+                "attendees": [
+                  "m1",
+                  "m2"
+                ]
+              },
+              "expect": 3
+            }
+          ]
+        },
+        {
+          "req": "人ごとの参加回数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "event": [
+              {
+                "set": {
+                  "attendees": [
+                    "m1"
+                  ],
+                  "capacity": 4
+                }
+              },
+              {
+                "set": {
+                  "attendees": [
+                    "m1"
+                  ],
+                  "capacity": 6
+                }
+              },
+              {
+                "set": {
+                  "attendees": [
+                    "m2"
+                  ],
+                  "capacity": 5
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        }
+      ],
+      "unwritable": []
+    },
+    {
+      "id": "attendance",
+      "note": "R4/attendance v2。(iv)＋(K-a)。/checks/1 は unsatisfiable。申告で合格にしない",
+      "roles": {
+        "event": {
+          "entity": {
+            "hasFieldTypes": [
+              "number",
+              "date",
+              "string"
+            ]
+          }
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "att": {
+          "entity": {}
+        },
+        "attEvent": {
+          "field": {
+            "of": "att",
+            "type": "ref",
+            "to": "event"
+          }
+        },
+        "attMember": {
+          "field": {
+            "of": "att",
+            "type": "ref",
+            "to": "member"
+          }
+        },
+        "capacity": {
+          "field": {
+            "of": "event",
+            "type": "number"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "人とゲーム会を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "event"
+          ],
+          "keys": [
+            "(参加|来る人|参加者).{0,20}(0\\s*人|０\\s*人|ゼロ|誰も|いなく|選ばず|空).{0,20}(登録|作れ|作成|作る)",
+            "(登録|作れ|作成|作る).{0,20}(参加|来る人|参加者).{0,20}(0\\s*人|０\\s*人|ゼロ|誰も|いなく|選ばず|空)",
+            "(参加|来る人|参加者).{0,10}(を|は).{0,5}(任意|必須でな|選ばなくても)"
+          ]
+        },
+        {
+          "req": "定員を超えたら登録できない",
+          "kind": "unsatisfiable",
+          "note": "R4/attendance の構造では満たせない書ける要件。D v2 と同じ扱い"
+        },
+        {
+          "req": "参加を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "att"
+          ]
+        },
+        {
+          "req": "定員は 1 人以上",
+          "kind": "validation",
+          "entity": "event",
+          "cases": [
+            {
+              "set": {
+                "capacity": 0
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 0.5
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 1
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "参加人数が見られる",
+          "kind": "computedVisible",
+          "entity": "event",
+          "sources": {
+            "att": [
+              {
+                "set": {
+                  "attEvent": "g1",
+                  "attMember": "m1"
+                }
+              },
+              {
+                "set": {
+                  "attEvent": "g1",
+                  "attMember": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "g1",
+              "set": {
+                "capacity": 5
+              },
+              "expect": 2
+            }
+          ]
+        },
+        {
+          "req": "残りの枠が見られる",
+          "kind": "computedVisible",
+          "entity": "event",
+          "sources": {
+            "att": [
+              {
+                "set": {
+                  "attEvent": "g1",
+                  "attMember": "m1"
+                }
+              },
+              {
+                "set": {
+                  "attEvent": "g1",
+                  "attMember": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "g1",
+              "set": {
+                "capacity": 5
+              },
+              "expect": 3
+            }
+          ]
+        },
+        {
+          "req": "人ごとの参加回数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "att": [
+              {
+                "set": {
+                  "attMember": "m1",
+                  "attEvent": "g1"
+                }
+              },
+              {
+                "set": {
+                  "attMember": "m1",
+                  "attEvent": "g2"
+                }
+              },
+              {
+                "set": {
+                  "attMember": "m2",
+                  "attEvent": "g1"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        }
+      ],
+      "unwritable": []
+    }
+  ],
+  "clock": "2026-10-08T12:00:00+09:00",
+  "today": "2026-10-08",
+  "version": 2
+}

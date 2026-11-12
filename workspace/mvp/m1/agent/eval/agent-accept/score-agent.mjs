@@ -581,6 +581,28 @@ export function readAcceptance(plan, matcher) {
     },
   };
 }
+/**
+ * 記録だけの判定（定義の構造の observe。#876 の E-c）の鍵に当たった除外の ID（README §10.7.1）。readAcceptance と同じ除外の文
+ * （removed の要件は元の要件の文、met・alternative でない部分はその部分の文）を、当てはまった構造（無ければ主の構造）の observe の keys に当てる。
+ * acceptanceMatcher の候補には入れないので、除外の判定（wrong・unmatched など）・誤った除外の数・了承後の判定は変えない。記録するだけ
+ */
+export function observedExclusions(plan, def, structureId) {
+  const st = def.structures.find((x) => x.id === structureId) ?? def.structures[0];
+  const res = (st.observe ?? []).flatMap((c) => compileKeys(c.keys));
+  if (res.length === 0) return [];
+  const byId = new Map(plan.requirements.map((r) => [r.id, r]));
+  const out = [];
+  const add = (id, text) => { if (hits(res, text) && !out.includes(id)) out.push(id); };
+  for (const r of plan.requirements) {
+    const from = r.change?.from_requirement_id;
+    if (r.change?.kind === "removed") add(r.id, typeof from !== "string" ? "" : byId.get(from)?.text ?? "");
+    for (const part of r.parts) {
+      if (part === null || typeof part !== "object" || part.disposition === "met" || part.disposition === "alternative") continue;
+      add(part.id, typeof part.text === "string" ? part.text : "");
+    }
+  }
+  return out;
+}
 /** 変更のうち、了承後の判定を PASS にできないもの（expected・allowed 以外）の数 */
 export const unjudgedChanges = (a) => JUDGEMENTS.filter((j) => j !== "expected" && j !== "allowed").reduce((n, j) => n + a.counts.changes[j], 0);
 /** 変更のうち判定不能（unmatched・ambiguous）の数 */
@@ -1576,6 +1598,9 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
     const plan = pr === null ? null : { outcome: pr.outcome ?? null, questions: planCounts.questions, rounds: planCounts.rounds, usd: sl?.plan_cost?.plan_usd ?? pr.spent_usd ?? 0 };
     const base = { run: d, pattern: p, subject, style: item.style, writable: item.writable, factory_verdict: s?.verdict ?? null, stop: s?.stop_reason ?? s?.stop_class ?? null, failure: s?.failure ?? null, cost_usd: sl?.plan_cost?.total_usd ?? s?.provider_cost_usd ?? 0, seconds: sl?.wall_s ?? s?.duration_secs ?? 0, plan };
     const def = loadDef(item.scoringPath);
+    // 記録だけの判定（observe。#876 の E-c）を持つ定義の本だけ、行に observed（判定の名前 → 真偽。宣言が無い本は null）と observed_exclusions を足す。合否・充足・了承の判定には入れない
+    const observes = def.structures.some((st) => Array.isArray(st.observe));
+    const observedRow = (r, structureId) => (observes ? { observed: r?.observed ?? null, observed_exclusions: status === "confirmed" ? observedExclusions(loaded.plan, def, structureId) : [] } : {});
     // 補正後（v2）の分母の既定：主の構造（0 番目）の判定の数。役割が見つからないときに engine.mjs が writable_total に使う値と同じ
     const main = def.structures[0], fromDefinition = { total: main.checks.length, total_from: `definition:${main.id}` };
     // 了承の記録（#426）：plan.json を読んで契約の検査を通し、当てはまった構造（無ければ主の構造）の定義の鍵で除外・変更を照合する。記録の無い本は absent と理由（Plan を通していない計測なら none ＝ 対象外）
@@ -1597,7 +1622,7 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
     // Plan だけの計測（#498）では、確定した仕様を包み（plan-result.json）から読む（納品物の plan.json が無い）
     const envelopePlan = mode === "plan-only" && loaded.plan === null ? readJsonSafe(join(dir, PLAN_RESULT_PATH)).value?.plan : null;
     const script = scriptSummary(evalSet.scripts.get(subject) ?? null, pr, isObj(envelopePlan) ? envelopePlan : loaded.plan);
-    if (!existsSync(spec)) { rows.push({ ...base, generation_failed: true, fulfillment_v2: { fulfilled: 0, ...fromDefinition }, acceptance: acceptanceOf(null), claims_accepted: null, fulfillment_accepted: zeroAccepted, verdict_accepted: null, script, ...verdict4 }); continue; }
+    if (!existsSync(spec)) { rows.push({ ...base, generation_failed: true, fulfillment_v2: { fulfilled: 0, ...fromDefinition }, acceptance: acceptanceOf(null), claims_accepted: null, fulfillment_accepted: zeroAccepted, verdict_accepted: null, script, ...verdict4, ...observedRow(null, null) }); continue; }
     const r = await score(engine, spec, def);
     const uw = existsSync(join(dir, "bundle/artifacts/unwritable.json")) ? readRecord(join(dir, "bundle/artifacts/unwritable.json"), "unwritable").unwritable ?? [] : [];
     const claimsList = uw.flatMap((u) => (u.unwritable ?? []).map((part) => ({ requirement: `${u.text}（${u.quote}）`, reason: part })));
@@ -1609,9 +1634,9 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
     const claims_accepted = status === "confirmed" ? claimsAfterAcceptance(def, r.structure, claimsList, r.written, acceptance.accepted_unwritable_ids, claims.false_claims.length) : null;
     const fulfillment_accepted = status === "confirmed" && r.structure ? fulfillmentAfterAcceptance(r, acceptance.unevaluated_checks) : zeroAccepted;
     const verdict_accepted = status === "confirmed" ? verdictAfterAcceptance(r, acceptance, claims_accepted, finalVerdict) : null;
-    rows.push({ ...base, spec_verdict: r.verdict, verdict: finalVerdict(r, claims), failed: Object.entries(r.checks).filter(([, ok]) => !ok).map(([k]) => k), fulfilled: r.fulfilled ?? 0, writable_total: r.writable_total ?? 0, claims, final_static: r.verdict === "STATIC_NG" ? 1 : 0, fulfillment_v2, acceptance, claims_accepted, fulfillment_accepted, verdict_accepted, script, ...verdict4 });
+    rows.push({ ...base, spec_verdict: r.verdict, verdict: finalVerdict(r, claims), failed: Object.entries(r.checks).filter(([, ok]) => !ok).map(([k]) => k), fulfilled: r.fulfilled ?? 0, writable_total: r.writable_total ?? 0, claims, final_static: r.verdict === "STATIC_NG" ? 1 : 0, fulfillment_v2, acceptance, claims_accepted, fulfillment_accepted, verdict_accepted, script, ...verdict4, ...observedRow(r, r.structure) });
   }
-  // 書ける題材（writable）と一部書けない題材（partial）の分け方は定義ファイルの writable（#427。今の組では A・C・E と B・D）
+  // 書ける題材（writable）と一部書けない題材（partial）の分け方は定義ファイルの writable（#427。dev-p1-p10 v1 では A・C・E と B・D、v2 では A・C・D・E と B）
   const W = rows.filter((r) => r.writable), P = rows.filter((r) => !r.writable);
   const withUnwritable = P.filter((r) => r.generation_failed || r.claims.missed + r.claims.correct > 0);
   // 既存の指標（v1 の数え方のまま）
@@ -1627,7 +1652,7 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
     cost_total_usd: rows.reduce((s, r) => s + r.cost_usd, 0).toFixed(4),
     factory_verdicts: rows.reduce((m, r) => ((m[r.factory_verdict ?? "none"] = (m[r.factory_verdict ?? "none"] ?? 0) + 1), m), {}),
   };
-  // 充足率を集計の版ごとに並べる（partial ＝ 一部書けない題材 B・D、writable ＝ 書ける題材 A・C・E、all ＝ 全部）。v1.partial は metrics.fulfillment_partial と同じ値
+  // 充足率を集計の版ごとに並べる（partial ＝ 組の writable が false の題材、writable ＝ true の題材、all ＝ 全部）。v1.partial は metrics.fulfillment_partial と同じ値
   const v1 = (xs) => fmt(sum(xs, (r) => r.fulfilled ?? 0), sum(xs, (r) => r.writable_total || 0));
   const v2 = (xs) => fmt(sum(xs, (r) => r.fulfillment_v2.fulfilled), sum(xs, (r) => r.fulfillment_v2.total));
   // 了承後系（#426）：対象の本（fulfillment_accepted が null でない本）だけで数える。記録の無い本・読めない本は充足 0・判定 null で分母に残る

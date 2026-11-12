@@ -25,7 +25,20 @@ import {
   PLAN_SCRIPT_SCHEMA,
   type PlanScript,
   type PlanScriptMatch,
+  type PlanScriptMatchDiagnosis,
 } from "./script-responder.js";
+
+/** 診断の期待値（既定は「当たり無し・v1 は不明」） */
+function diag(over: Partial<PlanScriptMatchDiagnosis> = {}): PlanScriptMatchDiagnosis {
+  return {
+    keysOnlyEntries: 0,
+    facetRejectedEntries: 0,
+    relaxed: false,
+    requirementTextNeeded: 0,
+    v1State: "unknown",
+    ...over,
+  };
+}
 
 /** 1 問（選択肢 2 つ・推奨・自由入力） */
 function question(overrides: Partial<PlanQuestion> = {}): PlanQuestion {
@@ -193,9 +206,9 @@ describe("台本の形の検査（04 §9・Issue #444）", () => {
   });
 });
 
-// ── 当て方 v1 ───────────────────────────────────────────
+// ── 当て方 v2 ───────────────────────────────────────────
 
-describe("台本の答える役（当て方 v1。Issue #444）", () => {
+describe("台本の答える役（当て方 v2。Issue #444・#893）", () => {
   it("台本の 1 件一致で、その選択肢を返す", async () => {
     const plan = script([{ id: "E1", facet: "aggregation", keys: ["数え"], answer: { choose: ["全員"] } }]);
     const { outcome, matches } = await answerWith(plan, request());
@@ -204,8 +217,16 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
       kind: "answers",
       answers: [{ id: "A:Q1-1", questionId: "Q1-1", revision: 1, choiceId: "c1" }],
     });
-    // 照合の記録は、コードが振った質問 ID・往復の版・状態・項目の添字だけである
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "answered", entryIndex: 0 }]);
+    // 照合の記録は、コードが振った質問 ID・往復の版・状態・項目の添字と、値を持たない診断だけである
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entryIndex: 0,
+        diagnosis: diag({ keysOnlyEntries: 1, v1State: "answered" }),
+      },
+    ]);
   });
 
   it("鍵は、事項の文と参照先の要件の文の両方に当たる", async () => {
@@ -220,12 +241,44 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
     });
   });
 
+  it("事項の観点も項目の観点も null なら、要件の文にだけ鍵がある合成でも今までどおり事項の文と要件の文に当てる", async () => {
+    // 観点が両方 null なので、v2 の緩めた経路（事項の観点 null・項目の観点 非 null）ではない。今までどおり
+    // 観点を照らし、鍵を事項の文と要件の文に当てる——要件の文にだけある鍵でも答える
+    const plan = script([{ id: "E1", facet: null, keys: ["数え"], answer: { choose: ["全員"] } }]);
+    const q = question();
+    const main = issue({
+      facetId: null,
+      text: "どのように記録するか",
+      requirement: { id: "R-1", text: "タスクを数えられる" },
+    });
+    const { outcome, matches } = await answerWith(
+      plan,
+      request({ questions: [q], issues: [{ question: q, main, alsoCloses: [] }] }),
+    );
+
+    expect(outcome).toEqual({
+      kind: "answers",
+      answers: [{ id: "A:Q1-1", questionId: "Q1-1", revision: 1, choiceId: "c1" }],
+    });
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entryIndex: 0,
+        diagnosis: diag({ keysOnlyEntries: 1, v1State: "answered" }),
+      },
+    ]);
+  });
+
   it("当たらない問いには答えない（不明）。all-recommended は返さない", async () => {
     const plan = script([{ id: "E1", facet: "aggregation", keys: ["該当しない語"], answer: { choose: ["全員"] } }]);
     const { outcome, matches } = await answerWith(plan, request());
 
     expect(outcome).toEqual({ kind: "answers", answers: [] });
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "unknown", entryIndex: null }]);
+    expect(matches).toEqual([
+      { questionId: "Q1-1", revision: 1, state: "unknown", entryIndex: null, diagnosis: diag() },
+    ]);
   });
 
   it("2 件に当たる（重複）ときは答えない", async () => {
@@ -236,7 +289,15 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
     const { outcome, matches } = await answerWith(plan, request());
 
     expect(outcome).toEqual({ kind: "answers", answers: [] });
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "duplicate", entryIndex: null }]);
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "duplicate",
+        entryIndex: null,
+        diagnosis: diag({ keysOnlyEntries: 2, v1State: "duplicate" }),
+      },
+    ]);
   });
 
   it("主の事項と一緒に閉じる事項が別の項目に当たるときは答えない（重複）", async () => {
@@ -253,7 +314,15 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
     );
 
     expect(outcome).toEqual({ kind: "answers", answers: [] });
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "duplicate", entryIndex: null }]);
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "duplicate",
+        entryIndex: null,
+        diagnosis: diag({ keysOnlyEntries: 2, v1State: "duplicate" }),
+      },
+    ]);
   });
 
   it("choose が選択肢 0 件にしか当たらないときは答えない（選択肢が決まらない）", async () => {
@@ -261,7 +330,15 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
     const { outcome, matches } = await answerWith(plan, request());
 
     expect(outcome).toEqual({ kind: "answers", answers: [] });
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "no-choice", entryIndex: 0 }]);
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "no-choice",
+        entryIndex: 0,
+        diagnosis: diag({ keysOnlyEntries: 1, v1State: "no-choice" }),
+      },
+    ]);
   });
 
   it("choose が選択肢 2 件に当たるときは答えない（選択肢が決まらない）", async () => {
@@ -269,19 +346,36 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
     const { outcome, matches } = await answerWith(plan, request());
 
     expect(outcome).toEqual({ kind: "answers", answers: [] });
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "no-choice", entryIndex: 0 }]);
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "no-choice",
+        entryIndex: 0,
+        diagnosis: diag({ keysOnlyEntries: 1, v1State: "no-choice" }),
+      },
+    ]);
   });
 
-  it("古い版の問いには答えない", async () => {
+  it("古い版の問いには答えない（診断の件数は全部 0・v1 も古い版）", async () => {
     const plan = script([{ id: "E1", facet: "aggregation", keys: ["数え"], answer: { choose: ["全員"] } }]);
     const { outcome, matches } = await answerWith(plan, request({ revision: 2 }));
 
     expect(outcome).toEqual({ kind: "answers", answers: [] });
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "stale-revision", entryIndex: null }]);
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "stale-revision",
+        entryIndex: null,
+        diagnosis: diag({ keysOnlyEntries: 0, v1State: "stale-revision" }),
+      },
+    ]);
   });
 
-  it("観点が欠けた値の事項には、観点を求める項目は当たらない（ID の字面で補わない）", async () => {
-    // 事項 ID は目録の事項の形（`OI:catalog:…:aggregation`）だが、渡された観点は欠けた値（null）
+  it("観点が null の事項には、事項の文だけで鍵が全部当たる観点つきの項目 1 件に答える（緩めた経路・v2）", async () => {
+    // 事項 ID は目録の事項の形（`OI:catalog:…:aggregation`）だが、渡された観点は欠けた値（null）。
+    // ID の字面で観点を補わない——緩めた経路は、渡された観点が null であることだけで決まる
     const stealth = issue({ id: "OI:catalog:R-1:aggregation", facetId: null, requirement: null });
     const q = question({ openIssueId: "OI:catalog:R-1:aggregation" });
     const withFacet = script([{ id: "E1", facet: "aggregation", keys: ["数え"], answer: { choose: ["全員"] } }]);
@@ -290,10 +384,21 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
       request({ questions: [q], issues: [{ question: q, main: stealth, alsoCloses: [] }] }),
     );
 
-    expect(outcome).toEqual({ kind: "answers", answers: [] });
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "unknown", entryIndex: null }]);
+    expect(outcome).toEqual({
+      kind: "answers",
+      answers: [{ id: "A:Q1-1", questionId: "Q1-1", revision: 1, choiceId: "c1" }],
+    });
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entryIndex: 0,
+        diagnosis: diag({ keysOnlyEntries: 1, relaxed: true }),
+      },
+    ]);
 
-    // 観点を求めない項目（facet: null）なら、同じ事項に当たる
+    // 観点を求めない項目（facet: null）なら、今までどおり観点を照らさずに当たる
     const withoutFacet = script([{ id: "E1", facet: null, keys: ["数え"], answer: { choose: ["全員"] } }]);
     const ok = await answerWith(
       withoutFacet,
@@ -303,6 +408,15 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
       kind: "answers",
       answers: [{ id: "A:Q1-1", questionId: "Q1-1", revision: 1, choiceId: "c1" }],
     });
+    expect(ok.matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entryIndex: 0,
+        diagnosis: diag({ keysOnlyEntries: 1, v1State: "answered" }),
+      },
+    ]);
   });
 
   it("束の一部にだけ答えてよい（残りは返さない）", async () => {
@@ -334,7 +448,15 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
       kind: "answers",
       answers: [{ id: "A:Q1-1", questionId: "Q1-1", revision: 1, choiceId: "c1" }],
     });
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "answered", entryIndex: 0 }]);
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entryIndex: 0,
+        diagnosis: diag({ keysOnlyEntries: 1, v1State: "answered" }),
+      },
+    ]);
   });
 
   it("recommended: true は、推奨が先頭でなくても推奨の選択肢を返す（最初の選択肢で代用しない）", async () => {
@@ -349,7 +471,15 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
       kind: "answers",
       answers: [{ id: "A:Q1-1", questionId: "Q1-1", revision: 1, choiceId: "c2" }],
     });
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "answered", entryIndex: 0 }]);
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entryIndex: 0,
+        diagnosis: diag({ keysOnlyEntries: 1, v1State: "answered" }),
+      },
+    ]);
   });
 
   it("推奨が無い問いでは、recommended: true に答えない（no-choice）", async () => {
@@ -373,7 +503,15 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
     );
 
     expect(outcome).toEqual({ kind: "answers", answers: [] });
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "no-choice", entryIndex: 0 }]);
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "no-choice",
+        entryIndex: 0,
+        diagnosis: diag({ keysOnlyEntries: 1, v1State: "no-choice" }),
+      },
+    ]);
   });
 
   it("推奨が問いの選択肢に無いときは、recommended: true に答えない（no-choice）", async () => {
@@ -385,7 +523,147 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
     );
 
     expect(outcome).toEqual({ kind: "answers", answers: [] });
-    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "no-choice", entryIndex: 0 }]);
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "no-choice",
+        entryIndex: 0,
+        diagnosis: diag({ keysOnlyEntries: 1, v1State: "no-choice" }),
+      },
+    ]);
+  });
+
+  it("別の決めどころへの誤答の反例：要件の文だけが鍵を満たすなら答えない（requirement_text_needed）", async () => {
+    // 事項の観点は null、台本の項目は観点つき。要件の文だけが鍵「数え」を満たす。選択肢の 1 つは
+    // 台本の choose が指す語だが、要件の文を連結しないので当たらない（別の決めどころへの誤答を作らない）
+    const plan = script([{ id: "E1", facet: "aggregation", keys: ["数え"], answer: { choose: ["全員分"] } }]);
+    const q = question();
+    const main = issue({
+      facetId: null,
+      text: "どのように記録するか",
+      requirement: { id: "R-1", text: "タスクを数えられる" },
+    });
+    const { outcome, matches } = await answerWith(
+      plan,
+      request({ questions: [q], issues: [{ question: q, main, alsoCloses: [] }] }),
+    );
+
+    expect(outcome).toEqual({ kind: "answers", answers: [] });
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "unknown",
+        entryIndex: null,
+        diagnosis: diag({ keysOnlyEntries: 1, requirementTextNeeded: 1 }),
+      },
+    ]);
+  });
+
+  it("既知の観点どうしの不一致では答えない（facet_rejected_entries）", async () => {
+    const plan = script([{ id: "E1", facet: "aggregation", keys: ["数え"], answer: { choose: ["全員"] } }]);
+    const q = question();
+    const main = issue({ facetId: "include-zero", text: "何を数えるか", requirement: null });
+    const { outcome, matches } = await answerWith(
+      plan,
+      request({ questions: [q], issues: [{ question: q, main, alsoCloses: [] }] }),
+    );
+
+    expect(outcome).toEqual({ kind: "answers", answers: [] });
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "unknown",
+        entryIndex: null,
+        diagnosis: diag({ keysOnlyEntries: 1, facetRejectedEntries: 1 }),
+      },
+    ]);
+  });
+
+  it("観点が null の事項に別の 2 項目が当たるときは答えない（重複）", async () => {
+    const plan = script([
+      { id: "E1", facet: "aggregation", keys: ["数え"], answer: { choose: ["全員"] } },
+      { id: "E2", facet: "include-zero", keys: ["数え"], answer: { choose: ["自分の"] } },
+    ]);
+    const q = question();
+    const main = issue({ facetId: null, text: "何を数えるか", requirement: null });
+    const { outcome, matches } = await answerWith(
+      plan,
+      request({ questions: [q], issues: [{ question: q, main, alsoCloses: [] }] }),
+    );
+
+    expect(outcome).toEqual({ kind: "answers", answers: [] });
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "duplicate",
+        entryIndex: null,
+        diagnosis: diag({ keysOnlyEntries: 2, relaxed: true }),
+      },
+    ]);
+  });
+
+  it("同じ項目が 2 つの事項に当たるのは 1 件に数える", async () => {
+    const plan = script([{ id: "E1", facet: "aggregation", keys: ["数え"], answer: { choose: ["全員"] } }]);
+    const q = question({ alsoCloses: ["OI-2"] });
+    const main = issue({ facetId: null, text: "数え方" });
+    const extra = issue({ id: "OI-2", facetId: null, text: "数え方（もう一つ）", requirement: null });
+    const { outcome, matches } = await answerWith(
+      plan,
+      request({ questions: [q], issues: [{ question: q, main, alsoCloses: [extra] }] }),
+    );
+
+    expect(outcome).toEqual({
+      kind: "answers",
+      answers: [{ id: "A:Q1-1", questionId: "Q1-1", revision: 1, choiceId: "c1" }],
+    });
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entryIndex: 0,
+        diagnosis: diag({ keysOnlyEntries: 1, relaxed: true }),
+      },
+    ]);
+  });
+
+  it("一方の事項の観点と別の事項の鍵を混ぜない（事項ごとに照合する）", async () => {
+    // 鍵は主の事項の観点（aggregation）に合うが、主の事項の文には「丸め」が無い。一緒に閉じる事項には
+    // 「丸め」があるが観点が違う。文を連結して当てる実装なら、ここで誤って当たる
+    const plan = script([{ id: "E1", facet: "aggregation", keys: ["数え", "丸め"], answer: { choose: ["全員"] } }]);
+    const q = question({ alsoCloses: ["OI-2"] });
+    const main = issue({ facetId: "aggregation", text: "数え方", requirement: null });
+    const extra = issue({ id: "OI-2", facetId: "include-zero", text: "丸め方", requirement: null });
+    const { outcome, matches } = await answerWith(
+      plan,
+      request({ questions: [q], issues: [{ question: q, main, alsoCloses: [extra] }] }),
+    );
+
+    expect(outcome).toEqual({ kind: "answers", answers: [] });
+    expect(matches).toEqual([
+      {
+        questionId: "Q1-1",
+        revision: 1,
+        state: "unknown",
+        entryIndex: null,
+        diagnosis: diag(),
+      },
+    ]);
+  });
+
+  it("鍵は問い・選択肢の文に当てない（選択肢の文にだけ鍵がある合成の入力で unknown）", async () => {
+    // 鍵「自分の分だけ数える」は選択肢の文にだけある。問いの文にも事項の文にも無い
+    const plan = script([{ id: "E1", facet: null, keys: ["自分の分だけ数える"], answer: { choose: ["全員"] } }]);
+    const { outcome, matches } = await answerWith(plan, request());
+
+    expect(outcome).toEqual({ kind: "answers", answers: [] });
+    expect(matches).toEqual([
+      { questionId: "Q1-1", revision: 1, state: "unknown", entryIndex: null, diagnosis: diag() },
+    ]);
   });
 
   it("確認の画面の答えは build（答えのファイルの形と同じ）", async () => {

@@ -23,6 +23,7 @@ import {
   bundleFiles,
   type AssembledBundle,
 } from "../bundle.js";
+import { STOP_DIAGNOSTICS_FILE } from "../v12/stop-diagnostics.js";
 import type { StageOutputLimits } from "../call.js";
 import { costOfUsageUsd } from "../budget.js";
 import type { Judge, JudgeAnswer } from "../judge.js";
@@ -110,6 +111,7 @@ import {
   stageOutputDigest,
   stagesInRange,
   stageVersionsAt,
+  documentsVersionOf,
   verifyStageInput,
   type BoundaryMaterials,
   type ResumeMaterials,
@@ -1196,8 +1198,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       ["ok", 0],
     ]);
     // 通る走りの診断は回ごとの行の 1 本だけ（候補が無い段のファイルは作らない。Issue #699）
-    expect(diagnosticPaths(clean.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
-    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_VOCABULARY_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(clean.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_VOCABULARY_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
     const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ stage: "vocabulary", operation: null, call: 2, round: 1, attempt: 1, kind: "shape" });
@@ -1217,7 +1219,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(result.stopped).toBeNull();
     expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(result.record.stages.filter((record) => record.stage === "mapping").map((record) => [record.status, record.retries.shape])).toEqual([["ok", 1]]);
-    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
     const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ stage: "mapping", operation: null, call: 1, round: 1, attempt: 1, kind: "shape" });
@@ -1344,7 +1346,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     ]);
     expect(countStage(carried.result, "semantic-check")).toBe(1);
     expect(carryEntriesOf(carried.result.bundle).map((entry) => entry.requirementId)).toEqual(["R3"]);
-    expect(diagnosticPaths(carried.result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(carried.result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
     const candidates = rejectedOf(carried.result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(candidates).toHaveLength(1);
     // 2 回目は拒否された R3 だけの書き直しなので、候補は書き直した要件 1・保持した要件 3 の数を持つ（ID の値は持たない。Issue #661）
@@ -1363,7 +1365,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(passed.result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
     expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
-    expect(diagnosticPaths(passed.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(passed.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
   });
 
   /**
@@ -2394,7 +2396,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const r3 = MAPPED_IDS.verification.find((entry) => entry.requirementId === "R3");
     const r3Targets = r3?.kind === "structural" ? (r3.targets ?? []).reduce((sum, target) => sum + 1 + (target.sourceId === null ? 0 : 1), 0) : 0;
     expect(records[1]?.references).toEqual({ checked: 1 + r3Roles + r3Targets, unknown_ids: 0, duplicates: 0, cross_bundle_ids: 0 });
-    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE, STOP_DIAGNOSTICS_FILE]);
   });
 
   /**
@@ -2653,6 +2655,47 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(stage.tableRounds).toEqual(tableRoundsOf(result));
     expect(stage.tableRounds).toHaveLength(2);
     expectNoAcceptanceMaterial([...stageRecording.structured.map((request) => JSON.stringify(request)), ...result.diagnostics.map((artifact) => artifact.text)]);
+  });
+
+  it("(898) 同じ台本の段の走り（ids on・name-table..semantic-check）の C2・C3 の診断は、一気通貫の同じ名前の診断と深く等しい。記録は束・巡・試行の添字を持ち、本文を含まない（Issue #898）", async () => {
+    const calls = [
+      ...vocabularyCalls(),
+      structured(good().mapping),
+      structured(judgments(IDS, REJECT_R3_R4)),
+      structured(onlyEntries("R3", "R4")),
+      structured(acceptAll()),
+    ];
+    const stageRecording = createCheckedRecordingClient(calls, { bundledC3: true, bundledC2: true });
+    const stage = await runStageRangeV11a({
+      ...inputOf(stageRecording.client),
+      flags: IDS_FLAGS,
+      range: { start: "name-table", end: "semantic-check" },
+    });
+    const { result } = await runScenario([...calls, ...tailFor(IDS)], { flags: IDS_FLAGS });
+    const full = diagnosticOf(result.diagnostics, STOP_DIAGNOSTICS_FILE)["records"] as readonly {
+      readonly kind: string;
+      readonly round: number;
+      readonly attempt: number | null;
+      readonly bundle_index?: number;
+      readonly targets?: readonly string[];
+      readonly missing?: readonly string[];
+      readonly problems: readonly unknown[];
+    }[];
+    expect(full.length).toBeGreaterThan(0);
+    // 型・直列化・名前は 1 か所で決め、通常 Build と段指定で同じ記録を共有する
+    expect(stage.stopDiagnostics).toEqual(full);
+    for (const record of full) {
+      expect(typeof record.round).toBe("number");
+      expect(record.problems.length === 0 || typeof record.problems[0] === "string" || typeof record.problems[0] === "object").toBe(true);
+      if (record.kind === "c3") {
+        expect(typeof record.bundle_index).toBe("number");
+        expect(typeof record.attempt).toBe("number");
+        expect(Array.isArray(record.targets)).toBe(true);
+        expect(Array.isArray(record.missing)).toBe(true);
+      } else {
+        expect(typeof record.attempt).toBe("number");
+      }
+    }
   });
 
   /**
@@ -3002,15 +3045,19 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(JSON.stringify(after.requests)).not.toBe(JSON.stringify(before.requests));
   });
 
-  /** 台帳の行から工場の照合の版を出す（全体の指紋・上流の台帳の部分の指紋・旗の組。Issue #713） */
+  /**
+   * 台帳の行から工場の照合の版を出す（全体の指紋・上流の台帳の部分の指紋・旗の組。Issue #713）。旗 ids の組なので、段へ渡す
+   * 文書の中身の指紋も足す（工場どうしで同じ文書。Issue #875）
+   */
   const factoryVersionsOf = async (rows: readonly PropertyRow[] = PROPERTY_LEDGER) => ({
     ledger: await propertyLedgerSha256(rows),
     ledgerUpstream: await upstreamLedgerSha256(rows),
     flags: toPublicV12Flags({ ledger: true, searchRepair: true, ids: true }),
+    documents: await documentsVersionOf(FIXTURE_DOCUMENTS),
   });
   /** 境界の材料から、その工場が書く v1.2 の checkpoint と記録（境界ごとの版） */
   const writtenBy = async (factory: Awaited<ReturnType<typeof factoryVersionsOf>>, materials: BoundaryMaterials) => {
-    const base = { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0", ledger: factory.ledger, flags: factory.flags, call_limits: null };
+    const base = { vocabulary: "v1", contract: "v0.2", prompt: "v1.2", factory: "0.0.0", ledger: factory.ledger, flags: factory.flags, call_limits: null, documents: factory.documents };
     const versions = stageVersionsAt(base, materials.boundary, factory.ledgerUpstream);
     const checkpoint = JSON.parse(stageJsonText(buildStageCheckpoint({ materials, versions, planSha256: "a".repeat(64), sourceSha256: "b".repeat(64) }))) as Record<string, unknown>;
     const record = { schema_version: STAGE_RUN_RECORD_SCHEMA, checkpoints: [{ boundary: materials.boundary, path: "cp.json", output_digest: await stageOutputDigest(checkpoint) }] };
@@ -11544,3 +11591,263 @@ async function restoreClaimsAndDerived(
   });
 }
 
+
+// ── v1.2 の通常 Build の HTTP 停止を、保存する記録の failure に残す（Issue #899）──
+//
+// 段の失敗そのものが補足を運ぶ（口の「最後に見た status」を共有して代用しない）。headless の要約には
+// 補足を写さない——保存する記録（段の走り）と診断だけが持つ。
+
+describe("v1.2 の通常 Build の HTTP 停止を、保存する記録の failure に残す（Issue #899）", () => {
+  /** 決まった回数目の構造化出力を HTTP で失敗させる（それまでは台本どおり） */
+  function failingAt(calls: readonly RecordedCall[], at: number, status: number, repeat = 1) {
+    const base = createCheckedRecordingClient(calls);
+    let n = 0;
+    const client: LlmClient = {
+      callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        n += 1;
+        if (n >= at && n < at + repeat) {
+          return Promise.reject(Object.assign(new Error("HTTP の誤り"), { kind: "http", status }));
+        }
+        return base.client.callStructured<T>(request);
+      },
+      callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
+        return base.client.callWithTools(request);
+      },
+    };
+    return client;
+  }
+
+  it("write の 503 枯渇：記録の failure が status・実試行数・固定の理由を持ち、headless は従来の投影のまま", async () => {
+    // head() = T1（name-table）・T1''（semantic-check）・T2（test-spec）・B1（write）の順
+    // write（declaration-v11a）の 2 試行（4・5 回目）を 503 で枯渇させる
+    const client = failingAt(head(), 4, 503, 2);
+    const result = await runGenerationV11a(inputOf(client, { flags: {}, callTimeoutMs: 1_000 }));
+    expect(result.stopped).toMatchObject({ stage: "write", kind: "http" });
+    const http = (result.record.failure as { readonly http?: unknown } | null)?.http;
+    const trace = http as { readonly attempts: number; readonly history: readonly Record<string, unknown>[] };
+    expect(trace.attempts).toBe(2);
+    // 通し番号は段をまたいで増える（4 回目の呼び出し＝write の 1 回目）。順序は保つ
+    expect(trace.history.map(({ status, kind, reason, retry }) => ({ status, kind, reason, retry }))).toEqual([
+      { status: 503, kind: "http", reason: "http-5xx", retry: "started" },
+      { status: 503, kind: "http", reason: "http-5xx", retry: "attempts-exhausted" },
+    ]);
+    expect(trace.history.map((row) => row["attempt"])).toEqual([4, 5]);
+    // headless の要約には補足が無い（欄・値は従来の投影のまま）
+    expect(result.summary.failure).toEqual({ stage: "write", kind: "http" });
+    expect(result.summary.schema_version).toBe("commandagent.headless-summary/v1");
+  });
+
+  it("429 の即時停止：記録の failure が 1 回・not-retryable の行を持つ", async () => {
+    const client = failingAt(head(), 4, 429);
+    const result = await runGenerationV11a(inputOf(client, { flags: {}, callTimeoutMs: 1_000 }));
+    expect(result.stopped).toMatchObject({ stage: "write", kind: "http" });
+    const http = (result.record.failure as { readonly http?: unknown } | null)?.http;
+    const trace = http as { readonly attempts: number; readonly history: readonly Record<string, unknown>[] };
+    expect(trace.attempts).toBe(1);
+    expect(trace.history.map(({ status, kind, reason, retry }) => ({ status, kind, reason, retry }))).toEqual([
+      { status: 429, kind: "http", reason: null, retry: "not-retryable" },
+    ]);
+    expect(trace.history.map((row) => row["attempt"])).toEqual([4]);
+  });
+
+  it("HTTP ではない失敗（残高切れ）には、記録の failure に補足を付けない（読み替えない）", async () => {
+    const base = createCheckedRecordingClient(head());
+    let n = 0;
+    const client: LlmClient = {
+      callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        n += 1;
+        if (n === 4) return Promise.reject(Object.assign(new Error("残高切れ"), { kind: "balance" }));
+        return base.client.callStructured<T>(request);
+      },
+      callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
+        return base.client.callWithTools(request);
+      },
+    };
+    const result = await runGenerationV11a(inputOf(client, { flags: {}, callTimeoutMs: 1_000 }));
+    expect(result.stopped).toMatchObject({ stage: "write", kind: "balance" });
+    expect(result.record.failure === null ? null : "http" in result.record.failure).toBe(false);
+  });
+});
+
+// ── 並列の 2 束を別の status で失敗させても、選ぶ束と補足は完了順に依らない（Issue #899）──
+//
+// C3（semantic-check）は対象を 5 件ごとの束に切り、束を同時に呼ぶ。どれか 1 つ落ちたら全部の終わりを
+// 待ち、**一覧の順で最初に落ちた束**の失敗を段の失敗にする（既存の選び方）。補足はその選ばれた失敗が運ぶ。
+
+describe("C3 の並列の束の失敗の選択と補足（Issue #899）", () => {
+  /** 1 つの要件（索引から作る。束は 5 件ごとなので 6 件で 2 束） */
+  const syntheticRequirement = (index: number): RequirementList["requirements"][number] => ({
+    id: `B${String(index)}`,
+    text: `要件の文 ${String(index)}`,
+    quote: `引用 ${String(index)}`,
+    position: { start: index, end: index + 1 },
+  });
+  const SIX: RequirementList = {
+    requirements: Array.from({ length: 6 }, (_, index) => syntheticRequirement(index + 1)),
+    decisions: [],
+    unresolved: [],
+  };
+  const EMPTY_TABLE: NameTable = { rows: [], ownership: [], verification: [], classification: [] };
+
+  /** 先頭の束（B1〜B5）を 503、2 番目の束（B6）を 429 で失敗させる。遅延で完了の順を入れ替える */
+  async function bundlesFailure(delayFirstMs: number, delaySecondMs: number) {
+    const requests: { readonly order: number; readonly input: string }[] = [];
+    let order = 0;
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        order += 1;
+        requests.push({ order, input: request.input });
+        // 呼び出しの順は start の順（worker は同期的に始める）: 1・3 が先頭の束、2 が 2 番目の束
+        const first = order !== 2;
+        const status = first ? 503 : 429;
+        const delay = first ? delayFirstMs : delaySecondMs;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        throw Object.assign(new Error("HTTP の誤り"), { kind: "http", status });
+      },
+      async callWithTools(): Promise<LlmToolResponse> {
+        throw new Error("使わない");
+      },
+    };
+    const outcome = await semanticCheckStage.runSemanticCheck({
+      plan: PLAN,
+      list: SIX,
+      table: EMPTY_TABLE,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(client, { deadline: 10_000_000 }),
+      ids: true,
+      bundleConcurrency: 2,
+    });
+    return { outcome, requests };
+  }
+
+  it("先着が 2 番目の束でも、一覧の順で最初に落ちた束（503・実開始 2）を選ぶ", async () => {
+    const { outcome, requests } = await bundlesFailure(20, 0);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("http");
+    const http = (outcome.failure as { readonly http?: unknown }).http as {
+      readonly http_status: number;
+      readonly attempts: number;
+      readonly history: readonly {
+        readonly attempt: number;
+        readonly status: number | null;
+        readonly reason: string | null;
+        readonly retry: string;
+      }[];
+    };
+    expect(http.http_status).toBe(503);
+    // **選ばれた束の実試行数**は 2（共有の口の全束の開始数 3 ではない）
+    expect(http.attempts).toBe(2);
+    expect(http.history.map(({ status, reason, retry }) => ({ status, reason, retry }))).toEqual([
+      { status: 503, reason: "http-5xx", retry: "started" },
+      { status: 503, reason: "http-5xx", retry: "attempts-exhausted" },
+    ]);
+    // 通し番号は共有の口のもの（開始の順）。選ばれた束の中で単調に増える
+    const numbers = http.history.map((row) => row.attempt);
+    expect(numbers).toEqual([...numbers].sort((left, right) => left - right));
+    // 先頭の束は 2 回（503 の再送）、2 番目の束は 1 回（429 はやり直さない）
+    expect(requests).toHaveLength(3);
+  });
+
+  it("完了の順を入れ替えても、選ぶ束・status・実試行数・理由は同じ", async () => {
+    const late = await bundlesFailure(0, 20);
+    const early = await bundlesFailure(20, 0);
+    expect(late.outcome.ok).toBe(false);
+    expect(early.outcome.ok).toBe(false);
+    if (late.outcome.ok || early.outcome.ok) return;
+    // 通し番号は開始の順（完了の順ではない）ので、入れ替えても同じ。番号まで同じとは限らないため除いて比べる
+    const withoutNumbers = (failure: unknown): unknown => {
+      const http = (failure as { readonly http?: { readonly history?: readonly Record<string, unknown>[] } }).http;
+      if (http?.history === undefined) return failure;
+      return {
+        ...(failure as Record<string, unknown>),
+        http: { ...http, history: http.history.map(({ attempt: _attempt, ...rest }) => rest) },
+      };
+    };
+    expect(withoutNumbers(late.outcome.failure)).toEqual(withoutNumbers(early.outcome.failure));
+    expect(late.requests).toHaveLength(3);
+    expect(early.requests).toHaveLength(3);
+  });
+});
+
+// ── v1.2 の通常 Build の repair・decl-check の HTTP 停止を、保存する記録から分類する（Issue #899）──
+
+describe("v1.2 の通常 Build の repair・decl-check の HTTP 停止（Issue #899）", () => {
+  /** 決まった回数目の構造化出力を HTTP で失敗させる */
+  function failingStructuredAt(calls: readonly RecordedCall[], at: number, status: number, repeat: number) {
+    const base = createCheckedRecordingClient(calls);
+    let n = 0;
+    const client: LlmClient = {
+      callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        n += 1;
+        if (n >= at && n < at + repeat) {
+          return Promise.reject(Object.assign(new Error("HTTP の誤り"), { kind: "http", status }));
+        }
+        return base.client.callStructured<T>(request);
+      },
+      callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
+        return base.client.callWithTools(request);
+      },
+    };
+    return client;
+  }
+
+  const httpOfFailure = (failure: unknown): unknown =>
+    (failure as { readonly http?: unknown } | null | undefined)?.http;
+
+  it("decl-check の 503 枯渇：保存する記録の failure が段・status・実試行数・理由を持つ", async () => {
+    // head() は 4 回（name-table・semantic-check・test-spec・write）。5・6 回目が decl-check の 2 試行
+    const client = failingStructuredAt(head(), 5, 503, 2);
+    const result = await runGenerationV11a(inputOf(client, { flags: {}, callTimeoutMs: 1_000 }));
+    expect(result.stopped).toMatchObject({ stage: "decl-check", kind: "http" });
+    const http = httpOfFailure(result.record.failure);
+    expect(http).toEqual({
+      http_status: 503,
+      attempts: 2,
+      history: [
+        { attempt: 5, status: 503, kind: "http", reason: "http-5xx", retry: "started" },
+        { attempt: 6, status: 503, kind: "http", reason: "http-5xx", retry: "attempts-exhausted" },
+      ],
+    });
+    // headless の要約には補足を写さない（従来の投影のまま）
+    expect(result.summary.failure).toEqual({ stage: "decl-check", kind: "http" });
+
+    // 段指定の走りでも、保存する記録（段の走りの stopped）に同じ補足が残る
+    const stageClient = failingStructuredAt(head(), 5, 503, 2);
+    const stage = await runStageRangeV11a({
+      ...inputOf(stageClient, { flags: {}, callTimeoutMs: 1_000 }),
+      range: { start: "name-table", end: "judge" },
+    });
+    expect(stage.stopped).toMatchObject({ stage: "decl-check", kind: "http" });
+    expect(httpOfFailure(stage.stopped)).toEqual(http);
+  });
+
+  it("repair の 503 枯渇：道具付きの段の停止も、保存する記録の failure から分類できる", async () => {
+    const [example] = COUNTEREXAMPLES;
+    if (example === undefined) throw new Error("前提が壊れた：反例が無い");
+    const rejection = judgments(IDS, { [example.requirementId]: [example.kind, example.quote] });
+    const base = createCheckedRecordingClient([...head({ yaml: example.bad }), structured(rejection)]);
+    const client: LlmClient = {
+      callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        return base.client.callStructured<T>(request);
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(Object.assign(new Error("HTTP の誤り"), { kind: "http", status: 503 }));
+      },
+    };
+    const result = await runGenerationV11a(inputOf(client, { flags: {}, callTimeoutMs: 1_000 }));
+    expect(result.stopped).toMatchObject({ stage: "repair", kind: "http" });
+    const http = httpOfFailure(result.record.failure) as {
+      readonly http_status: number;
+      readonly attempts: number;
+      readonly history: readonly { readonly status: number | null; readonly reason: string | null }[];
+    };
+    expect(http.http_status).toBe(503);
+    expect(http.attempts).toBe(2);
+    expect(http.history.map((row) => [row.status, row.reason])).toEqual([
+      [503, "http-5xx"],
+      [503, "http-5xx"],
+    ]);
+    expect(result.summary.failure).toEqual({ stage: "repair", kind: "http" });
+  });
+});

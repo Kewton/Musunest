@@ -46,6 +46,7 @@ import {
   isRecord,
   ruleTexts,
   serializeJson,
+  STEP_ATTEMPTS,
   type Problem,
   type PromptDocument,
   type RuleDefinition,
@@ -59,6 +60,13 @@ import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 import type { UpstreamLedgerView } from "../../v12/ledger.js";
 import { STRUCTURAL_MEANINGS, structuralReadingText, type StructuralMeaningTable } from "../../v12/structural-meanings.js";
 import { V12_T2_BUNDLE } from "../../v12/limits.js";
+import {
+  reportStopDiagnostic,
+  responseSha256,
+  type C3ProblemClass,
+  type C3StopDiagnostic,
+  type StopDiagnostic,
+} from "../../v12/stop-diagnostics.js";
 import { bundleRequirementIds } from "../../v12/test-cases.js";
 
 /** T1'' の JSON Schema の名前 */
@@ -212,37 +220,64 @@ export function quoteSources(plan: ConfirmedPlan, list: RequirementList): readon
   return sources;
 }
 
+/** 形の検査の結果に、問題の固定分類と欠落した対象を足したもの（Issue #898。診断の生成側が分類を付ける） */
+export type SourcedJudgmentsShape =
+  | { readonly ok: true; readonly value: readonly SemanticJudgment[] }
+  | {
+      readonly ok: false;
+      readonly problems: readonly Problem[];
+      /** `problems` と同じ件数・同じ順の固定分類 */
+      readonly classifications: readonly C3ProblemClass[];
+      /** 判定が無い対象の要件 ID（対象の順） */
+      readonly missing: readonly string[];
+    };
+
 /**
  * 判定の並びの形と完全性を確かめる（T1''・B3' で共有）。対象の全要件にちょうど 1 判定・拒否は有限の種類と
  * 見つかる引用。合わない欄を**すべて**挙げる（`field` は位置、`message` は固定文。値は埋めない）。通れば
  * **対象の順**に並べ直した判定を返す。
+ *
+ * 診断のための分類と欠落した対象も併産する（Issue #898）。分類は**この発生側**が分岐ごとに付け、`field` や
+ * `message` から逆算しない。既存の検査の口（`checkJudgmentsShape`）は問題だけを投影するので、B3' と既存の
+ * 呼び出しは今までと同じ値を受ける。
  */
-export function checkJudgmentsShape(
+export function checkJudgmentsShapeSourced(
   output: unknown,
   targets: readonly string[],
   kinds: readonly string[],
   sources: readonly string[],
-): ShapeCheck<readonly SemanticJudgment[]> {
-  if (!isRecord(output)) return { ok: false, problems: [{ field: "", message: "応答は写像（object）であること" }] };
-  const raw = output["judgments"];
-  if (!Array.isArray(raw)) return { ok: false, problems: [{ field: "judgments", message: "判定は並び（array）であること" }] };
+): SourcedJudgmentsShape {
   const problems: Problem[] = [];
+  const classifications: C3ProblemClass[] = [];
+  const add = (problem: Problem, classification: C3ProblemClass): void => {
+    problems.push(problem);
+    classifications.push(classification);
+  };
+  if (!isRecord(output)) {
+    add({ field: "", message: "応答は写像（object）であること" }, "not-object");
+    return { ok: false, problems, classifications, missing: [] };
+  }
+  const raw = output["judgments"];
+  if (!Array.isArray(raw)) {
+    add({ field: "judgments", message: "判定は並び（array）であること" }, "not-array");
+    return { ok: false, problems, classifications, missing: [] };
+  }
   const targetSet = new Set(targets);
   const byId = new Map<string, SemanticJudgment>();
   const seen = new Set<string>();
   raw.forEach((item, index) => {
     const field = `judgments[${index}]`;
     if (!isRecord(item)) {
-      problems.push({ field, message: "判定は写像（object）であること" });
+      add({ field, message: "判定は写像（object）であること" }, "not-object");
       return;
     }
     const requirementId = item["requirementId"];
     if (typeof requirementId !== "string" || !targetSet.has(requirementId)) {
-      problems.push({ field: `${field}.requirementId`, message: "要件 ID が点検の対象に無い" });
+      add({ field: `${field}.requirementId`, message: "要件 ID が点検の対象に無い" }, "unknown-target");
       return;
     }
     if (seen.has(requirementId)) {
-      problems.push({ field: `${field}.requirementId`, message: "同じ要件の判定が重なっている" });
+      add({ field: `${field}.requirementId`, message: "同じ要件の判定が重なっている" }, "duplicate-judgment");
       return;
     }
     seen.add(requirementId);
@@ -251,35 +286,50 @@ export function checkJudgmentsShape(
     const quote = item["quote"];
     if (verdict === "accept") {
       if (kind !== null || quote !== null) {
-        problems.push({ field, message: "受理の判定の種類と引用は null であること" });
+        add({ field, message: "受理の判定の種類と引用は null であること" }, "bad-accept-payload");
         return;
       }
       byId.set(requirementId, { requirementId, verdict: "accept" });
       return;
     }
     if (verdict !== "reject") {
-      problems.push({ field: `${field}.verdict`, message: "判定の値は accept・reject のいずれかであること" });
+      add({ field: `${field}.verdict`, message: "判定の値は accept・reject のいずれかであること" }, "bad-verdict");
       return;
     }
     let good = true;
     if (typeof kind !== "string" || !kinds.includes(kind)) {
-      problems.push({ field: `${field}.kind`, message: `拒否の種類は ${kinds.join("・")} のいずれかであること` });
+      add({ field: `${field}.kind`, message: `拒否の種類は ${kinds.join("・")} のいずれかであること` }, "bad-kind");
       good = false;
     }
     if (typeof quote !== "string" || quote.trim() === "") {
-      problems.push({ field: `${field}.quote`, message: "拒否には引用が要る" });
+      add({ field: `${field}.quote`, message: "拒否には引用が要る" }, "bad-quote");
       good = false;
     } else if (!sources.some((source) => source.includes(quote))) {
-      problems.push({ field: `${field}.quote`, message: "引用が確定した仕様にも要件の文にも無い" });
+      add({ field: `${field}.quote`, message: "引用が確定した仕様にも要件の文にも無い" }, "bad-quote");
       good = false;
     }
     if (good) byId.set(requirementId, { requirementId, verdict: "reject", kind: kind as string, quote: quote as string });
   });
+  const missing: string[] = [];
   targets.forEach((requirementId, index) => {
-    if (!seen.has(requirementId)) problems.push({ field: `requirements[${index}]`, message: "判定が無い要件がある" });
+    if (!seen.has(requirementId)) {
+      add({ field: `requirements[${index}]`, message: "判定が無い要件がある" }, "missing-judgment");
+      missing.push(requirementId);
+    }
   });
-  if (problems.length > 0) return { ok: false, problems };
+  if (problems.length > 0) return { ok: false, problems, classifications, missing };
   return { ok: true, value: targets.map((requirementId) => byId.get(requirementId) as SemanticJudgment) };
+}
+
+/** 判定の並びの形と完全性を確かめ、問題だけを投影する（T1''・B3'。既存の口。Issue #507） */
+export function checkJudgmentsShape(
+  output: unknown,
+  targets: readonly string[],
+  kinds: readonly string[],
+  sources: readonly string[],
+): ShapeCheck<readonly SemanticJudgment[]> {
+  const checked = checkJudgmentsShapeSourced(output, targets, kinds, sources);
+  return checked.ok ? checked : { ok: false, problems: checked.problems };
 }
 
 /**
@@ -329,6 +379,53 @@ export interface SemanticCheckInput {
    * R-sc-07 を足す。部分が 0 件なら LLM を呼ばず、束 0・判定 0 の結果を返す（Issue #805）
    */
   readonly recheck?: readonly string[];
+  /**
+   * 形の拒否の診断を受け取る任意の口（Issue #898）。1 つの束の形の試行ごとに 1 件を渡す。**省けば何もしない。**
+   * 口の有無・例外で、要求・試行の回数・予算・判定・失敗の選択は変わらない（`reportStopDiagnostic`）。
+   * 渡す記録は本文を含まず、処理対象への参照も持たない（`C3StopDiagnostic`）。
+   */
+  readonly onStopDiagnostic?: (record: StopDiagnostic) => void;
+}
+
+/** C3 の 1 回の形の試行の観測（診断の材料。本文は持たない） */
+interface C3AttemptObservation {
+  readonly attempt: number;
+  readonly problems: readonly C3ProblemClass[];
+  readonly missing: readonly string[];
+  readonly response_sha256: string | null;
+  readonly observed: boolean;
+}
+
+/**
+ * C3 の束の試行の観測を、診断の記録にする（Issue #898）。回復・受理・失敗・未開始を区別し、拒否された試行を
+ * 回復後にも残す。応答を観測していない試行は `response_sha256` を null・`observed` を偽にし、欠落を捏造しない。
+ */
+function c3DiagnosticsOf(
+  round: number,
+  bundle: number,
+  targets: readonly string[],
+  observations: readonly C3AttemptObservation[],
+  accepted: boolean,
+): readonly C3StopDiagnostic[] {
+  const last = observations.length - 1;
+  return observations.map((observation, index) => ({
+    kind: "c3",
+    round,
+    bundle_index: bundle,
+    attempt: observation.attempt,
+    targets: [...targets],
+    missing: [...observation.missing],
+    problems: [...observation.problems],
+    response_sha256: observation.response_sha256,
+    observed: observation.observed,
+    status: !observation.observed
+      ? "not-started"
+      : accepted
+        ? index === last
+          ? "accepted"
+          : "recovered"
+        : "failed",
+  }));
 }
 
 /** T1'' の結果（表の SHA-256 に結ぶ完全な結果と、点検の対象の要件 ID） */
@@ -492,11 +589,15 @@ export function mergeSemanticJudgments(
   return { ok: true, value: targets.map((requirementId) => byId.get(requirementId) as SemanticJudgment) };
 }
 
-/** 束の結果（判定か段の失敗か例外） */
+/** 束の結果（判定か段の失敗か例外。診断は束の順に入口へ渡す。Issue #898） */
 type SemanticBundleResult =
-  | { readonly kind: "ok"; readonly judgments: readonly SemanticJudgment[] }
-  | { readonly kind: "failed"; readonly failure: StageFailure }
-  | { readonly kind: "thrown"; readonly error: unknown };
+  | { readonly kind: "ok"; readonly judgments: readonly SemanticJudgment[]; readonly diagnostics: readonly C3StopDiagnostic[] }
+  | {
+      readonly kind: "failed";
+      readonly failure: StageFailure;
+      readonly diagnostics: readonly C3StopDiagnostic[];
+    }
+  | { readonly kind: "thrown"; readonly error: unknown; readonly diagnostics: readonly C3StopDiagnostic[] };
 
 /**
  * T1'' を 1 回呼ぶ。形・完全性・引用の落ちは共通の窓口が 1 回やり直し、2 回続けば `malformed`。
@@ -548,9 +649,22 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
     const bundleTargets = bundles[bundle] ?? [];
     let attempt = 0;
     let refused: readonly Problem[] | undefined;
+    // 形の試行の観測（診断にだけ使う。要求・試行・予算・失敗の選択には使わない。Issue #898）
+    const observations: C3AttemptObservation[] = [];
     const check = (output: unknown): ShapeCheck<readonly SemanticJudgment[]> => {
       attempt += 1;
-      const checked = checkJudgmentsShape(output, bundleTargets, SEMANTIC_REJECTION_KINDS, sources);
+      const checked = checkJudgmentsShapeSourced(output, bundleTargets, SEMANTIC_REJECTION_KINDS, sources);
+      observations.push(
+        checked.ok
+          ? { attempt, problems: [], missing: [], response_sha256: responseSha256(output), observed: true }
+          : {
+              attempt,
+              problems: checked.classifications,
+              missing: checked.missing,
+              response_sha256: responseSha256(output),
+              observed: true,
+            },
+      );
       if (checked.ok || attempt > 1) return checked;
       // 形のやり直しは段全体の予算が残るときだけ（残らなければ再試行せずに形の落ちで断る。共通の窓口は変えない）
       if (shapeRetries.used.length < shapeRetries.limit) {
@@ -566,9 +680,31 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
       request: semanticCheckRequest(input, bundleRules, bundleTargets, references),
       check,
     });
-    if (!answer.ok) return { kind: "failed", failure: answer.failure };
-    if (refused !== undefined) return { kind: "failed", failure: { kind: "malformed", attempts: 1, problems: refused } };
-    return { kind: "ok", judgments: answer.value };
+    // 応答を観測していない試行（通信・締切・門の失敗）は、応答も SHA も欠落も捏造せず「未開始」として残す
+    if (!answer.ok && observations.length < STEP_ATTEMPTS) {
+      observations.push({
+        attempt: observations.length + 1,
+        problems: [],
+        missing: [],
+        response_sha256: null,
+        observed: false,
+      });
+    }
+    if (!answer.ok) {
+      return { kind: "failed", failure: answer.failure, diagnostics: c3DiagnosticsOf(round, bundle, bundleTargets, observations, false) };
+    }
+    if (refused !== undefined) {
+      return {
+        kind: "failed",
+        failure: { kind: "malformed", attempts: 1, problems: refused },
+        diagnostics: c3DiagnosticsOf(round, bundle, bundleTargets, observations, false),
+      };
+    }
+    return {
+      kind: "ok",
+      judgments: answer.value,
+      diagnostics: c3DiagnosticsOf(round, bundle, bundleTargets, observations, true),
+    };
   };
 
   const results: (SemanticBundleResult | undefined)[] = bundles.map(() => undefined);
@@ -581,13 +717,17 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
       try {
         result = await callBundle(bundle);
       } catch (error) {
-        result = { kind: "thrown", error };
+        result = { kind: "thrown", error, diagnostics: [] };
       }
       results[bundle] = result;
     }
   };
   const concurrency = input.bundleConcurrency ?? V12_T2_BUNDLE.concurrency;
   await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, bundles.length)) }, worker));
+  // 診断は**束の順**（一覧の順）に渡す。束の完了の順に依らせない（Issue #898）
+  for (const result of results) {
+    for (const record of result?.diagnostics ?? []) reportStopDiagnostic(input.onStopDiagnostic, record);
+  }
   // 一覧の順で最初に落ちた束（例外を含む）を段の結果にする（完了の順に依らない）
   for (const result of results) {
     if (result === undefined || result.kind === "ok") continue;

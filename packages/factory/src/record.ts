@@ -15,15 +15,23 @@ import {
   type HeadlessSummaryWire,
 } from "@musunest/appspec-schema";
 import {
+  CALL_ERROR_KINDS,
+  CALL_RETRY_REASONS,
+  CALL_RETRY_STATES,
   cacheWriteTokensOf,
   isIncompleteResponseError,
   runNoteHook,
+  sanitizeHttpStatus,
   type AttemptCounts,
   type CallAttemptEnd,
   type CallAttemptObservation,
   type CallAttemptObserver,
   type CallCounts,
   type CallErrorKind,
+  type CallHttpAttempt,
+  type CallHttpTrace,
+  type CallRetryReason,
+  type CallRetryState,
   type RetryCounts,
 } from "./call.js";
 import type { LimitName } from "./limits.js";
@@ -151,6 +159,12 @@ export interface FailureAttribution {
    * （ほかの走り・ほかの種類では欄が無い＝形は今のまま）。数と名前だけで、値の中身は持たない（S-8）
    */
   readonly limit?: FailureLimit;
+  /**
+   * HTTP 停止の補足（状態コード・実開始試行数・試行順の歴史。Issue #899）。共通の口の失敗が
+   * 補足を持つときだけ写す。**本文・ヘッダー・URL・任意の provider 文字列は持たない**——数値・
+   * 固定の値・既存の安全な件数だけである。headless の要約には写さない（`buildSummary` が落とす）。
+   */
+  readonly http?: CallHttpTrace;
 }
 
 /** 失敗の帰属の上限（名前・上限値・実際の値。Issue #665） */
@@ -762,7 +776,7 @@ export class CallRequestLog {
  * 失敗の帰属を、列挙した欄に写す（S-7・S-8・#304）。`code`・`problems`・`limit` は**あるときだけ**写し、
  * 欄の名前と問題の種類・上限の名前と数だけを残す（値の中身は残さない。`limit` は Issue #665）。
  */
-function pickFailure(failure: FailureAttribution): FailureAttribution {
+function pickFailure(failure: FailureAttribution, includeHttp = true): FailureAttribution {
   let picked: FailureAttribution = { stage: failure.stage, kind: failure.kind };
   if (failure.code !== undefined) picked = { ...picked, code: failure.code };
   if (failure.malformed_kind !== undefined) picked = { ...picked, malformed_kind: failure.malformed_kind };
@@ -772,8 +786,57 @@ function pickFailure(failure: FailureAttribution): FailureAttribution {
   if (failure.problems !== undefined && failure.problems.length > 0) {
     picked = { ...picked, problems: failure.problems.map((problem) => ({ field: problem.field, message: problem.message })) };
   }
+  const http = includeHttp ? pickHttpTrace(failure.http) : undefined;
+  if (http !== undefined) picked = { ...picked, http };
   return picked;
 }
+
+/**
+ * 失敗の帰属を、**保存する記録の許可リスト**で投影する（Issue #899）。`Build` だけの記録など、
+ * `pickFailure` の外から保存用の failure を組むときも同じ許可リストを通す。headless はこれを使わず、
+ * `pickFailure(failure, false)` で `http` を落とす。
+ */
+export function pickFailureForRecord(failure: FailureAttribution): FailureAttribution {
+  return pickFailure(failure, true);
+}
+
+/**
+ * HTTP 停止の補足を、**固定の欄だけ**の安全な写しにする（Issue #899）。状態コードは数値のときだけ、
+ * 誤り分類・再試行の理由・状態は固定の一覧にある値だけを採る。不正な値は落とすか `null` にする——
+ * 任意の文字列・`NaN`・余分な属性をそのまま記録へ出さない。
+ */
+function pickHttpTrace(trace: CallHttpTrace | undefined): CallHttpTrace | undefined {
+  if (trace === undefined) return undefined;
+  const history = trace.history.map(pickHttpAttempt).filter((row): row is CallHttpAttempt => row !== undefined);
+  const httpStatus = sanitizeHttpStatus(trace.http_status);
+  const attempts =
+    typeof trace.attempts === "number" && Number.isFinite(trace.attempts) && trace.attempts >= 0
+      ? Math.trunc(trace.attempts)
+      : 0;
+  if (history.length === 0 && httpStatus === null) return undefined;
+  return { http_status: httpStatus, attempts, history };
+}
+
+/** 試行順の 1 行を、固定の欄だけの写しにする（Issue #899） */
+function pickHttpAttempt(row: CallHttpAttempt): CallHttpAttempt | undefined {
+  if (row === null || typeof row !== "object") return undefined;
+  const kind = typeof row.kind === "string" && (CALL_ERROR_KIND_SET as ReadonlySet<string>).has(row.kind)
+    ? (row.kind as CallErrorKind)
+    : null;
+  const reason =
+    typeof row.reason === "string" && (CALL_RETRY_REASON_SET as ReadonlySet<string>).has(row.reason)
+      ? (row.reason as CallRetryReason)
+      : null;
+  const retry = (CALL_RETRY_STATE_SET as ReadonlySet<string>).has(row.retry) ? (row.retry as CallRetryState) : undefined;
+  if (retry === undefined) return undefined;
+  const attempt = typeof row.attempt === "number" && Number.isFinite(row.attempt) ? Math.trunc(row.attempt) : 0;
+  return { attempt, status: sanitizeHttpStatus(row.status), kind, reason, retry };
+}
+
+/** 形の誤りの一覧（`pickHttpAttempt` が誤り分類を検めるための集合。Issue #899） */
+const CALL_ERROR_KIND_SET: ReadonlySet<string> = new Set(CALL_ERROR_KINDS);
+const CALL_RETRY_REASON_SET: ReadonlySet<string> = new Set(CALL_RETRY_REASONS);
+const CALL_RETRY_STATE_SET: ReadonlySet<string> = new Set(CALL_RETRY_STATES);
 
 /** 記録を組み立てる。**列挙した欄だけ**を写す（余分な欄は渡されても落ちる） */
 export function buildRunRecord(input: RunRecord): RunRecord {
@@ -849,6 +912,8 @@ export function buildSummary(record: RunRecord, base: SummaryBase): Summary {
     budget_remaining_usd: picked.budget_remaining_usd,
     budget_reserved_usd: picked.budget_reserved_usd ?? 0,
     missing_usage_calls: picked.missing_usage_calls,
-    failure: picked.failure,
+    // headless の要約は従来の投影のまま——HTTP 停止の補足（`http`）を写さない（Issue #899）。
+    // 保存する記録（段の走り）には残るので、要約の欄・値・schema_version は変わらない。
+    failure: picked.failure === null ? null : pickFailure(picked.failure, false),
   };
 }

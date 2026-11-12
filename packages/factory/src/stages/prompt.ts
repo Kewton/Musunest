@@ -16,7 +16,16 @@
 //      `input` の末尾だけを「前回の応答」→「前回の問題（欄・分類・固定文）」の順のデータの塊 2 つで
 //      足したものにする（#447・#479）。前回の応答を渡すのは、問題の欄が応答の中の位置を添字で指すのに
 //      その位置の参照先が要るためである（値を文に埋めない決まりは保つ。#439・#445）。
-import type { CallErrorKind, CallGateway, CallResult } from "../call.js";
+import {
+  httpTraceOfResult,
+  sanitizeHttpStatus,
+  type CallErrorKind,
+  type CallGateway,
+  type CallHttpAttempt,
+  type CallHttpSnapshot,
+  type CallHttpTrace,
+  type CallResult,
+} from "../call.js";
 import type { LimitName } from "../limits.js";
 import type { LlmStructuredRequest, MalformedKind } from "../llm.js";
 import type { RequirementList } from "../pipeline.js";
@@ -156,7 +165,7 @@ export type ShapeCheck<T> =
   | { readonly ok: false; readonly problems: readonly Problem[] };
 
 /** 段の失敗（呼び出しの失敗・形の不一致・やり直しても直らないこと） */
-export type StageFailure =
+type StageFailureBase =
   /** 入力が上限を超えている（依頼文の長さなど） */
   | { readonly kind: "limit"; readonly limit: LimitName; readonly max: number; readonly actual: number }
   /** 締切に触れた */
@@ -198,6 +207,12 @@ export type StageFailure =
   /** 形は合うが、コードの検査に合わない（やり直しても直らなかった＝未達） */
   | { readonly kind: "unmet"; readonly attempts: number; readonly problems: readonly Problem[] };
 
+/**
+ * 段の失敗。**共通の口の HTTP 停止の補足**（Issue #899）を、失敗そのものに運ぶ——段の帰属は
+ * 呼び出し結果から決める（並列の口の「最後に見た status」で代用しない）。補足が無ければ欄を持たない。
+ */
+export type StageFailure = StageFailureBase & { readonly http?: CallHttpTrace };
+
 /** 段の結果。合否はここでは決めない（⑦ の終わりの判定が行う。§1.4） */
 export type StageOutcome<T> =
   | { readonly ok: true; readonly value: T }
@@ -208,6 +223,16 @@ type CallFailure = Exclude<CallResult<unknown>, { readonly kind: "ok" }>;
 
 /** 共通の口が分類した誤りの種類を、段の失敗に写す（§2.2・#302）。**拒否は拒否のときだけ**にする */
 export function mapCallErrorKind(
+  errorKind: CallErrorKind,
+  attempts: number,
+  malformedKind?: MalformedKind,
+  http?: CallHttpTrace,
+): StageFailure {
+  const mapped = mapCallErrorKindBase(errorKind, attempts, malformedKind);
+  return http === undefined ? mapped : { ...mapped, http };
+}
+
+function mapCallErrorKindBase(
   errorKind: CallErrorKind,
   attempts: number,
   malformedKind?: MalformedKind,
@@ -252,6 +277,23 @@ function mapCallFailure(result: CallFailure): StageFailure {
       // 失敗の結果が形の誤りの印を持つときは、それも写す（Issue #783）
       return mapCallErrorKind(result.errorKind, result.attempts, result.malformedKind);
   }
+}
+
+/**
+ * 段の失敗に、共通の口の HTTP 停止の補足を足す（Issue #899）。呼び出しの前後の一時点の差を取る——
+ * **実開始試行数は差**、試行順の歴史は**前の長さから後ろを切り出す**。最終の状態コードは失敗結果の
+ * 数値だけを採り、不正な型・非有限値・未知は `null`（不明）にする。補足が空なら欄を足さない
+ * （HTTP が一度もない失敗に不要な空の欄を付けない）。
+ */
+export function withHttpTrace(
+  failure: StageFailure,
+  snapshot: CallHttpSnapshot,
+  finalStatus: unknown,
+): StageFailure {
+  const { history, attempts } = snapshot;
+  const httpStatus = sanitizeHttpStatus(finalStatus);
+  if (history.length === 0 && httpStatus === null) return failure;
+  return { ...failure, http: { http_status: httpStatus, attempts, history } };
 }
 
 /** 1 つの段の答えを取るのに許す試行の回数（2 = 1 回だけやり直す。§2.2） */
@@ -366,12 +408,29 @@ export async function callStructuredChecked<T>(
   let problems: readonly Problem[] = [];
   // 形の検査に掛けた前回の応答（raw の `output`）。2 回目の要求に、問題の添字の参照先として渡す。
   let previousOutput: unknown;
+  // HTTP 停止の補足の材料（**この論理呼び出しだけ**。共有の配列の添字で切らない。Issue #899）
+  let httpAttempts = 0;
+  const httpHistory: CallHttpAttempt[] = [];
   for (let attempt = 0; attempt < STEP_ATTEMPTS; attempt += 1) {
     // 1 回目は変更前と byte で同じ要求（問題はまだ無い）。2 回目だけ、前回の応答と前回の問題の塊を末尾に足す。
     const request =
       problems.length === 0 ? plan.request : withShapeRetry(plan.request, previousOutput, problems);
     const result = await gateway.callStructured(request);
-    if (result.kind !== "ok") return { ok: false, failure: mapCallFailure(result) };
+    // この結果（1 つの論理呼び出し）に属する補足だけを足す（並列の束の行を混ぜない。Issue #899）
+    const trace = httpTraceOfResult(result);
+    if (trace !== undefined) {
+      httpAttempts += trace.attempts;
+      httpHistory.push(...trace.history);
+    }
+    if (result.kind !== "ok") {
+      // 共通の口の HTTP 停止の補足を、段の失敗へ写す（Issue #899）。最終の状態コードは失敗結果の数値だけ。
+      const failure = withHttpTrace(
+        mapCallFailure(result),
+        { attempts: httpAttempts, history: httpHistory },
+        result.kind === "failed" ? result.status : undefined,
+      );
+      return { ok: false, failure };
+    }
     const checked = plan.check(result.value.output);
     if (checked.ok) return { ok: true, value: checked.value, output: result.value.output };
     problems = checked.problems;
@@ -380,7 +439,7 @@ export async function callStructuredChecked<T>(
     plan.onShapeRejected?.({ attempt: attempt + 1, output: result.value.output, problems: checked.problems });
     // 形が合わなかったので、1 回だけやり直す。この**やり直し**を、共通の口へ告げる（Issue #446）。
     // 最後の試行の形の誤りは、やり直しではないので告げない（`malformed` の終端になる）。
-    if (attempt + 1 < STEP_ATTEMPTS) gateway.noteRetry("shape");
+    if (attempt + 1 < STEP_ATTEMPTS) httpHistory.push(gateway.noteRetry("shape"));
   }
   return { ok: false, failure: { kind: "malformed", attempts: STEP_ATTEMPTS, problems } };
 }

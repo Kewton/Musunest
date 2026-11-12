@@ -385,6 +385,13 @@ interface PlanCliRecordShape {
       readonly revision: number;
       readonly state: string;
       readonly entry_index: number | null;
+      readonly diagnosis: {
+        readonly keys_only_entries: number;
+        readonly facet_rejected_entries: number;
+        readonly relaxed: boolean;
+        readonly requirement_text_needed: number;
+        readonly v1_state: string;
+      };
     }[];
   };
   readonly rounds: readonly {
@@ -3154,9 +3161,21 @@ describe("台本のファイルを渡す（04 §9・Issue #444）", () => {
     expect(record.confirmation).toBe("build");
     // 台本の照合の記録（内容の SHA-256・当て方の版・問いごとの結果）
     expect(record.script?.sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(record.script?.matcher).toBe("v1");
+    expect(record.script?.matcher).toBe("v2");
     expect(record.script?.matches).toEqual([
-      { question_id: "Q1-1", revision: 1, state: "answered", entry_index: 0 },
+      {
+        question_id: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entry_index: 0,
+        diagnosis: {
+          keys_only_entries: 1,
+          facet_rejected_entries: 0,
+          relaxed: false,
+          requirement_text_needed: 0,
+          v1_state: "answered",
+        },
+      },
     ]);
     // 台本の鍵・根拠・項目の ID の目印は、記録に写さない
     const recordText = JSON.stringify(record);
@@ -3169,6 +3188,90 @@ describe("台本のファイルを渡す（04 §9・Issue #444）", () => {
     expect(record.rounds[0]?.questions.map((question) => question.id)).toEqual(["Q1-1"]);
     expect(record.rounds[0]?.answers).toEqual([
       { id: "A:Q1-1", question_id: "Q1-1", choice_id: "c2", free_text: null },
+    ]);
+  });
+
+  it("記録への写しで、観点の不一致で落とした件数と要件の文が要る件数を、0 でない異なる値で残す（Issue #896）", async () => {
+    // 主の事項は目録の事項（観点 counted-state・要件 R-1）、一緒に閉じる事項は目録に無い事項（観点 null・
+    // 要件 R-2）。前者で facet_rejected_entries、後者で requirement_text_needed を作る——2 つを取り違えて
+    // 写すと、値が違うので落ちる
+    const groupedSurface = {
+      ambiguities: [{ id: "OI-1", requirementId: "R-2", text: "いつ締め切るか", critical: true }],
+      unwritable: [],
+    };
+    const groupedQuestions = {
+      questions: [
+        {
+          id: "Q-1",
+          openIssueId: "OI:catalog:R-1:counted-state",
+          alsoCloses: ["OI-1"],
+          text: "どの状態のものを数えますか",
+          choices: [
+            { id: "c1", text: "全員" },
+            { id: "c2", text: "自分のみ" },
+          ],
+          recommended: { choiceId: "c1", reason: "依頼に沿う" },
+          allowFreeText: true,
+        },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(groupedSurface),
+      structured(groupedQuestions),
+      structured(SURFACE_CLEAR),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogUnspecifiedFor({ "R-1": ["counted-state"] }),
+      ...coverAnswers(["A:Q1-1"]),
+    });
+    const dir = `${directory}/script-diagnosis-copy`;
+    const text = scriptText([
+      // 主の事項の文に当たり、観点が違う 2 件（facet_rejected_entries）
+      { id: "E1", facet: "include-zero", keys: ["要件"], answer: { choose: ["全員"] }, basis: "b" },
+      { id: "E2", facet: "aggregation", keys: ["どの状態"], answer: { choose: ["全員"] }, basis: "b" },
+      // 主の事項に当たって答える 1 件（観点が主の事項と一致する）
+      { id: "E3", facet: "counted-state", keys: ["どの状態のもの"], answer: { choose: ["自分のみ"] }, basis: "b" },
+      // 一緒に閉じる事項の要件の文にだけ当たる 1 件（requirement_text_needed）
+      { id: "E4", facet: "period", keys: ["件数を合計できる"], answer: { choose: ["全員"] }, basis: "b" },
+    ]);
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--script", "script.json"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === "script.json" ? text : SOURCE_TEXT),
+      writeFile: async (path, file) => {
+        await fs.writeFile(path, file, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).not.toBe(EXIT_USAGE);
+    const record = await readPlanRecord(dir);
+    expect(record.script?.matches).toEqual([
+      {
+        question_id: "Q1-1",
+        revision: 1,
+        state: "answered",
+        entry_index: 2,
+        diagnosis: {
+          keys_only_entries: 4,
+          facet_rejected_entries: 2,
+          relaxed: false,
+          requirement_text_needed: 1,
+          v1_state: "answered",
+        },
+      },
     ]);
   });
 
@@ -3216,6 +3319,20 @@ describe("台本のファイルを渡す（04 §9・Issue #444）", () => {
     expect(record.script?.matches).toHaveLength(9);
     expect(record.script?.matches.every((match) => match.state === "unknown" && match.entry_index === null)).toBe(true);
     expect(record.script?.matches.map((match) => match.revision)).toEqual([1, 1, 1, 2, 2, 2, 3, 3, 3]);
+    // 問いごとの行に、値を持たない診断の 5 つの欄が出る（当たりが無い合成の入力）
+    expect(
+      record.script?.matches.every(
+        (match) =>
+          match.diagnosis.keys_only_entries === 0 &&
+          match.diagnosis.facet_rejected_entries === 0 &&
+          match.diagnosis.relaxed === false &&
+          match.diagnosis.requirement_text_needed === 0 &&
+          match.diagnosis.v1_state === "unknown",
+      ),
+    ).toBe(true);
+    // 台本の照合の記録に、事項の文・要件の文も写さない
+    expect(JSON.stringify(record.script)).not.toContain("誰の分を数えるか");
+    expect(JSON.stringify(record.script)).not.toContain("タスクを記録できる");
     // F1: 上限までの往復・問数と、空の答えが、往復の記録に残る
     expect(record.rounds).toHaveLength(3);
     expect(record.rounds.every((round) => round.all_recommended === false)).toBe(true);
@@ -4399,6 +4516,34 @@ describe("Build だけの記録の checkpoints（`--pipeline v1.2` の走りだ�
     expect(JSON.stringify(rest)).toBe(JSON.stringify(plain));
     // 境界に届かなかった走りは空の並びを置く
     expect(buildBuildCliRecord({ ...base, checkpoints: [] }).checkpoints).toEqual([]);
+  });
+
+  it("HTTP 停止の補足を持つ失敗だけを failure 欄に置き、許可リストで投影する（Issue #899）", () => {
+    type Failure = NonNullable<Parameters<typeof buildBuildCliRecord>[0]["failure"]>;
+    const http = {
+      http_status: 503,
+      attempts: 2,
+      history: [
+        { attempt: 1, status: 503, kind: "http", reason: "http-5xx", retry: "started" },
+        { attempt: 2, status: 503, kind: "http", reason: "http-5xx", retry: "attempts-exhausted" },
+      ],
+    };
+    const plain = buildBuildCliRecord(base);
+    expect("failure" in plain).toBe(false);
+    const withHttp = buildBuildCliRecord({
+      ...base,
+      failure: {
+        stage: "write",
+        kind: "http",
+        http: { ...http, body: "BODY-SENTINEL", provider: "PROVIDER-SENTINEL" },
+      } as unknown as Failure,
+    });
+    expect(Object.keys(withHttp)).toEqual([...Object.keys(plain), "failure"]);
+    expect(withHttp.failure).toEqual({ stage: "write", kind: "http", http });
+    expect(JSON.stringify(withHttp)).not.toContain("SENTINEL");
+    // 補足を持たない失敗は欄を置かない（従来の記録とバイト列で同じ）
+    const withoutHttp = buildBuildCliRecord({ ...base, failure: { stage: "write", kind: "balance" } });
+    expect("failure" in withoutHttp).toBe(false);
   });
 
   it("v1 の `--plan-file` の走り（--pipeline 省略）の記録に checkpoints が無く、checkpoint を書かない", async () => {

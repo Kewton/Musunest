@@ -902,11 +902,13 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
   {
     id: "validation-expression",
     requires: "ids",
-    since: "Issue #800",
-    why: "入力の値を 1 つの比較で縛る決まりを、対象の項目ごとの検査（validate）の試験で確かめる。決まりの無い要件に検査の試験を作らせないため、式で書ける決まりだけを受理し、対象を targets の項目に限る（方法論 03 の H2・H1。08 §5・§8.2）",
+    // 規則の 2 セル（rules.t1・rules.t1Acceptance）だけを #875 の前の文に戻す（Issue #902。2026-11-12 の計測で P2 の成績が
+    // 下がったため。`requirementRule`・`why`・上位の受理条件は #875 の文のまま。文法に委ねた #875 の規則の文は試験の定数に残す）
+    since: "Issue #800（受理の条件を文書の式の文法に委ねたのは 2026-11-11 の #875。台帳の文が文書の旧い文法〔式＝比較 1 つ〕を言い換えて写し、文書が式の結合を許したあと追従しなかったため。2026-11-12 の #902 で規則の 2 セル〔rules.t1・rules.t1Acceptance〕だけを #875 の前の文に戻した。requirementRule・why・上位の受理条件〔t1Acceptance〕は #875 の文のまま）",
+    why: "入力の値を縛る決まりを、対象の項目ごとの検査（validate）の試験で確かめる。決まりの無い要件に検査の試験を作らせないため、同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）だけを受理し、対象を targets の項目に限る（方法論 03 の H2・H1。08 §5・§8.2）",
     state: "active",
     inherited: false,
-    requirementRule: "入力の値を 1 つの比較で縛る決まりだけを決める要件",
+    requirementRule: "同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）だけを決める要件",
     t1: {
       kind: "validation-expression",
       valueField: null,
@@ -932,7 +934,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       },
     },
     t1Acceptance:
-      "確かめ方が検査の式（validation-expression）の要件は、要件の決まりが入力の値を 1 つの比較で縛る決まりだけで、targets がその決まりが縛る項目と過不足なく合うときだけ受理する。式で書けない決まりを含む要件や targets の合わない要件は受理せず、weak-verification で拒否する",
+      "確かめ方が検査の式（validation-expression）の要件は、要件の決まりが同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）だけで、targets がその決まりが縛る項目と過不足なく合うときだけ受理する。式で書けない決まりを含む要件や targets の合わない要件は受理せず、weak-verification で拒否する",
     combinations: [
       { targetKind: "field", operation: "validate" },
       { targetKind: "entity", operation: "validate" },

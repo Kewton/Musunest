@@ -122,6 +122,8 @@ function writePlanSet(base, repo) {
     return { pattern: pid, run: null, started_at: null, envelope: { path: `envelopes/${pid}.json`, sha256: sha256(bytes) }, plan_sha256: PSHA(pid), source_sha256: SSHA(pid) };
   });
   const set = { schema: FROZEN_SET_SCHEMA, id: "plan-set-t", version: 1, origin: "frozen-plan", rule: null, set: { path: SET_PATH, sha256: sha256(readFileSync(join(repo, SET_PATH))), id: "dev-p1-p10", version: 1 }, source_measurement: null, adopted, missing: [] };
+  // #876：作成時の文書の指紋（形だけを見る凍結の道具には合成の値で足りる）
+  set.prompt_documents = { contract: "c".repeat(64), semantics: "d".repeat(64), vocabulary: "f".repeat(64) };
   const path = join(dir, "frozen-plan-set.json");
   writeFileSync(path, JSON.stringify(set, null, 1));
   return path;
@@ -471,6 +473,72 @@ test("#817 公開の関数がある dist の凍結は、その dist の V12_PIPE
       }
     }
     assert.deepEqual([treeOf(out), readFileSync(score).toString("base64")], before, "入力は不変");
+  });
+});
+
+// ── #876：段の再開の文書の指紋（#875 の documentsVersionOf）。新しい dist の偽物の照合の関数は、旗 ids が on なら版の documents と渡した期待値が
+// 64 桁の 16 進で同じことを求める（#875 の工場と同じ規則）。入口は documentsVersionOf と loadDocumentsFromFiles（FAKE_DOCS で今の文書を変える）を出す
+const DOCS_TEXT = "docs-a";
+const docsVersion = (text) => sha256(JSON.stringify([{ name: "contract-doc", text }]));
+const fakeStageLib876 = fakeStageLib.replace(
+  '  if (h(JSON.stringify(cp)) !== declared.output_digest) return fail("stage-input:digest");',
+  '  if (input.v12?.flags?.ids === true && !(hex(cp.versions?.documents) && hex(input.v12?.documents) && cp.versions.documents === input.v12.documents)) return fail("stage-input:version");\n' +
+    '  if (h(JSON.stringify(cp)) !== declared.output_digest) return fail("stage-input:digest");',
+);
+assert.ok(fakeStageLib876 !== fakeStageLib, "偽物の差し替えが当たらない");
+/** 新しい dist の入口の足し分。loader が false なら loadDocumentsFromFiles を出さない、"throw" なら documentsVersionOf が例外、{ value } なら任意の値 */
+const docsIndex = ({ loader = true, version = null } = {}) =>
+  'import { createHash as docsHash } from "node:crypto";\n' +
+  `export async function documentsVersionOf(d) { ${version === "throw" ? 'throw new Error("x");' : version !== null ? `return ${JSON.stringify(version.value)};` : 'return docsHash("sha256").update(JSON.stringify(d.map((x) => ({ name: x.name, text: x.text })))).digest("hex");'} }\n` +
+  (loader ? `export async function loadDocumentsFromFiles() { return [{ name: "contract-doc", text: process.env.FAKE_DOCS ?? ${JSON.stringify(DOCS_TEXT)} }]; }\n` : "");
+
+test("#876 段の入力の凍結（境界 t1-t2・t2-b1）：documentsVersionOf を出さない旧 dist は文書の指紋を照合に渡さず今までどおり正常な checkpoint を採る。出す新 dist はその dist の loadDocumentsFromFiles() から作った期待値を documents に渡して正常な checkpoint を採り、documents の欠け・不正形・今の文書との不一致の checkpoint は照合に落ちる（freeze:none-adopted）。読み込みの関数が無い・例外・形の異常は freeze:dist-unreadable で何も書かない", async () => {
+  await withWorld(async ({ base, repo, fz }) => {
+    const index = join(repo, "packages/factory/dist/index.js"), libPath = join(repo, "packages/factory/dist/v11a/bundle-v11a.js");
+    const ADOPTED = ["P1-r1", "P2-r2", "P4-r2"];
+    const adoptedOf = (dest) => readJson(join(dest, FROZEN_STAGE_SET_FILE)).adopted.map((a) => a.run);
+    const run = (name, versions, boundary, env = {}) => {
+      const out = writeMeasurement(base, repo, fz, { name: `ref-876-${name}-${boundary}`, versions });
+      const score = writeScore(base, out, { name: `score-876-${name}-${boundary}.json` });
+      const dest = join(base, `set-876-${name}-${boundary}`);
+      return { r: runNode([repo, out, score, dest, "--id", "stage-set-876", "--version", "1", "--boundary", boundary], env), dest, out };
+    };
+    const expectedDocs = docsVersion(DOCS_TEXT);
+    // 互換：旧 dist（入口に documentsVersionOf が無い・今の照合の関数）。documents の無い checkpoint を採り、照合に documents を渡さない
+    for (const [boundary, expected] of [["t1-t2", { ledger: LEDGER, ledgerUpstream: UPSTREAM, flags: FLAGS }], ["t2-b1", { ledger: LEDGER, flags: FLAGS }]]) {
+      const vlog = join(base, `v12-876-old-${boundary}.log`);
+      const { r, dest } = run("old", null, boundary, { FAKE_VERIFY_V12_LOG: vlog });
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(adoptedOf(dest), ADOPTED, boundary);
+      for (const v of readFileSync(vlog, "utf8").trim().split("\n").map((l) => JSON.parse(l))) assert.deepEqual(v, expected, `old-${boundary}`);
+    }
+    // 新 dist
+    writeFileSync(libPath, fakeStageLib876);
+    writeFileSync(index, fakeIndex(FLAGS) + docsIndex());
+    const withDocs = (value) => (v) => { v.documents = value; };
+    for (const [boundary, expected] of [["t1-t2", { ledger: LEDGER, ledgerUpstream: UPSTREAM, flags: FLAGS, documents: expectedDocs }], ["t2-b1", { ledger: LEDGER, flags: FLAGS, documents: expectedDocs }]]) {
+      const vlog = join(base, `v12-876-new-${boundary}.log`);
+      const { r, dest } = run("new", withDocs(expectedDocs), boundary, { FAKE_VERIFY_V12_LOG: vlog });
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(adoptedOf(dest), ADOPTED, boundary);
+      for (const v of readFileSync(vlog, "utf8").trim().split("\n").map((l) => JSON.parse(l))) assert.deepEqual(v, expected, `new-${boundary}`);
+      // checkpoint の documents の欠け・不正形・不一致と、今の文書が違う場合は、どの本も照合に落ちる
+      for (const [label, versions, env] of [
+        ["missing", null, {}], ["null", withDocs(null), {}], ["upper", withDocs(expectedDocs.toUpperCase()), {}], ["short", withDocs(expectedDocs.slice(1)), {}],
+        ["mismatch", withDocs("0".repeat(64)), {}], ["changed", withDocs(expectedDocs), { FAKE_DOCS: "docs-b" }],
+      ]) {
+        const { r: rb, dest: db, out } = run(label, versions, boundary, env);
+        assertRefused(rb, "freeze:none-adopted", { dest: db, inputs: [out], before: [treeOf(out)], label: `${label}-${boundary}` });
+      }
+    }
+    // 新 dist の読み取りの失敗：読み込みの関数が無い（入口にも cli.js にも）・例外・64 桁の 16 進でない値
+    for (const [label, docs] of [["no-loader", { loader: false }], ["throw", { version: "throw" }], ["upper", { version: { value: expectedDocs.toUpperCase() } }], ["number", { version: { value: 1 } }]]) {
+      writeFileSync(index, fakeIndex(FLAGS) + docsIndex(docs));
+      for (const boundary of ["t1-t2", "t2-b1"]) {
+        const { r, dest } = run(`dist-${label}`, withDocs(expectedDocs), boundary);
+        assertRefused(r, "freeze:dist-unreadable", { dest, label: `${label}-${boundary}` });
+      }
+    }
   });
 });
 

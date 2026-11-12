@@ -28,6 +28,7 @@ import { V11A_EVALUATION_NAMES } from "../v11a/evaluate.js";
 import { NAME_TABLE_VERIFICATION_KINDS } from "../v11a/names.js";
 import { SEMANTIC_CHECK_RULE_DEFINITIONS, semanticCheckRuleDefinitionsOf } from "../v11a/stages/semantic-check.js";
 import { NAME_TABLE_RULE_DEFINITIONS, nameTableRuleDefinitionsOf } from "../v11a/stages/name-table.js";
+import { withOldValidationExpressionTexts } from "./__tests__/ledger.js";
 import {
   DEFAULT_VALUE_EXEMPT_MESSAGES,
   DEFAULT_VALUE_NOT_ALLOWED_MESSAGE,
@@ -1563,10 +1564,15 @@ describe("旗 v12.ids の C2 への文（Issue #806）", () => {
     const idsWhole = await propertyLedgerSha256(PROPERTY_LEDGER, ids);
     expect(idsWhole).not.toBe(BASE_IDS_WHOLE);
     // R3 の B1 の文と #832 の T2 の文を旧の文に戻すと、ids の全体の指紋は base（#806 の後・#816 の前）の値に戻る
-    // （#816・#832 の差がその 2 文だけであることの証跡）
-    expect(await propertyLedgerSha256(withOldValidationExpressionB1(withOldValidationExpressionT2()), ids)).toBe(BASE_IDS_WHOLE_806);
+    // （#816・#832 の差がその 2 文だけであることの証跡）。#875 で検査の式の行の文を文書の式の文法に委ねたので、その文も
+    // 旧の文に戻す（`withOldValidationExpressionTexts`）
+    expect(await propertyLedgerSha256(withOldValidationExpressionB1(withOldValidationExpressionT2(withOldValidationExpressionTexts())), ids)).toBe(
+      BASE_IDS_WHOLE_806,
+    );
     // #806 で足した t1Ids も外すと、#800 の ids の全体の指紋に戻る（旧の値も消さずに照らす）
-    expect(await propertyLedgerSha256(withOldValidationExpressionB1(withOldValidationExpressionT2(withoutIdsRuleTexts())), ids)).toBe(BASE_IDS_WHOLE);
+    expect(
+      await propertyLedgerSha256(withOldValidationExpressionB1(withOldValidationExpressionT2(withOldValidationExpressionTexts(withoutIdsRuleTexts()))), ids),
+    ).toBe(BASE_IDS_WHOLE);
     const idsUpstream = await upstreamLedgerSha256(PROPERTY_LEDGER, ids);
     expect(idsUpstream).not.toBe(BASE_OFF_UPSTREAM);
     expect(UPSTREAM_LEDGER_VIEW_VERSION_IDS).toBe(2);

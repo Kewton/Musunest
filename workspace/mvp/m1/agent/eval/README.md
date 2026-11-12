@@ -1155,6 +1155,35 @@ C3（T1''）の判定を同じ正解と照らし、誤りの要件の受理（**
 - `--resume` は記録の上限と今の dist の上限が違えば、今の条件の不一致と同じ `[resume:signature]` で断る。`v12_call_limits` の欄の無い前の版の条件のファイルは、その欄を除いた署名で今までどおり照らして再開できる（上限が記録されていないので、混ざったかどうかはこの照合では分からない）
 - 旗 `ids` が on の dist が `V12_CALL_LIMITS` を出さない・3 つが有限の数でないときは、**exit 3・`pipeline:v1.2-limits-unavailable`** で子を 1 本も起こさない（黙って欄を省かない）。`ids` が off か、旗に `ids` の無い dist（手 3p より前）だけ欄を足さずに通す
 
+#### 10.7.1 開発用の組 `dev-p1-p10` v2（#876。2026-11-11）と、§1〜§6 への追記
+
+> 置き場所：§7 の先頭より前と §7.11 の先頭より前のバイト列は試験が SHA で照合し、§10.8.1 の後ろは #### の小節だけ・§10.8.4 が末尾なので、§1〜§6 に書くべき追記（組 v2・判定の種類・行の欄・#876 の拒否の符号・回帰用との対応）もここに置く。§1〜§6 の該当の行は、ここで読み替える。
+
+#853・#854 で言語が変わり（参照の並びを空で登録できる・`and`／`or`／`not`）、v1 の組の D・E の書ける欄と採点定義が旧い限界に依っていた所を、所有者の決定 3（2026-11-11。#876 のコメント）のとおり直した。**v1 のファイルはバイト列で残し、v2 は別のファイルに置く。v1 と v2 の成績は比較しない**（方法論 `01` §1）。
+
+| ファイル | 中身 |
+|---|---|
+| `sets/dev-p1-p10.v2.json` | `id` は v1 と同じ `dev-p1-p10`・`version: 2`・`basis`（言語の根拠と決定）。本・依頼文・書き方は v1 と同じ。**P7・P8 は `writable: true`**。D・E は `subjects/v2/`・`sets/scripts/v2/` を指し、A・B・C は v1 と同じファイル。**既定の組ではない** |
+| `subjects/v2/D.json` | 主の構造：書けない要件を外し（`unwritable: []`）、新しい判定（以下「D の主の構造の 0 人の判定」。`validation`。空の並びの行が検査に通る）と鍵 K0 を足す。判定 6→7。v1 の 2 つ目の判定（以下「D の主の構造の 2 つ目の判定」）に鍵（2 つの語の組。review-891 中 1）を足す。別の構造：**(iv)＋(K-a)**。v1 の書けない要件を `unsatisfiable` の判定（2 つ目）にして必ず落とし（申告では合格にならない）、1 つ目の判定に鍵 K0 を付ける。判定 6→7（主の構造と同じ分母） |
+| `subjects/v2/E.json` | **E-c**。判定（`checks`）は v1 と同じ（2026-10-08 の決定 3 を保つ）。`observe` に判定 1 つ（以下「E の observe の判定」。`highlight`・`setLabels` で状態を固定・過ぎた日で偽）と鍵を置く。合否・充足・了承の照合には入れない |
+| `sets/scripts/v2/D.json`・`E.json` | `version: 2`。D の `D:attendees:empty-allowed` は答えを変えず、根拠を「書ける要件。了承で除いてはいけない」に直した。E の `E:overdue-mark:returned` は推奨のまま、根拠を v2 の定義（observe）に直した。A の台本は直していない（`basis` の文だけの古さで採点は同じ） |
+| `cases/v2/` | 合成の正例・負例（宣言 13 本と v1 の `cases/` の別の構造の宣言 1 本を索引の 15 行で・申告 1 本・了承の部分の文 9 件）と索引 `cases.json`（v2 と v1 の両方の期待）。`run-cases.mjs` は `subjects/<題材>.json` を名前で引くので入れず、`agent-accept/score-agent.test.mjs`（`#876` の試験）が `subjects/v2/` を明示して当てる |
+
+- **§1・§2 への追記（エンジン）**：判定の種類に **`unsatisfiable`**（必ず偽。その構造では満たせない書ける要件）を足して 13。`highlight` は **`setLabels`**（役割 → 選択肢の表示名。宣言の鍵を表示名から引いて値に入れる。当たる鍵が無ければ偽）を読む。構造に **`observe`**（`checks` と同じ形の記録だけの判定）を書ける：結果は `score()` の戻り値 `observed`（`{ 判定の名前: 真偽 }`。`observe` を持つ定義のときだけ出す）に入り、`passed`・`writable_total`・`verdict`・`requiresClaim`・当てはめの選択には入らない。判定の `keys` は除外・変更の文を書ける要件に当てる鍵（§5.5.2 の `check`）。`subjects/v2/` はサブディレクトリなので採点の指紋の `files[]`（`subjects/` 直下）に入らず、組の `definition:<題材>` で数える
+- **§5.2 の読み替え**：`fulfillment.*` の `partial`・`writable` は組の `writable` で分ける（v1 では B・D と A・C・E、v2 では B と A・C・D・E）
+- **§5.5.5 への追記（行の欄）**：`rows[].observed`・`rows[].observed_exclusions`。採点の定義が `observe` を持つ本だけ。`observed` は判定の名前 → 真偽（宣言の無い本は `null`）。`observed_exclusions` は確定した仕様の除外（`removed` の要件の元の文・`met`・`alternative` でない部分の文）のうち `observe` の `keys` に当たったものの ID（確定していない本は `[]`。関数 `observedExclusions`）。**合否・充足・了承の照合（`acceptance` の判定・`wrong` の数）・`verdict_accepted` には入れない**
+- **`observed` の読み方（review-891 低 4）**：observe を持つ定義で、宣言の無い本（生成失敗）は `null`、静的 NG・役割が見つからない本は `{}`（観測していない）、構造が当てはまった本は判定の名前ごとの真偽。`{}` を「全部偽」と読まない
+- **Plan だけの計測（review-891 低 5）**：`observed_exclusions` は納品物の `bundle/artifacts/plan.json` だけを読み、包み（`plan-result.json`）の確定した仕様は読まない（了承の照合 `acceptanceOf` と同じ作り）。だから `--plan-only` の計測（M1）では空になる。M1 で E の observe の判定の鍵に当たる除外を観測するなら、包みも読むかを先に決める
+- **§5.7.3・§5.7.4・§5.7.6 への追記（#876 の手 2・手 4。#889）**：`--build-from` は組の文書の指紋（`prompt_documents`：契約 `contract`・語彙の意味 `semantics`・語彙の台帳 `vocabulary`）が無い旧い形の組を `build-from:documents-missing`、形が違えば `build-from:documents-invalid`、計測する checkout の今の文書と違えば `build-from:documents-mismatch` で断る（どれも子を起こす前。API を呼ばない）。凍結の道具は出どころの計測の条件に文書の指紋が無いか形が違えば `freeze:documents` で断り、組に `prompt_documents` を写す（今の文書から取り直さない）。指紋を持たない旧い (b)・(a) は作り直すまで `--build-from` で使えない
+- **分母（10P×1）**：書ける本 8・一部不可能の本 2（B だけ）。判定の数（主の構造）A 7・B 8・C 9・D 7・E 7（E の observe は数えない）。充足の分母は全体 76・書ける本 60・一部不可能 16。D の申告の期待は 0 件で、D の主の構造の 0 人の判定の鍵 K0 に当たる除外は（どちらの構造でも）書ける要件の除外＝`wrong`、D の主の構造の 2 つ目の判定の鍵に当たる除外も `wrong`。E の observe の判定の鍵に当たる除外は v1 と同じく判定不能（`unmatched`）で、`observed_exclusions` に記録するだけ。`stage1-patterns.md` §5 の決定 2（一部不可能は 10 のうち 4）は v2 では 2
+- **既定の組は v1 のまま**（D1）。v2 は計測・採点とも `--set workspace/mvp/m1/agent/eval/sets/dev-p1-p10.v2.json` で明示する。v2 の採点は #854 の後の spec-engine の dist で行う（前の dist では `and` を含む宣言が静的 NG）
+- **帰結（定義から決まること）**：別の構造の宣言が v1 の書けない要件を申告すると、v2 では書けない要件が無いので誤った申告に数える（`cases/v2` の索引で固定）。その本は `unsatisfiable` の判定でもう FAIL なので、`false_claims` が 1 増えて二重に効く。**申告の正しさの指標（`false_claims`・`false_claim_runs`）は v1 と v2 で意味が違う**（v1 と v2 は比較しないので実害は無いが、M1 以後に読む人は注意する。review-891 低 2）。主の構造の本が D の主の構造の 2 つ目の判定を除外で了承したときは、v1 は別の構造の書けない要件に当たって `wrong`、v2 は D の主の構造の 2 つ目の判定の鍵に当たって `wrong`（鍵が無いと `unmatched` に落ちて検出が弱まるので足した。変更で当たればその判定は未評価になる）。E-c は既存の判定に `setLabels` を足さないので、状態の既定値が無く 2 つ目の選択肢が既定の側の宣言は、v1 と同じく 1 つ目の判定と既存の印の判定の 2 つが落ちる（E の observe の判定は状態を固定するので通る）
+- **§6.2 の読み替え（回帰用との対応）**：§6.2 は v1 どうしの対応である。2026-11-11 所有者の決定 4・5（#876）により、回帰用 r1 も別ファイル `sets/regression-r1.v2.json`（同じ ID・版 2）に置く。開発用 v2 との対応は `[A:R6, B:R2, C:R3, D:R4, E:R5]`、各 2 本の ID・書き方・書ける範囲の並びも同じ。R1 は窓口が依頼文の一部を見たため開発用へ移し、R6 で補充する（方法論 `01` §1）。v1 の資産はバイト列で残し、版をまたいで比較しない。回帰用 v2 は `--set workspace/mvp/m1/agent/eval/sets/regression-r1.v2.json` で明示する
+- **回帰用 r1 v2 の定義と試験**（2026-11-11。#876）：`subjects/v2/R4.json` は `list` の判定 `R4:list:C4`（`/structures/0/checks/3`）と鍵 K0、`/structures/0/checks/1` の鍵を追加する。`attendance` は `/structures/1/checks/1` を `unsatisfiable` として、両構造を判定 7・`unwritable: []` にそろえ、K-a を付ける。v1 の小数の境界と集計の入力は保つ。`subjects/v2/R6.json` は P1・P2 の共通の定義（`R6:C1`〜`R6:C7`）で、指定の型と書ける範囲を持つ。台本は v1 の回帰用と同じく未指定。`cases/regression/v2/` の合成の正例・負例・了承の照合を `agent-accept/score-agent.test.mjs` が v2 定義を明示して検証する。v1 の題材・組・台本・cases は `agent-accept/regression-v1.sha256.json` の個々の SHA-256 と照合する。総合の指紋の旧い値は固定しない。分母は全体 76・書ける本 60・一部不可能 16（R2 だけ）。本物の回帰用の基準は #875・#876 を main に入れる直前に新しい道具で測り直し、この合成の試験の結果を基準の計測と扱わない
+- **R2・R3・R5 の点検結果**（2026-11-11・Codex）：採点の定義だけを点検し、旧い限界への依存がないことを確認した（#876 の所有者の決定 4）。
+- **v1 の判定は変わらない（二点。2026-11-11）**：`engine.mjs` に `unsatisfiable`・`setLabels`・`observe` を足した。v1 の定義はどれも使わないので、直す前と後で `run-cases.mjs` の出力（`cases 12, mismatches 0`）・`regress.mjs --json` の出力（79 本・v4≠v5 7）・v1 の 5 題材の定義を `cases/` と `regress.mjs` の 91 本の宣言の全部に当てた `score()` の戻り値（455 行）がバイト列で一致した。`regress.mjs` は入力の場所（`../stage1-specs` など）が `grammar-trial/` へ移った後のまま直っていないので、場所だけを書き換えた写しで流した（道具は触っていない）
+- **採点の総合の指紋が変わる（2026-11-11。#876）**：`engine.mjs` と集計のコード（`score-agent.mjs`。`observedExclusions` と行の欄）を直したので、`SCORING_FILES` の SHA と、それを含む採点の総合の指紋は、v1 の組・回帰用 `regression-r1` を含むどの組でも変わる。直す前に記録した条件を採点し直すと `scoring_matches_conditions` が偽＝「未照合」になる（前例 §5.9.6）。**旧いハッシュを固定して一致に見せない**。変わらないことを固定するのは、`files[]` の `subjects/{A..E,R1..R5}.json` と v1 の組の `definition:<題材>` の個々の SHA-256（試験「#876 v1 をバイト列で残す」）。回帰用 r1 の基準は、#875・#876 を main に入れる直前に新しい道具で 1 回測り直す（所有者の決定 4）
+
 ### 10.8 v1.2 の段の走りの計測と採点（条件 v8・旗の照合・1 段先の副指標。#638。道具 `agent-accept/run-agent.mjs`・`agent-accept/score-agent.mjs`）
 
 工程ごとの評価の単位 U1（C1 語彙 → C2 写像 → C3 意味の点検）を、段の旗（§5.11）で v1.2 の経路のまま流して採点する。工場の段の走りの口（`--pipeline v1.2 --plan-file` と段の旗）に合わせて計測・採点を接続したもので、費用は 0（API を呼ぶのは計測のときだけ）。

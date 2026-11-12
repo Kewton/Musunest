@@ -989,3 +989,101 @@ describe("実物の文書から制約 ID を取り出す（Issue #398）", () =>
     expect(ids.has("ロジック層")).toBe(false);
   });
 });
+
+// ── HTTP 停止の補足を、段の失敗まで落とさない（Issue #899）──
+//
+// 偽 client で 503 の再試行枯渇と 429 の即時停止を作り、共通の口から段の失敗まで、段・status・
+// 実試行数・固定の理由が一致することを固定する。**判断を観測側で二重実装しない**（理由は口の分岐が決める）。
+
+/** 失敗の側から HTTP の補足を読む（実装前は `undefined`＝assertion の赤になる。型エラーを赤にしない） */
+function httpOf(failure: unknown): unknown {
+  return (failure as { readonly http?: unknown }).http;
+}
+
+const httpThrown = (status: unknown): Error =>
+  Object.assign(new Error(`HTTP の誤り（${String(status)}）`), { kind: "http", status });
+
+describe("HTTP 停止の補足を、段の失敗まで落とさない（Issue #899）", () => {
+  it("503 の再試行枯渇：段の失敗が status・実試行数・試行順の理由を持つ", async () => {
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        return Promise.reject(httpThrown(503));
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    const outcome = await callStructuredChecked(makeGateway(client, { deadline: 10_000_000 }), PLAN);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("http");
+    expect(httpOf(outcome.failure)).toEqual({
+      http_status: 503,
+      attempts: 2,
+      history: [
+        { attempt: 1, status: 503, kind: "http", reason: "http-5xx", retry: "started" },
+        { attempt: 2, status: 503, kind: "http", reason: "http-5xx", retry: "attempts-exhausted" },
+      ],
+    });
+  });
+
+  it("429 の即時停止：1 回で止まり、再試行しない終端として 1 行", async () => {
+    let calls = 0;
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        return Promise.reject(httpThrown(429));
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    const outcome = await callStructuredChecked(makeGateway(client, { deadline: 10_000_000 }), PLAN);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(calls).toBe(1);
+    expect(httpOf(outcome.failure)).toEqual({
+      http_status: 429,
+      attempts: 1,
+      history: [{ attempt: 1, status: 429, kind: "http", reason: null, retry: "not-retryable" }],
+    });
+  });
+
+  it("形の再試行 → HTTP：形の再試行の理由と HTTP の行が、同じ段の失敗に並ぶ", async () => {
+    let calls = 0;
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        if (calls === 1) return Promise.resolve({ output: { wrong: true } as T, usage: undefined });
+        return Promise.reject(httpThrown(503));
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    const outcome = await callStructuredChecked(makeGateway(client, { deadline: 10_000_000 }), PLAN);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    const http = httpOf(outcome.failure) as { readonly attempts: number; readonly history: readonly { reason: string | null }[] };
+    // 段の論理呼び出しの実開始は 3（形の 1 回目・形の再試行・HTTP の再送）。正常応答は誤りの行として
+    // 二重計上せず、試行順の理由だけが shape → http-5xx → http-5xx と並ぶ。
+    expect(http.attempts).toBe(3);
+    expect(http.history.map((row) => row.reason)).toEqual(["shape", "http-5xx", "http-5xx"]);
+  });
+
+  it("HTTP が一度もない失敗には、空の補足を付けない（非 HTTP を HTTP へ読み替えない）", async () => {
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        return Promise.reject(Object.assign(new Error("残高切れ"), { kind: "balance" }));
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    const outcome = await callStructuredChecked(makeGateway(client), PLAN);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("balance");
+    expect(httpOf(outcome.failure)).toBeUndefined();
+  });
+});

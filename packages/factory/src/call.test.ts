@@ -22,6 +22,7 @@ import {
   isIncompleteResponseError,
   isInvalidRequestError,
   isRetryableCallError,
+  sanitizeHttpStatus,
   structuredInputParts,
   toolInputParts,
   type CallErrorKind,
@@ -2471,5 +2472,483 @@ describe("段の出力の上限の上書きの表（Issue #776）", () => {
     expect(base.gateway.maxOutputTokens("semantic-check")).toBe(16_384);
     expect((await base.gateway.callStructured({ ...STRUCTURED_REQUEST, maxOutputTokens: base.gateway.maxOutputTokens("semantic-check") })).kind).toBe("ok");
     expect(base.calls()).toBe(1);
+  });
+});
+
+// ── HTTP 停止の補足：試行順の状態コード・固定の誤り分類・再試行の理由（Issue #899）──
+//
+// ここで固定するのは、**既存の分岐を観測しただけ**の試行順の歴史である。判断を二重実装しない
+// （理由は `isRetryableCallError` と `noteRetry` の分岐が決める）。本文・ヘッダー・URL・例外の文は持たない。
+
+/** 渡した順に応答か誤りを返す偽 client（実 API を呼ばない） */
+function scriptedClient(
+  steps: readonly (Error | { readonly output: unknown })[],
+): { readonly client: LlmClient; readonly calls: () => number } {
+  let index = 0;
+  return {
+    calls: () => index,
+    client: {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        const step = steps[index] ?? steps.at(-1);
+        index += 1;
+        if (step instanceof Error) return Promise.reject(step);
+        return Promise.resolve({ output: (step?.output ?? {}) as T, usage: undefined });
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    },
+  };
+}
+
+const httpError = (status: unknown): Error =>
+  Object.assign(new Error("HTTP の誤り"), { kind: "http", status });
+
+describe("HTTP 停止の補足：試行順の状態コード・誤り分類・再試行の理由（Issue #899）", () => {
+  const gatewayOf = (
+    client: LlmClient,
+    overrides: {
+      readonly budget?: JobBudget;
+      readonly now?: () => number;
+      readonly deadline?: number;
+      readonly maxAttempts?: number;
+      readonly callCount?: number;
+    } = {},
+  ): CallGateway =>
+    new CallGateway({
+      client,
+      budget: overrides.budget ?? new JobBudget(1_000_000),
+      rates: RATES,
+      now: overrides.now ?? (() => 0),
+      deadline: overrides.deadline ?? 100_000,
+      // 既定の effort high の基準（100 秒）だと締切 100 秒でやり直しが伸ばせない。試験では短くする
+      callTimeoutMs: 1_000,
+      ...(overrides.maxAttempts === undefined ? {} : { maxAttempts: overrides.maxAttempts }),
+      ...(overrides.callCount === undefined ? {} : { limits: { ...AGENT_LIMITS, callCount: overrides.callCount } }),
+    });
+
+  it("503 の再試行枯渇：2 回とも 503・理由 http-5xx・最後は attempts-exhausted", async () => {
+    const scripted = scriptedClient([httpError(503), httpError(503)]);
+    const gateway = gatewayOf(scripted.client);
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result).toMatchObject({ kind: "failed", errorKind: "http", attempts: 2, status: 503 });
+    expect(scripted.calls()).toBe(2);
+    expect(gateway.httpTrace).toEqual({
+      attempts: 2,
+      history: [
+        { attempt: 1, status: 503, kind: "http", reason: "http-5xx", retry: "started" },
+        { attempt: 2, status: 503, kind: "http", reason: "http-5xx", retry: "attempts-exhausted" },
+      ],
+    });
+    // 既存の計は変わらない（control invariant）
+    expect(gateway.calls).toBe(2);
+    expect(gateway.retries).toBe(1);
+    expect(gateway.attempts).toMatchObject({ started: 2, errors: 2, responded: 0 });
+  });
+
+  it("503 → 成功：実開始は 2、歴史は 503 の 1 行だけ（成功の試行を失敗として二重計上しない）", async () => {
+    const scripted = scriptedClient([httpError(503), { output: { ok: true } }]);
+    const gateway = gatewayOf(scripted.client);
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result.kind).toBe("ok");
+    expect(gateway.httpTrace).toEqual({
+      attempts: 2,
+      history: [{ attempt: 1, status: 503, kind: "http", reason: "http-5xx", retry: "started" }],
+    });
+    expect(gateway.attempts).toMatchObject({ started: 2, responded: 1, errors: 1 });
+  });
+
+  it("network → 503：状態コードの無い行と 503 の行が試行順に並ぶ", async () => {
+    const network = Object.assign(new Error("fetch"), { kind: "network" });
+    const scripted = scriptedClient([network, httpError(503)]);
+    const gateway = gatewayOf(scripted.client);
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result.kind).toBe("failed");
+    expect(gateway.httpTrace.history).toEqual([
+      { attempt: 1, status: null, kind: "network", reason: "network", retry: "started" },
+      { attempt: 2, status: 503, kind: "http", reason: "http-5xx", retry: "attempts-exhausted" },
+    ]);
+  });
+
+  it("429 の即時停止：再試行しない終端として 1 行（not-retryable）", async () => {
+    const scripted = scriptedClient([httpError(429)]);
+    const gateway = gatewayOf(scripted.client);
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result).toMatchObject({ kind: "failed", errorKind: "http", attempts: 1, status: 429 });
+    expect(gateway.httpTrace).toEqual({
+      attempts: 1,
+      history: [{ attempt: 1, status: 429, kind: "http", reason: null, retry: "not-retryable" }],
+    });
+    expect(gateway.calls).toBe(1);
+    expect(gateway.retries).toBe(0);
+  });
+
+  it("status が分からない HTTP の失敗は、不明（null）として行を残す（任意の文字列・NaN も生値を出さない）", async () => {
+    for (const status of [undefined, "503-secret-sentinel", Number.NaN, -1]) {
+      const scripted = scriptedClient([httpError(status)]);
+      const gateway = gatewayOf(scripted.client);
+      await gateway.callStructured(STRUCTURED_REQUEST);
+      expect(gateway.httpTrace.history).toEqual([
+        { attempt: 1, status: null, kind: "http", reason: null, retry: "not-retryable" },
+      ]);
+      expect(JSON.stringify(gateway.httpTrace)).not.toContain("secret-sentinel");
+    }
+  });
+
+  it("再試行の前の締切：未開始（not-started:deadline）として閉じる", async () => {
+    let nowMs = 0;
+    const network = Object.assign(new Error("fetch"), { kind: "network" });
+    // 1 回目の実呼び出しの後、締切に達した状態にする
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        nowMs = 1_000;
+        return Promise.reject(network);
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    const gateway = gatewayOf(client, { now: () => nowMs, deadline: 1_000 });
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result.kind).toBe("deadlineExceeded");
+    expect(gateway.httpTrace).toEqual({
+      attempts: 1,
+      history: [{ attempt: 1, status: null, kind: "network", reason: "network", retry: "not-started:deadline" }],
+    });
+    void gateway;
+  });
+
+  it("再試行の前の予算：未開始（not-started:budget）として閉じる", async () => {
+    const maxCost = maxCostOf(structuredInputParts(STRUCTURED_REQUEST), STRUCTURED_REQUEST.maxOutputTokens);
+    const network = Object.assign(new Error("fetch"), { kind: "network" });
+    const scripted = scriptedClient([network]);
+    const gateway = gatewayOf(scripted.client, { budget: new JobBudget(maxCost) });
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result.kind).toBe("budgetExceeded");
+    expect(gateway.httpTrace.history).toEqual([
+      { attempt: 1, status: null, kind: "network", reason: "network", retry: "not-started:budget" },
+    ]);
+  });
+
+  it("再試行の前の呼び出しの上限：未開始（not-started:limit）として閉じる", async () => {
+    const network = Object.assign(new Error("fetch"), { kind: "network" });
+    const scripted = scriptedClient([network]);
+    const gateway = gatewayOf(scripted.client, { callCount: 1 });
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result.kind).toBe("limitExceeded");
+    expect(gateway.httpTrace.history).toEqual([
+      { attempt: 1, status: null, kind: "network", reason: "network", retry: "not-started:limit" },
+    ]);
+  });
+
+  it("再試行の前の timeout を伸ばせない：未開始（not-started:timeout）として閉じる", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const client: LlmClient = {
+        callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+          return new Promise<never>(() => {});
+        },
+        callWithTools(): Promise<LlmToolResponse> {
+          return Promise.reject(new Error("使わない"));
+        },
+      };
+      const gateway = new CallGateway({
+        client,
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => Date.now(),
+        deadline: 90_000,
+        effort: "low",
+        maxAttempts: 3,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await pending;
+      expect(result.kind).toBe("failed");
+      expect(gateway.httpTrace).toEqual({
+        attempts: 1,
+        history: [{ attempt: 1, status: null, kind: "timeout", reason: "timeout", retry: "not-started:timeout" }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("形・中身の再試行も、既存の noteRetry の分岐で理由を付ける", async () => {
+    const scripted = scriptedClient([{ output: {} }]);
+    const gateway = gatewayOf(scripted.client);
+    gateway.noteRetry("shape");
+    gateway.noteRetry("content");
+    expect(gateway.httpTrace).toEqual({
+      attempts: 0,
+      history: [
+        { attempt: 0, status: null, kind: "malformed", reason: "shape", retry: "planned" },
+        { attempt: 0, status: null, kind: null, reason: "content", retry: "planned" },
+      ],
+    });
+    // 次の試行が始まれば、**最後に決めた**判断は started になる（その前の判断は planned のまま）
+    await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(gateway.httpTrace.history.map((row) => row.retry)).toEqual(["planned", "started"]);
+  });
+
+  it("形の再試行 → 次の呼び出しが始まれば started、始まらなければ未開始の理由で閉じる", async () => {
+    const scripted = scriptedClient([{ output: {} }]);
+    const gateway = gatewayOf(scripted.client);
+    gateway.noteRetry("shape");
+    await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(gateway.httpTrace.history).toEqual([
+      { attempt: 0, status: null, kind: "malformed", reason: "shape", retry: "started" },
+    ]);
+  });
+
+  it("HTTP が一度もない正常な走りには、空の補足を付けない（履歴 0・実開始だけ進む）", async () => {
+    const scripted = scriptedClient([{ output: { ok: true } }]);
+    const gateway = gatewayOf(scripted.client);
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result.kind).toBe("ok");
+    expect(gateway.httpTrace).toEqual({ attempts: 1, history: [] });
+  });
+
+  it("本文・ヘッダー・URL・Error.message・余分な属性の sentinel を持たない（数値・固定値・件数だけ）", async () => {
+    const error = Object.assign(new Error("BODY-SENTINEL-1"), {
+      kind: "http",
+      status: 503,
+      headers: { authorization: "HEADER-SENTINEL" },
+      body: "BODY-SENTINEL-2",
+      url: "https://provider.invalid/URL-SENTINEL",
+      provider: "PROVIDER-SENTINEL",
+      request: { text: "REQUEST-SENTINEL" },
+    });
+    const scripted = scriptedClient([error]);
+    const gateway = gatewayOf(scripted.client, { maxAttempts: 1 });
+    await gateway.callStructured(STRUCTURED_REQUEST);
+    const text = JSON.stringify(gateway.httpTrace);
+    for (const sentinel of ["BODY-SENTINEL", "HEADER-SENTINEL", "URL-SENTINEL", "PROVIDER-SENTINEL", "REQUEST-SENTINEL"]) {
+      expect(text).not.toContain(sentinel);
+    }
+    expect(gateway.httpTrace.history[0]).toEqual({
+      attempt: 1,
+      status: 503,
+      kind: "http",
+      reason: "http-5xx",
+      retry: "attempts-exhausted",
+    });
+  });
+
+  it("状態コードの受け口は、数値のときだけ採る（文字列・NaN・Infinity・負・非整数は不明）", () => {
+    expect(sanitizeHttpStatus(503)).toBe(503);
+    expect(sanitizeHttpStatus("503")).toBeNull();
+    expect(sanitizeHttpStatus(Number.NaN)).toBeNull();
+    expect(sanitizeHttpStatus(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(sanitizeHttpStatus(-1)).toBeNull();
+    expect(sanitizeHttpStatus(503.5)).toBeNull();
+    expect(sanitizeHttpStatus(undefined)).toBeNull();
+  });
+});
+
+// ── H4-http-control-invariant：補足の観測は制御を変えない（Issue #899）──
+//
+// 固定した偽 client・時計で、送信要求と実開始の順・再試行の判断・timeout・門・予約／精算・usage・
+// calls/attempts/retries が、補足の観測（と観測 callback の例外・後着・二重通知）で変わらないことを固定する。
+
+describe("H4-http-control-invariant：補足の観測は制御を変えない（Issue #899）", () => {
+  interface ControlRun {
+    readonly result: CallResult<LlmStructuredResponse<unknown>>;
+    readonly requests: readonly string[];
+    readonly calls: number;
+    readonly retries: number;
+    readonly attempts: Readonly<Record<string, unknown>>;
+    readonly spentUsd: number;
+    readonly reservedUsd: number;
+    readonly gateAttempts: number;
+    readonly trace: unknown;
+  }
+
+  /** 503 → 成功の台本を、固定した時計・門・予算で 1 回流す（観測の口は任意） */
+  async function controlRun(observer?: CallAttemptObserver): Promise<ControlRun> {
+    const requests: string[] = [];
+    const steps: readonly (Error | { readonly output: unknown })[] = [httpError(503), { output: { ok: true } }];
+    let index = 0;
+    const client: LlmClient = {
+      callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        requests.push(JSON.stringify({ input: request.input, schema: request.schema, max: request.maxOutputTokens }));
+        const step = steps[index] ?? steps.at(-1);
+        index += 1;
+        if (step instanceof Error) return Promise.reject(step);
+        return Promise.resolve({ output: (step?.output ?? {}) as T, usage: USAGE });
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    const budget = new JobBudget(1_000_000);
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 10 });
+    const gateway = new CallGateway({
+      client,
+      budget,
+      rates: RATES,
+      now: () => 0,
+      deadline: 100_000,
+      callTimeoutMs: 1_000,
+      gate,
+      ...(observer === undefined ? {} : { observer }),
+    });
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    return {
+      result,
+      requests,
+      calls: gateway.calls,
+      retries: gateway.retries,
+      attempts: gateway.attempts as unknown as Readonly<Record<string, unknown>>,
+      spentUsd: budget.spentUsd,
+      reservedUsd: budget.reservedUsd,
+      gateAttempts: gate.attempts(),
+      trace: gateway.httpTrace,
+    };
+  }
+
+  /** 例外・後着・二重通知をわざと起こす観測の口（制御へ漏れないことを見る） */
+  function hostileObserver(): CallAttemptObserver {
+    return {
+      beginAttempt(): CallAttemptObservation {
+        let settled = false;
+        return {
+          settle(): void {
+            // 二重通知。2 度目は数えない（行の終わり方を変えない）
+            if (settled) throw new Error("settle が 2 度呼ばれた");
+            settled = true;
+            throw new Error("観測の口の例外");
+          },
+          late(): void {
+            throw new Error("後着の観測の例外");
+          },
+          note(): void {
+            throw new Error("計量の印の例外");
+          },
+        };
+      },
+    };
+  }
+
+  it("503 → 成功：観測 callback の例外・後着・二重通知があっても、制御の値と補足が同じ", async () => {
+    const plain = await controlRun();
+    const observed = await controlRun(hostileObserver());
+    expect(observed.result).toEqual(plain.result);
+    expect(observed.requests).toEqual(plain.requests);
+    expect(observed.calls).toBe(plain.calls);
+    expect(observed.retries).toBe(plain.retries);
+    expect(observed.attempts).toEqual(plain.attempts);
+    expect(observed.spentUsd).toBe(plain.spentUsd);
+    expect(observed.reservedUsd).toBe(plain.reservedUsd);
+    expect(observed.gateAttempts).toBe(plain.gateAttempts);
+    expect(observed.trace).toEqual(plain.trace);
+    // 既存の計を新しい値で上書きしていない: 実開始 2・通信 1・応答 1・誤り 1
+    expect(plain.calls).toBe(2);
+    expect(plain.retries).toBe(1);
+    expect(plain.attempts).toMatchObject({ started: 2, responded: 1, errors: 1 });
+    expect(plain.gateAttempts).toBe(2);
+    expect(plain.trace).toEqual({
+      attempts: 2,
+      history: [{ attempt: 1, status: 503, kind: "http", reason: "http-5xx", retry: "started" }],
+    });
+  });
+
+  it("timeout → 成功：補足（timeout の行）を足しても、timeout・門・予約／精算・usage・計は同じ", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const run = async (observer?: CallAttemptObserver): Promise<ControlRun> => {
+        const requests: string[] = [];
+        let attempt = 0;
+        const client: LlmClient = {
+          callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+            requests.push(JSON.stringify({ input: request.input, max: request.maxOutputTokens }));
+            attempt += 1;
+            if (attempt === 1) return new Promise<never>(() => {});
+            return Promise.resolve({ output: {} as T, usage: USAGE });
+          },
+          callWithTools(): Promise<LlmToolResponse> {
+            return Promise.reject(new Error("使わない"));
+          },
+        };
+        const budget = new JobBudget(1_000_000);
+        const gate = createCallGate({ now: () => Date.now(), deadline: 100_000, limit: 10 });
+        const gateway = new CallGateway({
+          client,
+          budget,
+          rates: RATES,
+          now: () => Date.now(),
+          deadline: 100_000,
+          callTimeoutMs: 1_000,
+          gate,
+          ...(observer === undefined ? {} : { observer }),
+        });
+        const pending = gateway.callStructured(STRUCTURED_REQUEST);
+        await vi.advanceTimersByTimeAsync(1_000);
+        const result = await pending;
+        return {
+          result,
+          requests,
+          calls: gateway.calls,
+          retries: gateway.retries,
+          attempts: gateway.attempts as unknown as Readonly<Record<string, unknown>>,
+          spentUsd: budget.spentUsd,
+          reservedUsd: budget.reservedUsd,
+          gateAttempts: gate.attempts(),
+          trace: gateway.httpTrace,
+        };
+      };
+      // 二重通知だけを起こす（打ち切りの時点の settle はタイマーの側で呼ばれるので、例外は投げない）
+      const double: CallAttemptObserver = {
+        beginAttempt(): CallAttemptObservation {
+          let settled = false;
+          return {
+            settle(): void {
+              if (settled) return;
+              settled = true;
+            },
+            late(): void {},
+            note(): void {},
+          };
+        },
+      };
+      const plain = await run();
+      const observed = await run(double);
+      expect(observed.result).toEqual(plain.result);
+      expect(observed.requests).toEqual(plain.requests);
+      expect(observed.calls).toBe(plain.calls);
+      expect(observed.attempts).toEqual(plain.attempts);
+      expect(observed.spentUsd).toBe(plain.spentUsd);
+      expect(observed.reservedUsd).toBe(plain.reservedUsd);
+      expect(observed.gateAttempts).toBe(plain.gateAttempts);
+      expect(observed.trace).toEqual(plain.trace);
+      expect(plain.attempts).toMatchObject({ started: 2, cancelled_timeout: 1, responded: 1 });
+      expect(plain.trace).toEqual({
+        attempts: 2,
+        history: [{ attempt: 1, status: null, kind: "timeout", reason: "timeout", retry: "started" }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("503 の枯渇：補足を除いた失敗の形は従来のまま（status・kind・attempts 以外を足さない）", async () => {
+    const scripted = scriptedClient([httpError(503), httpError(503)]);
+    const gateway = new CallGateway({
+      client: scripted.client,
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 100_000,
+      callTimeoutMs: 1_000,
+    });
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result).toMatchObject({ kind: "failed", errorKind: "http", attempts: 2, status: 503 });
+    // 制御の値（送信 2・再送 1・予約 2 回）は補足の有無に依らない
+    expect(scripted.calls()).toBe(2);
+    expect(gateway.calls).toBe(2);
+    expect(gateway.retries).toBe(1);
+    expect(gateway.attempts).toMatchObject({ started: 2, errors: 2 });
   });
 });

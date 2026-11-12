@@ -99,6 +99,7 @@ import type { LlmClient } from "./llm.js";
 import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL, OLLAMA_STAGE_OUTPUT_LIMITS } from "./ollama.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL } from "./openai.js";
 import { createOpenRouterLlmClient, DEFAULT_OPENROUTER_MODEL } from "./openrouter.js";
+import type { FailureAttribution } from "./record.js";
 import type { EnvelopeId } from "./schema-envelope.js";
 import { runPlan, type PlanResponder, type PlanResult } from "./plan/run-plan.js";
 import {
@@ -107,6 +108,7 @@ import {
   type PlanScriptRecordSink,
 } from "./plan/script-responder.js";
 import { runGeneration } from "./run.js";
+import { buildStopDiagnosticsFile } from "./v12/stop-diagnostics.js";
 import {
   boundaryBefore,
   buildStageCheckpoint,
@@ -119,6 +121,7 @@ import {
   stagePassOf,
   stagesInRange,
   stageVersionsAt,
+  documentsVersionOf,
   verifyStageInput,
   STAGE_BUDGET_SCOPE,
   STAGE_DECLARATION_FILE,
@@ -912,6 +915,8 @@ async function runBuild(
   readonly boundaries?: readonly BoundaryMaterials[];
   /** 境界の材料を集めた走りの実効の旗（checkpoint の版の `flags`・`call_limits`。Issue #637） */
   readonly flags?: V12Flags;
+  /** 止めた段の失敗の帰属（HTTP 停止の補足を持つときだけ Build の記録へ書く。Issue #899） */
+  readonly failure: FailureAttribution | null;
 }> {
   // v1.1α は確定した仕様と組んでだけ流れる（引数の読み取りが `--plan-file` を要る。Issue #511）。v1.2 は同じ経路に
   // 旗の組を渡し、要約に旗の組を書かせる（Issue #547）。旗 v12.ids が on の走りだけ、境界の材料も集めさせる（checkpoint を書く
@@ -935,7 +940,8 @@ async function runBuild(
           ...(job.pipeline === "v1.2" ? { recordMalformedKinds: true } : {}),
         });
   const written = await writeBuildRun(deps, job, run, log);
-  return run.boundaries === undefined || flags === undefined ? written : { ...written, boundaries: run.boundaries, flags };
+  const withFailure = { ...written, failure: run.stopped ?? null };
+  return run.boundaries === undefined || flags === undefined ? withFailure : { ...withFailure, boundaries: run.boundaries, flags };
 }
 
 /** 生成の入力のうち、経路に依らない部分（v1・v1.1α・段の走りで同じ） */
@@ -1292,7 +1298,7 @@ async function runBuildFromPlanFile(
     build.boundaries === undefined
       ? undefined
       : await writeStageCheckpoints(deps, job.outDir, build.boundaries, {
-          stageVersions: await stageVersionsOf(promptVersionOf(job.pipeline), build.flags),
+          stageVersions: await stageVersionsOf(promptVersionOf(job.pipeline), build.flags, job.documents),
           planSha256: validation.planSha256,
           sourceSha256: validation.sourceSha256,
         });
@@ -1305,6 +1311,8 @@ async function runBuildFromPlanFile(
         sourceSha256: validation.sourceSha256,
         returnToPlan: build.returnToPlan,
         ...(checkpoints === undefined ? {} : { checkpoints }),
+        // HTTP 停止の補足を持つ失敗だけが、記録の `failure` 欄になる（Issue #899）
+        ...(build.failure === null ? {} : { failure: build.failure }),
       }),
     ),
   );
@@ -1332,16 +1340,32 @@ interface StageVersionsOfRun {
  * checkpoint に残す版（語彙・契約・prompt・工場。段の走りと `--pipeline v1.2` の走りで同じ形。Issue #636）。v1.2 の走り（実効の旗を
  * 渡す）だけ、台帳の指紋・実効の旗の組の公開の形・呼び出しの上限（旗 ids が off なら null）を足す（v1.1a は 4 欄のまま。Issue #637）。
  * v1.2 の走りは照合の版も返す（全体の指紋・上流の台帳の部分の指紋・旗の組。境界ごとの欄は書くときに `stageVersionsAt` で足す。
- * Issue #713）
+ * Issue #713）。旗 ids が on の走りだけ、段へ渡す文書（`documents`。照合と生成に同じ読取結果を渡す）の中身の指紋を checkpoint の版の
+ * `documents` と照合の版に足す（ids off・v1.1a は欄を持たない。Issue #875）
  */
-async function stageVersionsOf(promptVersion: string, flags?: V12Flags): Promise<StageVersionsOfRun> {
+async function stageVersionsOf(
+  promptVersion: string,
+  flags: V12Flags | undefined,
+  documents: readonly PromptDocument[],
+): Promise<StageVersionsOfRun> {
   const versions = { vocabulary: VOCABULARY_VERSION, contract: CONTRACT_VERSION, prompt: promptVersion, factory: FACTORY_VERSION };
   if (flags === undefined) return { versions };
   // 全体・上流の指紋は公開の関数 1 つを通す（`toPublicV12Flags(flags)` を渡す。旗の組み立てをここに重複させない。Issue #816）
   const publicFlags = toPublicV12Flags(flags);
-  const v12 = { ...(await ledgerVersionsOf(publicFlags)), flags: publicFlags };
+  const documentsVersion = flags.ids ? await documentsVersionOf(documents) : undefined;
+  const v12 = {
+    ...(await ledgerVersionsOf(publicFlags)),
+    flags: publicFlags,
+    ...(documentsVersion === undefined ? {} : { documents: documentsVersion }),
+  };
   return {
-    versions: { ...versions, ledger: v12.ledger, flags: v12.flags, call_limits: flags.ids ? v12CallLimitsRecord() : null },
+    versions: {
+      ...versions,
+      ledger: v12.ledger,
+      flags: v12.flags,
+      call_limits: flags.ids ? v12CallLimitsRecord() : null,
+      ...(documentsVersion === undefined ? {} : { documents: documentsVersion }),
+    },
     v12,
   };
 }
@@ -1428,7 +1452,9 @@ async function runStageFromPlanFile(
   const pipeline = parsed.pipeline === "v1.2" ? "v1.2" : "v1.1a";
   const publicFlags = v12FlagsOf(pipeline);
   const flags = publicFlags === undefined ? undefined : fromPublicV12Flags(publicFlags);
-  const stageVersions = await stageVersionsOf(promptVersionOf(pipeline), flags);
+  // 文書は照合の前に 1 回だけ読み、同じ読取結果を照合（旗 ids の文書の中身の指紋）と生成へ渡す（Issue #875）
+  const documents = await deps.loadDocuments();
+  const stageVersions = await stageVersionsOf(promptVersionOf(pipeline), flags, documents);
   let resume: Parameters<typeof runStageRangeV11a>[0]["resume"];
   let inputRecord: { readonly checkpoint: string; readonly boundary: StageBoundary; readonly output_digest: string } | null =
     null;
@@ -1463,7 +1489,6 @@ async function runStageFromPlanFile(
     log(USAGE);
     return EXIT_USAGE;
   }
-  const documents = await deps.loadDocuments();
   const client = deps.makeClient({
     apiKey,
     model: parsed.model,
@@ -1585,6 +1610,15 @@ async function runStageFromPlanFile(
   // （行が無ければ何も書かず、置き場所も作らない。記録・checkpoint・要約・終了コードは変えない。Issue #699）
   if (pipeline === "v1.2" && outcome.tableRounds !== undefined && outcome.tableRounds.length > 0) {
     for (const file of buildTableRoundsFile(outcome.tableRounds)) {
+      const parent = parentOf(file.path);
+      if (parent !== "") await deps.makeDirectory(joinPath(job.outDir, parent));
+      await deps.writeFile(joinPath(job.outDir, file.path), file.text);
+    }
+  }
+  // `--pipeline v1.2` の段の走りだけ、C2・C3 の形の拒否の診断を一気通貫と同じ関数・同じ名前で診断に書く
+  // （記録が無ければ何も書かず、置き場所も作らない。記録・checkpoint・要約・終了コードは変えない。Issue #898）
+  if (pipeline === "v1.2" && outcome.stopDiagnostics !== undefined && outcome.stopDiagnostics.length > 0) {
+    for (const file of buildStopDiagnosticsFile(outcome.stopDiagnostics)) {
       const parent = parentOf(file.path);
       if (parent !== "") await deps.makeDirectory(joinPath(job.outDir, parent));
       await deps.writeFile(joinPath(job.outDir, file.path), file.text);
