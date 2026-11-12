@@ -268,13 +268,13 @@ describe("(4) 回帰の守り：追加の場所の検査は and・or・not の�
   );
 });
 
-describe("(3b) 送る規則・schema・データの差は C2 の R-map-03 と C3 の R-sc-02 の文だけ。C1 の規則・schema は変えない", () => {
-  /** 規則の定義のうち、前後で text が変わる id */
-  const changedRuleIds = (
-    now: readonly { readonly id: string; readonly text: string }[],
-    before: readonly { readonly id: string; readonly text: string }[],
-  ): readonly string[] => now.filter((entry) => before.find((other) => other.id === entry.id)?.text !== entry.text).map((entry) => entry.id);
+/** 規則の定義のうち、前後で text が変わる id */
+const changedRuleIds = (
+  now: readonly { readonly id: string; readonly text: string }[],
+  before: readonly { readonly id: string; readonly text: string }[],
+): readonly string[] => now.filter((entry) => before.find((other) => other.id === entry.id)?.text !== entry.text).map((entry) => entry.id);
 
+describe("(3b) 送る規則・schema・データの差は C2 の R-map-03 と C3 の R-sc-02 の文だけ。C1 の規則・schema は変えない", () => {
   it("C2 の 2 つの形と C3 の規則で前後で文が変わるのは R-map-03・R-sc-02 だけ", () => {
     const now = deriveUpstreamLedgerView(PROPERTY_LEDGER, { ...V12_FLAGS_OFF, ids: true });
     const before = deriveUpstreamLedgerView(withOldValidationExpressionTexts(), { ...V12_FLAGS_OFF, ids: true });
@@ -300,13 +300,13 @@ describe("(3b) 送る規則・schema・データの差は C2 の R-map-03 と C3
     expect(nowRest).toEqual(beforeRest);
     // 変わるのは検査の式の行の 1 文ずつ（ほかの行の文は同じ）
     expect(now.t1RuleTexts).not.toEqual(before.t1RuleTexts);
-    expect([...now.t1RuleTexts].sort()).toEqual(
-      [...before.t1RuleTexts].sort().map((text) => (text === OLD_VALIDATION_EXPRESSION_TEXTS.rulesT1 ? NEW_906_VALIDATION_EXPRESSION_TEXTS.rulesT1 : text)),
+    expect(now.t1RuleTexts).toEqual(
+      before.t1RuleTexts.map((text) => (text === OLD_VALIDATION_EXPRESSION_TEXTS.rulesT1 ? NEW_906_VALIDATION_EXPRESSION_TEXTS.rulesT1 : text)),
     );
-    expect([...now.t1AcceptanceTexts].sort()).toEqual(
-      [...before.t1AcceptanceTexts]
-        .sort()
-        .map((text) => (text === OLD_VALIDATION_EXPRESSION_TEXTS.rulesT1Acceptance ? NEW_906_VALIDATION_EXPRESSION_TEXTS.rulesT1Acceptance : text)),
+    expect(now.t1AcceptanceTexts).toEqual(
+      before.t1AcceptanceTexts.map((text) =>
+        text === OLD_VALIDATION_EXPRESSION_TEXTS.rulesT1Acceptance ? NEW_906_VALIDATION_EXPRESSION_TEXTS.rulesT1Acceptance : text,
+      ),
     );
     // off の見方（検査の式の行を読まない）は前後で深く等しい
     expect(deriveUpstreamLedgerView(PROPERTY_LEDGER, V12_FLAGS_OFF)).toEqual(deriveUpstreamLedgerView(withOldValidationExpressionTexts(), V12_FLAGS_OFF));
