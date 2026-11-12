@@ -55,6 +55,11 @@ function instructionsOf(question: JudgeQuestion | undefined): Record<string, unk
   return typeof instructions === "object" ? (instructions as Record<string, unknown>) : undefined;
 }
 
+/** Choice の criteria のキー（順に依らず集合として比べる） */
+function criteriaKeys(question: JudgeQuestion | undefined): string[] {
+  return question !== undefined && question.kind === "choice" ? Object.keys(question.criteria) : [];
+}
+
 /** 申告 1 件を作る */
 function claim(
   id: string,
@@ -711,19 +716,20 @@ describe("v2：主の 2 問と再点検に、文書の全体と全要件を渡�
   it("答えの有限の集合は前後で同じ（仕分け 3・裏付け 3・再点検 4）。根拠の候補は申告の制約 ID と none だけ", async () => {
     const { run, requests } = check(surface(GENERIC), ALL_THREE);
     await run;
-    const keys = (question: JudgeQuestion | undefined): string[] =>
-      question !== undefined && question.kind === "choice" ? Object.keys(question.criteria).sort() : [];
 
-    expect(keys(requests[0]?.questions[surfaceTriageQuestionName(0)])).toEqual(["ambiguity", "not-a-problem", "vocabulary-hole"]);
-    expect(keys(requests[1]?.questions[surfaceSupportQuestionName(0)])).toEqual(["contradicts", "not-stated", "supports"]);
-    expect(keys(requests[2]?.questions[surfaceRecheckKindQuestionName(0)])).toEqual([
-      "ambiguity",
-      "not-a-problem",
-      "undecidable",
-      "vocabulary-hole",
-    ]);
+    expect(new Set(criteriaKeys(requests[0]?.questions[surfaceTriageQuestionName(0)]))).toEqual(
+      new Set(["ambiguity", "not-a-problem", "vocabulary-hole"]),
+    );
+    expect(new Set(criteriaKeys(requests[1]?.questions[surfaceSupportQuestionName(0)]))).toEqual(
+      new Set(["contradicts", "not-stated", "supports"]),
+    );
+    expect(new Set(criteriaKeys(requests[2]?.questions[surfaceRecheckKindQuestionName(0)]))).toEqual(
+      new Set(["ambiguity", "not-a-problem", "undecidable", "vocabulary-hole"]),
+    );
     // 文書の他の節（合計・computed・アプリの名前・説明）は、照らす文脈であって根拠の候補ではない
-    expect(keys(requests[2]?.questions[surfaceRecheckEvidenceQuestionName(0)])).toEqual(["none", "記録"]);
+    expect(new Set(criteriaKeys(requests[2]?.questions[surfaceRecheckEvidenceQuestionName(0)]))).toEqual(
+      new Set(["none", "記録"]),
+    );
   });
 
   it("再点検が申告の外の節を根拠に選んでも受理しない（根拠の候補の外は根拠なし）", async () => {
