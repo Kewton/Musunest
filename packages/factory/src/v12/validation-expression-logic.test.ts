@@ -1,13 +1,14 @@
-// Issue #875（原因 1）：性質の台帳の検査の式（validation-expression）の行が、受理の条件を文書の旧い文法（式＝比較 1 つ）の
-// 言い換え「入力の値を 1 つの比較で縛る」で写していた。文書が式の結合（and・or・not）を許したあと写しが追従せず、範囲や
-// 「どちらか」の決まりを検査の式に選ぶことを妨げていた。行の文を文書の式の文法に委ねる文に直す（旧の文は試験の定数に残す）。
+// Issue #902：2026-11-12 の計測で、#875 が受理の条件を「文書の式の文法に委ねる」文に変えたあと P2 の成績が下がった。
+// 所有者の決定で、検査の式（validation-expression）の行の規則の 2 セル（rules.t1・rules.t1Acceptance）だけを #875 の
+// 前（b511936）の文に戻す。`requirementRule`・`why`・上位の受理条件は #875 の文のまま（since に履歴を足す）。
 //
-// 二点測定：偽物も外部の API も使わない（台帳・規則の文・追加の場所の形の検査は純粋な関数）。
-//   (1) 指紋：今の文では旗 ids の全体・上流の指紋が base（417e14f）から変わり、旧の文に戻すと base の値に戻る。off は変わらない
-//   (2) 規則の文：旗 ids の C2・C3（と T1・T1''）へ送る文に「1 つの比較」が無く、新しい文が入る。旧の文に戻すと「1 つの比較」が入る。
-//       off の要求はバイト列で同じ
-//   (3) 回帰の守り：追加の場所の検査は、targets の項目だけを参照する and・or・not の式を受け取り、targets の外の項目を参照する式を
-//       wrongReference で断る（受理の範囲だけを文書の文法に合わせ、targets の検査は残す）
+// 二点測定：
+//   (1) 指紋：since だけを #875 の文に戻すと、旗 ids の台帳全体の指紋が対照の値 d4af4ab… に等値（ほかの欄・行を変えて
+//       いないことを 1 本で縛る。requirementRule・why を 1 字変える変異で赤になることを一時的に確かめた）。ids の上流の
+//       指紋は b511936 の値に戻り、off の全体・上流は変わらない。#875 の文に戻すと #875 の値（0449638…・a24dade1…）に戻る
+//   (2) 規則の文：旗 ids の C2 の 2 つの形（通常・了承済み部分あり）と C3 の規則の文が、b511936 の規則の文とバイト列で同じ
+//   (3) 回帰の守り：追加の場所の検査は、targets の項目だけを参照する and・or・not の式を受け取り、targets の外の項目を
+//       参照する式を wrongReference で断る（受理の範囲の検査は今までどおり）
 //   (4) 題材の言葉は無い
 
 import { readSpecDocument } from "@musunest/spec-engine";
@@ -15,8 +16,15 @@ import { describe, expect, it } from "vitest";
 import { ACCEPTANCE_MATERIAL_WORDS } from "../stages/__tests__/prompt.js";
 import { validationWorldOfDocument } from "../v11a/bind-by-id.js";
 import { nameTableRuleDefinitionsOf } from "../v11a/stages/name-table.js";
-import { semanticCheckRuleDefinitionsOf } from "../v11a/stages/semantic-check.js";
-import { BASE_IDS_LEDGER_BEFORE_875, OLD_VALIDATION_EXPRESSION_TEXTS, withOldValidationExpressionTexts } from "./__tests__/ledger.js";
+import { SEMANTIC_CHECK_LEDGER_RULE_ID, semanticCheckRuleDefinitionsOf } from "../v11a/stages/semantic-check.js";
+import {
+  BASE_IDS_LEDGER_BEFORE_875,
+  NEW_875_VALIDATION_EXPRESSION_TEXTS,
+  OLD_VALIDATION_EXPRESSION_TEXTS,
+  withNew875ValidationExpressionTexts,
+  withOldValidationExpressionTexts,
+  withSinceOnly875,
+} from "./__tests__/ledger.js";
 import {
   PROPERTY_LEDGER,
   V12_FLAGS_OFF,
@@ -33,13 +41,36 @@ import { mappingRuleDefinitionsOf } from "./stages/mapping.js";
 const IDS = fromPublicV12Flags({ ids: true });
 const OFF = fromPublicV12Flags({});
 const OLD_PHRASE = "1 つの比較";
-/** 新しい文が委ねる先（文書の式の文法）を述べる句 */
+/** #875 の文が委ねる先（文書の式の文法）を述べる句 */
 const NEW_PHRASE = "同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）";
+/** since だけを #875 の文に戻した旗 ids の台帳全体の指紋（対照の値。ほかの欄・行を変えていないことを縛る） */
+const CONTROL_IDS_WHOLE_WITH_875_SINCE = "d4af4ab1970275c7fae258cd37167c5c2253bcf3d5bcf8ac4884e6f3fb37f80b";
 
 const rowOf = (rows: readonly PropertyRow[] = PROPERTY_LEDGER): PropertyRow => {
   const row = rows.find((entry) => entry.id === "validation-expression");
   if (row === undefined) throw new Error("前提が壊れた：検査の式の行が無い");
   return row;
+};
+
+const ruleOf = (definitions: readonly { readonly id: string; readonly text: string }[], id: string): string => {
+  const definition = definitions.find((entry) => entry.id === id);
+  if (definition === undefined) throw new Error(`前提が壊れた：規則 ${id} が無い`);
+  return definition.text;
+};
+
+/** 旗 ids の C2 の 2 つの形（通常・了承済み部分あり）の規則の文 */
+const c2TextsOf = (rows: readonly PropertyRow[]): { readonly normal: string; readonly accepted: string } => {
+  const view = deriveUpstreamLedgerView(rows, { ...V12_FLAGS_OFF, ids: true });
+  return {
+    normal: ruleOf(mappingRuleDefinitionsOf(view), "R-map-03"),
+    accepted: ruleOf(mappingRuleDefinitionsOf(view, true), "R-map-03"),
+  };
+};
+
+/** 旗 ids の C3 の規則の文 */
+const c3TextOf = (rows: readonly PropertyRow[]): string => {
+  const view = deriveUpstreamLedgerView(rows, { ...V12_FLAGS_OFF, ids: true });
+  return ruleOf(semanticCheckRuleDefinitionsOf(view, true), SEMANTIC_CHECK_LEDGER_RULE_ID);
 };
 
 /** 旗 ids の C2・C3・T1・T1'' へ送る規則の文（台帳の行の文を差し込む規則だけでなく、規則の全文） */
@@ -58,73 +89,86 @@ const offRuleTexts = (rows: readonly PropertyRow[]): readonly string[] => {
   return views.flatMap((view) => [...nameTableRuleDefinitionsOf(view), ...semanticCheckRuleDefinitionsOf(view)].map((definition) => definition.text));
 };
 
-describe("(1) 指紋：旗 ids の全体・上流は変わり、旧の文に戻すと base（417e14f）に戻る。off は変わらない", () => {
-  it("今の文では ids の全体・上流の指紋が base と違い、旧の文に戻すと base と等値", async () => {
+describe("(1) 指紋：ids の上流は b511936 の値に戻り、全体は新しい値。off は変わらない", () => {
+  it("ids の全体は新しい固定値、上流は b511936 の値に戻る。off の全体・上流は今までどおり", async () => {
     const whole = await propertyLedgerSha256(PROPERTY_LEDGER, IDS);
-    const upstream = await upstreamLedgerSha256(PROPERTY_LEDGER, IDS);
     expect(whole).not.toBe(BASE_IDS_LEDGER_BEFORE_875.ledger);
-    expect(upstream).not.toBe(BASE_IDS_LEDGER_BEFORE_875.upstream);
-    // 取り直した今の値（台帳の試験・CLI の試験の定数と同じ）
-    expect(whole).toBe("044963891242397e3120016c9e6e8e1c1daa9b1d0c0be46e767cd2836dbc881e");
+    expect(whole).toBe("555f169b3bbd1d6bd1d4032e14e99566e3dbc039710111841b25e3e334a01c3f");
+    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, IDS)).toBe(BASE_IDS_LEDGER_BEFORE_875.upstream);
+    expect(await propertyLedgerSha256(PROPERTY_LEDGER, OFF)).toBe("fd0adc6ddc5bf82c48ff8be3930a74fe86f469b623359aedb64af5bdfe1e08f5");
+    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, OFF)).toBe("421d105d258f0d810cc44173edcad4720e391c63760348308f7a97187dd88d42");
+  });
+
+  it("since だけを #875 の文に戻すと、旗 ids の台帳全体の指紋が対照の値に等値（ほかの欄・行を変えていない）", async () => {
+    expect(await propertyLedgerSha256(withSinceOnly875(), IDS)).toBe(CONTROL_IDS_WHOLE_WITH_875_SINCE);
+  });
+
+  it("#875 の文（since と規則の 2 セル）に戻すと、旗 ids の全体・上流の指紋が #875 の値に戻る（#875 の文を試験の定数に残した）", async () => {
+    expect(await propertyLedgerSha256(withNew875ValidationExpressionTexts(), IDS)).toBe(
+      "044963891242397e3120016c9e6e8e1c1daa9b1d0c0be46e767cd2836dbc881e",
+    );
+    expect(await upstreamLedgerSha256(withNew875ValidationExpressionTexts(), IDS)).toBe(
+      "a24dade1c8030cdfea05f14514a012ffcdf124d14035c370134f16e379264e19",
+    );
+    // 旧の文（#875 の前）に戻すと b511936 の値に戻る（今までどおり）
     expect(await propertyLedgerSha256(withOldValidationExpressionTexts(), IDS)).toBe(BASE_IDS_LEDGER_BEFORE_875.ledger);
     expect(await upstreamLedgerSha256(withOldValidationExpressionTexts(), IDS)).toBe(BASE_IDS_LEDGER_BEFORE_875.upstream);
   });
+});
 
-  it("off の全体・上流の指紋は base と同じ（検査の式の行は旗 ids の行で、off の適用行に入らない）", async () => {
-    expect(await propertyLedgerSha256(PROPERTY_LEDGER, OFF)).toBe("fd0adc6ddc5bf82c48ff8be3930a74fe86f469b623359aedb64af5bdfe1e08f5");
-    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, OFF)).toBe("421d105d258f0d810cc44173edcad4720e391c63760348308f7a97187dd88d42");
-    expect(await propertyLedgerSha256(withOldValidationExpressionTexts(), OFF)).toBe(await propertyLedgerSha256(PROPERTY_LEDGER, OFF));
-  });
-
-  it("行の文は文書の式の文法に委ね、since に履歴（日付・この Issue）を持つ。B1・T2 の文・所属の形・targets の検査は変えない。台帳の点検は不備 0", () => {
+describe("(2) 行の文：規則の 2 セルだけが #875 の前の文に戻り、why・requirementRule・上位の受理条件は #875 の文のまま", () => {
+  it("rules.t1・rules.t1Acceptance は b511936 の文とバイト列で同じ。why・requirementRule・t1Acceptance は今までどおり", () => {
     const row = rowOf();
-    const old = rowOf(withOldValidationExpressionTexts());
-    for (const text of [row.why, row.requirementRule, row.t1Acceptance, row.rules.t1, row.rules.t1Acceptance]) {
+    expect(row.rules.t1).toBe(OLD_VALIDATION_EXPRESSION_TEXTS.rulesT1);
+    expect(row.rules.t1Acceptance).toBe(OLD_VALIDATION_EXPRESSION_TEXTS.rulesT1Acceptance);
+    for (const text of [row.why, row.requirementRule, row.t1Acceptance]) {
       expect(text).not.toContain(OLD_PHRASE);
       expect(text).toContain(NEW_PHRASE);
     }
-    expect(row.since).toContain("Issue #800");
-    expect(row.since).toContain("#875");
-    expect(row.since).toContain("2026-11-11");
+    for (const text of [row.rules.t1, row.rules.t1Acceptance]) {
+      expect(text).toContain(OLD_PHRASE);
+      expect(text).not.toContain(NEW_PHRASE);
+    }
+    // since に履歴（2026-11-12・この Issue・規則の 2 セルだけを戻し、requirementRule・why・上位の受理条件は #875 のまま）
+    expect(row.since.startsWith(NEW_875_VALIDATION_EXPRESSION_TEXTS.since.slice(0, -1))).toBe(true);
+    expect(row.since).toContain("2026-11-11 の #875");
+    for (const marker of ["2026-11-12", "#902", "rules.t1", "rules.t1Acceptance", "requirementRule", "why", "t1Acceptance"]) {
+      expect(row.since).toContain(marker);
+    }
     // 変えない欄（B1・T2 の文・所属の形・targets の検査・T2 の型）
+    const old = rowOf(withOldValidationExpressionTexts());
     expect(row.rules.b1).toBe(old.rules.b1);
     expect(row.rules.t2).toBe(old.rules.t2);
     expect(row.rules.t2Ids).toBe(old.rules.t2Ids);
     expect(row.t1).toEqual(old.t1);
     expect(row.t2Validation).toEqual(old.t2Validation);
     expect(row.combinations).toEqual(old.combinations);
-    // 旧の文は旧の言い換えを持つ（試験の定数が旧の文であることの確かめ）
-    expect(OLD_VALIDATION_EXPRESSION_TEXTS.rulesT1).toContain(OLD_PHRASE);
     expect(ledgerRowDefects(PROPERTY_LEDGER)).toEqual([]);
   });
 });
 
-describe("(2) 規則の文：旗 ids の C2・C3（と T1・T1''）に「1 つの比較」が無く、新しい文が入る。off はバイト列で同じ", () => {
-  it("今の文：旗 ids の規則に旧の言い換えが無く、T1 の文と T1'' の受理条件の文が入る", () => {
-    const texts = idsRuleTexts(PROPERTY_LEDGER).join("\n");
-    expect(texts).not.toContain(OLD_PHRASE);
-    expect(texts).toContain(rowOf().rules.t1 ?? "前提が壊れた");
-    expect(texts).toContain(rowOf().rules.t1Acceptance ?? "前提が壊れた");
-    // C2（写像）と C3（点検）のそれぞれに入る
-    const view = deriveUpstreamLedgerView(PROPERTY_LEDGER, { ...V12_FLAGS_OFF, ids: true });
-    expect(mappingRuleDefinitionsOf(view).map((definition) => definition.text).join("\n")).toContain(NEW_PHRASE);
-    expect(semanticCheckRuleDefinitionsOf(view, true).map((definition) => definition.text).join("\n")).toContain(NEW_PHRASE);
+describe("(3) 規則の文：旗 ids の C2 の 2 つの形と C3 の規則の文が b511936 の文とバイト列で同じ", () => {
+  it("C2 の通常・了承済み部分ありの 2 つの形と C3 の文が、#875 の前の台帳から導いた文と等値。規則の 2 セルを差し込む", () => {
+    const now = { ...c2TextsOf(PROPERTY_LEDGER), c3: c3TextOf(PROPERTY_LEDGER) };
+    const before = { ...c2TextsOf(withOldValidationExpressionTexts()), c3: c3TextOf(withOldValidationExpressionTexts()) };
+    expect(now).toEqual(before);
+    expect(now.normal).toContain(OLD_VALIDATION_EXPRESSION_TEXTS.rulesT1);
+    expect(now.accepted).toContain(OLD_VALIDATION_EXPRESSION_TEXTS.rulesT1);
+    expect(now.c3).toContain(OLD_VALIDATION_EXPRESSION_TEXTS.rulesT1Acceptance);
+    expect(now.normal).not.toContain(NEW_PHRASE);
+    expect(now.accepted).not.toContain(NEW_PHRASE);
+    expect(now.c3).not.toContain(NEW_PHRASE);
   });
 
-  it("赤：旧の文に戻すと旗 ids の規則に「1 つの比較」が入る", () => {
-    expect(idsRuleTexts(withOldValidationExpressionTexts()).join("\n")).toContain(OLD_PHRASE);
-  });
-
-  it("off と台帳だけ on の T1・T1'' の規則の文は、旧の文の台帳とバイト列で同じ", () => {
+  it("off と台帳だけ on の T1・T1'' の規則の文は、今の台帳と旧の文の台帳でバイト列で同じ", () => {
     expect(offRuleTexts(PROPERTY_LEDGER)).toEqual(offRuleTexts(withOldValidationExpressionTexts()));
-    expect(offRuleTexts(PROPERTY_LEDGER).join("\n")).not.toContain(NEW_PHRASE);
   });
 });
 
 /** 追加の場所の本文（検査 1 つ） */
 const body = (expression: string): string => ["- name: bounded", "  entity: item", `  expression: ${expression}`].join("\n");
 
-describe("(3) 回帰の守り：追加の場所の検査は and・or・not の式を受け取り、targets の外を参照する式を wrongReference で断る", () => {
+describe("(4) 回帰の守り：追加の場所の検査は and・or・not の式を受け取り、targets の外を参照する式を wrongReference で断る", () => {
   const SOURCE = [
     "entities:",
     "  - name: item",
@@ -178,8 +222,8 @@ describe("(3) 回帰の守り：追加の場所の検査は and・or・not の�
   );
 });
 
-describe("(4) 題材の言葉は無い", () => {
-  it("行の新しい文・旗 ids の規則に題材の言葉が無い", () => {
+describe("(5) 題材の言葉は無い", () => {
+  it("行の文・旧の文・旗 ids の規則に題材の言葉が無い", () => {
     const row = rowOf();
     for (const text of [row.why, row.requirementRule, row.t1Acceptance, row.rules.t1, row.rules.t1Acceptance, ...idsRuleTexts(PROPERTY_LEDGER)]) {
       for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text ?? "").not.toContain(word);

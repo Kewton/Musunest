@@ -199,7 +199,8 @@ describe("(5)(6) 指紋と要求：ids の全体は変わり、T2 の文を旧�
     const now = await propertyLedgerSha256(PROPERTY_LEDGER, IDS);
     // Issue #875 で検査の式の行の文を文書の式の文法に委ねたので、今の値は #832 の値（65c1f276…）から変わる。#875 の文を
     // 旧の文に戻すと #832 の値に戻る（以下の #832 の照合はその戻した台帳で続ける）
-    expect(now).toBe("044963891242397e3120016c9e6e8e1c1daa9b1d0c0be46e767cd2836dbc881e");
+    // Issue #902 で規則の 2 セルだけを #875 の前の文に戻したので、今の値はさらに変わる（上流は b511936 の値に戻る）
+    expect(now).toBe("555f169b3bbd1d6bd1d4032e14e99566e3dbc039710111841b25e3e334a01c3f");
     expect(await propertyLedgerSha256(withOldValidationExpressionTexts(), IDS)).toBe("65c1f276c2f72cc7fbe947397ee214da740dcdbd1680bdd001f61f889d141487");
     // Issue #816 の値（この Issue の前）。T2 の文だけを旧の文に戻すとこの値に戻る
     const base816 = "fac851157c424650e597a3fe8c8e0b4156ec983c835d7f3e90b1f147284d27e4";
@@ -208,8 +209,8 @@ describe("(5)(6) 指紋と要求：ids の全体は変わり、T2 の文を旧�
     // off の全体・上流と ids の上流は変えない（上流の見方は T2 の文を読まない）
     expect(await propertyLedgerSha256(PROPERTY_LEDGER, off)).toBe("fd0adc6ddc5bf82c48ff8be3930a74fe86f469b623359aedb64af5bdfe1e08f5");
     expect(await upstreamLedgerSha256(PROPERTY_LEDGER, off)).toBe("421d105d258f0d810cc44173edcad4720e391c63760348308f7a97187dd88d42");
-    // ids の上流は #875 で変わる（T1 の文・T1'' の受理条件の文を読む）。旧の文に戻すと #832 の値に戻る
-    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, IDS)).toBe("a24dade1c8030cdfea05f14514a012ffcdf124d14035c370134f16e379264e19");
+    // ids の上流は #902 で b511936 の値に戻る（T1 の文・T1'' の受理条件の文を読む。旧の文に戻すと #832 の値に戻る）
+    expect(await upstreamLedgerSha256(PROPERTY_LEDGER, IDS)).toBe("dc21dd0177557eec5af22eafe2355a41f99884ab4e063d6745e30ae9c554c110");
     expect(await upstreamLedgerSha256(withOldValidationExpressionTexts(), IDS)).toBe("dc21dd0177557eec5af22eafe2355a41f99884ab4e063d6745e30ae9c554c110");
   });
 
