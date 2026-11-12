@@ -57,6 +57,37 @@ export const NEW_875_VALIDATION_EXPRESSION_TEXTS = {
     "確かめ方が validation-expression の要件は、要件の決まりが同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）だけで、targets がその決まりが縛る項目と過不足なく合うときだけ受理する。式で書けない決まりを含む要件や targets の合わない要件は受理せず、weak-verification で拒否する。",
 } as const;
 
+/**
+ * Issue #906 で規則の 2 セルに足した句。変更後の文から取り除くと、`OLD_VALIDATION_EXPRESSION_TEXTS` の前の文にバイト列で戻る
+ * （足したのはこの句だけで、前の文の限定〔同じ entity の項目・入力の値を縛る・targets の完全性〕は保つ）
+ */
+export const ADDED_906_PHRASES = {
+  rulesT1: "か「入力の値を、同じ entity の項目の比較を and・or・not で結んだ 1 つの条件で縛る」",
+  rulesT1Acceptance: "、または同じ entity の項目の比較を and・or・not で結んだ 1 つの条件",
+} as const;
+
+/**
+ * Issue #906 で変えない欄（`requirementRule`・`why`・上位の `t1Acceptance`）。#875 の文のままで、前後でバイト列が同じ
+ * （変えたのは規則の 2 セルと `since` の履歴だけ。製品のコードはこの値を読まない）
+ */
+export const UNCHANGED_906_VALIDATION_EXPRESSION_TEXTS = {
+  requirementRule: "同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）だけを決める要件",
+  why: "入力の値を縛る決まりを、対象の項目ごとの検査（validate）の試験で確かめる。決まりの無い要件に検査の試験を作らせないため、同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）だけを受理し、対象を targets の項目に限る（方法論 03 の H2・H1。08 §5・§8.2）",
+  t1Acceptance:
+    "確かめ方が検査の式（validation-expression）の要件は、要件の決まりが同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）だけで、targets がその決まりが縛る項目と過不足なく合うときだけ受理する。式で書けない決まりを含む要件や targets の合わない要件は受理せず、weak-verification で拒否する",
+} as const;
+
+/**
+ * Issue #906 の検査の式の行の規則の 2 セル（#902 の前の文に、比較を and・or・not で結んだ 1 つの入力の条件を最小限に足した文）。
+ * 前の文・#875 の文と並べて試験の定数に残す（製品のコードはこの値を読まない）
+ */
+export const NEW_906_VALIDATION_EXPRESSION_TEXTS = {
+  rulesT1:
+    "要件の決まりが「入力の値を 1 つの比較で縛る」か「入力の値を、同じ entity の項目の比較を and・or・not で結んだ 1 つの条件で縛る」だけなら kind を validation-expression にし、targets にその決まりが縛る項目（同じ entity の項目の行の ID）を 1 つ以上書く。entity と対象の項目はコードが所属に足す。value は null にする。式で書けない決まり・項目を縛らない決まり・複数の entity にまたがる項目を含む要件には validation-expression を使わない。",
+  rulesT1Acceptance:
+    "確かめ方が validation-expression の要件は、要件の決まりが入力の値を 1 つの比較、または同じ entity の項目の比較を and・or・not で結んだ 1 つの条件で縛る決まりだけで、targets がその決まりが縛る項目と過不足なく合うときだけ受理する。式で書けない決まりを含む要件や targets の合わない要件は受理せず、weak-verification で拒否する。",
+} as const;
+
 /** 検査の式の行の `since` だけを Issue #875 の文に戻した台帳（ほかの欄は今のまま） */
 export function withSinceOnly875(rows: readonly PropertyRow[] = PROPERTY_LEDGER): readonly PropertyRow[] {
   const since = NEW_875_VALIDATION_EXPRESSION_TEXTS.since;
