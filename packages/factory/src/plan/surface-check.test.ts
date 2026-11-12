@@ -22,9 +22,15 @@ import {
 } from "../stages/unwritable-triage.js";
 import { DEFAULT_PLAN_JUDGE_THRESHOLD } from "./run-plan.js";
 import type { PlanSurface, PlanUnwritable } from "./surface.js";
+import { createCallHash } from "./claim-recorded-judge.js";
 import {
+  SURFACE_CHECK_VERSION,
+  SURFACE_RECHECK_EVIDENCE_ASK_V2,
+  SURFACE_RECHECK_KIND_ASK_V2,
   SURFACE_RECHECK_NO_EVIDENCE,
+  SURFACE_SUPPORT_ASK_V2,
   SURFACE_SUPPORT_QUESTION_PREFIX,
+  SURFACE_TRIAGE_ASK_V2,
   SURFACE_TRIAGE_QUESTION_PREFIX,
   runSurfaceCheck,
   surfaceRecheckEvidenceQuestionName,
@@ -220,9 +226,9 @@ describe("判定への渡し方（05 §3・§4・Issue #376・#432）", () => {
     expect(String(instructions?.excerpt)).toContain("アプリ自体の名前や説明を置く欄は無い。");
     expect(String(instructionsOf(triageQuestion)?.ask)).toMatch(/^[\x20-\x7E]+$/);
     expect(String(instructions?.ask)).toMatch(/^[\x20-\x7E]+$/);
-    // state には依頼文（原文）を入れない
-    expect(requests[0]?.state).toEqual({});
-    expect(requests[1]?.state).toEqual({});
+    // state には依頼文（原文）を入れない。載るのは文書と要件の一覧（点検の材料）だけ（Issue #910）
+    expect(Object.keys(requests[0]?.state ?? {})).toEqual(["documents", "requirements"]);
+    expect(Object.keys(requests[1]?.state ?? {})).toEqual(["documents", "requirements"]);
   });
 
   it("問いの名前の頭は、Build の仕分け（triage・support）と違う", () => {
@@ -574,5 +580,235 @@ describe("最初の判定で止まっても、全申告の診断が残る（Issu
       { index: 0, stage: "unexecuted", classification: "unexecuted", docVersion: "v1" },
       { index: 1, stage: "unexecuted", classification: "unexecuted", docVersion: "v1" },
     ]);
+  });
+});
+
+// ── v2：独立点検に要件と文書の全体を渡し、要件が書けるかを問う（Issue #910）──────────────
+//
+// **偽物の判定で回す。** ここで固定するのは**要求の材料と問いの文と門**である——偽物の答えの緑は、
+// 意味の判断の効き目の証明ではない（効き目は窓口が実 Plan で確かめる）。
+
+/** 主の仕分け → 裏付け（書いていない）→ 再点検、の 3 要求をすべて出させる答え */
+const ALL_THREE = {
+  [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+  [surfaceSupportQuestionName(0)]: choice("not-stated", 0.9),
+  [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+  [surfaceRecheckEvidenceQuestionName(0)]: choice("記録", 0.9),
+};
+
+/** 一般名の申告（制約 ID 1 つ。要件を書く別の表現が文書の他の節にある型） */
+const GENERIC = claim("U-0", "R-1", "参照ごとの件数", ["記録"], "記録の節に参照ごとの件数を数える手段が無い");
+
+/** 申告の制約の節（記録）の**外**にある文書の本文（他の節・他の文書） */
+const OUTSIDE_SECTION_TEXTS = [
+  "合計の意味の説明。",
+  "計算の意味の説明。",
+  "アプリ自体の名前や説明を置く欄は無い。",
+  "R-NAME-10 集計の where は this を使う。",
+  "使ってよい語彙の台帳。",
+];
+
+describe("v2：主の 2 問と再点検に、文書の全体と全要件を渡す（Issue #910）", () => {
+  it("一般名の申告から組み立てた 3 要求に、申告の節の外の文書の本文と、全要件の id・text が含まれる", async () => {
+    const { run, requests } = check(surface(GENERIC), ALL_THREE);
+    await run;
+
+    expect(requests.map((request) => Object.keys(request.questions))).toEqual([
+      ["plan-triage:0"],
+      ["plan-support:0"],
+      ["plan-recheck-kind:0", "plan-recheck-evidence:0"],
+    ]);
+    for (const request of requests) {
+      const sent = JSON.stringify(request);
+      for (const text of OUTSIDE_SECTION_TEXTS) expect(sent).toContain(JSON.stringify(text).slice(1, -1));
+      for (const [id, text] of REQUIREMENTS) {
+        expect(sent).toContain(id);
+        expect(sent).toContain(text);
+      }
+      // 材料は、渡した文書の全体（名前と本文）と要件の一覧（id と text）そのもの
+      expect(request.state).toEqual({
+        documents: SAMPLE_DOCUMENTS.map((document) => ({ name: document.name, text: document.text })),
+        requirements: [
+          { id: "R-1", text: "要件 R-1 の文" },
+          { id: "R-2", text: "要件 R-2 の文" },
+        ],
+      });
+    }
+  });
+
+  it("主の 2 問の欄に、対象の要件（id と文）が載る", async () => {
+    const { run, requests } = check(surface(GENERIC), ALL_THREE);
+    await run;
+
+    for (const [index, name] of [
+      [0, surfaceTriageQuestionName(0)],
+      [1, surfaceSupportQuestionName(0)],
+      [2, surfaceRecheckKindQuestionName(0)],
+      [2, surfaceRecheckEvidenceQuestionName(0)],
+    ] as const) {
+      expect(requests[index]?.questions[name]?.instructions).toMatchObject({
+        requirementId: "R-1",
+        requirement: "要件 R-1 の文",
+      });
+    }
+  });
+
+  it("同じ文書の組・要件の組なら、申告の制約 ID・部分・要件 ID を変えても材料が変わらない", async () => {
+    const other = claim("U-9", "R-2", "別の部分", ["アプリの名前・説明", "R-NAME-10"], "別の理由");
+    const a = check(surface(GENERIC), ALL_THREE);
+    await a.run;
+    const b = check(surface(other), ALL_THREE);
+    await b.run;
+
+    expect(a.requests).toHaveLength(3);
+    expect(b.requests).toHaveLength(3);
+    for (let index = 0; index < 3; index += 1) {
+      expect(b.requests[index]?.state).toEqual(a.requests[index]?.state);
+    }
+  });
+
+  it("材料の要件は、呼ぶ側が渡した一覧だけ（代わりの案の要件・了承除外の印・代わりの案の文は載らない）", async () => {
+    const withAlternative = claim("U-0", "R-1", "参照ごとの件数", ["記録"], "理由", "代わりの案の文（採否）");
+    const { run, requests } = check(surface(withAlternative), ALL_THREE, {
+      requirements: new Map([
+        ["R-1", "要件 R-1 の文"],
+        ["R:alt:U-7", "前の代わりの案の要件"],
+      ]),
+      materialRequirements: [{ id: "R-1", text: "要件 R-1 の文" }],
+    });
+    await run;
+
+    for (const request of requests) {
+      const material = JSON.stringify(request.state);
+      expect(material).not.toContain("R:alt:");
+      expect(material).not.toContain("前の代わりの案の要件");
+      expect(material).not.toContain("accepted_removal");
+      // 申告の代わりの案（過去の判断）は、問いにも材料にも載らない
+      expect(JSON.stringify(request)).not.toContain("代わりの案の文（採否）");
+    }
+  });
+
+  it("問いは、申告の方法ではなく要件が文書の許すどの表現でも書けないかを問う（文は ASCII）", async () => {
+    const { run, requests } = check(surface(GENERIC), ALL_THREE);
+    await run;
+
+    const asks = [
+      [requests[0]?.questions[surfaceTriageQuestionName(0)], SURFACE_TRIAGE_ASK_V2],
+      [requests[1]?.questions[surfaceSupportQuestionName(0)], SURFACE_SUPPORT_ASK_V2],
+      [requests[2]?.questions[surfaceRecheckKindQuestionName(0)], SURFACE_RECHECK_KIND_ASK_V2],
+      [requests[2]?.questions[surfaceRecheckEvidenceQuestionName(0)], SURFACE_RECHECK_EVIDENCE_ASK_V2],
+    ] as const;
+    for (const [question, ask] of asks) {
+      // 送った問いの文そのものが、対象の要件を、文書の許す表現の**どれでも**書けないかを問う
+      const sent = String(instructionsOf(question)?.ask);
+      expect(sent).toContain("target requirement");
+      expect(sent).toMatch(/any expression the documents (in state )?permit/);
+      expect(sent).toMatch(/^[\x20-\x7E]+$/);
+      expect(sent).toBe(ask);
+    }
+  });
+
+  it("答えの有限の集合は前後で同じ（仕分け 3・裏付け 3・再点検 4）。根拠の候補は申告の制約 ID と none だけ", async () => {
+    const { run, requests } = check(surface(GENERIC), ALL_THREE);
+    await run;
+    const keys = (question: JudgeQuestion | undefined): string[] =>
+      question !== undefined && question.kind === "choice" ? Object.keys(question.criteria).sort() : [];
+
+    expect(keys(requests[0]?.questions[surfaceTriageQuestionName(0)])).toEqual(["ambiguity", "not-a-problem", "vocabulary-hole"]);
+    expect(keys(requests[1]?.questions[surfaceSupportQuestionName(0)])).toEqual(["contradicts", "not-stated", "supports"]);
+    expect(keys(requests[2]?.questions[surfaceRecheckKindQuestionName(0)])).toEqual([
+      "ambiguity",
+      "not-a-problem",
+      "undecidable",
+      "vocabulary-hole",
+    ]);
+    // 文書の他の節（合計・computed・アプリの名前・説明）は、照らす文脈であって根拠の候補ではない
+    expect(keys(requests[2]?.questions[surfaceRecheckEvidenceQuestionName(0)])).toEqual(["none", "記録"]);
+  });
+
+  it("再点検が申告の外の節を根拠に選んでも受理しない（根拠の候補の外は根拠なし）", async () => {
+    const { run } = check(surface(GENERIC), {
+      ...ALL_THREE,
+      [surfaceRecheckEvidenceQuestionName(0)]: choice("合計", 0.9),
+    });
+    const result = await run;
+
+    expect(result.accepted).toEqual([]);
+    expect(result.unchecked).toEqual([{ index: 0, requirementId: "R-1", part: "参照ごとの件数", code: "not-stated" }]);
+  });
+
+  it("正しい申告は偽の判定の下で今までどおり受理され、反証された申告は落ちる", async () => {
+    const accepted = check(surface(GENERIC), {
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.9),
+    });
+    expect((await accepted.run).accepted).toEqual([GENERIC]);
+
+    const refuted = check(surface(GENERIC), {
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("contradicts", 0.9),
+    });
+    const result = await refuted.run;
+    expect(result.accepted).toEqual([]);
+    expect(result.dropped.map((entry) => entry.code)).toEqual(["contradicts"]);
+  });
+
+  it("主の supports だけでは、仕分けが未確定の申告を通さない（門は前後で同じ）", async () => {
+    const requests: JudgeRequest[] = [];
+    const primary = createFakeJudge({
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", DEFAULT_PLAN_JUDGE_THRESHOLD - 0.1),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    // 再点検の宛先（Luna）を渡さない
+    const result = await runSurfaceCheck({
+      surface: surface(GENERIC),
+      documents: SAMPLE_DOCUMENTS,
+      judge: {
+        async judge(request) {
+          requests.push(request);
+          return primary.judge(request);
+        },
+      },
+      threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
+      requirements: REQUIREMENTS,
+      docVersion: "v1",
+    });
+
+    expect(result.accepted).toEqual([]);
+    expect(result.unchecked.map((entry) => entry.code)).toEqual(["unknown"]);
+    // 裏付けは呼ばず、再点検の宛先が無いので再試行も足さない（主の 1 回だけ）
+    expect(requests).toHaveLength(1);
+  });
+
+  it("本番の版は v2", () => {
+    expect(SURFACE_CHECK_VERSION).toBe("v2");
+  });
+});
+
+describe("v1 の要求は、過去の記録のハッシュが当たる形のまま再生できる（Issue #910）", () => {
+  it("checkVersion: v1 の 3 要求は、変更前の要求とハッシュが一致する（state は空）", async () => {
+    const { run, requests } = check(surface(HOLE), ALL_THREE, { checkVersion: "v1" });
+    await run;
+
+    // 変更前（main・e471996）の点検で同じ申告・文書・要件から組んだ要求のハッシュ
+    const hashes = await Promise.all(requests.map((request) => createCallHash(request)));
+    expect(hashes).toEqual([
+      "79038243148e03195132f2296c2e2f80c62e6761b7f94a978580dbd7f678bbbf",
+      "a056b02ac4e2569fd325c5657ce334e57b39ffa5157e833ef945ea5cabd7fde4",
+      "5417167c85abd38d0d98fab84970c2b97c2503104c66f5cae1d0d4b446e7e20f",
+    ]);
+    for (const request of requests) expect(request.state).toEqual({});
+  });
+
+  it("v2 の要求は、同じ申告の v1 の要求とハッシュが違う（過去の記録を新しい要求の記録にしない）", async () => {
+    const v1 = check(surface(HOLE), ALL_THREE, { checkVersion: "v1" });
+    await v1.run;
+    const v2 = check(surface(HOLE), ALL_THREE);
+    await v2.run;
+
+    const v1Hashes = await Promise.all(v1.requests.map((request) => createCallHash(request)));
+    const v2Hashes = await Promise.all(v2.requests.map((request) => createCallHash(request)));
+    expect(v2Hashes).toHaveLength(3);
+    for (const hash of v2Hashes) expect(v1Hashes).not.toContain(hash);
   });
 });

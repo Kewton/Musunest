@@ -1,18 +1,22 @@
-// 記録した「書けない」の申告を、今の点検と形を変えた問いの組で比べるための**問いの形**（Issue #459）。
+// 記録した「書けない」の申告を、v1 の点検の問いと形を変えた問いの組で比べるための**問いの形**（Issue #459）。
 //
 // ここは**判定の口（`Judge`）に閉じた問い**の形だけを定義する——文は作らない（05-judge-model.md §3・
 // 03-fix-layer.md H6）。形は ID と版（`v1`）を持ち、次の 7 つである。
 //
-//   - **T1** … 今の点検の仕分けの問いを、点検と同じ関数（`surfaceTriageQuestion`）で組む
+//   - **T1** … v1 の点検の仕分けの問いを、v1 の点検と同じ関数（`surfaceTriageQuestion`）で組む
 //   - **T2** … 05 §2 E1 の忠実な再現。**1 申告＝1 要求**で、state（要件の文と申告）を渡す。生ラベル
 //     （`ambiguity`／`vocabulary_gap`／`not_an_issue`）から共通の 3 ラベルへの写しを宣言する
 //   - **T3** … T1 の欄に、要件の文と代わりの案を足す（問いごとに自分の欄。束でよい）
-//   - **S1** … 今の点検の裏付けの問いを、同じ関数（`surfaceSupportQuestion`）で組む。票は従来の 3 値で、
+//   - **S1** … v1 の点検の裏付けの問いを、同じ関数（`surfaceSupportQuestion`）で組む。票は従来の 3 値で、
 //     **四値へ写さず**、S2〜S4 の票にも入れない（別の根拠種別）
 //   - **S2** … 申告の制約 ID の節の抜粋に、書く手段を与える／明示的に制限する／どちらも無い／判定不能
 //   - **S3** … 語の一覧の形。選択肢はコードが**文書の制約 ID の集合**から組み「どれでもない」を足す。
 //     選ばれた ID だけでは票が決まらず、その節に **S2** を掛けた答えで決まる（段ごとに 1 回）
 //   - **S4** … 節を段落に切り、段落ごとに S2 と同じ Choice を掛ける（Noul は使わない）
+//
+// **T1・S1 は v1 の点検の問いのまま**である（Issue #910）。本番の点検は v2（文書の全体と全要件を state に
+// 載せ、要件が書けるかを問う。`surface-check.ts`）へ移ったが、T1・S1 を v2 に変えると形の版（`v1`）と閾値の
+// 表と過去の票の意味が変わるので、ここは変えない。v2 を形として比べるなら、新しい形の版として足す。
 //
 // 生の答え →（形の中の集計）→ **一票**の写しをここで固定する。票の値は有限である。集合の外の答えは
 // `unknown-answer`、確率が返らない答えは `probability-unknown`、閾値未満は `low-probability`、流さない
@@ -723,7 +727,7 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
     return { response: sent.response, state: sent.state };
   };
 
-  // ── T1（今の点検の仕分け。束）────────────────────────────────
+  // ── T1（v1 の点検の仕分け。束）────────────────────────────────
   const t1Claims = input.claims.filter((claim) => applies("T1", claim));
   if (t1Claims.length > 0) {
     const questions: Record<string, JudgeChoiceQuestion> = {};
@@ -801,7 +805,7 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
     }
   }
 
-  // ── S1（今の点検の裏付け。束）────────────────────────────────
+  // ── S1（v1 の点検の裏付け。束）────────────────────────────────
   const s1Claims = input.claims.filter((claim) => applies("S1", claim));
   if (s1Claims.length > 0) {
     const questions: Record<string, JudgeChoiceQuestion> = {};
