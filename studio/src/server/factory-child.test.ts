@@ -1,4 +1,5 @@
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
+import { PLAN_CLI_RECORD_FILE, PLAN_SURFACE_CHECK_FILE } from "@musunest/factory";
 import type {
   CliDeps,
   LlmClient,
@@ -119,6 +120,85 @@ const confirmedResult = (spentUsd: number): PlanResult =>
 
 const stoppedResult = (spentUsd: number): PlanResult =>
   ({ kind: "stopped", reason: "declined", failure: null, spentUsd, remainingUsd: 2 - spentUsd }) as unknown as PlanResult;
+
+/** 記録の組み立てが読む欄をすべて持つ、偽物の Plan の結果（値は最小。Issue #885） */
+const recordFields = (): Record<string, unknown> => ({
+  stages: [],
+  judge: { calls_by_adapter: {}, cost_usd: 0 },
+  closedBySource: [],
+  closedByDefault: [],
+  requirementsDiagnosis: {
+    rounds: [],
+    redone: false,
+    unmet: { quoteNotFound: 0, positionMismatch: 0, uncoveredSource: { code: 0, conversation: 0 } },
+  },
+  surfaceCheck: { accepted: 0, dropped: 0, ambiguity: 0, unchecked: 0, completed: true, judgments: [] },
+  surfaceCheckDiagnostics: [],
+  diffReviews: [],
+  openIssueConflicts: {
+    ids: 1,
+    rows: [{ existing: "catalog", added: "surface", count: 1 }],
+    attribution: [],
+    emptyTargets: 0,
+    round: 2,
+  },
+  surfaceIdReuse: [],
+  surfaceTargetAttempts: [],
+  issueFlow: [
+    {
+      revision: 2,
+      startOpen: 1,
+      opened: { total: 1, initial: 0, diff: 1, byOrigin: [{ origin: "surface", count: 1 }] },
+      closed: { total: 1, answerMain: 1, alsoCloses: 0, source: 0, default: 0 },
+      inheritedResolved: 0,
+      endOpen: { critical: 1, nonCritical: 0 },
+      end: "cannot-confirm",
+    },
+  ],
+  remainingOpenIssues: [
+    { origin: "surface", revision: 2, critical: true, requirementKind: "behavior", facetId: null },
+  ],
+  confirmCoverage: [],
+});
+
+const recordCannotConfirmResult = (): PlanResult =>
+  ({
+    kind: "cannot-confirm",
+    openIssues: [],
+    reasons: [{ source: "confirm", code: "open_critical", path: "open_issues" }],
+    spentUsd: 0.2,
+    remainingUsd: 1.8,
+    ...recordFields(),
+  }) as unknown as PlanResult;
+
+const recordDeclinedResult = (): PlanResult =>
+  ({
+    kind: "stopped",
+    reason: "declined",
+    failure: null,
+    spentUsd: 0.2,
+    remainingUsd: 1.8,
+    ...recordFields(),
+  }) as unknown as PlanResult;
+
+const recordStoppedResult = (): PlanResult =>
+  ({
+    kind: "stopped",
+    reason: "budget",
+    failure: null,
+    spentUsd: 0.2,
+    remainingUsd: 1.8,
+    ...recordFields(),
+  }) as unknown as PlanResult;
+
+const recordConfirmedResult = (): PlanResult =>
+  ({
+    kind: "confirmed",
+    plan: confirmedPlan,
+    spentUsd: 0.2,
+    remainingUsd: 1.8,
+    ...recordFields(),
+  }) as unknown as PlanResult;
 
 const noopClient: LlmClient = {
   async callStructured<T>(): Promise<LlmStructuredResponse<T>> {
@@ -342,5 +422,119 @@ describe("工場の子", () => {
       spentUsd: 0,
     });
     expect(called).toBe(false);
+  });
+
+  it("確定できない Plan でも記録と診断を書き、事項の流れ・残った事項・衝突が結果と一致する", async () => {
+    const channel = new TestChannel();
+    const written = new Map<string, string>();
+    const deps = makeDeps({
+      runPlan: async () => recordCannotConfirmResult(),
+      runCli: async () => {
+        throw new Error("Build を起こさない");
+      },
+      writeFile: async (path, text) => {
+        written.set(path, text);
+      },
+    });
+
+    const outcome = await runFactoryChild(request(), channel, deps);
+    expect(outcome).toEqual({
+      kind: "stopped",
+      reason: "cannot-confirm",
+      spentUsd: 0.2,
+      codes: ["open_critical"],
+    });
+
+    const record = JSON.parse(written.get(join(OUT_DIR, PLAN_CLI_RECORD_FILE)) ?? "null") as Record<string, unknown>;
+    expect(record["outcome"]).toBe("cannot-confirm");
+    expect(record["cannot_confirm"]).toEqual([{ source: "confirm", code: "open_critical", path: "open_issues" }]);
+    expect(record["issue_flow"]).toHaveLength(1);
+    expect(record["issue_flow"]).toMatchObject([
+      { revision: 2, start_open: 1, closed: { total: 1, answer_main: 1 }, end: "cannot-confirm" },
+    ]);
+    expect(record["remaining_open_issues"]).toEqual([
+      { origin: "surface", revision: 2, critical: true, requirement_kind: "behavior", facet_id: null },
+    ]);
+    expect(record["open_issue_conflicts"]).toMatchObject({
+      ids: 1,
+      rows: [{ existing: "catalog", added: "surface", count: 1 }],
+      round: 2,
+    });
+
+    const diagnostic = JSON.parse(written.get(join(OUT_DIR, PLAN_SURFACE_CHECK_FILE)) ?? "null") as Record<
+      string,
+      unknown
+    >;
+    expect(diagnostic).toMatchObject({ plan_id: "studio-job-1", claims: [] });
+  });
+
+  it("確認でやめた・段の失敗・確定した、の各場合も同じ 2 つを書く", async () => {
+    for (const makeResult of [recordDeclinedResult, recordStoppedResult, recordConfirmedResult]) {
+      const written: string[] = [];
+      const deps = makeDeps({
+        runPlan: async () => makeResult(),
+        runCli: async () => 0,
+        writeFile: async (path) => {
+          written.push(path);
+        },
+      });
+      await runFactoryChild(request(), new TestChannel(), deps);
+      expect(written).toContain(join(OUT_DIR, PLAN_CLI_RECORD_FILE));
+      expect(written).toContain(join(OUT_DIR, PLAN_SURFACE_CHECK_FILE));
+    }
+  });
+
+  it("記録の書き込みが失敗しても、子の結果は書き込みが成功した場合と同じ", async () => {
+    const control = await runFactoryChild(
+      request(),
+      new TestChannel(),
+      makeDeps({
+        runPlan: async () => recordCannotConfirmResult(),
+        runCli: async () => {
+          throw new Error("Build を起こさない");
+        },
+      }),
+    );
+
+    const logs: string[] = [];
+    const failingDeps = makeDeps({
+      runPlan: async () => recordCannotConfirmResult(),
+      runCli: async () => {
+        throw new Error("Build を起こさない");
+      },
+      writeFile: async (path) => {
+        if (path.endsWith(PLAN_CLI_RECORD_FILE) || path.endsWith(PLAN_SURFACE_CHECK_FILE)) {
+          throw new Error("記録の書き込みの失敗");
+        }
+      },
+    });
+    const failing = await runFactoryChild(request(), new TestChannel(), {
+      ...failingDeps,
+      log: (line) => logs.push(line),
+    });
+
+    expect(failing).toEqual(control);
+    expect(logs.filter((line) => line === "Plan の記録を書けませんでした")).toHaveLength(1);
+  });
+
+  it("Plan が例外で終わったら記録を書かず、今までどおり失敗を返す", async () => {
+    const written: string[] = [];
+    const deps = makeDeps({
+      runPlan: async () => {
+        throw new Error("Plan の失敗");
+      },
+      runCli: async () => 0,
+      writeFile: async (path) => {
+        written.push(path);
+      },
+    });
+
+    await expect(runFactoryChild(request(), new TestChannel(), deps)).resolves.toEqual({
+      kind: "failed",
+      reason: "factory-failure",
+      spentUsd: 0,
+    });
+    expect(written).not.toContain(join(OUT_DIR, PLAN_CLI_RECORD_FILE));
+    expect(written).not.toContain(join(OUT_DIR, PLAN_SURFACE_CHECK_FILE));
   });
 });
