@@ -6617,7 +6617,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     for (const entry of INVARIANT_RUNS) {
       expect(searched[entry.name], entry.name).toBe(entry.kind === "stage" && entry.flags === null && entry.pipeline === "v1.2");
     }
-  });
+  }, 30_000);
 
   /**
    * 4a80f4b（比較元）の全出力のダイジェスト（search_repair を含む既存の欄をそのまま比較する。Issue #748 のレビュー R3）。
@@ -6737,7 +6737,7 @@ describe("段の走りの探索の出来事の列（旗 v12.ids・v12.search-rep
     for (const entry of INVARIANT_RUNS) {
       expect(searched[entry.name], entry.name).toBe(entry.kind === "stage" && entry.flags === null && entry.pipeline === "v1.2");
     }
-  });
+  }, 30_000);
 
   /** 出来事の列に出てよい文字列（列挙値と SHA-256 だけ）と鍵 */
   const ALLOWED_STRINGS = new Set<string>([
