@@ -8,9 +8,14 @@
 //      入口を持たない（Issue #278「純粋な TypeScript」・Issue #288「新しいライブラリのファイルを足す」）
 //   4. v1.1α（v11a/）の契約・段・走らせる部分・記録も根から読め、v11a の全ファイルが禁じた入口を持たない（Issue #511）
 import { describe, expect, it } from "vitest";
-import type { Judge } from "./index.js";
+import type { Judge, PlanTranscript } from "./index.js";
 import {
   ALL_CARRIED_PROBLEM,
+  PLAN_CLI_RECORD_FILE,
+  PLAN_SURFACE_CHECK_FILE,
+  buildPlanCliRecord,
+  buildSurfaceCheckDiagnostic,
+  createPlanTranscript,
   DECL_CHECK_SCHEMA_NAME,
   FakeLlmExhaustedError,
   NAME_TABLE_SCHEMA_NAME,
@@ -151,6 +156,16 @@ describe("公開する面", () => {
 
   it("Plan を 1 回流す口が、根から読める（Issue #363）", () => {
     expect(runPlan).toBeTypeOf("function");
+  });
+
+  it("Plan の記録の組み立てとファイル名が、根から読める（Issue #885）", () => {
+    for (const entry of [buildPlanCliRecord, buildSurfaceCheckDiagnostic, createPlanTranscript]) {
+      expect(entry).toBeTypeOf("function");
+    }
+    expect(PLAN_CLI_RECORD_FILE).toBe("plan-record.json");
+    expect(PLAN_SURFACE_CHECK_FILE).toBe("plan-surface-check.json");
+    const transcript: PlanTranscript = createPlanTranscript();
+    expect(transcript).toEqual({ rounds: [], scriptMatches: [], confirmation: null });
   });
 
   it("v1.1α の契約・段・走らせる部分・記録が、根から読める（Issue #511）", () => {

@@ -14,15 +14,21 @@ import {
   EXIT_RETURN_TO_PLAN,
   VOCABULARY_VERSION,
   assembleJudge,
+  buildPlanCliRecord,
+  buildSurfaceCheckDiagnostic,
   createOpenAiLlmClient,
+  createPlanTranscript,
   loadDocumentsFromFiles,
   modelRatesOf,
+  PLAN_CLI_RECORD_FILE,
+  PLAN_SURFACE_CHECK_FILE,
   runCli,
   runPlan,
   type CliDeps,
   type LlmClient,
   type PlanResult,
   type PlanRunInput,
+  type PlanTranscript,
   type PromptDocument,
 } from "@musunest/factory";
 import { remainingBuildBudgetUsd, buildFactoryBuildArgs } from "./build-args.js";
@@ -151,6 +157,27 @@ function failureCodesOf(result: Extract<PlanResult, { kind: "stopped" }>): reado
 }
 
 /**
+ * Plan の往復の記録と、申告の点検の診断をジョブの置き場に書く（納品物・公開の対象には入れない。
+ * 記録の形は工場の CLI と同じ組み立てを使う。Issue #885）。
+ */
+async function writePlanRecords(
+  deps: FactoryChildDeps,
+  request: FactoryChildRequest,
+  planId: string,
+  result: PlanResult,
+  transcript: PlanTranscript,
+): Promise<void> {
+  await deps.writeFile(
+    join(request.outDir, PLAN_CLI_RECORD_FILE),
+    JSON.stringify(buildPlanCliRecord({ result, transcript, budgetUsd: request.budgetUsd, planId })),
+  );
+  await deps.writeFile(
+    join(request.outDir, PLAN_SURFACE_CHECK_FILE),
+    JSON.stringify(buildSurfaceCheckDiagnostic({ result, planId })),
+  );
+}
+
+/**
  * 子の仕事。Plan を回し、確定したら包みを書いて Build を流し、結果を親へ返す。
  * **例外の文・依頼文・答えを結果に写さない**——分類と数だけを返す。
  */
@@ -172,7 +199,9 @@ export async function runFactoryChild(
   const tracker = createProgressTracker({
     notify: (progress) => channel.notify({ kind: "progress", progress }),
   });
-  const responder = createPlanResponder({ channel, now: deps.now, deadline });
+  const transcript = createPlanTranscript();
+  const planId = `studio-${request.jobId}`;
+  const responder = createPlanResponder({ channel, transcript, now: deps.now, deadline });
   const client: LlmClient = tracker.wrap(
     deps.makeClient({ apiKey, model: FACTORY_MODEL, effort: FACTORY_EFFORT }),
   );
@@ -200,12 +229,20 @@ export async function runFactoryChild(
       now: deps.now,
       deadline,
       effort: FACTORY_EFFORT,
-      planId: `studio-${request.jobId}`,
+      planId,
       vocabularyVersion: VOCABULARY_VERSION,
       confirmedBy: STUDIO_CONFIRMED_BY,
     });
   } catch {
     return { kind: "failed", reason: "factory-failure", spentUsd: tracker.estimatedUsd };
+  }
+
+  // 確定したかどうかによらず、Plan の記録と診断をジョブの置き場に書く（Issue #885）。書けなくても、
+  // 子の結果（止まった理由・符号・費用）は変えない——記録の失敗はログに 1 行だけ残す。
+  try {
+    await writePlanRecords(deps, request, planId, result, transcript);
+  } catch {
+    deps.log?.("Plan の記録を書けませんでした");
   }
 
   if (result.kind !== "confirmed") {

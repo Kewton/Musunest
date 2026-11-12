@@ -65,6 +65,8 @@ export * from "./record.js";
 export * from "./bundle.js";
 export * from "./run.js";
 export * from "./cli.js";
+// Plan の往復の記録の組み立て（CLI と studio で記録の形の持ち主を 1 つにする。Issue #885）
+export * from "./cli-plan.js";
 
 // ── v1.1α（v11a/。`07-architecture-v1.1a.md`・Issue #505〜#511）─────────────
 // 契約（名前の表・v1 の型への写し・id の結び付け・持ち越し・網羅の単位）
