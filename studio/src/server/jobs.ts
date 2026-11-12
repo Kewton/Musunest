@@ -138,6 +138,7 @@ export class Jobs {
       request,
       state: "received",
       stopReason: null,
+      stopReasonCodes: [],
       createdAt: now,
       updatedAt: now,
       answerDeadlineAt: null,
@@ -265,6 +266,7 @@ export class Jobs {
       if (!isActiveJobState(job.state)) continue;
       job.state = "stopped";
       job.stopReason = "cancel";
+      job.stopReasonCodes = [];
       job.answerDeadlineAt = null;
       job.question = null;
       job.confirmation = null;
@@ -329,7 +331,19 @@ export class Jobs {
       case "sent-back":
         job.state = "sent-back";
         job.stopReason = null;
+        job.stopReasonCodes = [];
         job.note = event.reason;
+        job.result = null;
+        this.clearWait(job);
+        this.closeLedger(job, event.spentUsd, false);
+        job.updatedAt = now;
+        this.persist(job);
+        return;
+      case "stopped":
+        job.state = "stopped";
+        job.stopReason = event.reason;
+        job.stopReasonCodes = event.codes;
+        job.note = event.note;
         job.result = null;
         this.clearWait(job);
         this.closeLedger(job, event.spentUsd, false);
@@ -339,6 +353,7 @@ export class Jobs {
       case "failed":
         job.state = "failed";
         job.stopReason = "factory-failure";
+        job.stopReasonCodes = [];
         job.note = event.reason;
         job.result = null;
         this.clearWait(job);
@@ -351,6 +366,7 @@ export class Jobs {
   private finish(job: JobRecord, result: NonNullable<JobRecord["result"]>, spentUsd: number): void {
     job.state = "result";
     job.stopReason = null;
+    job.stopReasonCodes = [];
     job.result = result;
     this.clearWait(job);
     this.closeLedger(job, spentUsd, false);
@@ -362,6 +378,7 @@ export class Jobs {
   private stopJob(job: JobRecord, reason: StopReason, cancelRunner: boolean): void {
     job.state = "stopped";
     job.stopReason = reason;
+    job.stopReasonCodes = [];
     this.clearWait(job);
     this.closeLedger(job, job.progress?.estimatedUsd ?? job.estimatedUsd, true);
     job.updatedAt = this.clock();
@@ -421,6 +438,7 @@ export class Jobs {
     if (TERMINAL_STATES.has(job.state)) return;
     job.state = "failed";
     job.stopReason = "factory-failure";
+    job.stopReasonCodes = [];
     job.note = error instanceof Error ? error.message : String(error);
     this.clearWait(job);
     this.closeLedger(job, job.progress?.estimatedUsd ?? job.estimatedUsd, true);

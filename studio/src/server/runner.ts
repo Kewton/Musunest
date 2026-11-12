@@ -74,12 +74,13 @@ export function isActiveJobState(state: JobState): state is ActiveJobState {
   return (ACTIVE_JOB_STATES as readonly string[]).includes(state);
 }
 
-/** 止めた理由の分類（Issue #866 の目的・1） */
+/** 止めた理由の分類（Issue #866 の目的・1・Issue #886 の目的・1） */
 export const STOP_REASONS = [
   "cancel", // 取り消し
   "answer-timeout", // 答えの待ちの上限
   "timeout", // 時間切れ
   "budget", // 費用の上限
+  "cannot-confirm", // 要件を固めきれなかった（工場の失敗ではない）
   "factory-failure", // 工場の失敗
 ] as const;
 export type StopReason = (typeof STOP_REASONS)[number];
@@ -90,6 +91,7 @@ export const STOP_REASON_LABELS = {
   "answer-timeout": "答えの待ちの上限",
   timeout: "時間切れ",
   budget: "費用の上限",
+  "cannot-confirm": "要件を固めきれませんでした",
   "factory-failure": "工場の失敗",
 } as const satisfies Record<StopReason, string>;
 
@@ -190,6 +192,11 @@ export interface JobView {
   readonly stateLabel: string;
   readonly stopReason: StopReason | null;
   readonly stopReasonLabel: string | null;
+  /**
+   * `cannot-confirm` のときの、理由の符号から決めた分類（利用者の言葉の短い 1 文）。
+   * 符号そのものは載せない（符号・事項 ID・要件 ID を画面へ出さない）。他の理由では null。
+   */
+  readonly stopReasonCategory?: string | null;
   readonly question: ApiQuestionBundle | null;
   readonly confirmation: ApiConfirmation | null;
   readonly progress: ApiProgress | null;
@@ -299,6 +306,17 @@ export type RunnerEvent =
   | { readonly kind: "progress"; readonly progress: RunnerProgress }
   | { readonly kind: "finished"; readonly result: RunnerResult; readonly spentUsd: number }
   | { readonly kind: "sent-back"; readonly reason: string; readonly spentUsd: number }
+  | {
+      /**
+       * 走りは止まったが、工場の失敗ではない（費用の上限・時間切れ・要件を固めきれなかった）。
+       * `codes` は理由の符号の並びで、ジョブの記録にだけ残す（画面へは出さない）。
+       */
+      readonly kind: "stopped";
+      readonly reason: StopReason;
+      readonly note: string | null;
+      readonly codes: readonly string[];
+      readonly spentUsd: number;
+    }
   | { readonly kind: "failed"; readonly reason: string; readonly spentUsd: number };
 
 /** 通知の受け口 */

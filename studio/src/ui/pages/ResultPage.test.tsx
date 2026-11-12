@@ -136,6 +136,25 @@ describe("ResultPage（none・差し戻し・時間切れ）", () => {
     expect(screen.getByText("時間切れ")).toBeTruthy();
     expect(screen.getByRole("button", { name: "依頼を直してやり直す" })).toBeTruthy();
   });
+
+  it("要件を固めきれなかった走りは、分類と直し方を出し、「工場の失敗」を出さない", () => {
+    const cannotConfirm: JobView = {
+      ...baseJob,
+      state: "stopped",
+      stateLabel: "止めた",
+      stopReason: "cannot-confirm",
+      stopReasonLabel: "要件を固めきれませんでした",
+      stopReasonCategory: "質問の回数の中で決めきれないことが残りました",
+      result: null,
+    };
+    renderResult({ job: cannotConfirm });
+
+    expect(screen.getByText("要件を固めきれませんでした")).toBeTruthy();
+    expect(screen.getByText(/質問の回数の中で決めきれないことが残りました/)).toBeTruthy();
+    expect(screen.getByText(/決めてほしいことを依頼に書き足すと、固めやすくなります。/)).toBeTruthy();
+    expect(screen.queryByText("工場の失敗")).toBeNull();
+    expect(screen.getByRole("button", { name: "依頼を直してやり直す" })).toBeTruthy();
+  });
 });
 
 describe("ResultPage の文言", () => {
