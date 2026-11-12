@@ -3166,8 +3166,10 @@ const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
   // Issue #875 で取り直した（検査の式の行の文を文書の式の文法に委ねて ids の全体・上流の指紋が変わり、checkpoint の版の末尾に
   // 段へ渡した文書の中身の指紋 `documents` を足したため。旧の値は `V12_STAGE_C1_RETRY_DIGESTS_BEFORE_875` に残し、checkpoint の
   // `ledger`・`ledger_upstream` を #875 の前の値に戻して `documents` を外せば一致することを試験で確かめる）
-  "8f62c2c2144ee3040d8cff7a6e479ba1d42284141ec6b9584dd54e76ba484afd",
-  "dae0c86b91176eaffdec7f33d9d0e8b7a6da849723ccdf948bb5f67bf11239db",
+  // Issue #902 で取り直した（検査の式の行の規則の 2 セルだけを #875 の前の文に戻して since に履歴を足したので、ids の全体の
+  // 指紋が変わり、t1-t2 の checkpoint の版と、それを入力の出力ダイジェストに持つ記録が変わるため。#875 へ戻す照合は今までどおり）
+  "acefc5387ba2cafe19e9b4961a63f4a3d3e2c3909c59c2e74efada7dd7046b40",
+  "39cb8da2b27efe88b2fa7a2aeb47ca47ccf94339bf940476ef6e36b70d390ea7",
 ];
 
 /** Issue #875 の前（417e14f だけの base）の同じ走りの記録と t1-t2 の checkpoint の SHA-256（旧の値） */

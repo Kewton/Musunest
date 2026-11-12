@@ -902,9 +902,9 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
   {
     id: "validation-expression",
     requires: "ids",
-    // 受理の条件は文書の式の文法に委ねる（Issue #875。文法の言い換え「1 つの比較」は文書が and・or・not を許したあと追従しなかった。
-    // 旧の文は試験の定数に残す）
-    since: "Issue #800（受理の条件を文書の式の文法に委ねたのは 2026-11-11 の #875。台帳の文が文書の旧い文法〔式＝比較 1 つ〕を言い換えて写し、文書が式の結合を許したあと追従しなかったため）",
+    // 規則の 2 セル（rules.t1・rules.t1Acceptance）だけを #875 の前の文に戻す（Issue #902。2026-11-12 の計測で P2 の成績が
+    // 下がったため。`requirementRule`・`why`・上位の受理条件は #875 の文のまま。文法に委ねた #875 の規則の文は試験の定数に残す）
+    since: "Issue #800（受理の条件を文書の式の文法に委ねたのは 2026-11-11 の #875。台帳の文が文書の旧い文法〔式＝比較 1 つ〕を言い換えて写し、文書が式の結合を許したあと追従しなかったため。2026-11-12 の #902 で規則の 2 セル〔rules.t1・rules.t1Acceptance〕だけを #875 の前の文に戻した。requirementRule・why・上位の受理条件〔t1Acceptance〕は #875 の文のまま）",
     why: "入力の値を縛る決まりを、対象の項目ごとの検査（validate）の試験で確かめる。決まりの無い要件に検査の試験を作らせないため、同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）だけを受理し、対象を targets の項目に限る（方法論 03 の H2・H1。08 §5・§8.2）",
     state: "active",
     inherited: false,
@@ -960,9 +960,9 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
     outer: OUTER_NOT_SCORED,
     unsupportedMessage: null,
     rules: {
-      t1: "要件の決まりが同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）だけなら kind を validation-expression にし、targets にその決まりが縛る項目（同じ entity の項目の行の ID）を 1 つ以上書く。entity と対象の項目はコードが所属に足す。value は null にする。式で書けない決まり・項目を縛らない決まり・複数の entity にまたがる項目を含む要件には validation-expression を使わない。",
+      t1: "要件の決まりが「入力の値を 1 つの比較で縛る」だけなら kind を validation-expression にし、targets にその決まりが縛る項目（同じ entity の項目の行の ID）を 1 つ以上書く。entity と対象の項目はコードが所属に足す。value は null にする。式で書けない決まり・項目を縛らない決まり・複数の entity にまたがる項目を含む要件には validation-expression を使わない。",
       t1Acceptance:
-        "確かめ方が validation-expression の要件は、要件の決まりが同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）だけで、targets がその決まりが縛る項目と過不足なく合うときだけ受理する。式で書けない決まりを含む要件や targets の合わない要件は受理せず、weak-verification で拒否する。",
+        "確かめ方が validation-expression の要件は、要件の決まりが入力の値を 1 つの比較で縛る決まりだけで、targets がその決まりが縛る項目と過不足なく合うときだけ受理する。式で書けない決まりを含む要件や targets の合わない要件は受理せず、weak-verification で拒否する。",
       t2: "検査の式（validation-expression）の試験は、確かめ方が validation-expression の要件にだけ、対象の項目ごとに正常・異常・境界の 3 種類を作る。対象（target）はその要件の targets の項目（field）の行、operation は validate、observes は validation-expression、期待（expected）は今の評価器のとおり（validate の異常は誤りコード、正常は値）にする。確かめ方がこの種類でない要件の validate の試験に validation-expression を書かない。",
       // 旗 ids の T2 の文（Issue #832）：旧の文は「確かめ方が validation-expression の要件の項目・entity の行の場合だけ
       // validation-expression と書き」と肯定で書かせ、場合の schema の observes の enum（value・empty-aggregate・null）と

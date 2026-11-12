@@ -43,3 +43,36 @@ export function withOldValidationExpressionTexts(rows: readonly PropertyRow[] = 
         },
   );
 }
+
+/**
+ * Issue #875 の検査の式の行の文（この Issue #902 で `rules.t1`・`rules.t1Acceptance` だけを #875 の前の文に戻した。
+ * 戻す前の文は消さずに試験の定数に残す（#816・#832 と同じ作法）。製品のコードはこの値を読まない
+ */
+export const NEW_875_VALIDATION_EXPRESSION_TEXTS = {
+  since:
+    "Issue #800（受理の条件を文書の式の文法に委ねたのは 2026-11-11 の #875。台帳の文が文書の旧い文法〔式＝比較 1 つ〕を言い換えて写し、文書が式の結合を許したあと追従しなかったため）",
+  rulesT1:
+    "要件の決まりが同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）だけなら kind を validation-expression にし、targets にその決まりが縛る項目（同じ entity の項目の行の ID）を 1 つ以上書く。entity と対象の項目はコードが所属に足す。value は null にする。式で書けない決まり・項目を縛らない決まり・複数の entity にまたがる項目を含む要件には validation-expression を使わない。",
+  rulesT1Acceptance:
+    "確かめ方が validation-expression の要件は、要件の決まりが同じ entity の項目だけを参照する 1 つの検査の式で書ける決まり（書き方は文書の式の文法のとおり）だけで、targets がその決まりが縛る項目と過不足なく合うときだけ受理する。式で書けない決まりを含む要件や targets の合わない要件は受理せず、weak-verification で拒否する。",
+} as const;
+
+/** 検査の式の行の `since` だけを Issue #875 の文に戻した台帳（ほかの欄は今のまま） */
+export function withSinceOnly875(rows: readonly PropertyRow[] = PROPERTY_LEDGER): readonly PropertyRow[] {
+  const since = NEW_875_VALIDATION_EXPRESSION_TEXTS.since;
+  return rows.map((row) => (row.id === "validation-expression" ? { ...row, since } : row));
+}
+
+/** 検査の式の行を Issue #875 の文に戻した台帳（`since` と規則の 2 セル。`why`・`requirementRule`・上位の受理条件は今のまま） */
+export function withNew875ValidationExpressionTexts(rows: readonly PropertyRow[] = PROPERTY_LEDGER): readonly PropertyRow[] {
+  const new875 = NEW_875_VALIDATION_EXPRESSION_TEXTS;
+  return rows.map((row) =>
+    row.id !== "validation-expression"
+      ? row
+      : {
+          ...row,
+          since: new875.since,
+          rules: { ...row.rules, t1: new875.rulesT1, t1Acceptance: new875.rulesT1Acceptance },
+        },
+  );
+}
