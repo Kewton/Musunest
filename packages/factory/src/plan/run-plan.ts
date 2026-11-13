@@ -758,8 +758,10 @@ export const PLAN_REMAINING_REQUIREMENT_KINDS = [
 export type PlanRemainingRequirementKind = (typeof PLAN_REMAINING_REQUIREMENT_KINDS)[number];
 
 /**
- * 終わりに残った（開いている）事項 1 つぶんの記録（**値は入れない**。Issue #488）。由来・開いた往復の版・
- * 重大か・対象の要件の種類・目録の観点 ID（目録の行だけ）を持つ。事項 ID・要件 ID・文・答えは入れない。
+ * 終わりに残った（開いている）事項 1 つぶんの記録（Issue #488・#930）。由来・開いた往復の版・重大か・
+ * 対象の要件の種類・目録の観点 ID（目録の行だけ）に、事項 ID と対象の要件 ID を足す（#930）。**文は入れない**。
+ * 要件 ID はコードが持つ対応（目録・洗い出し・申告の点検）から引き、引けなければ `null` である——ID の字面や
+ * 文から補わない。
  */
 export interface PlanRemainingOpenIssue {
   readonly origin: PlanOpenIssueOrigin;
@@ -769,6 +771,10 @@ export interface PlanRemainingOpenIssue {
   readonly requirementKind: PlanRemainingRequirementKind;
   /** 目録の行なら観点 ID（目録の一覧から引いた値だけ。それ以外は `null`） */
   readonly facetId: string | null;
+  /** 事項の ID（Issue #930） */
+  readonly issueId: string;
+  /** 対象の要件の ID（コードの対応から引く。引けなければ `null`。Issue #930） */
+  readonly requirementId: string | null;
 }
 
 /** 3 つの結果に共通する記録（使った額・残りの額・段ごとの記録・判定の呼び出し） */
@@ -839,9 +845,16 @@ export interface PlanResultBase {
   readonly issueFlow: readonly PlanIssueFlowRecord[];
   /**
    * 終わりに残った（開いている）事項 1 つずつの記録（由来・開いた往復の版・重大か・対象の要件の種類・
-   * 目録の観点 ID。Issue #488）。**値は入れない**——事項 ID・要件 ID・文・答えは含まない。
+   * 目録の観点 ID・事項 ID・対象の要件 ID。Issue #488・#930）。**文は入れない**——事項の文・答えの文・
+   * 要件の文は含まない。
    */
   readonly remainingOpenIssues: readonly PlanRemainingOpenIssue[];
+  /**
+   * 受理した答え 1 つずつの、閉じた事項の記録（Issue #930）。答えの ID・問いの ID・答えた往復の版・
+   * 答え由来の要件 ID と、主の事項・`alsoCloses` のうち閉じた行（事項 ID・閉じ方・対象の要件 ID・観点 ID）
+   * を持つ。**文は入れない**。閉じる対象が見つからなかった ID は `closed` に入れない。
+   */
+  readonly answerClosures: readonly PlanAnswerClosure[];
   /**
    * P6 の文ごとの覆いの記録（文番号と覆いの分類。Issue #488）。**P6 まで届かなければ空の並び**である。
    * 値（原文の文・引用・ID）は入れない。
@@ -893,6 +906,37 @@ export interface PlanAnswerIssueContext {
   readonly facetId: string | null;
   /** その事項が指す要件（ID と文）。その時点の一覧から引く（無ければ `null`） */
   readonly requirement: { readonly id: string; readonly text: string } | null;
+}
+
+/**
+ * 答えが事項を閉じたときの閉じ方（2 つ。Issue #930）。`main` は問いの主の事項、`also` は「一緒に閉じる」事項。
+ */
+export const PLAN_ANSWER_CLOSURE_HOWS = ["main", "also"] as const;
+export type PlanAnswerClosureHow = (typeof PLAN_ANSWER_CLOSURE_HOWS)[number];
+
+/**
+ * 答えが閉じた事項 1 つぶんの記録（**文は入れない**。Issue #930）。事項 ID・閉じ方・対象の要件 ID・目録の
+ * 観点 ID（目録の行だけ）を持つ。要件 ID はコードが持つ対応から引き、引けなければ `null` である。
+ */
+export interface PlanAnswerClosureIssue {
+  readonly issueId: string;
+  readonly how: PlanAnswerClosureHow;
+  readonly requirementId: string | null;
+  readonly facetId: string | null;
+}
+
+/**
+ * 受理した答え 1 つぶんの、閉じた事項の記録（**文は入れない**。Issue #930）。答えの ID・問いの ID・答えた
+ * 往復の版・答え由来の要件 ID（`R:<答えの ID>` が一覧にあればその ID。無ければ `null`）と、閉じた事項の並び
+ * （主の事項と `alsoCloses` のうち、**閉じる対象が見つかった行だけ**）を持つ。
+ */
+export interface PlanAnswerClosure {
+  readonly answerId: string;
+  readonly questionId: string;
+  /** 答えた往復の版 */
+  readonly revision: number;
+  readonly answerRequirementId: string | null;
+  readonly closed: readonly PlanAnswerClosureIssue[];
 }
 
 /** 問い 1 つぶんの照合の文脈（Issue #444）。`main` は主の事項、`alsoCloses` は一緒に閉じる事項 */
@@ -1588,6 +1632,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
 
   // ── 往復ごとの事項の流れの記録（件数と有限の分類だけ。Issue #488）────────────────
   const issueFlowRows: MutableIssueFlowRow[] = [];
+  // 受理した答えごとの、閉じた事項の記録（ID だけ。文は入れない。Issue #930）
+  const answerClosures: PlanAnswerClosure[] = [];
   let currentIssueFlow: MutableIssueFlowRow | null = null;
   /** いま開いている事項の件数（重大・重大でない別） */
   const openIssueCounts = (): PlanIssueFlowOpenCounts => {
@@ -1627,7 +1673,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   };
   /**
    * 終わりに残った（開いている）事項 1 つずつの記録（値は入れない。Issue #488）。由来・開いた往復の版・
-   * 重大か・対象の要件の種類・目録の観点 ID（目録の行だけ）を持つ。
+   * 重大か・対象の要件の種類・目録の観点 ID（目録の行だけ）と、事項 ID・対象の要件 ID（Issue #930）を持つ。
    */
   const buildRemainingOpenIssues = (): readonly PlanRemainingOpenIssue[] =>
     openIssues.flatMap((issue, index) => {
@@ -1641,6 +1687,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           critical: issue.critical,
           requirementKind: classifyRemainingRequirementKind(requirementId),
           facetId: facet?.facetId ?? null,
+          issueId: issue.id,
+          requirementId: requirementId ?? null,
         },
       ];
     });
@@ -2001,6 +2049,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       surfaceTargetAttempts: surfaceTargetAttempts.slice(),
       issueFlow: buildIssueFlow(),
       remainingOpenIssues: buildRemainingOpenIssues(),
+      answerClosures: answerClosures.slice(),
       confirmCoverage: confirmCoverage.slice(),
     };
   };
@@ -2401,22 +2450,50 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       return target.index;
     };
 
-    const resolveIssue = (issueId: string, answerId: string, kind: "main" | "also-closes"): void => {
+    const resolveIssue = (
+      issueId: string,
+      answerId: string,
+      kind: "main" | "also-closes",
+    ): PlanAnswerClosureIssue | undefined => {
       const index = resolveTargetIndex(issueId);
       const issue = index === undefined ? undefined : openIssues[index];
-      if (index === undefined || issue === undefined) return;
+      if (index === undefined || issue === undefined) return undefined;
       openIssues[index] = { ...issue, status: "resolved", resolution: { answer_id: answerId } };
       // 事項の流れに、閉じ方の別（主の事項／一緒に閉じる事項）で数える（Issue #488）
       if (currentIssueFlow !== null) {
         if (kind === "main") currentIssueFlow.closedAnswerMain += 1;
         else currentIssueFlow.closedAlsoCloses += 1;
       }
+      // 閉じた行の ID を、コードが持つ対応から写す（文は取らない。Issue #930）
+      const facet = catalogIssueFacets.get(issueId);
+      return {
+        issueId,
+        how: kind === "main" ? "main" : "also",
+        requirementId: facet?.requirementId ?? surfaceIssueRequirements.get(issueId) ?? null,
+        facetId: facet?.facetId ?? null,
+      };
     };
 
     /** 問いの主の事項と、一緒に閉じる事項（`alsoCloses`）を、同じ答えの ID で閉じる（04 §3 P4） */
     const resolveQuestionIssues = (question: PlanQuestion, answerId: string): void => {
-      resolveIssue(question.openIssueId, answerId, "main");
-      for (const id of alsoClosesOf(question)) resolveIssue(id, answerId, "also-closes");
+      const closed: PlanAnswerClosureIssue[] = [];
+      const main = resolveIssue(question.openIssueId, answerId, "main");
+      if (main !== undefined) closed.push(main);
+      for (const id of alsoClosesOf(question)) {
+        const entry = resolveIssue(id, answerId, "also-closes");
+        if (entry !== undefined) closed.push(entry);
+      }
+      // 受理した答えごとに、閉じた行（対象が見つかった行だけ）を残す（Issue #930）
+      const answerRequirementId = `R:${answerId}`;
+      answerClosures.push({
+        answerId,
+        questionId: question.id,
+        revision,
+        answerRequirementId: requirements.some((requirement) => requirement.id === answerRequirementId)
+          ? answerRequirementId
+          : null,
+        closed,
+      });
     };
 
     /**

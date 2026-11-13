@@ -156,7 +156,26 @@ const recordFields = (): Record<string, unknown> => ({
     },
   ],
   remainingOpenIssues: [
-    { origin: "surface", revision: 2, critical: true, requirementKind: "behavior", facetId: null },
+    {
+      origin: "surface",
+      revision: 2,
+      critical: true,
+      requirementKind: "behavior",
+      facetId: null,
+      issueId: "OI-extra",
+      requirementId: "R-1",
+    },
+  ],
+  answerClosures: [
+    {
+      answerId: "A:Q2-1",
+      questionId: "Q2-1",
+      revision: 2,
+      answerRequirementId: "R:A:Q2-1",
+      closed: [
+        { issueId: "OI:catalog:R-1:aggregation", how: "main", requirementId: "R-1", facetId: "aggregation" },
+      ],
+    },
   ],
   confirmCoverage: [],
 });
@@ -453,7 +472,26 @@ describe("工場の子", () => {
       { revision: 2, start_open: 1, closed: { total: 1, answer_main: 1 }, end: "cannot-confirm" },
     ]);
     expect(record["remaining_open_issues"]).toEqual([
-      { origin: "surface", revision: 2, critical: true, requirement_kind: "behavior", facet_id: null },
+      {
+        origin: "surface",
+        revision: 2,
+        critical: true,
+        requirement_kind: "behavior",
+        facet_id: null,
+        issue_id: "OI-extra",
+        requirement_id: "R-1",
+      },
+    ]);
+    expect(record["answer_closures"]).toEqual([
+      {
+        answer_id: "A:Q2-1",
+        question_id: "Q2-1",
+        revision: 2,
+        answer_requirement_id: "R:A:Q2-1",
+        closed: [
+          { issue_id: "OI:catalog:R-1:aggregation", how: "main", requirement_id: "R-1", facet_id: "aggregation" },
+        ],
+      },
     ]);
     expect(record["open_issue_conflicts"]).toMatchObject({
       ids: 1,
