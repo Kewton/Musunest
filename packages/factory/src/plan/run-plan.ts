@@ -396,8 +396,16 @@ export interface PlanFailureProblem {
   readonly code: string;
 }
 
-/** P1/P2 のどの呼び出しで止まったか（有限の値。Issue #397） */
-export const PLAN_OPERATIONS = ["requirements", "reverse-check", "requirements-redo", "reverse-check-redo"] as const;
+/** P1/P2 のどの呼び出しで止まったか（有限の値。Issue #397・#917） */
+export const PLAN_OPERATIONS = [
+  "requirements",
+  "reverse-check",
+  "requirements-redo",
+  "reverse-check-redo",
+  // 引用の修復と、その後の照らし直し（Issue #917。Plan の経路だけ）
+  "quote-repair",
+  "reverse-check-repair",
+] as const;
 export type PlanOperation = (typeof PLAN_OPERATIONS)[number];
 
 /** 早く止まった帰属（どの段の・どの種類の失敗か。P1/P2 ではどの呼び出しかも持つ） */
@@ -2005,6 +2013,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         source: input.source,
         documents: input.documents,
         gateway,
+        // 落ちが来歴だけのときは、全体の作り直しではなく引用の修復を使う（Issue #917。**Plan の経路だけ**の
+        // 明示の選択である。既定の Build の経路は今までどおり全体の作り直し）
+        quoteRepair: true,
       });
       // 止まったときも、止まるまでに終えた往復の分を結果へ残す（Issue #430）
       requirementsDiagnosis = outcome.ok ? outcome.value.diagnosis : outcome.diagnosis;

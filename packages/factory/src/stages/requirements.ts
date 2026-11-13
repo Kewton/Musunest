@@ -14,10 +14,12 @@ import {
   callStructuredChecked,
   checkStringArray,
   isRecord,
+  ruleTexts,
   serializeJson,
   type Problem,
   type PromptData,
   type PromptDocument,
+  type RuleDefinition,
   type ShapeCheck,
   type StageOutcome,
 } from "./prompt.js";
@@ -172,6 +174,20 @@ function decidePosition(source: string, quote: string, position: SourceRange): D
     return { position: { start, end: start + quote.length }, corrected: true };
   }
   return undefined;
+}
+
+/**
+ * 引用から位置を決める（Issue #382。P1 の正規化と、引用の修復の当てた後の正規化で共有する）。
+ * **LLM の位置をそのまま使うのは、その範囲の原文が引用と一致するときだけ**である。一致せず、引用が原文に
+ * **1 か所だけ**あれば、その位置にする（直した）。一致せず、引用が空か **2 か所以上**（重なる出現を含む）の
+ * ときは、位置を推測せず `undefined` を返す（呼ぶ側が落ちとして扱う）。
+ */
+export function decideQuotePosition(
+  source: string,
+  quote: string,
+  position: SourceRange,
+): SourceRange | undefined {
+  return decidePosition(source, quote, position)?.position;
 }
 
 /**
@@ -332,6 +348,191 @@ function buildData(input: RequirementsInput): readonly PromptData[] {
     data.push({ name: "逆照合で見つかった落ち", text: serializeJson(input.redo.misses) });
   }
   return data;
+}
+
+// ── 引用の修復（Issue #917）──────────────────────────────────────────────
+//
+// 逆照合（①'）の落ちが**来歴だけ**（引用の不在・位置の不一致だけ）のとき、一覧の全体を作り直す代わりに、
+// 落ちを指された候補の**引用と位置だけ**を出し直させる。**Plan の経路が明示の選択で有効にしたときだけ**
+// 使う（既定の Build の経路は今までどおり全体の作り直し）。要件の本文・id・ほかの候補・枠・decisions・
+// unresolved は出させず、コードが前の一覧へ当てる——ほかの候補は前の一覧のまま保たれる。
+
+/** 引用の修復の JSON Schema の名前（新しい段は作らず、`requirements` の出力の上限を使う） */
+export const REQUIREMENT_QUOTE_REPAIR_SCHEMA_NAME = "requirement-quote-repair";
+
+/**
+ * 引用の修復に足す規則（Issue #917）。**指された候補の引用と位置だけ**を返させ、本文を変えさせない。
+ * 規則の ID・理由・履歴は PR の本文に書く（方法論 04 §3）。
+ */
+export const REQUIREMENT_QUOTE_REPAIR_RULE_DEFINITIONS: readonly RuleDefinition[] = [
+  {
+    id: "R-rq-01",
+    text: "あなたは、要件の一覧のうち、指された候補の引用（quote）と位置（position）だけを直す役である。",
+    why: "来歴（引用・位置）の落ちを直すのに、落ちていない要件の本文と引用まで出し直させると、作り直しが意味を壊す（Issue #917）",
+    since: "Issue #917",
+  },
+  {
+    id: "R-rq-02",
+    text: "要件の本文（text）と識別子（id）は変えない。候補を増やさない・減らさない。指された番号の候補だけを返す。",
+    why: "修復の範囲を落ちより広げない。指されていない候補はコードが前の一覧のまま保つ（Issue #917）",
+    since: "Issue #917",
+  },
+  {
+    id: "R-rq-03",
+    text: "引用（quote）は原文からそのまま写し、原文の中で 1 か所に決まる引用にする（前後を含めて長くする）。位置（position）はその引用の文字の範囲にする。",
+    why: "引用の実在と位置は P2 のコードが検査する。1 か所に決まらない引用は位置を取り違えるので、前後を含めさせる（Issue #917）",
+    since: "Issue #917",
+  },
+];
+
+/** 引用の修復の規則（`text` の並び。規則と定義が食い違わないよう定義から組む） */
+export const REQUIREMENT_QUOTE_REPAIR_RULES: readonly string[] = ruleTexts(
+  REQUIREMENT_QUOTE_REPAIR_RULE_DEFINITIONS,
+);
+
+/**
+ * 引用の修復の JSON Schema（Issue #917）。**番号ごとの引用と位置だけ**を返させ、要件の本文・id・ほかの
+ * 候補・枠・decisions・unresolved を出させない。番号は一覧の位置（0 始まりの添字）である。
+ */
+export const REQUIREMENT_QUOTE_REPAIR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["repairs"],
+  properties: {
+    repairs: {
+      type: "array",
+      description: "指された候補の番号ごとの、引用と位置",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["index", "quote", "position"],
+        properties: {
+          index: { type: "integer", minimum: 0, description: "一覧の候補の番号（0 始まりの添字）" },
+          quote: { type: "string", description: "原文からそのまま写した引用" },
+          position: {
+            type: "object",
+            additionalProperties: false,
+            required: ["start", "end"],
+            properties: {
+              start: { type: "integer", minimum: 0 },
+              end: { type: "integer", minimum: 0 },
+            },
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+/**
+ * 引用の修復の 1 件（番号・引用・位置。Issue #917）。番号は**一覧の位置（添字）**である——一覧の候補は
+ * ID が重複しうるので、ID では当て先が決まらない。
+ */
+export interface QuoteRepair {
+  readonly index: number;
+  readonly quote: string;
+  readonly position: SourceRange;
+}
+
+/** 引用の修復が受け取るもの（原文・文書・前の一覧・対象の番号とその落ちだけ。Issue #917） */
+export interface QuoteRepairInput {
+  readonly source: string;
+  readonly documents: readonly PromptDocument[];
+  readonly gateway: CallGateway;
+  readonly previous: RequirementList;
+  /** 修復の対象（一覧の添字。重複しない。呼ぶ側が並べ替えない） */
+  readonly targets: readonly number[];
+  /** 対象の候補の落ち（対象の番号のものだけ） */
+  readonly misses: readonly ReverseCheckMiss[];
+}
+
+/**
+ * 引用の修復の応答の形を確かめる（Issue #917）。`targets` を渡すと、**対象外の番号を含む・番号が重複する・
+ * 対象の番号が欠ける**を形の誤りにする（今の形のやり直し 1 回の口を使う）。問題の `field` は位置、`message`
+ * は固定文で、**引用の値は埋めない**。
+ */
+export function checkQuoteRepairOutput(
+  output: unknown,
+  targets: readonly number[],
+): ShapeCheck<{ readonly repairs: readonly QuoteRepair[] }> {
+  if (!isRecord(output)) {
+    return { ok: false, problems: [{ field: "", code: "shape", message: "応答は写像（object）であること" }] };
+  }
+  const raw = output["repairs"];
+  if (!Array.isArray(raw)) {
+    return {
+      ok: false,
+      problems: [{ field: "repairs", code: "shape", message: "修復の並び（array）であること" }],
+    };
+  }
+  const problems: Problem[] = [];
+  const repairs: QuoteRepair[] = [];
+  const wanted = new Set(targets);
+  const seen = new Set<number>();
+  raw.forEach((item, index) => {
+    const field = `repairs[${index}]`;
+    if (!isRecord(item)) {
+      problems.push({ field, code: "shape", message: "修復は写像（object）であること" });
+      return;
+    }
+    const repairIndex = item["index"];
+    const quote = item["quote"];
+    if (!Number.isInteger(repairIndex) || !wanted.has(repairIndex as number)) {
+      // 値は入れない——対象外の番号そのものは、応答の中の位置（`field` の添字）で示す
+      problems.push({ field: `${field}.index`, code: "shape", message: "対象の番号であること" });
+      return;
+    }
+    if (seen.has(repairIndex as number)) {
+      problems.push({ field: `${field}.index`, code: "shape", message: "番号が重複している" });
+      return;
+    }
+    seen.add(repairIndex as number);
+    if (typeof quote !== "string") {
+      problems.push({ field: `${field}.quote`, code: "shape", message: "引用は文字列であること（原文からそのまま写す）" });
+      return;
+    }
+    const position = checkPosition(item["position"], `${field}.position`, problems);
+    if (position === undefined) return;
+    repairs.push({ index: repairIndex as number, quote, position });
+  });
+  for (const target of targets) {
+    if (!seen.has(target)) {
+      problems.push({ field: "repairs", code: "shape", message: "対象の番号が欠けている" });
+    }
+  }
+  if (problems.length > 0) return { ok: false, problems };
+  return { ok: true, value: { repairs } };
+}
+
+/** 引用の修復のデータ（原文・前の一覧・対象の番号とその落ちだけ。Issue #917） */
+function buildQuoteRepairData(input: QuoteRepairInput): readonly PromptData[] {
+  return [
+    { name: "原文", text: input.source },
+    { name: "前回の要件の一覧", text: serializeJson(input.previous) },
+    { name: "直す対象の番号", text: serializeJson(input.targets) },
+    { name: "直す対象の落ち", text: serializeJson(input.misses) },
+  ];
+}
+
+/**
+ * 引用の修復を 1 回呼ぶ（Issue #917）。**Plan の経路が明示の選択で有効にしたときだけ**呼ぶ。P1 と同じ出力の
+ * 上限（`requirements` の段）を使い、新しい段名を作らない。形が合わない応答は 1 回だけやり直す。
+ */
+export async function runQuoteRepair(
+  input: QuoteRepairInput,
+): Promise<StageOutcome<{ readonly repairs: readonly QuoteRepair[] }>> {
+  const request = buildStructuredRequest({
+    rules: REQUIREMENT_QUOTE_REPAIR_RULES,
+    documents: input.documents,
+    data: buildQuoteRepairData(input),
+    schemaName: REQUIREMENT_QUOTE_REPAIR_SCHEMA_NAME,
+    schema: REQUIREMENT_QUOTE_REPAIR_SCHEMA,
+    maxOutputTokens: input.gateway.maxOutputTokens("requirements"),
+  });
+  return callStructuredChecked(input.gateway, {
+    request,
+    check: (output) => checkQuoteRepairOutput(output, input.targets),
+  });
 }
 
 /**
