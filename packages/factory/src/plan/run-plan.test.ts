@@ -1354,7 +1354,8 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
     const recording = createRecordingClient([
       structured(paraphrase),
       structured(REVERSE_CHECK_OUTPUT),
-      structured(paraphrase),
+      // 来歴だけの落ちなので Plan の経路は引用の修復を通る（Issue #917）。同じ引用を返して直さない
+      structured({ repairs: [{ index: 0, quote: "タスクを登録する", position: { start: 0, end: 8 } }] }),
       structured(REVERSE_CHECK_OUTPUT),
     ]);
 
@@ -1548,7 +1549,8 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
     const recording = createRecordingClient([
       structured(paraphrase),
       structured(REVERSE_CHECK_OUTPUT),
-      structured(paraphrase),
+      // 来歴だけの落ちなので Plan の経路は引用の修復を通る（Issue #917）。同じ引用を返して直さない
+      structured({ repairs: [{ index: 0, quote: `${quoteMark}する`, position: { start: 0, end: quoteMark.length + 2 } }] }),
       structured(REVERSE_CHECK_OUTPUT),
     ]);
 
@@ -2578,6 +2580,7 @@ describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430
             { sentence: 2, requirements: [2], framing: false },
           ],
           missEntries: [],
+          fix: "initial",
         },
       ],
       redone: false,
@@ -2598,16 +2601,19 @@ describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430
     const recording = createRecordingClient([
       structured(paraphrase),
       structured(REVERSE_CHECK_OUTPUT),
-      structured(paraphrase),
+      // 来歴だけの落ちなので Plan の経路は引用の修復を通る（Issue #917）。直らない引用を返す
+      structured({ repairs: [{ index: 0, quote: "タスクを登録する", position: { start: 0, end: 8 } }] }),
       structured(REVERSE_CHECK_OUTPUT),
     ]);
 
     const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE));
 
     expect(result.kind).toBe("cannot-confirm");
-    // 往復 2（初回 + やり直し）。やり直し後の往復 2 の内訳と unmet の内訳が一致する
-    expect(result.requirementsDiagnosis.redone).toBe(true);
+    // 往復 2（初回 + 修復）。修復後の往復 2 の内訳と unmet の内訳が一致する（Issue #917 で全体の作り直しを
+    // 通らない——`redone` は false、`repaired` が真）
+    expect(result.requirementsDiagnosis.redone).toBe(false);
     expect(result.requirementsDiagnosis.rounds).toHaveLength(2);
+    expect(result.requirementsDiagnosis.rounds.map((round) => round.fix)).toEqual(["initial", "quote-repair"]);
     expect(result.requirementsDiagnosis.rounds[1]?.misses).toEqual(result.requirementsDiagnosis.unmet);
     expect(result.requirementsDiagnosis.unmet).toEqual({
       quoteNotFound: 1,
@@ -6885,16 +6891,17 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
     const recording = createRecordingClient([
       structured(paraphrase),
       structured(REVERSE_CHECK_OUTPUT),
-      structured(paraphrase),
+      // 来歴だけの落ちなので Plan の経路は引用の修復を通る（Issue #917）。直らない引用を返す
+      structured({ repairs: [{ index: 0, quote: "タスクを登録する", position: { start: 0, end: 8 } }] }),
       structured(REVERSE_CHECK_OUTPUT),
     ]);
 
     const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE));
 
     expect(result.kind).toBe("cannot-confirm");
-    // 往復の診断は、止まるまでの分（初回＋やり直しの 2）を持つ
+    // 往復の診断は、止まるまでの分（初回＋修復の 2）を持つ（Issue #917）
     expect(result.requirementsDiagnosis.rounds).toHaveLength(2);
-    expect(result.requirementsDiagnosis.redone).toBe(true);
+    expect(result.requirementsDiagnosis.redone).toBe(false);
     // P6 まで届かないので、P6 の欄は空の並び
     expect(result.confirmCoverage).toEqual([]);
   });
@@ -6973,7 +6980,13 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
     const recording = createRecordingClient([
       structured(paraphrase),
       structured(REVERSE_CHECK_OUTPUT),
-      structured(paraphrase),
+      // 来歴だけの落ちなので Plan の経路は引用の修復を通る（Issue #917）。直らない引用を返す
+      structured({
+        repairs: [
+          { index: 0, quote: "タスクを登録する", position: { start: 0, end: 8 } },
+          { index: 1, quote: "件数を数える", position: { start: 9, end: 16 } },
+        ],
+      }),
       structured(REVERSE_CHECK_OUTPUT),
     ]);
 
@@ -7071,3 +7084,125 @@ describe("申告の独立点検の材料（Issue #910）", () => {
     expect(Object.keys(firstRequirement ?? {})).toEqual(["id", "text"]);
   });
 });
+
+// ── Issue #917：来歴だけの落ちは引用の修復で直し、ほかの要件を保つ ─────────────────
+
+describe("Plan の経路の引用の修復（Issue #917）", () => {
+  /** 同じ句が 2 か所ある原文（位置の不一致の修復の題材） */
+  const REPAIR_SOURCE = "印を出す。印を出す。件数を合計する。";
+  /** 原文の開始位置から引用の範囲を作る */
+  const spanOf = (quote: string, from = 0): { readonly start: number; readonly end: number } => {
+    const start = REPAIR_SOURCE.indexOf(quote, from);
+    return { start, end: start + quote.length };
+  };
+
+  it("位置の不一致だけの初回の落ちでは、2 回目の呼び出しが引用の修復で、指されていない候補と枠・decisions・unresolved が前と同じ", async () => {
+    // R-1 の引用「印を出す。」は原文に 2 か所あり、位置が 1 か所に決まらない（コードの落ち）
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOf("件数を合計する。") },
+      ],
+      framing: [{ quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }],
+      decisions: ["記録の形は 1 行とした"],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+      // 2 回目の呼び出しは引用の修復（R-1 の引用を前後を含めて 1 か所に決まる形にする）
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      // 修復の後の P2（P3 より手前で止まる組なので、ここまでの記録で足りる）
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE, { source: REPAIR_SOURCE }),
+    );
+
+    // 2 回目の呼び出しは引用の修復で、要件の本文を出させる欄が無い
+    const repairRequest = recording.structured[2];
+    expect(repairRequest?.schemaName).toBe("requirement-quote-repair");
+    const schema = repairRequest?.schema as {
+      readonly properties: { readonly repairs: { readonly items: { readonly properties: Record<string, unknown> } } };
+    };
+    expect(Object.keys(schema.properties).sort()).toEqual(["repairs"]);
+    expect(Object.keys(schema.properties.repairs.items.properties).sort()).toEqual(["index", "position", "quote"]);
+    // 修復の要求のデータに、前の一覧・対象の番号・対象の落ちが載り、指されていない候補もそのまま渡る
+    expect(repairRequest?.input).toContain("前回の要件の一覧");
+    expect(repairRequest?.input).toContain("直す対象の番号");
+    expect(repairRequest?.input).toContain("件数を合計する。");
+    expect(repairRequest?.input).toContain("記録の形は 1 行とした");
+    // 往復の診断に、直し方（有限の値）が載り、引用・位置の値は載らない
+    expect(result.requirementsDiagnosis.rounds.map((round) => round.fix)).toEqual(["initial", "quote-repair"]);
+    const diagnosisText = JSON.stringify(result.requirementsDiagnosis);
+    expect(diagnosisText).not.toContain("印を出す");
+    // 全体の作り直しはしていない
+    expect(result.requirementsDiagnosis.redone).toBe(false);
+  });
+
+  it("修復の応答が対象外の番号を含む・番号が重複する・対象の番号が欠けるときは形の誤りとして扱い、確定しない", async () => {
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOf("件数を合計する。") },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const cases: readonly { readonly label: string; readonly repairs: ReadingOnlyRepair[] }[] = [
+      // 対象外の番号（1）を含む
+      { label: "out-of-target", repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }, { index: 1, quote: "件数を合計する。", position: spanOf("件数を合計する。") }] },
+      // 番号が重複する（0 が 2 つ）
+      { label: "duplicated", repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }, { index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] },
+      // 対象の番号（0）が欠ける
+      { label: "missing", repairs: [] },
+    ];
+    for (const one of cases) {
+      const recording = createRecordingClient([
+        structured(list),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured({ repairs: one.repairs }),
+        structured({ repairs: one.repairs }),
+      ]);
+      const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE, { source: REPAIR_SOURCE }));
+      expect(result.kind, one.label).toBe("stopped");
+      if (result.kind !== "stopped") continue;
+      expect(result.failure?.operation, one.label).toBe("quote-repair");
+      expect(result.failure?.kind, one.label).toBe("malformed");
+    }
+  });
+
+  it("修復を当てた一覧も、P2 の会話とコードの全体で照らし直す（門の省略が無い）", async () => {
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOf("件数を合計する。") },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      // 修復の後の P2 が、覆われていない部分を申告する（門を省いていれば、この落ちは出ない）
+      structured({ uncovered: [{ start: 0, end: 3 }] }),
+      structured(THREE_REQUIREMENTS),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE, { source: REPAIR_SOURCE }),
+    );
+    // 修復の後の P2 が動いた（2 回目の照らし直しが記録に載る）
+    expect(recording.structured[3]?.schemaName).toBe("reverse-check");
+    expect(result.requirementsDiagnosis.rounds.map((round) => round.fix)).toContain("quote-repair");
+  });
+});
+
+/** 修復の応答の形だけを持つ読み取り用の型（試験の表を組むため） */
+interface ReadingOnlyRepair {
+  readonly index: number;
+  readonly quote: string;
+  readonly position: { readonly start: number; readonly end: number };
+}

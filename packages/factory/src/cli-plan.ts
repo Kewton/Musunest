@@ -577,6 +577,11 @@ export interface PlanCliRoundDiagnosisRecord {
   readonly sentences: readonly PlanCliSentenceCoverageRecord[];
   /** 指摘 1 件ごとの記録（値は入れない） */
   readonly miss_entries: readonly PlanCliMissEntryRecord[];
+  /**
+   * この往復を照らした一覧を、どの直し方で作ったか（有限の値。Issue #917。`initial`・`whole-redo`・
+   * `quote-repair`）。**欄の追加だけ**なので、記録の schema の版は今のまま。
+   */
+  readonly fix: string;
 }
 
 /** 記録に入れる、P1/P2 の往復ごとの逆照合の診断（Issue #430）。 */
@@ -808,6 +813,7 @@ function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCl
         requirements: entry.requirements.slice(),
         framing_overlap: entry.framingOverlap,
       })),
+      fix: round.fix,
     })),
     redone: diagnosis.redone,
     unmet: toMissCountsRecord(diagnosis.unmet),

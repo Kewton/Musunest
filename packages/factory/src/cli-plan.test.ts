@@ -444,6 +444,8 @@ interface PlanCliRecordShape {
         readonly requirements: readonly number[];
         readonly framing_overlap: boolean;
       }[];
+      /** この往復を照らした一覧を、どの直し方で作ったか（有限の値。Issue #917） */
+      readonly fix: string;
     }[];
     readonly redone: boolean;
     readonly unmet: {
@@ -1522,6 +1524,7 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
     const recording = createRecordingClient([
       structured(list),
       structured(conversation),
+      // 引用の不在のあとに覆いの落ちも残るので、Plan の経路は全体の作り直しへ進む（Issue #917）
       structured(list),
       structured(conversation),
     ]);
@@ -1581,7 +1584,10 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
       ],
     };
     expect(record.requirements_diagnosis).toEqual({
-      rounds: [expectedRound, expectedRound],
+      rounds: [
+        { ...expectedRound, fix: "initial" },
+        { ...expectedRound, fix: "whole-redo" },
+      ],
       redone: true,
       unmet: expected,
     });
@@ -3482,7 +3488,9 @@ describe("Plan の記録に、事項の流れ・残りの事項・P6 の覆い�
     const recording = createRecordingClient([
       structured(paraphrase),
       structured(REVERSE_CHECK_OUTPUT),
-      structured(paraphrase),
+      // 来歴だけの落ちなので Plan の経路は引用の修復を通る（Issue #917）。直らない引用を返す
+      // （対象は引用が原文に無い R-1 だけ。R-2 の引用は原文にある）
+      structured({ repairs: [{ index: 0, quote: "タスクを登録する", position: { start: 0, end: 8 } }] }),
       structured(REVERSE_CHECK_OUTPUT),
     ]);
     const dir = `${directory}/no-confirm-coverage`;
@@ -4679,5 +4687,66 @@ describe("(9) model-rate:v1-and-plan：Plan の入口でも terra の単価（Is
     expect(baseCost.plan_usd).toBeCloseTo(planCalls * planRecordedCost(DEFAULT_RATES), 12);
     expect(baseCost.build_usd).toBeCloseTo(buildCalls * planRecordedCost(DEFAULT_RATES), 12);
     expect(baseCost.total_usd).toBeCloseTo(baseCost.plan_usd + baseCost.build_usd, 12);
+  });
+});
+
+// ── Issue #917：来歴だけの落ちの Plan の記録に、直し方（有限の値）が載る ─────────
+
+describe("Plan の記録に、引用の修復の直し方が載る（Issue #917）", () => {
+  it("位置の不一致だけの初回の落ちでは、記録の往復の要素に quote-repair が載り、引用・位置の値は出ない", async () => {
+    // 同じ句が 2 か所ある原文（位置の不一致の修復の題材）
+    const source = "印を出す。印を出す。件数を合計する。";
+    const spanOf = (quote: string, from = 0): { readonly start: number; readonly end: number } => {
+      const start = source.indexOf(quote, from);
+      return { start, end: start + quote.length };
+    };
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOf("件数を合計する。") },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+      // 引用の修復（1 か所に決まる引用へ直す）
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const dir = `${directory}/quote-repair-fix`;
+    const answersPath = "quote-repair-fix-answers.json";
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : source),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => createFakeJudge(catalogAnswers()),
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    const record = await readPlanRecord(dir);
+    // 記録の版は今のまま（欄の追加だけ。Issue #917）
+    expect(record.schema_version).toBe(PLAN_CLI_RECORD_SCHEMA);
+    // 往復の要素に、直し方（有限の値）が載る
+    expect(record.requirements_diagnosis.rounds.map((round) => round.fix)).toEqual(["initial", "quote-repair"]);
+    // 全体の作り直しはしていない
+    expect(record.requirements_diagnosis.redone).toBe(false);
+    // 引用・原文の断片・位置の値は、診断にも記録のどこにも出ない
+    const text = JSON.stringify(record.requirements_diagnosis);
+    expect(text).not.toContain("印を出す");
+    expect(text).not.toContain("件数を");
   });
 });
