@@ -1410,6 +1410,110 @@ describe("経路の表（Issue #917）：修復と作り直しは 1 回の流れ
     expect(outcome.value.redone).toBe(false);
     expect(outcome.value.unmet.map((miss) => miss.kind)).toContain("quote-not-found");
   });
+
+  it("(5) 覆いを含む → 作り直し → 来歴だけが残る、の本は修復へ 1 回進む（6 回）", async () => {
+    // 原文は「印を出す。」が 2 か所ある 3 文（5 + 5 + 8 = 18 文字）
+    const repairSource = "印を出す。印を出す。件数を合計する。";
+    const firstList = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 0, end: 5 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    // 作り直した一覧は覆いを直すが、R-2 の引用が 2 か所あるため位置が 1 か所に決まらない（来歴だけが残る）
+    const secondList = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 0, end: 5 } },
+        { id: "R-2", text: "印を出せる（2 つ目）", quote: "印を出す。", position: { start: 5, end: 11 } },
+        { id: "R-3", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      // 初回 P1: 2 文目を覆わない一覧（覆いの落ち）
+      structured(firstList),
+      structured(REVERSE_CHECK_OUTPUT),
+      // 全体の作り直し: 覆いは直るが、R-2 の位置が 1 か所に決まらない（来歴だけが残る）
+      structured(secondList),
+      structured(REVERSE_CHECK_OUTPUT),
+      // 引用の修復: R-2（添字 1）を前後を含めた 1 か所の引用へ直す
+      structured({ repairs: [{ index: 1, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoop({
+      source: repairSource,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      quoteRepair: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 呼び出しの列は 6 回（形のやり直しを除く）
+    expect(recording.structured.map((request) => request.schemaName)).toEqual([
+      "requirement-list",
+      "reverse-check",
+      "requirement-list",
+      "reverse-check",
+      "requirement-quote-repair",
+      "reverse-check",
+    ]);
+    // 往復の直し方は initial → whole-redo → quote-repair
+    expect(outcome.value.diagnosis.rounds.map((round) => round.fix)).toEqual([
+      "initial",
+      "whole-redo",
+      "quote-repair",
+    ]);
+    // 修復 1 回・作り直し 1 回で、落ちは残らない
+    expect(outcome.value.repaired).toBe(true);
+    expect(outcome.value.redone).toBe(true);
+    expect(outcome.value.unmet).toEqual([]);
+  });
+
+  it("(5') 作り直しの後の修復でも落ちが残れば、作り直しへは戻らずに止まる", async () => {
+    const repairSource = "印を出す。印を出す。件数を合計する。";
+    const firstList = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 0, end: 5 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const secondList = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 0, end: 5 } },
+        { id: "R-2", text: "印を出せる（2 つ目）", quote: "印を出す。", position: { start: 5, end: 11 } },
+        { id: "R-3", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(firstList),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(secondList),
+      structured(REVERSE_CHECK_OUTPUT),
+      // 元の引用を含まない引用を返す（門に掛かり、当たらない → 落ちが残る）
+      structured({ repairs: [{ index: 1, quote: "件数を合計する。", position: { start: 10, end: 18 } }] }),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoop({
+      source: repairSource,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      quoteRepair: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 作り直し 1 回・修復 1 回のまま、作り直しへ戻らない
+    expect(recording.structured).toHaveLength(6);
+    expect(outcome.value.repaired).toBe(true);
+    expect(outcome.value.redone).toBe(true);
+    expect(outcome.value.unmet.map((miss) => miss.kind)).toContain("position-mismatch");
+  });
 });
 
 describe("経路の表：修復を使わない（Build の既定。Issue #917）", () => {
