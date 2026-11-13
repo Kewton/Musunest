@@ -16,9 +16,11 @@ import {
   callStructuredChecked,
   isRecord,
   serializeJson,
+  ruleTexts,
   type Problem,
   type PromptData,
   type PromptDocument,
+  type RuleDefinition,
   type ShapeCheck,
   type StageFailure,
   type StageOutcome,
@@ -34,6 +36,47 @@ export const REVERSE_CHECK_RULES: readonly string[] = [
   "原文のどの部分が、一覧のどの要件にも対応していないかを挙げる。",
   "要件の一覧だけを渡されるので、原文に書かれていて一覧に無いものを、位置（文字の範囲）で挙げる。",
 ];
+
+/**
+ * ①' に足す、対応の意味の基準の規則（Issue #925）。**Plan の経路だけ**が旗 `meaningRule` で有効にする。
+ * 既存の 3 文（`REVERSE_CHECK_RULES`）は配列のまま変えず、この組を**その後ろ**に足す——旗の無い Build の
+ * 経路は、送る規則のバイト列を変えない。
+ */
+export const REVERSE_CHECK_MEANING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
+  {
+    id: "R-rcm-01",
+    text: "原文のある部分が、一覧のどれかの要件に対応しているとは、その部分が運ぶ要求・条件・制約（対象・否定・例外・時点・期限・数量・適用の範囲・指定の文言）のすべてを、その要件の本文が表していることである。条件のすべてを本文が表すとき対応と数え、一部だけなら挙げる（表していない条件を落ちとして挙げる）。修飾が複数の項目に掛かるときは、修飾は項目ごとに確かめる。",
+    why: "コードの覆いは文の一部の重なりで覆いとするので、同じ文の別の条件の欠落を拾えるのはこの点検だけである",
+    since: "Issue #925",
+  },
+  {
+    id: "R-rcm-02",
+    text: "引用（quote）は出典の目印にすぎない。本文がすべての条件を表していれば、引用の範囲の外でも対応している。逆に、引用が覆っても本文が欠けば対応しない。",
+    why: "出典の範囲の不足と、意味の欠落を取り違えない",
+    since: "Issue #925",
+  },
+  {
+    id: "R-rcm-03",
+    text: "新しい動作・対象・条件・制約を加えない語（つなぎ・評価・感想・挨拶）は、落ちとして挙げない。その形でも、対応の基準が挙げる種類の条件を運ぶ語は、要求として扱う。",
+    why: "要求を持たない語を挙げると、利用者に問う前に確定を止める",
+    since: "Issue #925",
+  },
+  {
+    id: "R-rcm-04",
+    text: "迷うときは挙げる。",
+    why: "挙げすぎは確定を止めるが、見逃しは原文の要求を黙って落とす。後者のほうが重い",
+    since: "Issue #925",
+  },
+];
+
+/**
+ * ①' の規則（`text` の並び。Issue #925）。旗が有効なときだけ、既存の 3 文の**後ろ**に `R-rcm-01`〜`04` の
+ * 文を足す。旗の無いときは既存の 3 文の配列をそのまま返す（送る規則のバイト列を変えない）。
+ */
+export function reverseCheckRulesOf(meaningRule?: boolean): readonly string[] {
+  if (meaningRule !== true) return REVERSE_CHECK_RULES;
+  return [...REVERSE_CHECK_RULES, ...ruleTexts(REVERSE_CHECK_MEANING_RULE_DEFINITIONS)];
+}
 
 /** ①' の JSON Schema（構造化出力） */
 export const REVERSE_CHECK_SCHEMA = {
@@ -67,6 +110,11 @@ export interface ReverseCheckInput {
    * この往復がどの直し方の後か（有限の値。Issue #917）。省けば初回（`initial`）。診断の往復の要素に写す。
    */
   readonly fix?: ReverseCheckFix;
+  /**
+   * 対応の意味の基準（`R-rcm-01`〜`04`）を規則に足すか（Issue #925）。**Plan の経路だけ**が明示の選択で
+   * 有効にする。省けば（Plan を経ない Build の経路）送る規則は今までどおり 3 文だけである。
+   */
+  readonly meaningRule?: boolean;
 }
 
 /** ①' の会話の答え */
@@ -496,7 +544,7 @@ export async function runReverseCheckWithDiagnosis(
     { name: "要件の一覧", text: listText },
   ];
   const request = buildStructuredRequest({
-    rules: REVERSE_CHECK_RULES,
+    rules: reverseCheckRulesOf(input.meaningRule),
     documents: input.documents,
     data,
     schemaName: REVERSE_CHECK_SCHEMA_NAME,
@@ -798,6 +846,12 @@ export interface ReverseCheckLoopInput {
    * 結果を変えない。
    */
   readonly quoteRepair?: boolean;
+  /**
+   * 対応の意味の基準（`R-rcm-01`〜`04`）を、初回・全体の作り直しの後・引用の修復の後の 3 つの P2 の
+   * 要求すべてに足すか（Issue #925）。**Plan の経路だけ**が明示の選択で有効にする。省けば（Plan を経ない
+   * Build の経路）呼び出しの列・要求のバイト列・結果を変えない。`quoteRepair` には相乗りしない（別の直し）。
+   */
+  readonly meaningRule?: boolean;
 }
 
 /** ①' と ① のやり直しの結果 */
@@ -953,6 +1007,7 @@ export async function runReverseCheckLoopWithOperation(
     documents: input.documents,
     gateway: input.gateway,
     fix: "initial",
+    ...(input.meaningRule === true ? { meaningRule: true } : {}),
   });
   if (!initial.ok) return stop(initial.failure, "reverse-check");
   // 往復の診断は、①' の実行の中で組んだものを使う（会話の断片の枠の重なりまで持つ。Issue #488）
@@ -1012,6 +1067,7 @@ export async function runReverseCheckLoopWithOperation(
       documents: input.documents,
       gateway: input.gateway,
       fix: "quote-repair",
+      ...(input.meaningRule === true ? { meaningRule: true } : {}),
     });
     if (!after.ok) return stop(after.failure, "reverse-check-repair");
     rounds.push(after.value.round);
@@ -1038,6 +1094,7 @@ export async function runReverseCheckLoopWithOperation(
       documents: input.documents,
       gateway: input.gateway,
       fix: "whole-redo",
+      ...(input.meaningRule === true ? { meaningRule: true } : {}),
     });
     if (!second.ok) return stop(second.failure, "reverse-check-redo");
     rounds.push(second.value.round);
