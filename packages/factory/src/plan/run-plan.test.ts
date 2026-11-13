@@ -10,6 +10,7 @@
 //   7. 判定の包みが、共有の門を Jev の内部の再送へ届ける（Issue #469）
 import { describe, expect, it } from "vitest";
 import { checkConfirmedPlan, isConfirmationValid, planDigest, type ConfirmedPlan, type PlanAcceptedUnwritable, type PlanOpenIssue, type PlanPart, type PlanRequirement } from "@musunest/appspec-schema";
+import { sha256Hex } from "@musunest/spec-engine";
 import { planStopReasonLine } from "../cli-plan.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.js";
@@ -2695,6 +2696,69 @@ describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430
     expect(atRedoReverse.requirementsDiagnosis.rounds).toHaveLength(1);
     expect(atRedoReverse.requirementsDiagnosis.redone).toBe(true);
     expect(atRedoReverse.requirementsDiagnosis.unmet).toEqual(ZERO_MISS_COUNTS);
+  });
+
+  it("確定した結果にも、逆照合の往復ごとの診断を残す（Issue #919）", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const responder: PlanResponder = {
+      async answer(request) {
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    const trace = result.reverseCheckTrace;
+    expect(trace).toBeDefined();
+    // 原文は複写せず、SHA-256 と長さだけを持つ
+    expect(trace?.sourceSha256).toBe(await sha256Hex(SOURCE_TEXT));
+    expect(trace?.sourceLength).toBe(SOURCE_TEXT.length);
+    // 往復は 1 つ（初回）。一覧の全体・会話の生の範囲・コードの落ちが載る
+    expect(trace?.rounds.map((round) => round.fix)).toEqual(["initial"]);
+    expect(trace?.rounds[0]?.list).toEqual({
+      requirements: REQUIREMENT_LIST_OUTPUT.requirements,
+      framing: [],
+      decisions: REQUIREMENT_LIST_OUTPUT.decisions,
+      unresolved: REQUIREMENT_LIST_OUTPUT.unresolved,
+    });
+    expect(typeof trace?.rounds[0]?.listSha256).toBe("string");
+    expect(trace?.rounds[0]?.reported).toEqual([]);
+    expect(trace?.rounds[0]?.codeMisses).toEqual([]);
+  });
+
+  it("止まった結果でも、止まるまでに終えた往復の分の診断を残す（Issue #919）", async () => {
+    const stopped = await runPlan(
+      makePlanInput(
+        clientThrowingAt(
+          [structured(THREE_REQUIREMENTS), structured(REVERSE_CHECK_OUTPUT), structured(THREE_REQUIREMENTS)],
+          4,
+          () => invalidRequestError("invalid_json_schema"),
+        ),
+        createFakeJudge({}),
+        ANSWER_NONE,
+        { source: THREE_SOURCE },
+      ),
+    );
+    expect(stopped.kind).toBe("stopped");
+    // 初回の往復だけを終えている（やり直しの逆照合で止まった）
+    expect(stopped.reverseCheckTrace?.rounds.map((round) => round.fix)).toEqual(["initial"]);
+    expect(stopped.reverseCheckTrace?.sourceSha256).toBe(await sha256Hex(THREE_SOURCE));
+    expect(stopped.reverseCheckTrace?.sourceLength).toBe(THREE_SOURCE.length);
   });
 });
 

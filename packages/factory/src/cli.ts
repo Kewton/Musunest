@@ -61,6 +61,7 @@ import {
   buildBuildCliRecord,
   buildPlanCliRecord,
   buildPlanOnlyResult,
+  buildReverseCheckTraceDiagnostic,
   buildSurfaceCheckDiagnostic,
   createAnswersFilePlanResponder,
   createInteractivePlanResponder,
@@ -69,6 +70,7 @@ import {
   parsePlanFile,
   PLAN_CLI_RECORD_FILE,
   PLAN_ONLY_RESULT_FILE,
+  PLAN_REVERSE_CHECK_TRACE_FILE,
   PLAN_SURFACE_CHECK_FILE,
   planBuildCostLine,
   planFileErrorLine,
@@ -1086,6 +1088,12 @@ async function writePlanRecords(
     joinPath(outDir, PLAN_SURFACE_CHECK_FILE),
     JSON.stringify(buildSurfaceCheckDiagnostic({ result: input.result, planId: input.planId })),
   );
+  // 逆照合の往復ごとの診断を、**別のファイル**に置く（Issue #919）。確定・確定できない・止まったのどれも
+  // 書き、途中で止まったときは終えた往復の分だけを持つ。`plan-record.json` は今の要約のままにする。
+  const reverseCheckTrace = buildReverseCheckTraceDiagnostic({ result: input.result, planId: input.planId });
+  if (reverseCheckTrace !== undefined) {
+    await deps.writeFile(joinPath(outDir, PLAN_REVERSE_CHECK_TRACE_FILE), JSON.stringify(reverseCheckTrace));
+  }
 }
 
 /** Plan を 1 回流し、往復の記録と点検の診断を書く（`--plan`・`--plan-only` が共有する。Issue #495） */

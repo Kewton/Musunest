@@ -61,6 +61,7 @@ import {
   splitSourceSentences,
   type ReverseCheckDiagnosis,
   type ReverseCheckOperation,
+  type ReverseCheckTrace,
 } from "../stages/reverse-check.js";
 import { runAnswers, validateAnswer, type ClassifiedAnswer, type PlanAnswerDraft } from "./answers.js";
 import {
@@ -791,6 +792,13 @@ export interface PlanResultBase {
    */
   readonly requirementsDiagnosis: ReverseCheckDiagnosis;
   /**
+   * P1/P2 の逆照合の往復ごとの診断（一覧の全体・その SHA-256・会話の生の範囲と行き先・コードの落ち。
+   * Issue #919）。確定・確定できない・止まったの 3 つの結果に共通で、途中で止まったときは終えた往復の分だけを
+   * 持つ。**判定・やり直し・持ち越し・P3 以降の入力には使わない**。`plan-record.json` には写さず、呼ぶ側
+   * （`cli.ts`）が別の診断ファイルに書く。
+   */
+  readonly reverseCheckTrace?: ReverseCheckTrace;
+  /**
    * P3 の「書けない」の申告の点検の記録（受理・落とした・曖昧さへ・未点検の件数と、判定の記録。Issue #432）。
    * 値（申告の部分の文・理由・制約 ID）は入れない。**往復の記録（`plan-record.json`）に載せる要約**である。
    */
@@ -1490,6 +1498,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const closedByDefaults: PlanDefaultClosure[] = [];
   // P1/P2 の往復ごとの逆照合の落ちの内訳（Issue #430）。止まったときは、止まるまでに得た分だけになる。
   let requirementsDiagnosis: ReverseCheckDiagnosis = emptyReverseCheckDiagnosis();
+  // P1/P2 の逆照合の往復ごとの診断（Issue #919）。止まったときも、止まるまでに終えた往復の分を持つ。
+  let reverseCheckTrace: ReverseCheckTrace | undefined;
   // P3 の「書けない」の申告の点検の記録（Issue #432・#434）。**点検 1 回ごとに 1 件積む**——初回と、
   // 各往復の差分の点検である。途中停止・未点検でも、そこまでに終えた分類・判定・診断を残す
   // （成功や 0 件に見せない）。申告 0 件でも点検は 1 件積み、`completed` を真にする。
@@ -1982,6 +1992,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       closedBySource: closedBySource.slice(),
       closedByDefault: closedByDefaults.slice(),
       requirementsDiagnosis,
+      ...(reverseCheckTrace === undefined ? {} : { reverseCheckTrace }),
       surfaceCheck: aggregateSurfaceCheck(),
       surfaceCheckDiagnostics: aggregateSurfaceCheckDiagnostics(),
       diffReviews: diffReviews.map(finalizeDiffReview),
@@ -2017,8 +2028,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         // 明示の選択である。既定の Build の経路は今までどおり全体の作り直し）
         quoteRepair: true,
       });
-      // 止まったときも、止まるまでに終えた往復の分を結果へ残す（Issue #430）
+      // 止まったときも、止まるまでに終えた往復の分を結果へ残す（Issue #430・#919）
       requirementsDiagnosis = outcome.ok ? outcome.value.diagnosis : outcome.diagnosis;
+      reverseCheckTrace = outcome.ok ? outcome.value.trace : outcome.trace;
       return outcome;
     });
     const list = reverse.list;
