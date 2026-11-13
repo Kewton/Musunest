@@ -547,13 +547,28 @@ interface PlanCliRecordShape {
     readonly end_open: { readonly critical: number; readonly non_critical: number };
     readonly end: string;
   }[];
-  /** 終わりに残った（開いている）事項 1 つずつ（値は入れない。Issue #488） */
+  /** 終わりに残った（開いている）事項 1 つずつ（ID を含む。文は入れない。Issue #488・#930） */
   readonly remaining_open_issues: readonly {
     readonly origin: string;
     readonly revision: number;
     readonly critical: boolean;
     readonly requirement_kind: string;
     readonly facet_id: string | null;
+    readonly issue_id: string;
+    readonly requirement_id: string | null;
+  }[];
+  /** 受理した答えごとの、閉じた事項（ID だけ。文は入れない。Issue #930） */
+  readonly answer_closures: readonly {
+    readonly answer_id: string;
+    readonly question_id: string;
+    readonly revision: number;
+    readonly answer_requirement_id: string | null;
+    readonly closed: readonly {
+      readonly issue_id: string;
+      readonly how: string;
+      readonly requirement_id: string | null;
+      readonly facet_id: string | null;
+    }[];
   }[];
   /** P6 の文ごとの覆い（文番号と分類。値は入れない。Issue #488） */
   readonly confirm_coverage: readonly {
@@ -3462,19 +3477,51 @@ describe("Plan の記録に、事項の流れ・残りの事項・P6 の覆い�
     }
     // すべて閉じたので、終わりに残った事項は無い
     expect(record.remaining_open_issues).toEqual([]);
+    // 受理した答えごとに、閉じた事項の記録が出る（ID だけ。Issue #930）
+    expect(record.answer_closures).toEqual([
+      {
+        answer_id: "A:Q1-1",
+        question_id: "Q1-1",
+        revision: 1,
+        answer_requirement_id: "R:A:Q1-1",
+        closed: [{ issue_id: "OI-1", how: "main", requirement_id: "R-1", facet_id: null }],
+      },
+      {
+        answer_id: "A:Q1-2",
+        question_id: "Q1-2",
+        revision: 1,
+        answer_requirement_id: "R:A:Q1-2",
+        closed: [{ issue_id: "OI-2", how: "main", requirement_id: "R-1", facet_id: null }],
+      },
+      {
+        answer_id: "A:Q1-3",
+        question_id: "Q1-3",
+        revision: 1,
+        answer_requirement_id: "R:A:Q1-3",
+        closed: [{ issue_id: "OI-3", how: "main", requirement_id: "R-2", facet_id: null }],
+      },
+    ]);
     // P6 まで届いたので、文ごとの覆いが出る（文番号と分類だけ）
     expect(record.confirm_coverage.map((row) => row.coverage)).toEqual(["origin", "origin"]);
     expect(record.confirm_coverage.map((row) => row.sentence)).toEqual([1, 2]);
-    // 値（事項 ID・要件 ID・依頼文の断片）は、新しい欄に出ない
-    const text = JSON.stringify({
-      issue_flow: record.issue_flow,
+    // 事項の流れと P6 の覆いには、値（事項 ID・要件 ID・依頼文の断片）が出ない（Issue #488）
+    const flowText = JSON.stringify({ issue_flow: record.issue_flow, confirm_coverage: record.confirm_coverage });
+    expect(flowText).not.toContain("OI:");
+    expect(flowText).not.toContain("R-");
+    expect(flowText).not.toContain("R:");
+    expect(flowText).not.toContain(SOURCE_TEXT.slice(0, 4));
+    // 残った事項と答えの閉じ方には ID を残すが、事項の文・答えの文・要件の文は入れない（Issue #930）
+    const idText = JSON.stringify({
       remaining_open_issues: record.remaining_open_issues,
-      confirm_coverage: record.confirm_coverage,
+      answer_closures: record.answer_closures,
     });
-    expect(text).not.toContain("OI:");
-    expect(text).not.toContain("R-");
-    expect(text).not.toContain("R:");
-    expect(text).not.toContain(SOURCE_TEXT.slice(0, 4));
+    expect(idText).toContain("OI-1");
+    expect(idText).toContain("R:A:Q1-1");
+    expect(idText).not.toContain("誰の分を数えるか");
+    expect(idText).not.toContain("全員");
+    expect(idText).not.toContain("今週");
+    expect(idText).not.toContain("切り捨て");
+    expect(idText).not.toContain("依頼に沿う");
   });
 
   it("P6 まで届かない組では、confirm_coverage が空の並びになる", async () => {

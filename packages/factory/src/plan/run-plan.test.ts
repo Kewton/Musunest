@@ -6929,23 +6929,40 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
     expect(result.reasons).toEqual([{ source: "session", code: "round-trip-limit", path: "open_issues" }]);
     // 終わりに残った事項 1 つずつに、由来・開いた往復の版・重大か・対象の要件の種類が入る
     expect(result.remainingOpenIssues).toEqual([
-      { origin: "surface", revision: 1, critical: true, requirementKind: "source", facetId: null },
-      { origin: "surface", revision: 1, critical: false, requirementKind: "source", facetId: null },
+      {
+        origin: "surface",
+        revision: 1,
+        critical: true,
+        requirementKind: "source",
+        facetId: null,
+        issueId: "OI-a",
+        requirementId: "R-1",
+      },
+      {
+        origin: "surface",
+        revision: 1,
+        critical: false,
+        requirementKind: "source",
+        facetId: null,
+        issueId: "OI-b",
+        requirementId: "R-1",
+      },
     ]);
     // 行の数は、開いている事項の数と等しい
     expect(result.remainingOpenIssues).toHaveLength(result.openIssues.length);
     expectBalanced(result);
     expect(result.confirmCoverage).toEqual([]);
-    // 新しい欄を JSON にしても、事項 ID・要件 ID・文が出ない
-    const text = JSON.stringify({
-      issueFlow: result.issueFlow,
-      remainingOpenIssues: result.remainingOpenIssues,
-      confirmCoverage: result.confirmCoverage,
-    });
-    expect(text).not.toContain("OI-a");
-    expect(text).not.toContain("OI-b");
-    expect(text).not.toContain("R-1");
-    expect(text).not.toContain("問い");
+    // 事項の流れと P6 の覆いには、事項 ID・要件 ID・文が出ない（Issue #488）
+    const flowText = JSON.stringify({ issueFlow: result.issueFlow, confirmCoverage: result.confirmCoverage });
+    expect(flowText).not.toContain("OI-a");
+    expect(flowText).not.toContain("OI-b");
+    expect(flowText).not.toContain("R-1");
+    expect(flowText).not.toContain("問い");
+    // 残った事項には ID を残すが、文は入れない（Issue #930）
+    const remainingText = JSON.stringify(result.remainingOpenIssues);
+    expect(remainingText).toContain("OI-a");
+    expect(remainingText).toContain("R-1");
+    expect(remainingText).not.toContain("問い");
     // 止まり方・理由は、欄を足す前と等しい
     expect(result.openIssues.map((issue) => issue.id).sort()).toEqual(["OI-a", "OI-b"]);
   });
@@ -7022,9 +7039,33 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
     if (result.kind !== "cannot-confirm") return;
     // 矛盾の事項は、答えの反映の途中（仕様の `revision` はまだ 1）に開くが、事項の流れの版（2）で記録する
     expect(result.remainingOpenIssues).toEqual([
-      { origin: "surface", revision: 1, critical: true, requirementKind: "source", facetId: null },
-      { origin: "surface", revision: 1, critical: true, requirementKind: "source", facetId: null },
-      { origin: "contradiction", revision: 2, critical: true, requirementKind: "none", facetId: null },
+      {
+        origin: "surface",
+        revision: 1,
+        critical: true,
+        requirementKind: "source",
+        facetId: null,
+        issueId: "OI-a",
+        requirementId: "R-1",
+      },
+      {
+        origin: "surface",
+        revision: 1,
+        critical: true,
+        requirementKind: "source",
+        facetId: null,
+        issueId: "OI-b",
+        requirementId: "R-1",
+      },
+      {
+        origin: "contradiction",
+        revision: 2,
+        critical: true,
+        requirementKind: "none",
+        facetId: null,
+        issueId: "OI:contradiction:A:Q1-1",
+        requirementId: null,
+      },
     ]);
     // 開いたのは版 2 の行（由来 contradiction・件数 1 の差分）である
     const row2 = result.issueFlow.find((row) => row.revision === 2);
@@ -7068,13 +7109,258 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
     // 返す未解決事項（引用の落ち 2 件）が、残りの一覧と流れの残数で一致する
     expect(result.openIssues.map((issue) => issue.id)).toEqual(["OI:reverse:1", "OI:reverse:2"]);
     expect(result.remainingOpenIssues).toEqual([
-      { origin: "unresolved", revision: 1, critical: true, requirementKind: "none", facetId: null },
-      { origin: "unresolved", revision: 1, critical: true, requirementKind: "none", facetId: null },
+      {
+        origin: "unresolved",
+        revision: 1,
+        critical: true,
+        requirementKind: "none",
+        facetId: null,
+        issueId: "OI:reverse:1",
+        requirementId: null,
+      },
+      {
+        origin: "unresolved",
+        revision: 1,
+        critical: true,
+        requirementKind: "none",
+        facetId: null,
+        issueId: "OI:reverse:2",
+        requirementId: null,
+      },
     ]);
     const last = result.issueFlow.at(-1);
     expect((last?.endOpen.critical ?? 0) + (last?.endOpen.nonCritical ?? 0)).toBe(result.openIssues.length);
     expect(result.remainingOpenIssues).toHaveLength(result.openIssues.length);
     expectBalanced(result);
+  });
+});
+
+
+// ── 残った事項と、答えが閉じた事項に ID を残す（Issue #930）────────────────────────────
+//
+// **振る舞いは変えない**——記録に ID を写すだけである。ここで固定するのは、残った事項の `issueId` と
+// `requirementId`（目録・洗い出し・申告の点検・P1 の未解決の 4 通り）と、答えごとの `answerClosures`
+// （主の事項・`alsoCloses` の ID と、答え由来の要件 ID）である。文は入れない。
+
+describe("残った事項と、答えが閉じた事項に ID を残す（Issue #930）", () => {
+  it("(残る1) 目録の事項が残ると、issue_id と目録の対応の要件 ID を残す", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(questionsFor("OI:catalog:R-1:aggregation")),
+      structured(questionsFor("OI:catalog:R-1:aggregation")),
+      structured(questionsFor("OI:catalog:R-1:aggregation")),
+    ]);
+    // 目録：R-1 の aggregation（重大・既定なし）だけ未指定
+    const judge = createFakeJudge(catalogUnspecifiedFor({ "R-1": ["aggregation"] }));
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.remainingOpenIssues).toEqual([
+      {
+        origin: "catalog",
+        revision: 1,
+        critical: true,
+        requirementKind: "source",
+        facetId: "aggregation",
+        issueId: "OI:catalog:R-1:aggregation",
+        requirementId: "R-1",
+      },
+    ]);
+  });
+
+  it("(残る2) 洗い出しの事項が残ると、issue_id と洗い出しの対応の要件 ID を残す", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(questionsFor("OI-extra")),
+      structured(questionsFor("OI-extra")),
+      structured(questionsFor("OI-extra")),
+    ]);
+    const judge = createFakeJudge(catalogAnswers());
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.remainingOpenIssues).toEqual([
+      {
+        origin: "surface",
+        revision: 1,
+        critical: true,
+        requirementKind: "source",
+        facetId: null,
+        issueId: "OI-extra",
+        requirementId: "R-1",
+      },
+    ]);
+  });
+
+  it("(残る3) 申告の点検から曖昧さへ戻した事項が残ると、issue_id と申告の対応の要件 ID を残す", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE_CLAIMS),
+      structured(questionsFor("OI:surface-check:1:2")),
+      structured(questionsFor("OI:surface-check:1:2")),
+      structured(questionsFor("OI:surface-check:1:2")),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+      [surfaceTriageQuestionName(1)]: choice("not-a-problem", 0.8),
+      // U-2（要件 R-1）を曖昧さへ戻す
+      [surfaceTriageQuestionName(2)]: choice("ambiguity", 0.9),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.remainingOpenIssues).toEqual([
+      {
+        origin: "surface-check",
+        revision: 1,
+        critical: true,
+        requirementKind: "source",
+        facetId: null,
+        issueId: "OI:surface-check:1:2",
+        requirementId: "R-1",
+      },
+    ]);
+  });
+
+  it("(残る4) P1 の未解決メモの事項は、対象の要件を持たないので requirement_id が null になる", async () => {
+    const paraphrase = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "タスクを登録する", position: { start: 0, end: 8 } },
+        { id: "R-2", text: "合計できる", quote: "件数を数える", position: { start: 9, end: 16 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured({
+        repairs: [
+          { index: 0, quote: "タスクを登録する", position: { start: 0, end: 8 } },
+          { index: 1, quote: "件数を数える", position: { start: 9, end: 16 } },
+        ],
+      }),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.remainingOpenIssues).toEqual([
+      {
+        origin: "unresolved",
+        revision: 1,
+        critical: true,
+        requirementKind: "none",
+        facetId: null,
+        issueId: "OI:reverse:1",
+        requirementId: null,
+      },
+      {
+        origin: "unresolved",
+        revision: 1,
+        critical: true,
+        requirementKind: "none",
+        facetId: null,
+        issueId: "OI:reverse:2",
+        requirementId: null,
+      },
+    ]);
+  });
+
+  it("(答え) 2 往復の答えごとに answer_closures を残し、主・一緒に閉じる行に ID を入れる", async () => {
+    const surface = {
+      ambiguities: [
+        { id: "OI-a", requirementId: "R-1", text: "誰の分を数えるか", critical: true },
+        { id: "OI-b", requirementId: "R-1", text: "誰の分を数えるか（同じ問い）", critical: true },
+        { id: "OI-c", requirementId: "R-2", text: "依頼文で決まる事項", critical: true },
+      ],
+      unwritable: [],
+    };
+    const firstQuestions = {
+      questions: [
+        {
+          id: "Q-1",
+          openIssueId: "OI-a",
+          alsoCloses: ["OI-b"],
+          text: "誰の分を数えますか",
+          choices: [
+            { id: "c1", text: "全員" },
+            { id: "c2", text: "自分のみ" },
+          ],
+          recommended: { choiceId: "c1", reason: "依頼に沿う" },
+          allowFreeText: true,
+        },
+      ],
+      closedBySource: [{ issueId: "OI-c", quote: "タスクを記録する", value: "記録する内容を 1 行にする" }],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured(firstQuestions),
+      // 1 往復目のあとの差分の洗い出し（新しい曖昧さは無い）
+      structured(SURFACE_OUTPUT_CLEAR),
+      // 2 往復目の問い（差分の目録が開いた重大な観点）
+      structured(questionsFor("OI:catalog:R:A:Q1-1:aggregation")),
+      // 2 往復目の答えのあとの差分の洗い出し（新しい曖昧さは無い）
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogUnspecifiedFor({ "R:A:Q1-1": ["aggregation"] }, ["R:A:Q1-1"]),
+      ...catalogAnswersFor(["R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED));
+
+    expect(result.kind).toBe("confirmed");
+    expect(result.answerClosures).toEqual([
+      {
+        answerId: "A:Q1-1",
+        questionId: "Q1-1",
+        revision: 1,
+        answerRequirementId: "R:A:Q1-1",
+        closed: [
+          { issueId: "OI-a", how: "main", requirementId: "R-1", facetId: null },
+          { issueId: "OI-b", how: "also", requirementId: "R-1", facetId: null },
+        ],
+      },
+      {
+        answerId: "A:Q2-1",
+        questionId: "Q2-1",
+        revision: 2,
+        answerRequirementId: "R:A:Q2-1",
+        closed: [
+          {
+            issueId: "OI:catalog:R:A:Q1-1:aggregation",
+            how: "main",
+            requirementId: "R:A:Q1-1",
+            facetId: "aggregation",
+          },
+        ],
+      },
+    ]);
+    // 答えの文（問い・選択肢）と要件の文は入らない（ID だけ）
+    const text = JSON.stringify(result.answerClosures);
+    expect(text).not.toContain("誰の分を数えますか");
+    expect(text).not.toContain("全員");
+    expect(text).not.toContain("依頼に沿う");
   });
 });
 
