@@ -7280,21 +7280,21 @@ interface ReadingOnlyRepair {
 
 // ── Issue #925：Plan の経路の P2 に、対応の意味の基準を足す ─────────────────
 
+/** 原文の開始位置から引用の範囲を作る（Issue #925 の試験で使う） */
+const meaningSpanOf = (source: string, quote: string, from = 0): { readonly start: number; readonly end: number } => {
+  const start = source.indexOf(quote, from);
+  return { start, end: start + quote.length };
+};
+/** P2 の要求か（schema の名前で見る。Issue #925 の試験で使う） */
+const isMeaningReverseCheck = (request: { readonly schemaName: string } | undefined): boolean =>
+  request?.schemaName === REVERSE_CHECK_SCHEMA_NAME;
+/** 要求の規則（無ければ空。Issue #925 の試験で使う） */
+const meaningRulesOf = (request: { readonly rules?: readonly string[] } | undefined): readonly string[] =>
+  request?.rules ?? [];
+
 describe("Plan の経路の P2 の要求に、対応の意味の基準が入る（Issue #925）", () => {
   /** 意味の基準の 4 文（定義の `text`）。規則の ID は文に入れない */
   const MEANING_TEXTS = REVERSE_CHECK_MEANING_RULE_DEFINITIONS.map((definition) => definition.text);
-  /** 原文の開始位置から引用の範囲を作る */
-  const spanOfQuote = (source: string, quote: string, from = 0): { readonly start: number; readonly end: number } => {
-    const start = source.indexOf(quote, from);
-    return { start, end: start + quote.length };
-  };
-  /** P2 の要求か（schema の名前で見る） */
-  const isReverseCheck = (request: { readonly schemaName: string } | undefined): boolean =>
-    request?.schemaName === REVERSE_CHECK_SCHEMA_NAME;
-  /** 要求の規則（無ければ空） */
-  const rulesOf = (request: { readonly rules?: readonly string[] } | undefined): readonly string[] =>
-    request?.rules ?? [];
-
   it("(a) 初回・全体の作り直しの後・引用の修復の後の 3 つの P2 の要求に、4 文が既存の 3 文の後ろに入る", async () => {
     // 初回が来歴だけ（引用が 2 か所）→ 修復 → 修復の後の P2 が覆いを含む → 作り直し → P2。
     // 偽の応答で 3 つの往復（initial・quote-repair・whole-redo）を通す
@@ -7302,7 +7302,7 @@ describe("Plan の経路の P2 の要求に、対応の意味の基準が入る�
     const list = {
       requirements: [
         { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
-        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOfQuote(source, "件数を合計する。") },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: meaningSpanOf(source, "件数を合計する。") },
       ],
       framing: [],
       decisions: [],
@@ -7311,7 +7311,7 @@ describe("Plan の経路の P2 の要求に、対応の意味の基準が入る�
     const redone = {
       requirements: [
         { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: { start: 0, end: 10 } },
-        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOfQuote(source, "件数を合計する。") },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: meaningSpanOf(source, "件数を合計する。") },
       ],
       framing: [],
       decisions: [],
@@ -7331,11 +7331,11 @@ describe("Plan の経路の P2 の要求に、対応の意味の基準が入る�
     );
 
     // 3 つの往復が、どれも P2（reverse-check）である
-    const reverseRequests = recording.structured.filter(isReverseCheck);
+    const reverseRequests = recording.structured.filter(isMeaningReverseCheck);
     expect(reverseRequests).toHaveLength(3);
     for (const request of reverseRequests) {
-      expect(rulesOf(request).slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
-      expect(rulesOf(request).slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
+      expect(meaningRulesOf(request).slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
+      expect(meaningRulesOf(request).slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
     }
     // 往復の並びは、初回・修復の後・作り直しの後である
     expect(result.requirementsDiagnosis.rounds.map((round) => round.fix)).toEqual([
@@ -7354,8 +7354,8 @@ describe("Plan の経路の P2 の要求に、対応の意味の基準が入る�
     });
     expect(outcome.ok).toBe(true);
     const request = recording.structured[1];
-    expect(isReverseCheck(request)).toBe(true);
-    expect(rulesOf(request)).toEqual([...REVERSE_CHECK_RULES]);
-    expect(rulesOf(request).some((rule) => MEANING_TEXTS.includes(rule))).toBe(false);
+    expect(isMeaningReverseCheck(request)).toBe(true);
+    expect(meaningRulesOf(request)).toEqual([...REVERSE_CHECK_RULES]);
+    expect(meaningRulesOf(request).some((rule) => MEANING_TEXTS.includes(rule))).toBe(false);
   });
 });

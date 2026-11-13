@@ -45,6 +45,18 @@ import {
   makeGateway,
 } from "./__tests__/prompt.js";
 
+/** 原文から引用の位置を求めて、要件 1 件を作る（Issue #925 の試験で使う） */
+const meaningRequirementOf = (source: string, id: string, text: string, quote: string) => {
+  const start = source.indexOf(quote);
+  return { id, text, quote, position: { start, end: start + quote.length } };
+};
+/** P2 の要求か（schema の名前で見る。Issue #925 の試験で使う） */
+const isReverseCheckRequest = (request: { readonly schemaName: string } | undefined): boolean =>
+  request?.schemaName === REVERSE_CHECK_SCHEMA_NAME;
+/** 要求の規則（無ければ空。Issue #925 の試験で使う） */
+const rulesOfRequest = (request: { readonly rules?: readonly string[] } | undefined): readonly string[] =>
+  request?.rules ?? [];
+
 /** 引用が原文に無い一覧（①' の落ちを起こす） */
 const BAD_LIST_OUTPUT = {
   requirements: [
@@ -499,17 +511,6 @@ describe("対応の意味の基準を、旗が有効なときだけ既存の 3 �
 describe("ループの 3 つの P2 の要求に、旗が有効なときだけ意味の基準が入る（Issue #925）", () => {
   /** 意味の基準の 4 文（定義の `text`） */
   const MEANING_TEXTS = REVERSE_CHECK_MEANING_RULE_DEFINITIONS.map((definition) => definition.text);
-  /** 原文から引用の位置を求めて、要件 1 件を作る */
-  const requirementOf = (source: string, id: string, text: string, quote: string) => {
-    const start = source.indexOf(quote);
-    return { id, text, quote, position: { start, end: start + quote.length } };
-  };
-  /** P2 の要求か（schema の名前で見る） */
-  const isReverseCheck = (request: { readonly schemaName: string } | undefined): boolean =>
-    request?.schemaName === REVERSE_CHECK_SCHEMA_NAME;
-  /** 要求の規則（無ければ空） */
-  const rulesOf = (request: { readonly rules?: readonly string[] } | undefined): readonly string[] =>
-    request?.rules ?? [];
 
   it("(a) 初回の P2 の要求に、既存の 3 文の後ろに 4 文が入る", async () => {
     const recording = createRecordingClient([
@@ -528,9 +529,9 @@ describe("ループの 3 つの P2 の要求に、旗が有効なときだけ意
     });
     expect(outcome.ok).toBe(true);
     const request = recording.structured[1];
-    expect(isReverseCheck(request)).toBe(true);
-    expect(rulesOf(request).slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
-    expect(rulesOf(request).slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
+    expect(isReverseCheckRequest(request)).toBe(true);
+    expect(rulesOfRequest(request).slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
+    expect(rulesOfRequest(request).slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
   });
 
   it("(b) 全体の作り直しの後の P2 の要求にも 4 文が入る", async () => {
@@ -538,8 +539,8 @@ describe("ループの 3 つの P2 の要求に、旗が有効なときだけ意
     const source = "タスクを記録する。件数を合計する。印を出す。";
     const first = {
       requirements: [
-        requirementOf(source, "R-1", "タスクを記録できる", "タスクを記録する。"),
-        requirementOf(source, "R-2", "件数を合計できる", "件数を合計する。"),
+        meaningRequirementOf(source, "R-1", "タスクを記録できる", "タスクを記録する。"),
+        meaningRequirementOf(source, "R-2", "件数を合計できる", "件数を合計する。"),
       ],
       framing: [],
       decisions: [],
@@ -548,7 +549,7 @@ describe("ループの 3 つの P2 の要求に、旗が有効なときだけ意
     const redone = {
       requirements: [
         ...first.requirements,
-        requirementOf(source, "R-3", "印を出せる", "印を出す。"),
+        meaningRequirementOf(source, "R-3", "印を出せる", "印を出す。"),
       ],
       framing: [],
       decisions: [],
@@ -572,9 +573,9 @@ describe("ループの 3 つの P2 の要求に、旗が有効なときだけ意
     expect(recording.structured).toHaveLength(4);
     // 2 回目の P2（添字 3）に 4 文が入る
     const redoneRequest = recording.structured[3];
-    expect(isReverseCheck(redoneRequest)).toBe(true);
-    expect(rulesOf(redoneRequest).slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
-    expect(rulesOf(redoneRequest).slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
+    expect(isReverseCheckRequest(redoneRequest)).toBe(true);
+    expect(rulesOfRequest(redoneRequest).slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
+    expect(rulesOfRequest(redoneRequest).slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
   });
 
   it("(c) 引用の修復の後の P2 の要求にも 4 文が入る", async () => {
@@ -582,7 +583,7 @@ describe("ループの 3 つの P2 の要求に、旗が有効なときだけ意
     const source = "記録する。合計する。";
     const list = {
       requirements: [
-        requirementOf(source, "R-1", "記録できる", "記録する。"),
+        meaningRequirementOf(source, "R-1", "記録できる", "記録する。"),
         { id: "R-2", text: "合計できる", quote: "原文に無い", position: { start: 5, end: 10 } },
       ],
       framing: [],
@@ -591,8 +592,8 @@ describe("ループの 3 つの P2 の要求に、旗が有効なときだけ意
     };
     const repaired = {
       requirements: [
-        requirementOf(source, "R-1", "記録できる", "記録する。"),
-        requirementOf(source, "R-2", "合計できる", "合計する。"),
+        meaningRequirementOf(source, "R-1", "記録できる", "記録する。"),
+        meaningRequirementOf(source, "R-2", "合計できる", "合計する。"),
       ],
       framing: [],
       decisions: [],
@@ -620,9 +621,9 @@ describe("ループの 3 つの P2 の要求に、旗が有効なときだけ意
     expect(recording.structured).toHaveLength(4);
     // 修復の後の P2（添字 3）に 4 文が入る
     const afterRequest = recording.structured[3];
-    expect(isReverseCheck(afterRequest)).toBe(true);
-    expect(rulesOf(afterRequest).slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
-    expect(rulesOf(afterRequest).slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
+    expect(isReverseCheckRequest(afterRequest)).toBe(true);
+    expect(rulesOfRequest(afterRequest).slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
+    expect(rulesOfRequest(afterRequest).slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
   });
 
   it("(d) 旗を渡さないときの 3 つの P2 の要求は、どれも 3 文のままである（バイト列を変えない）", async () => {
@@ -664,11 +665,11 @@ describe("ループの 3 つの P2 の要求に、旗が有効なときだけ意
     if (!outcome.ok) return;
     expect(outcome.value.repaired).toBe(true);
     expect(outcome.value.redone).toBe(true);
-    const reverseRequests = recording.structured.filter(isReverseCheck);
+    const reverseRequests = recording.structured.filter(isReverseCheckRequest);
     expect(reverseRequests).toHaveLength(3);
     for (const request of reverseRequests) {
-      expect(rulesOf(request)).toEqual([...REVERSE_CHECK_RULES]);
-      expect(rulesOf(request).some((rule) => MEANING_TEXTS.includes(rule))).toBe(false);
+      expect(rulesOfRequest(request)).toEqual([...REVERSE_CHECK_RULES]);
+      expect(rulesOfRequest(request).some((rule) => MEANING_TEXTS.includes(rule))).toBe(false);
     }
   });
 });
