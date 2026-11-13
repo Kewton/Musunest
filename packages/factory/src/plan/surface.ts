@@ -17,12 +17,10 @@ import {
   isRecord,
   normalizeConstraintId,
   normalizeConstraintIds,
-  ruleTexts,
   serializeJson,
   type Problem,
   type PromptDocument,
   type PromptData,
-  type RuleDefinition,
   type ShapeCheck,
   type StageOutcome,
 } from "../stages/prompt.js";
@@ -49,104 +47,6 @@ export const SURFACE_RULES: readonly string[] = [
   "曖昧さ（まだ書ける）と、書けないこと（語彙の穴）を混ぜない。要件の言い直しや、すでに決まっていることは挙げない。",
   "新しい事項の ID は、データで見せた事項の ID と同じにしない。既存の事項が重大・矛盾なら、新しい ID で挙げる。",
 ];
-
-/**
- * 答えが事項を閉じたときの閉じ方（2 つ。Issue #930）。`main` は問いの主の事項、`also` は「一緒に閉じる」事項。
- * **型の持ち主はこの file** である——Plan の記録（`run-plan.ts` の `answerClosures`）と、差分の洗い出しに渡す
- * 表（`SurfaceAnswerClosure`）の両方が、同じ定義を使う（Issue #931）。
- */
-export const PLAN_ANSWER_CLOSURE_HOWS = ["main", "also"] as const;
-export type PlanAnswerClosureHow = (typeof PLAN_ANSWER_CLOSURE_HOWS)[number];
-
-/**
- * 答えが閉じた事項 1 つぶんの記録（**文は入れない**。Issue #930）。事項 ID・閉じ方・対象の要件 ID・目録の
- * 観点 ID（目録の行だけ）を持つ。要件 ID はコードが持つ対応から引き、引けなければ `null` である。
- */
-export interface PlanAnswerClosureIssue {
-  readonly issueId: string;
-  readonly how: PlanAnswerClosureHow;
-  readonly requirementId: string | null;
-  readonly facetId: string | null;
-}
-
-/**
- * 受理した答え 1 つぶんの、閉じた事項の記録（**文は入れない**。Issue #930）。答えの ID・問いの ID・答えた
- * 往復の版・答え由来の要件 ID（`R:<答えの ID>` が一覧にあればその ID。無ければ `null`）と、閉じた事項の並び
- * （主の事項と `alsoCloses` のうち、**閉じる対象が見つかった行だけ**）を持つ。
- */
-export interface PlanAnswerClosure {
-  readonly answerId: string;
-  readonly questionId: string;
-  /** 答えた往復の版 */
-  readonly revision: number;
-  readonly answerRequirementId: string | null;
-  readonly closed: readonly PlanAnswerClosureIssue[];
-}
-
-/**
- * 差分の洗い出しに渡す、**答えで閉じた事項の表**の 1 行（Issue #931）。`PlanAnswerClosure` と同じ構造を、
- * 差分の段のデータの名前に合わせて写したものである——**値の持ち主は Plan の記録**であって、この表で
- * 組み直さない（`answerClosureTableOf` が写すだけ）。
- */
-export type SurfaceAnswerClosure = PlanAnswerClosure;
-
-/**
- * 差分の洗い出しに足す、**答えで閉じた決めどころの扱い**の規則（Issue #931）。`SURFACE_RULES` は変えず、
- * 表を渡す要求（差分の洗い出しの道）だけが、この組を**既存の規則の後ろ**に足す。
- *
- * 既存の 3 文目（「同じ決めどころでも挙げる」の `重大`・`対象の要件が違う`）と 8 文目（「既存の事項が
- * 重大・矛盾なら、新しい ID で挙げる」）は**まだ答えていない事項についての規則**であり、答えで閉じた
- * 決めどころには `R-sd-02` が優先する。規則の文は**題材に依らない**——P 番号・要件 ID・観点 ID・
- * 観測した決めどころの語を書かない。
- */
-export const SURFACE_ANSWER_CLOSURE_RULE_DEFINITIONS: readonly RuleDefinition[] = [
-  {
-    id: "R-sd-01",
-    text:
-      "答え由来の要件の決めどころが、データの `答えで閉じた事項` の表で、同じ対象の要件の同じ決めどころを閉じた答えの値で決まるときは、新しい事項として挙げない。",
-    why: "答え由来の要件は、親の要件の決めどころを答えの値で決めたものである。同じ決めどころを別の ID で開き直すと、答えを済ませた利用者に同じことを問い、往復の上限で確定を止める",
-    since: "Issue #931",
-  },
-  {
-    id: "R-sd-02",
-    text:
-      "答えで閉じた決めどころは、重大であることだけを理由に挙げ直さない。同じ決めどころでも重複として挙げる規則と、既存の事項が重大・矛盾なら新しい ID で挙げる規則は、まだ答えていない事項についての規則である。",
-    why: "答えで閉じた決めどころの再質問は利用者の決定の重複であり、原文の取りこぼしを防がない",
-    since: "Issue #931",
-  },
-  {
-    id: "R-sd-03",
-    text:
-      "次は、重大かどうかによらず挙げる——答えの値で決まらない新しい判断／対象違い（対象の要件・範囲・時点が表の答えと違う）／前の答えと矛盾する／対応が無い（表に対応が無く、対象の要件が空）／原文の条件の欠落（答え由来の要件から原文の条件が落ちている）。",
-    why: "答えが本当に新しい曖昧さを生むこと、答えどうしの矛盾、原文の取りこぼしは利用者に返す。表は点検を省く根拠ではない",
-    since: "Issue #931",
-  },
-  {
-    id: "R-sd-04",
-    text: "迷うときは挙げる。",
-    why: "挙げすぎは確定を止めるが、見逃しは仕様の誤りを確定させる。後者のほうが重い",
-    since: "Issue #931",
-  },
-];
-
-/**
- * 差分の洗い出しの規則（`SURFACE_RULES` の写しに、答えで閉じた事項の規則を**後ろ**に足す。Issue #931）。
- * 表を渡さない要求は `SURFACE_RULES` をそのまま使う——送る規則のバイト列を変えない。
- */
-export function surfaceRulesWithAnswerClosures(): readonly string[] {
-  return [...SURFACE_RULES, ...ruleTexts(SURFACE_ANSWER_CLOSURE_RULE_DEFINITIONS)];
-}
-
-/**
- * 答えで閉じた事項の表を組む（**コードだけ**。文の解析をしない。Issue #931）。Plan の記録
- * （`answerClosures`）と同じ組を、そのまま差分の洗い出しのデータにする——別の引き方をしない。
- * **空の表は `undefined`** を返す（要求に塊を足さない）。
- */
-export function answerClosureTableOf(
-  closures: readonly PlanAnswerClosure[],
-): readonly SurfaceAnswerClosure[] | undefined {
-  return closures.length === 0 ? undefined : closures;
-}
 
 /** P3 の洗い出しの JSON Schema（構造化出力） */
 export const SURFACE_SCHEMA = {
@@ -336,12 +236,6 @@ export interface SurfaceContext {
   readonly acceptedUnwritable: readonly PlanAcceptedUnwritable[];
   /** 関係する問いと答え */
   readonly questionsAndAnswers: readonly SurfaceContextQuestionAnswer[];
-  /**
-   * 答えで閉じた事項の表（Issue #931）。渡すと、参照用の文脈の**最後**（`関係する問いと答え` の後ろ）に
-   * データ `答えで閉じた事項` を足し、その要求にだけ `R-sd-01`〜`04` の文を既存の規則の後ろに足す。
-   * **空・省略なら足さない**（要求は変更前と byte で同じ）。
-   */
-  readonly answerClosures?: readonly SurfaceAnswerClosure[];
 }
 
 /**
@@ -791,13 +685,6 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
     data.push({ name: "了承除外", text: serializeJson(input.context.acceptedUnwritable) });
     data.push({ name: "関係する問いと答え", text: serializeJson(input.context.questionsAndAnswers) });
   }
-  // 答えで閉じた事項の表（Issue #931）。**差分の洗い出しの道だけ**が渡し、**空でないときだけ**
-  // `関係する問いと答え` の後ろに足す——空のときの要求は変更前と byte で同じである。規則は、表を渡す
-  // 要求にだけ `SURFACE_RULES` の後ろへ `R-sd-01`〜`04` を足す（既存の規則の文は変えない）。
-  const answerClosures = input.context?.answerClosures ?? [];
-  if (answerClosures.length > 0) {
-    data.push({ name: "答えで閉じた事項", text: serializeJson(answerClosures) });
-  }
   // 既存の事項の ID（ほかの 4 つの提示元に入らない行の ID。Issue #887）。**空でないときだけ**、参照用の
   // 文脈の後ろに**ID の並びだけ**を足す——空のときの要求は変更前と byte で同じである。規則の文は足さない。
   const existingIssueIds = input.shownIssueIds?.existing ?? [];
@@ -807,7 +694,7 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
   // 差分の要件 ID を渡されたときだけ、差分専用の schema（`enum` つき）と名前を使う（Issue #483）。
   // 渡されないとき（初回の洗い出し）の要求は、変更前と byte で同じである。
   const request = buildStructuredRequest({
-    rules: answerClosures.length > 0 ? surfaceRulesWithAnswerClosures() : SURFACE_RULES,
+    rules: SURFACE_RULES,
     documents: input.documents,
     data,
     schemaName: input.targetRequirementIds === undefined ? SURFACE_SCHEMA_NAME : SURFACE_DIFF_SCHEMA_NAME,
