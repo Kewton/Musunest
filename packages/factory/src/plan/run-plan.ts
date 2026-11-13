@@ -101,7 +101,13 @@ import {
   type PlanOpenIssueRowAttribution,
   type PlanOpenIssueSource,
 } from "./open-issues.js";
-import { runSurfaceCheck, type SurfaceClaimDiagnostic, type SurfaceJudgment, type SurfaceUncheckedClaim } from "./surface-check.js";
+import {
+  runSurfaceCheck,
+  type SurfaceCheckRequirement,
+  type SurfaceClaimDiagnostic,
+  type SurfaceJudgment,
+  type SurfaceUncheckedClaim,
+} from "./surface-check.js";
 
 export type { PlanOpenIssueConflicts, PlanOpenIssueSource } from "./open-issues.js";
 
@@ -2042,6 +2048,17 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     // 了承して除く部分（受理した申告を写す先。Issue #434）。事項の流れの分類にも使うので早めに置く（#488）
     const acceptedUnwritable: PlanAcceptedUnwritable[] = [];
     /**
+     * 申告の点検へ材料として渡す要件の一覧（id と text だけ。Issue #910）。**代わりの案の要件**（了承除外の
+     * 写し先）は過去の判断なので外す——了承除外の表の写し先で見分け、要件 ID の字面（`R:alt:`）では選ばない。
+     * 了承除外の印（部分の `disposition`）・出典・過去の判断は写さない。呼ぶたびに今の要件から組み立てる。
+     */
+    const surfaceCheckMaterialRequirements = (): readonly SurfaceCheckRequirement[] => {
+      const alternatives = new Set(acceptedUnwritable.map((entry) => entry.alternative_id));
+      return requirements
+        .filter((requirement) => !alternatives.has(requirement.id))
+        .map((requirement) => ({ id: requirement.id, text: requirement.text }));
+    };
+    /**
      * 対象の要件の種類を、コードの対応から分類する（Issue #488）。`DIFF_OUT_OF_SCOPE_KINDS` と同じ考え方に、
      * 対応を持たない `none` を足す。要件 ID の字面からは推測しない。
      */
@@ -2178,6 +2195,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         threshold,
         // 対象の要件の文（再点検の対象のデータ。Issue #432）
         requirements: new Map(requirements.map((requirement) => [requirement.id, requirement.text])),
+        // 点検の材料（全要件の id・text。代わりの案の要件は外す。Issue #910）。文書は `documents` の全体
+        materialRequirements: surfaceCheckMaterialRequirements(),
         docVersion: input.vocabularyVersion,
         // 段の途中までに得た分類・判定・診断を、続く裏付けや再点検の予算が尽きても残す（Issue #432）。
         // 段が止まっても途中までの記録が結果と診断ファイルに載る（`completed` は false のまま）。
@@ -2808,6 +2827,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           ...(judgeBudget.fallback === undefined ? {} : { recheckJudge: judgeBudget.fallback }),
           threshold,
           requirements: new Map(requirements.map((requirement) => [requirement.id, requirement.text])),
+          // 差分の点検にも、**その時点の**全要件を新しく渡す（代わりの案の要件は外す。Issue #910）
+          materialRequirements: surfaceCheckMaterialRequirements(),
           docVersion: input.vocabularyVersion,
           // 段の途中までに得た分類・判定・診断を、裏付けや再点検の予算が尽きても残す（Issue #432・#434）
           onProgress: (partial) => {

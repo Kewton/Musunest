@@ -12,6 +12,16 @@
 //      **問題ではない**は落とす（分類つき。要件はそのまま残す）。
 //   2. **裏付け**（Choice 1 問／語彙の穴の申告）… **申告の全部の制約 ID** の節の抜粋（`constraintExcerpt`）
 //      と主張を渡し、「裏付ける／反する／書いていない」を聞く。
+//
+// **点検の版（Issue #910）**：v1 は、主の 2 問へ申告の自己申告の材料（申告の制約の節）だけを渡し、「抜粋が
+// 主張を裏付けるか」を問うていた——対象の要件も文書の全体も無く、「1 つの実現方法が使えない」という申告を、
+// 要件全体を照らす材料を持たないまま判定していた。**v2（本番）** は、主の 2 問と再点検の**全部の要求**に、
+// 呼ぶ側が渡した**文書の全体と全要件の id・text**を同じ形で載せ（`surfaceCheckMaterial`）、問いを「対象の
+// 要件が、渡した文書の許す表現の**どれでも**書けないか」に直す。材料は申告の制約 ID・題材名・要件 ID・
+// P 番号で選ばない（呼ぶ側が P3 に渡したのと同じ正本をそのまま載せる）。答えの有限の集合（仕分け 3 値・
+// 裏付け 3 値・再点検 4 値）・根拠の候補（申告の制約 ID と none）・受理の条件は v1 と同じである。v1 の
+// 組み立て（`surfaceTriageQuestion`・`surfaceSupportQuestion` と v1 の再点検）は、比較の道具が過去の
+// 要求を再生できるよう**そのまま残す**。
 //   3. **再点検**（Choice 2 問／未確定の申告。**Luna の別の会話**）… 主の点検で**確信度が閾値未満・
 //      確信度が返らない（不明）・裏付けが「書いていない」**だった申告を、独立の会話で点検し直す
 //      （05 §3「確信度が低いものは Luna の別の会話に回す」「『書いていない』なら Luna に回す」）。
@@ -55,6 +65,42 @@ const TRIAGE_LABELS: ReadonlySet<string> = new Set(SURFACE_TRIAGE_LABELS);
 const SUPPORT_VERDICTS: ReadonlySet<string> = new Set(SURFACE_SUPPORT_VERDICTS);
 const RECHECK_KINDS: ReadonlySet<string> = new Set(SURFACE_RECHECK_KINDS);
 
+/**
+ * 点検の要求の版（Issue #910）。**v1** は今までの要求（state は空・主の 2 問に要件も文書の全体も無い）で、
+ * 比較の道具が過去の記録を再生するためにだけ残す。**v2** は本番の要求（全部の要求に文書の全体と全要件を
+ * 載せ、要件が書けるかを問う）。版が違えば要求の中身が違うので、記録のハッシュも当たらない。
+ */
+export const SURFACE_CHECK_VERSIONS = ["v1", "v2"] as const;
+export type SurfaceCheckVersion = (typeof SURFACE_CHECK_VERSIONS)[number];
+/** 本番の点検が使う版（Issue #910） */
+export const SURFACE_CHECK_VERSION: SurfaceCheckVersion = "v2";
+
+/** 点検の材料に載せる要件 1 件（id と text だけ。了承除外の印・代わりの案・出典は載せない。Issue #910） */
+export interface SurfaceCheckRequirement {
+  readonly id: string;
+  readonly text: string;
+}
+
+/**
+ * v2 の要求の `state`（点検の材料）を組み立てる（Issue #910）。**呼ぶ側が渡した文書の全体と要件の一覧を、
+ * そのままの順で**載せる——申告の制約 ID・題材名・要件 ID・P 番号で節や要件を選ばない（選ぶと、観測の外の
+ * 申告に効かず、申告自身が選んだ節だけで判定する v1 の欠落に戻る）。文書は名前と本文だけ、要件は id と
+ * text だけを写す（了承除外の印・代わりの案の採否・過去の判断は、呼ぶ側がこの一覧に入れない）。
+ *
+ * **state に置いてよい理由**：v1 で state を空にしたのは、生成役の会話（P3 の推論・代わりの案の採否・
+ * Build の合否）を点検へ引き継がないためである。文書と要件の一覧は会話ではなく、P3 に渡したのと同じ
+ * **正本の入力**であり、申告からも点検の答えからも作られない。問いごとに複製せず、1 要求に 1 回だけ載せる。
+ */
+export function surfaceCheckMaterial(
+  documents: readonly PromptDocument[],
+  requirements: readonly SurfaceCheckRequirement[],
+): Readonly<Record<string, unknown>> {
+  return {
+    documents: documents.map((document) => ({ name: document.name, text: document.text })),
+    requirements: requirements.map((requirement) => ({ id: requirement.id, text: requirement.text })),
+  };
+}
+
 /** 再点検の根拠の問いで、どの節も述べていないことを示す選択肢の名前（Issue #432） */
 export const SURFACE_RECHECK_NO_EVIDENCE = "none" as const;
 
@@ -67,6 +113,34 @@ export const SURFACE_RECHECK_KIND_QUESTION_PREFIX = "plan-recheck-kind";
 /** 再点検の根拠の問いの名前の頭 */
 export const SURFACE_RECHECK_EVIDENCE_QUESTION_PREFIX = "plan-recheck-evidence";
 
+// ── v2 の問いの文（Issue #910）──────────────────────────────────────
+// **変えた理由**：v1 の問いは「抜粋（申告が選んだ節）が主張を裏付けるか」「どの節が書けないと述べて
+// いるか」で、申告が挙げた**1 つの実現方法**が使えないかを問うていた。その方法が使えなくても、文書の許す
+// 別の表現（例：参照ごとの集計を where で絞る）で要件を書けるなら、申告は誤りである。v2 は、対象の要件が
+// 文書の許す表現の**どれでも**書けないかを問う。答えの集合と受理の条件は変えない。
+
+/** v2 の仕分けの問いの文 */
+export const SURFACE_TRIAGE_ASK_V2 =
+  "Which kind of 'cannot write' claim is this? Judge the target requirement, not only the method the claim names: read the whole documents and the requirement list in state. It is a vocabulary-hole only if the target requirement cannot be written by any expression the documents permit. If some expression the documents permit can write the requirement, even when the claimed method cannot, it is not-a-problem.";
+
+/** v2 の裏付けの問いの文 */
+export const SURFACE_SUPPORT_ASK_V2 =
+  "Do the documents in state support that the target requirement cannot be written by any expression the documents permit? The excerpt is the section the claim cites; read it against the whole documents and the requirement list. Answer supports only if no permitted expression can write the requirement. Answer contradicts if some permitted expression can write it, even when the claimed method cannot. Answer not-stated if the documents do not settle it.";
+
+/** v2 の再点検の仕分けの問いの文 */
+export const SURFACE_RECHECK_KIND_ASK_V2 =
+  "Is this claim a genuine vocabulary hole: can the target requirement not be written by any expression the documents in state permit, not only by the method the claim names? Answer not-a-problem if some permitted expression can write it. Answer undecidable if it cannot be decided from the given data.";
+
+/** v2 の再点検の根拠の問いの文 */
+export const SURFACE_RECHECK_EVIDENCE_ASK_V2 = `Which candidate section (by id) states a restriction under which the target requirement cannot be written by any expression the documents in state permit? Read each candidate against the whole documents. Answer ${SURFACE_RECHECK_NO_EVIDENCE} if no candidate states it, or if the documents permit another expression that writes the requirement.`;
+
+/** v2 の仕分け（主・再点検）の criteria（答えの集合は v1 と同じ） */
+const SURFACE_KIND_CRITERIA_V2 = {
+  ambiguity: "曖昧さ・決めたこと・不確かさのメモ（語彙の穴ではない）",
+  "vocabulary-hole": "文書の許すどの表現でも対象の要件を書けない（語彙の穴）",
+  "not-a-problem": "問題ではない（文書の許す表現で対象の要件を書ける・要件の言い直しなど）",
+} as const;
+
 /** 仕分けの問いの ID（申告の番号で決まる。問いの名前だけでは判定が読めないので、欄に申告を載せる） */
 export function surfaceTriageQuestionName(index: number): string {
   return `${SURFACE_TRIAGE_QUESTION_PREFIX}:${index}`;
@@ -78,8 +152,9 @@ export function surfaceSupportQuestionName(index: number): string {
 }
 
 /**
- * 仕分けの問い（T1）。**今の点検の問い**をそのまま組み立てる——比較の道具（`claim-forms.ts`）は、
- * この関数を呼ぶ（文・criteria・順を変えない。Issue #459）。
+ * 仕分けの問い（T1）。**v1 の点検の問い**をそのまま組み立てる——比較の道具（`claim-forms.ts`）は、
+ * この関数を呼ぶ（文・criteria・順を変えない。Issue #459）。本番の点検は v2（`surfaceTriageQuestionV2`）
+ * を使う（Issue #910）。
  */
 export function surfaceTriageQuestion(claim: PlanUnwritable): JudgeChoiceQuestion {
   return {
@@ -100,8 +175,9 @@ export function surfaceTriageQuestion(claim: PlanUnwritable): JudgeChoiceQuestio
 }
 
 /**
- * 裏付けの問い（S1）。**今の点検の問い**をそのまま組み立てる——比較の道具は、この関数を呼ぶ
- * （文・criteria・順を変えない。Issue #459）。抜粋は申告の制約 ID の節から取り出す。
+ * 裏付けの問い（S1）。**v1 の点検の問い**をそのまま組み立てる——比較の道具は、この関数を呼ぶ
+ * （文・criteria・順を変えない。Issue #459）。抜粋は申告の制約 ID の節から取り出す。本番の点検は v2
+ * （`surfaceSupportQuestionV2`）を使う（Issue #910）。
  */
 export function surfaceSupportQuestion(
   claim: PlanUnwritable,
@@ -121,6 +197,147 @@ export function surfaceSupportQuestion(
       contradicts: "抜粋が主張に反する",
       "not-stated": "抜粋に書いていない",
     },
+  };
+}
+
+/**
+ * v2 の仕分けの問い（本番。Issue #910）。対象の要件（id と文）と申告を欄に載せ、**要件が、渡した文書の
+ * 許す表現のどれでも書けないか**を問う。文書の全体と要件の一覧は、要求の `state`（`surfaceCheckMaterial`）
+ * で 1 回だけ渡す。答えの集合（3 値）は v1 と同じ。
+ */
+export function surfaceTriageQuestionV2(claim: PlanUnwritable, requirement: string): JudgeChoiceQuestion {
+  return {
+    kind: "choice",
+    instructions: {
+      requirementId: claim.requirementId,
+      requirement,
+      part: claim.part,
+      reason: claim.reason,
+      constraintIds: claim.constraintIds,
+      ask: SURFACE_TRIAGE_ASK_V2,
+    },
+    criteria: SURFACE_KIND_CRITERIA_V2,
+  };
+}
+
+/**
+ * v2 の裏付けの問い（本番。Issue #910）。申告が挙げた節の抜粋は**照らす手掛かり**として残し、判定は
+ * `state` の文書の全体と照らして、**要件が、文書の許す表現のどれでも書けないか**を問う。答えの集合
+ * （3 値）と受理の条件は v1 と同じ。
+ */
+export function surfaceSupportQuestionV2(
+  claim: PlanUnwritable,
+  requirement: string,
+  documents: readonly PromptDocument[],
+): JudgeChoiceQuestion {
+  return {
+    kind: "choice",
+    instructions: {
+      requirementId: claim.requirementId,
+      requirement,
+      part: claim.part,
+      reason: claim.reason,
+      excerpt: constraintExcerpt(documents, claim.constraintIds),
+      ask: SURFACE_SUPPORT_ASK_V2,
+    },
+    criteria: {
+      supports: "文書が、対象の要件を文書の許すどの表現でも書けないことを裏付ける",
+      contradicts: "文書の許す表現で対象の要件を書ける（申告の方法が使えなくても、主張に反する）",
+      "not-stated": "文書からは決まらない",
+    },
+  };
+}
+
+/**
+ * 再点検の仕分けの問い（Issue #432・#910）。v1 は今までの文・欄・順をそのまま組み立てる（過去の要求の
+ * 再生のため）。v2 は対象の要件の ID を足し、要件が書けるかを問う。答えの集合（4 値）は前後で同じ。
+ */
+export function surfaceRecheckKindQuestion(
+  claim: PlanUnwritable,
+  requirement: string,
+  version: SurfaceCheckVersion,
+): JudgeChoiceQuestion {
+  if (version === "v1") {
+    return {
+      kind: "choice",
+      instructions: {
+        // 申告と対象の要件を、点検の対象のデータとして渡す（生成役の会話は引き継がない）
+        requirement,
+        part: claim.part,
+        reason: claim.reason,
+        ask: "Is this claim a genuine vocabulary hole that is needed to build the requirement? Answer undecidable if it cannot be decided from the given data.",
+      },
+      criteria: {
+        "vocabulary-hole": "文書の語彙に無いために書けない（語彙の穴）",
+        "not-a-problem": "問題ではない（要件の言い直しなど。実際には書けている）",
+        ambiguity: "曖昧さ・決めたこと・不確かさのメモ（語彙の穴ではない）",
+        undecidable: "与えられたデータでは判定できない",
+      },
+    };
+  }
+  return {
+    kind: "choice",
+    instructions: {
+      requirementId: claim.requirementId,
+      requirement,
+      part: claim.part,
+      reason: claim.reason,
+      ask: SURFACE_RECHECK_KIND_ASK_V2,
+    },
+    criteria: {
+      "vocabulary-hole": SURFACE_KIND_CRITERIA_V2["vocabulary-hole"],
+      "not-a-problem": SURFACE_KIND_CRITERIA_V2["not-a-problem"],
+      ambiguity: SURFACE_KIND_CRITERIA_V2.ambiguity,
+      undecidable: "与えられたデータでは判定できない",
+    },
+  };
+}
+
+/**
+ * 再点検の根拠の問い（Issue #432・#910）。**根拠の候補は前後とも申告の制約 ID と none だけ**——v2 で足した
+ * 文書の全体は照らすための文脈であって、根拠の候補ではない。候補の本文はコードが取り出す（証跡）。
+ */
+export function surfaceRecheckEvidenceQuestion(
+  claim: PlanUnwritable,
+  requirement: string,
+  documents: readonly PromptDocument[],
+  version: SurfaceCheckVersion,
+): JudgeChoiceQuestion {
+  const candidates = claim.constraintIds.map((id) => ({
+    id,
+    section: constraintExcerpt(documents, [id]),
+  }));
+  const evidenceCriteria: Record<string, string> = {};
+  if (version === "v1") {
+    for (const candidate of candidates) evidenceCriteria[candidate.id] = `節 ${candidate.id} が書けないことを述べている`;
+    evidenceCriteria[SURFACE_RECHECK_NO_EVIDENCE] = "どの節も述べていない";
+    return {
+      kind: "choice",
+      instructions: {
+        part: claim.part,
+        reason: claim.reason,
+        // 根拠はコードが用意した有限の ID（節）から選ばせ、本文はコードが取り出す（証跡）
+        candidates,
+        ask: `Which candidate section (by id) states that this part cannot be written in the vocabulary? Answer ${SURFACE_RECHECK_NO_EVIDENCE} if no candidate states it.`,
+      },
+      criteria: evidenceCriteria,
+    };
+  }
+  for (const candidate of candidates) {
+    evidenceCriteria[candidate.id] = `節 ${candidate.id} が、対象の要件を文書の許すどの表現でも書けないことを述べている`;
+  }
+  evidenceCriteria[SURFACE_RECHECK_NO_EVIDENCE] = "どの節も述べていない（または文書の許す別の表現で書ける）";
+  return {
+    kind: "choice",
+    instructions: {
+      requirementId: claim.requirementId,
+      requirement,
+      part: claim.part,
+      reason: claim.reason,
+      candidates,
+      ask: SURFACE_RECHECK_EVIDENCE_ASK_V2,
+    },
+    criteria: evidenceCriteria,
   };
 }
 
@@ -249,8 +466,19 @@ export interface SurfaceCheckInput {
   readonly recheckJudge?: Judge;
   /** 確信度の閾値（これ**未満**は未確定） */
   readonly threshold: number;
-  /** 対象の要件の文（要件 ID → 文）。再点検の対象のデータに使う（Issue #432） */
+  /** 対象の要件の文（要件 ID → 文）。問いの対象の要件に使う（Issue #432・#910） */
   readonly requirements: ReadonlyMap<string, string>;
+  /**
+   * v2 の材料に載せる要件の一覧（id と text。Issue #910）。無ければ `requirements` の全件を、その順で載せる。
+   * **代わりの案の要件（了承除外の写し先）と過去の判断は入れない**——呼ぶ側（`runPlan`）が、了承除外の
+   * 表の写し先で外してから渡す（要件 ID の字面では選ばない）。
+   */
+  readonly materialRequirements?: readonly SurfaceCheckRequirement[];
+  /**
+   * 点検の要求の版（Issue #910）。無ければ本番の版（`SURFACE_CHECK_VERSION`）。v1 は比較の道具が過去の
+   * 記録を再生するときにだけ渡す。
+   */
+  readonly checkVersion?: SurfaceCheckVersion;
   /** 文書（語彙）の版。診断に残す（Issue #432） */
   readonly docVersion: string;
   /**
@@ -336,6 +564,16 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
 
   if (claims.length === 0) return snapshot();
 
+  // 要求の版と材料（Issue #910）。v1 は今までどおり state を空にする（過去の要求を再生するため）。v2 は、
+  // 呼ぶ側が渡した文書の全体と要件の一覧を、**全部の要求に同じ形で**載せる（初回・差分の点検とも、呼ぶ
+  // たびに今の入力から組み立てる。過去の判断・代わりの案の採否・Build の合否・外の採点は載せない）。
+  const version: SurfaceCheckVersion = input.checkVersion ?? SURFACE_CHECK_VERSION;
+  const materialRequirements: readonly SurfaceCheckRequirement[] =
+    input.materialRequirements ?? [...input.requirements].map(([id, text]) => ({ id, text }));
+  const state: Readonly<Record<string, unknown>> =
+    version === "v1" ? {} : surfaceCheckMaterial(input.documents, materialRequirements);
+  const requirementOf = (claim: PlanUnwritable): string => input.requirements.get(claim.requirementId) ?? "";
+
   // **最初の判定を呼ぶ前に**、全申告の最小データと「未実行」の印を登録して報告する（Issue #432）。最初の
   // 判定の予約が失敗しても、`plan-surface-check.json` に申告が 1 件も残らない（申告が無かった場合と区別
   // できない）ことを避ける。
@@ -346,9 +584,10 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
   const triageQuestions: Record<string, JudgeQuestion> = {};
   claims.forEach((claim, index) => {
     // 問いの組み立ては**道具と共有する 1 つの関数**（`surfaceTriageQuestion`。Issue #459）
-    triageQuestions[surfaceTriageQuestionName(index)] = surfaceTriageQuestion(claim);
+    triageQuestions[surfaceTriageQuestionName(index)] =
+      version === "v1" ? surfaceTriageQuestion(claim) : surfaceTriageQuestionV2(claim, requirementOf(claim));
   });
-  const classify = await safeJudge(input.judge, { state: {}, questions: triageQuestions });
+  const classify = await safeJudge(input.judge, { state, questions: triageQuestions });
 
   const holes: { readonly claim: PlanUnwritable; readonly index: number }[] = [];
   const pending: PendingClaim[] = [];
@@ -406,9 +645,12 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
     const supportQuestions: Record<string, JudgeQuestion> = {};
     for (const { claim, index } of holes) {
       // 問いの組み立ては**道具と共有する 1 つの関数**（`surfaceSupportQuestion`。Issue #459）
-      supportQuestions[surfaceSupportQuestionName(index)] = surfaceSupportQuestion(claim, input.documents);
+      supportQuestions[surfaceSupportQuestionName(index)] =
+        version === "v1"
+          ? surfaceSupportQuestion(claim, input.documents)
+          : surfaceSupportQuestionV2(claim, requirementOf(claim), input.documents);
     }
-    const support = await safeJudge(input.judge, { state: {}, questions: supportQuestions });
+    const support = await safeJudge(input.judge, { state, questions: supportQuestions });
 
     for (const { claim, index } of holes) {
       if (support === null) {
@@ -474,43 +716,18 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
     const kindQuestions: Record<string, JudgeQuestion> = {};
     const evidenceQuestions: Record<string, JudgeQuestion> = {};
     for (const entry of pending) {
-      const requirement = input.requirements.get(entry.claim.requirementId) ?? "";
-      kindQuestions[surfaceRecheckKindQuestionName(entry.index)] = {
-        kind: "choice",
-        instructions: {
-          // 申告と対象の要件を、点検の対象のデータとして渡す（生成役の会話は引き継がない）
-          requirement,
-          part: entry.claim.part,
-          reason: entry.claim.reason,
-          ask: "Is this claim a genuine vocabulary hole that is needed to build the requirement? Answer undecidable if it cannot be decided from the given data.",
-        },
-        criteria: {
-          "vocabulary-hole": "文書の語彙に無いために書けない（語彙の穴）",
-          "not-a-problem": "問題ではない（要件の言い直しなど。実際には書けている）",
-          ambiguity: "曖昧さ・決めたこと・不確かさのメモ（語彙の穴ではない）",
-          undecidable: "与えられたデータでは判定できない",
-        },
-      };
-      const candidates = entry.claim.constraintIds.map((id) => ({
-        id,
-        section: constraintExcerpt(input.documents, [id]),
-      }));
-      const evidenceCriteria: Record<string, string> = {};
-      for (const candidate of candidates) evidenceCriteria[candidate.id] = `節 ${candidate.id} が書けないことを述べている`;
-      evidenceCriteria[SURFACE_RECHECK_NO_EVIDENCE] = "どの節も述べていない";
-      evidenceQuestions[surfaceRecheckEvidenceQuestionName(entry.index)] = {
-        kind: "choice",
-        instructions: {
-          part: entry.claim.part,
-          reason: entry.claim.reason,
-          // 根拠はコードが用意した有限の ID（節）から選ばせ、本文はコードが取り出す（証跡）
-          candidates,
-          ask: `Which candidate section (by id) states that this part cannot be written in the vocabulary? Answer ${SURFACE_RECHECK_NO_EVIDENCE} if no candidate states it.`,
-        },
-        criteria: evidenceCriteria,
-      };
+      // 申告と対象の要件を、点検の対象のデータとして渡す（生成役の会話は引き継がない）。根拠の候補は
+      // 申告の制約 ID と none だけ（前後で同じ。Issue #432・#910）
+      const requirement = requirementOf(entry.claim);
+      kindQuestions[surfaceRecheckKindQuestionName(entry.index)] = surfaceRecheckKindQuestion(entry.claim, requirement, version);
+      evidenceQuestions[surfaceRecheckEvidenceQuestionName(entry.index)] = surfaceRecheckEvidenceQuestion(
+        entry.claim,
+        requirement,
+        input.documents,
+        version,
+      );
     }
-    const recheck = await safeJudge(luna, { state: {}, questions: { ...kindQuestions, ...evidenceQuestions } });
+    const recheck = await safeJudge(luna, { state, questions: { ...kindQuestions, ...evidenceQuestions } });
 
     for (const entry of pending) {
       const { claim, index } = entry;

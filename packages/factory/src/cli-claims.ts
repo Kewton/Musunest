@@ -2,7 +2,13 @@
 // 単独・組の票を、**同じ申告・同じ正解**で対にして比べる道具の入口（Issue #459）。
 //
 // **正解付けと本物の Jev での比較は窓口が別に行う。** ここは API を呼ばず、試験は偽物の判定で閉じる。
-// Plan の確定経路・既定の点検・今の問い（T1・S1）の文と criteria・Build 側の仕分けは変えない。
+// Plan の確定経路・既定の点検・v1 の問い（T1・S1）の文と criteria・Build 側の仕分けは変えない。
+//
+// **基準の経路の点検の版（Issue #910）**：基準の 2 経路は、`--check-version` で選んだ版の要求で点検を流す
+// （既定は本番の版 `SURFACE_CHECK_VERSION`）。**v1 を選べば過去の版の要求を同じ形で再生できる**（要求の
+// 中身が同じなので、過去の記録のハッシュが当たる）。v2 の要求は文書の全体と要件を載せるので中身が違い、
+// 過去の記録のハッシュには当たらない。出力の `surface_check_version` と、基準の呼び出しの `check_version`
+// に版を残し、版の違う記録を取り違えない。
 //
 // 端末もファイルも扱うのは、この入口（と cli.ts）だけである。文書の読み込みと判定の口の組み立ては
 // `factory:run`（cli.ts）と共有する（`loadDocumentsFromFiles`・`assembleJudge`）。
@@ -58,7 +64,13 @@ import {
   type LabelProblems,
 } from "./plan/claim-score.js";
 import { DEFAULT_PLAN_JUDGE_THRESHOLD } from "./plan/run-plan.js";
-import { runSurfaceCheck, type SurfaceCheckResult } from "./plan/surface-check.js";
+import {
+  SURFACE_CHECK_VERSION,
+  SURFACE_CHECK_VERSIONS,
+  runSurfaceCheck,
+  type SurfaceCheckResult,
+  type SurfaceCheckVersion,
+} from "./plan/surface-check.js";
 import type { PlanSurface, PlanUnwritable } from "./plan/surface.js";
 import type { PromptDocument } from "./stages/prompt.js";
 
@@ -83,7 +95,7 @@ export const DEFAULT_TALLY_RULE = "majority" as const;
 
 /** 使い方の文 */
 export const JUDGE_CLAIMS_USAGE =
-  "使い方: factory:judge-claims -- (--claims <ファイル> | --diagnostic <ファイル>) --out <ファイル> [--doc-version <版> --doc-hash <ハッシュ>] [--judge jev|fallback] [--repeat <回>] [--reverse-options] [--labels <ファイル>] [--model <名前>] [--rule unanimous|majority] [--forms <T1,T2,...>] [--budget <USD>] [--deadline <分>] [--max-calls <回>]";
+  "使い方: factory:judge-claims -- (--claims <ファイル> | --diagnostic <ファイル>) --out <ファイル> [--doc-version <版> --doc-hash <ハッシュ>] [--judge jev|fallback] [--repeat <回>] [--reverse-options] [--labels <ファイル>] [--model <名前>] [--rule unanimous|majority] [--forms <T1,T2,...>] [--budget <USD>] [--deadline <分>] [--max-calls <回>] [--check-version v1|v2]";
 
 /** 引数 */
 export interface JudgeClaimsArguments {
@@ -102,6 +114,8 @@ export interface JudgeClaimsArguments {
   readonly budgetUsd?: number;
   readonly deadlineMs?: number;
   readonly maxCalls?: number;
+  /** 基準の経路の点検の版（既定は本番の版。v1 は過去の要求の再生。Issue #910） */
+  readonly checkVersion: SurfaceCheckVersion;
 }
 
 function valueAfter(args: readonly string[], index: number, option: string): string | { error: string } {
@@ -130,6 +144,7 @@ export function parseJudgeClaimsArguments(
   let budgetUsd: number | undefined;
   let deadlineMs: number | undefined;
   let maxCalls: number | undefined;
+  let checkVersion: SurfaceCheckVersion = SURFACE_CHECK_VERSION;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === undefined) continue;
@@ -137,7 +152,7 @@ export function parseJudgeClaimsArguments(
       reverseOptions = true;
       continue;
     }
-    if (arg === "--claims" || arg === "--diagnostic" || arg === "--out" || arg === "--doc-version" || arg === "--doc-hash" || arg === "--judge" || arg === "--repeat" || arg === "--labels" || arg === "--model" || arg === "--rule" || arg === "--forms" || arg === "--budget" || arg === "--deadline" || arg === "--max-calls") {
+    if (arg === "--claims" || arg === "--diagnostic" || arg === "--out" || arg === "--doc-version" || arg === "--doc-hash" || arg === "--judge" || arg === "--repeat" || arg === "--labels" || arg === "--model" || arg === "--rule" || arg === "--forms" || arg === "--budget" || arg === "--deadline" || arg === "--max-calls" || arg === "--check-version") {
       const value = valueAfter(args, index, arg);
       index += 1;
       if (typeof value !== "string") return value;
@@ -175,6 +190,10 @@ export function parseJudgeClaimsArguments(
         const parsed = Number(value);
         if (!Number.isInteger(parsed) || parsed < 1) return { error: "--max-calls には 1 以上の整数を指定してください" };
         maxCalls = parsed;
+      } else if (arg === "--check-version") {
+        const known = SURFACE_CHECK_VERSIONS.find((version) => version === value);
+        if (known === undefined) return { error: `--check-version は ${SURFACE_CHECK_VERSIONS.join(" か ")} です` };
+        checkVersion = known;
       }
       continue;
     }
@@ -203,6 +222,7 @@ export function parseJudgeClaimsArguments(
     ...(budgetUsd === undefined ? {} : { budgetUsd }),
     ...(deadlineMs === undefined ? {} : { deadlineMs }),
     ...(maxCalls === undefined ? {} : { maxCalls }),
+    checkVersion,
   };
 }
 
@@ -550,9 +570,12 @@ function baselineCallToOutput(
   role: "primary" | "recheck",
   runId: string,
   orderedClaimIds: readonly string[],
+  checkVersion: SurfaceCheckVersion,
 ): Record<string, unknown> {
   const common = {
     role,
+    // 要求の版（Issue #910）。版の違う記録を、同じ要求の記録として扱わない
+    check_version: checkVersion,
     run_id: runId,
     request_hash: entry.requestHash,
     question_ids: entry.questionIds,
@@ -777,6 +800,7 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
         threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
         requirements,
         docVersion: loaded.docVersion,
+        checkVersion: parsed.checkVersion,
         onProgress: (entry) => {
           partialA = entry;
         },
@@ -792,8 +816,8 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
     // 「再点検あり」の実回付：**要求があり、実開始した**申告（N3）
     const referred = referredFromRecheck(recheckRecorder.entries.slice(), orderedClaimIds);
     if (partialA !== null) withRecheckParts.push(summarizeSurface(surface, partialA, referred));
-    for (const entry of recorder.entries) baselineCalls.push(baselineCallToOutput(entry, "primary", runId, orderedClaimIds));
-    for (const entry of recheckRecorder.entries) baselineCalls.push(baselineCallToOutput(entry, "recheck", runId, orderedClaimIds));
+    for (const entry of recorder.entries) baselineCalls.push(baselineCallToOutput(entry, "primary", runId, orderedClaimIds, parsed.checkVersion));
+    for (const entry of recheckRecorder.entries) baselineCalls.push(baselineCallToOutput(entry, "recheck", runId, orderedClaimIds, parsed.checkVersion));
 
     // 「再点検なし」：記録した応答・停止を、ハッシュの一致で返す記録の口へ流し直す。**止まっても流す**（F7）
     let partialB: SurfaceCheckResult | null = null;
@@ -805,6 +829,7 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
         threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
         requirements,
         docVersion: loaded.docVersion,
+        checkVersion: parsed.checkVersion,
         onProgress: (entry) => {
           partialB = entry;
         },
@@ -832,6 +857,7 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
         threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
         requirements,
         docVersion: loaded.docVersion,
+        checkVersion: parsed.checkVersion,
       });
     } catch (error) {
       if (isRecordedMiss(error)) {
@@ -908,6 +934,8 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
   const output = {
     schema_version: JUDGE_CLAIMS_SCHEMA,
     forms_version: CLAIM_FORMS_VERSION,
+    // 基準の経路の点検の版（Issue #910）
+    surface_check_version: parsed.checkVersion,
     doc_version: loaded.docVersion,
     doc_hash: actualHash,
     source: loaded.source,

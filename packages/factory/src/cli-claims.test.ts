@@ -818,3 +818,50 @@ describe("出力の attempts_by_adapter が、名乗りのある偽物の実開�
     expect(cost.attempts_by_adapter["fake"]).toBe(0);
   });
 });
+
+// ── 基準の経路の点検の版（Issue #910）──────────────────────────────────
+
+/** 変更前（main・e471996）の道具が、同じ申告の組・文書で基準の経路に送った要求のハッシュ */
+const V1_BASELINE_HASHES = [
+  "617d24bba610b07ed8b29aa86ed78e64581ed5600aae92da0afe89157c0b6dd3",
+  "229879737d6ddf8c576abf536203d04aeb0aa75784414cf058eb3ff55ad8a2b1",
+  "d70db9cae877d96d500ffc9c1fc64e9aaec715a8d178633b501e1da2bceb1393",
+];
+
+describe("基準の経路の点検の版（Issue #910）", () => {
+  it("--check-version v1 は、過去の版の要求を再生する（過去の記録のハッシュが当たる）", async () => {
+    const harness = await run([...BASE_ARGS, "--check-version", "v1"]);
+
+    expect(harness.code).toBe(JUDGE_CLAIMS_EXIT_OK);
+    expect(harness.output.surface_check_version).toBe("v1");
+    const calls = harness.output.baseline_calls as Record<string, unknown>[];
+    expect(calls.map((call) => call.request_hash)).toEqual(V1_BASELINE_HASHES);
+    expect(calls.every((call) => call.check_version === "v1")).toBe(true);
+  });
+
+  it("既定は本番の版（v2）。要求のハッシュは過去の記録に当たらず、版を出力と各呼び出しに残す", async () => {
+    const harness = await run(BASE_ARGS);
+
+    expect(harness.code).toBe(JUDGE_CLAIMS_EXIT_OK);
+    expect(harness.output.surface_check_version).toBe("v2");
+    const calls = harness.output.baseline_calls as Record<string, unknown>[];
+    expect(calls).toHaveLength(3);
+    for (const call of calls) {
+      expect(V1_BASELINE_HASHES).not.toContain(call.request_hash);
+      expect(call.check_version).toBe("v2");
+    }
+    // v2 の基準の要求には、文書の全体と要件が材料として載る
+    const baseline = harness.requests.filter((request) =>
+      Object.keys(request.questions).some((name) => name.startsWith("plan-")),
+    );
+    expect(baseline.length).toBeGreaterThan(0);
+    for (const request of baseline) expect(Object.keys(request.state)).toEqual(["documents", "requirements"]);
+  });
+
+  it("知らない版は使い方の誤り", () => {
+    expect(parseJudgeClaimsArguments([...BASE_ARGS, "--check-version", "v9"])).toEqual({
+      error: "--check-version は v1 か v2 です",
+    });
+    expect(parseJudgeClaimsArguments(BASE_ARGS)).toMatchObject({ checkVersion: "v2" });
+  });
+});
