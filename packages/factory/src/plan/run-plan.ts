@@ -61,6 +61,7 @@ import {
   splitSourceSentences,
   type ReverseCheckDiagnosis,
   type ReverseCheckOperation,
+  type ReverseCheckTrace,
 } from "../stages/reverse-check.js";
 import { runAnswers, validateAnswer, type ClassifiedAnswer, type PlanAnswerDraft } from "./answers.js";
 import {
@@ -87,7 +88,7 @@ import {
   type PlanRemaining,
   type PlanTurn,
 } from "./session.js";
-import { runSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceIdReuseRejection, type SurfaceOutOfScopeRef, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt, type SurfaceTargetAttemptResult } from "./surface.js";
+import { SURFACE_SHOWN_ID_SOURCES, runSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceIdReuseRejection, type SurfaceOutOfScopeRef, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt, type SurfaceTargetAttemptResult } from "./surface.js";
 import {
   PLAN_OPEN_ISSUE_ORIGINS,
   PLAN_OPEN_ISSUE_SOURCES,
@@ -173,6 +174,8 @@ export const PLAN_DIAGNOSIS_CODES = [
   "requirement-id-unknown",
   // P3 が、データで見せた事項 ID を新しい事項の ID に使った（形の検査で断る。Issue #464）
   "issue-id-reused",
+  // P3 の 1 つの応答の中で、同じ事項 ID の未解決の事項を 2 つ以上挙げた（形の誤り。Issue #887）
+  "issue-id-duplicated",
   // P3 の「書けない」の申告の点検（Issue #432）。未点検の分類（低確信・書いていない・読めない）
   "not-stated",
   "low-confidence",
@@ -394,8 +397,16 @@ export interface PlanFailureProblem {
   readonly code: string;
 }
 
-/** P1/P2 のどの呼び出しで止まったか（有限の値。Issue #397） */
-export const PLAN_OPERATIONS = ["requirements", "reverse-check", "requirements-redo", "reverse-check-redo"] as const;
+/** P1/P2 のどの呼び出しで止まったか（有限の値。Issue #397・#917） */
+export const PLAN_OPERATIONS = [
+  "requirements",
+  "reverse-check",
+  "requirements-redo",
+  "reverse-check-redo",
+  // 引用の修復と、その後の照らし直し（Issue #917。Plan の経路だけ）
+  "quote-repair",
+  "reverse-check-repair",
+] as const;
 export type PlanOperation = (typeof PLAN_OPERATIONS)[number];
 
 /** 早く止まった帰属（どの段の・どの種類の失敗か。P1/P2 ではどの呼び出しかも持つ） */
@@ -780,6 +791,13 @@ export interface PlanResultBase {
    * **値は件数だけ**である（落ちの文言・引用・位置は入れない。`02-failure-modes.md` §1）。
    */
   readonly requirementsDiagnosis: ReverseCheckDiagnosis;
+  /**
+   * P1/P2 の逆照合の往復ごとの診断（一覧の全体・その SHA-256・会話の生の範囲と行き先・コードの落ち。
+   * Issue #919）。確定・確定できない・止まったの 3 つの結果に共通で、途中で止まったときは終えた往復の分だけを
+   * 持つ。**判定・やり直し・持ち越し・P3 以降の入力には使わない**。`plan-record.json` には写さず、呼ぶ側
+   * （`cli.ts`）が別の診断ファイルに書く。
+   */
+  readonly reverseCheckTrace?: ReverseCheckTrace;
   /**
    * P3 の「書けない」の申告の点検の記録（受理・落とした・曖昧さへ・未点検の件数と、判定の記録。Issue #432）。
    * 値（申告の部分の文・理由・制約 ID）は入れない。**往復の記録（`plan-record.json`）に載せる要約**である。
@@ -1480,6 +1498,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const closedByDefaults: PlanDefaultClosure[] = [];
   // P1/P2 の往復ごとの逆照合の落ちの内訳（Issue #430）。止まったときは、止まるまでに得た分だけになる。
   let requirementsDiagnosis: ReverseCheckDiagnosis = emptyReverseCheckDiagnosis();
+  // P1/P2 の逆照合の往復ごとの診断（Issue #919）。止まったときも、止まるまでに終えた往復の分を持つ。
+  let reverseCheckTrace: ReverseCheckTrace | undefined;
   // P3 の「書けない」の申告の点検の記録（Issue #432・#434）。**点検 1 回ごとに 1 件積む**——初回と、
   // 各往復の差分の点検である。途中停止・未点検でも、そこまでに終えた分類・判定・診断を残す
   // （成功や 0 件に見せない）。申告 0 件でも点検は 1 件積み、`completed` を真にする。
@@ -1733,6 +1753,24 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     }
   };
   /**
+   * P3 に**データで見せた**事項 ID のうち、`existing`（ほかの 4 つの提示元に入らない既存の行の ID。
+   * **状態を問わない**）を組む（Issue #887）。呼ぶ側が構造化した対応から作る——ID の接頭辞や文は解析
+   * しない。4 つの提示元のどれかが覆う ID は `existing` に入れない（同じ ID を 2 か所で見せない）。
+   */
+  const existingShownIssueIds = (covered: {
+    readonly catalog: readonly string[];
+    readonly defaults: readonly string[];
+    readonly inherited: readonly string[];
+    readonly decisions: readonly string[];
+  }): readonly string[] => {
+    const shown = new Set<string>();
+    for (const source of SURFACE_SHOWN_ID_SOURCES) {
+      if (source === "existing") continue;
+      for (const id of covered[source]) shown.add(id);
+    }
+    return openIssues.flatMap((issue) => (shown.has(issue.id) ? [] : [issue.id]));
+  };
+  /**
    * 使い回しで断った応答を、点検の版（`check`）と試行ごとに記録する（Issue #464）。記録は**値を持たない**
    * ——件数と提示元の分類だけである。断ったあとに確定・停止しても、結果の別の欄に残る。
    */
@@ -1954,6 +1992,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       closedBySource: closedBySource.slice(),
       closedByDefault: closedByDefaults.slice(),
       requirementsDiagnosis,
+      ...(reverseCheckTrace === undefined ? {} : { reverseCheckTrace }),
       surfaceCheck: aggregateSurfaceCheck(),
       surfaceCheckDiagnostics: aggregateSurfaceCheckDiagnostics(),
       diffReviews: diffReviews.map(finalizeDiffReview),
@@ -1985,9 +2024,13 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         source: input.source,
         documents: input.documents,
         gateway,
+        // 落ちが来歴だけのときは、全体の作り直しではなく引用の修復を使う（Issue #917。**Plan の経路だけ**の
+        // 明示の選択である。既定の Build の経路は今までどおり全体の作り直し）
+        quoteRepair: true,
       });
-      // 止まったときも、止まるまでに終えた往復の分を結果へ残す（Issue #430）
+      // 止まったときも、止まるまでに終えた往復の分を結果へ残す（Issue #430・#919）
       requirementsDiagnosis = outcome.ok ? outcome.value.diagnosis : outcome.diagnosis;
+      reverseCheckTrace = outcome.ok ? outcome.value.trace : outcome.trace;
       return outcome;
     });
     const list = reverse.list;
@@ -2137,13 +2180,17 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     const catalogData: SurfaceCatalogData = buildCatalogData(catalog);
 
     // ── P3 洗い出し（目録に無い曖昧さ）──────────────────────────────
-    // 初回に**データで見せた**事項 ID の集合（目録の開いている事項と、仮に適用した既定の 2 種）。呼ぶ側が
-    // 構造化した対応から作る——文や ID の接頭辞の解析では作らない（Issue #464）。
-    const initialShownIds: SurfaceShownIssueIds = {
+    // 初回に**データで見せた**事項 ID の集合（目録の開いている事項と、仮に適用した既定の 2 種と、既存の
+    // 行）。呼ぶ側が構造化した対応から作る——文や ID の接頭辞の解析では作らない（Issue #464・#887）。
+    const initialShownSources = {
       catalog: catalogData.openIssues.map((issue) => issue.id),
       defaults: catalogData.defaults.map((entry) => entry.issueId),
-      inherited: [],
-      decisions: [],
+      inherited: [] as readonly string[],
+      decisions: [] as readonly string[],
+    };
+    const initialShownIds: SurfaceShownIssueIds = {
+      ...initialShownSources,
+      existing: existingShownIssueIds(initialShownSources),
     };
     const surface = await runStageOutcome("surface", () =>
       runSurface({
@@ -2702,7 +2749,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       // 作る——文や ID の接頭辞の解析では作らない。目録の開いている事項・仮の既定・今回の引き継ぎ・
       // 参照用の文脈の既存の決定に `resolution.decision_id` で結ばれた既存の事項である。
       const decisionIdsInContext = new Set(context.decisions.map((decision) => decision.id));
-      const diffShownIds: SurfaceShownIssueIds = {
+      const diffShownSources = {
         catalog: diffCatalogData.openIssues.map((issue) => issue.id),
         defaults: diffCatalogData.defaults.map((entry) => entry.issueId),
         inherited: inheritDecisions.map((entry) => entry.issue.id),
@@ -2710,6 +2757,12 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           const decisionId = issue.resolution?.decision_id;
           return decisionId !== undefined && decisionIdsInContext.has(decisionId) ? [issue.id] : [];
         }),
+      };
+      // 上の 4 つの提示元に入らない既存の行（答えで閉じた P3 の事項・前の版から開いたままの事項・
+      // 初回の要件化の未解決の行など。状態を問わない。Issue #887）
+      const diffShownIds: SurfaceShownIssueIds = {
+        ...diffShownSources,
+        existing: existingShownIssueIds(diffShownSources),
       };
       // この往復の点検の版（初回 1 に続く番号。`surfaceChecks` は初回の分だけ積んである）
       const diffCheckNumber = surfaceChecks.length + 1;

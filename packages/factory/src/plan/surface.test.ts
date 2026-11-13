@@ -526,12 +526,13 @@ describe("制約 ID の正規化は 1 回だけである（Issue #434・D2）", 
 // ── Issue #464：データで見せた事項 ID を使い回した応答を、形の検査で断る ──────────────
 
 describe("データで見せた事項 ID を使い回した応答を、形の検査で断る（04 §3 P3・Issue #464）", () => {
-  /** 4 つの提示元すべてに 1 つずつ ID を入れた「見せた ID」（初回の 2 種・差分の 4 種を兼ねる） */
+  /** 5 つの提示元すべてに 1 つずつ ID を入れた「見せた ID」（初回・差分・既存の行を兼ねる） */
   const SHOWN: SurfaceShownIssueIds = {
     catalog: ["OI:catalog:R-1:period"],
     defaults: ["OI:catalog:R-1:auto"],
     inherited: ["OI:catalog:R:A:Q1-1:aggregation"],
     decisions: ["OI:catalog:R-1:asked"],
+    existing: ["OI:existing:1"],
   };
   /** 提示元ごとの代表 ID */
   const ID_OF_SOURCE: Readonly<Record<SurfaceShownIdSource, string>> = {
@@ -539,6 +540,7 @@ describe("データで見せた事項 ID を使い回した応答を、形の検
     defaults: "OI:catalog:R-1:auto",
     inherited: "OI:catalog:R:A:Q1-1:aggregation",
     decisions: "OI:catalog:R-1:asked",
+    existing: "OI:existing:1",
   };
   /** 見せた ID を使った応答（未解決の事項 1 件） */
   const reuseOutput = (id: string) => ({
@@ -650,6 +652,109 @@ describe("データで見せた事項 ID を使い回した応答を、形の検
     expect(reuse.bySource.find((entry) => entry.source === "defaults")?.count).toBe(1);
     // 提示元の合計（2）は、異なる数（1）と一致しない
     expect(reuse.bySource.reduce((total, entry) => total + entry.count, 0)).toBe(2);
+  });
+
+  it("提示元 existing の件数も bySource に載る（Issue #887）", () => {
+    const reuse = surfaceIdReuseOf(reuseOutput("OI:existing:1"), SHOWN);
+    expect(reuse.distinctIds).toBe(1);
+    expect(reuse.bySource.find((entry) => entry.source === "existing")?.count).toBe(1);
+    // existing は提示元の末尾にある（既存の 4 つの並びを変えない）
+    expect(SURFACE_SHOWN_ID_SOURCES.at(-1)).toBe("existing");
+  });
+});
+
+// ── Issue #887：既存の行の ID をデータで見せ、応答の中の重複を形で断る ──────────────
+
+describe("既存の行の ID をデータで見せ、応答の中の重複を形で断る（04 §3 P3・Issue #887）", () => {
+  /** 4 つの提示元が空の「見せた ID」（existing の欄は省く） */
+  const SHOWN_EMPTY: SurfaceShownIssueIds = { catalog: [], defaults: [], inherited: [], decisions: [] };
+
+  /** 参照用の文脈（既存の決定 1 つ。塊の位置を見るために使う） */
+  const CONTEXT: SurfaceContext = {
+    requirements: [{ id: "R-1", text: "タスクを記録できる", origin: "S-1" }],
+    decisions: [{ id: "D-1", subject: "既定で決めた", value: "1 行", reason: "既定" }],
+    acceptedUnwritable: [],
+    questionsAndAnswers: [],
+  };
+
+  /** 1 回まわして、送った要求を返す */
+  async function inputOf(shown?: SurfaceShownIssueIds): Promise<{ readonly input: string; readonly ok: boolean }> {
+    const recording = createRecordingClient([
+      { kind: "structured" as const, output: SURFACE_OUTPUT, usage: undefined },
+      { kind: "structured" as const, output: SURFACE_OUTPUT, usage: undefined },
+    ]);
+    const outcome = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      catalog: {
+        targets: [],
+        openIssues: [],
+        defaults: [],
+      },
+      context: CONTEXT,
+      ...(shown === undefined ? {} : { shownIssueIds: shown }),
+    });
+    return { input: recording.structured[0]?.input ?? "", ok: outcome.ok };
+  }
+
+  it("existing が空なら塊を足さず、要求は変更前と byte で同じ", async () => {
+    const bare = await inputOf();
+    const empty = await inputOf(SHOWN_EMPTY);
+    expect(empty.ok).toBe(true);
+    expect(empty.input).toBe(bare.input);
+    expect(empty.input).not.toContain("既存の事項の ID");
+  });
+
+  it("existing が空でないときだけ、参照用の文脈の後ろに ID の並びだけを足す", async () => {
+    const { input, ok } = await inputOf({ ...SHOWN_EMPTY, existing: ["OI:a", "OI:b"] });
+    expect(ok).toBe(true);
+    // 参照用の文脈の最後（関係する問いと答え）の後ろに置く
+    const names = [...input.matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
+    expect(names.at(-1)).toBe("既存の事項の ID");
+    expect(names.at(-2)).toBe("関係する問いと答え");
+    // 中身は ID の並びだけである
+    const block = input.split(`<data name="既存の事項の ID">`)[1]?.split("</data>")[0] ?? "";
+    expect(JSON.parse(block)).toEqual(["OI:a", "OI:b"]);
+    // 規則の側には足さない
+    expect(SURFACE_RULES.join("\n")).not.toContain("既存の事項の ID");
+  });
+
+  it("1 つの応答の中の同じ ID は、issue-id-reused とは別の符号で形の誤りとして断る", () => {
+    const duplicated = {
+      ambiguities: [
+        { id: "OI-same", requirementId: "R-1", text: "ひとつ目", critical: true },
+        { id: "OI-same", requirementId: "R-2", text: "ふたつ目", critical: true },
+      ],
+      unwritable: [],
+    };
+    const checked = checkSurfaceOutput(duplicated);
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(
+      checked.problems.some(
+        (problem) => problem.field === "ambiguities[1].id" && problem.code === "issue-id-duplicated",
+      ),
+    ).toBe(true);
+    // 使い回しの符号とは混ぜない
+    expect(checked.problems.some((problem) => problem.code === "issue-id-reused")).toBe(false);
+    // 誤りの文に ID の値を入れない
+    for (const problem of checked.problems) expect(problem.message).not.toContain("OI-same");
+  });
+
+  it("SURFACE_RULES と P3 の schema は変更前と同じで、既存の行の ID の塊はデータにだけ足す", () => {
+    // 上位の欄と必須の欄は変わらない
+    expect(Object.keys(SURFACE_SCHEMA.properties)).toEqual(["ambiguities", "unwritable"]);
+    expect(SURFACE_SCHEMA.required).toEqual(["ambiguities", "unwritable"]);
+    // 未解決の事項と書けない部分の欄も変わらない
+    expect(Object.keys(SURFACE_SCHEMA.properties.ambiguities.items.properties)).toEqual([
+      "id",
+      "requirementId",
+      "text",
+      "critical",
+    ]);
+    expect(SURFACE_RULES).toHaveLength(8);
+    expect(SURFACE_RULES.join("\n")).not.toContain("既存の事項の ID");
   });
 });
 
