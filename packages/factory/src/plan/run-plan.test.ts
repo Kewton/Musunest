@@ -270,11 +270,11 @@ function inheritRecord(
   };
 }
 
-/** 使い回しで断った件の「提示元ごとの数」（Issue #464。既定はすべて 0） */
+/** 使い回しで断った件の「提示元ごとの数」（Issue #464・#887。既定はすべて 0） */
 function idReuseBySource(
-  overrides: Partial<Record<"catalog" | "defaults" | "inherited" | "decisions", number>> = {},
+  overrides: Partial<Record<"catalog" | "defaults" | "inherited" | "decisions" | "existing", number>> = {},
 ) {
-  return (["catalog", "defaults", "inherited", "decisions"] as const).map((source) => ({
+  return (["catalog", "defaults", "inherited", "decisions", "existing"] as const).map((source) => ({
     source,
     count: overrides[source] ?? 0,
   }));
@@ -4511,12 +4511,13 @@ describe("差分点検・§3：受理済み申告の正確な再申告だけを�
     }
   });
 
-  it("曖昧さは重複と認めない（要件・文・critical が違っても、同じ ID でも止める）", async () => {
+  it("曖昧さは重複と認めない（要件・文・critical が違っても、対象外なら止める）", async () => {
+    // 見せた既存の ID（OI-1）は使わない——Issue #887 で、既存の事項の ID を使った応答は形で断られる。
     const ambiguities = [
-      { id: "OI-1", requirementId: "R-2", text: "曖昧", critical: true },
-      { id: "OI-1", requirementId: "R-1", text: "別の文", critical: true },
-      { id: "OI-1", requirementId: "R-1", text: "曖昧", critical: false },
-      { id: "OI-2", requirementId: "R-1", text: "新しい要件と矛盾する", critical: true },
+      { id: "OI-diff", requirementId: "R-2", text: "曖昧", critical: true },
+      { id: "OI-diff", requirementId: "R-1", text: "別の文", critical: true },
+      { id: "OI-diff", requirementId: "R-1", text: "曖昧", critical: false },
+      { id: "OI-diff-2", requirementId: "R-1", text: "新しい要件と矛盾する", critical: true },
     ];
     for (const ambiguity of ambiguities) {
       // 対象の照合だけで断る負例。やり直し（2 試行目）にも同じ応答を返す（Issue #484）
@@ -4920,18 +4921,19 @@ describe("同じ ID の開いている事項の行を畳まず、衝突は問い
     }
   });
 
-  /** 与えた P3 の応答で 1 回流す（P4 に進んだかを見る） */
-  async function runSurface(surface: unknown): Promise<PlanResult> {
+  /** 与えた P3 の応答を 2 回（やり直しまで）返して 1 回流す */
+  async function runSurfaceTwice(surface: unknown): Promise<PlanResult> {
     const recording = createRecordingClient([
       structured(REQUIREMENT_LIST_OUTPUT),
       structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
       structured(surface),
     ]);
     const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor([]) });
     return runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
   }
 
-  it("同一応答内の同じ ID の 2 件は、畳まずに 2 行のまま、P4 を呼ばずに duplicate-open-issue で止まる", async () => {
+  it("同一応答内の同じ ID の 2 件は、形の誤り（issue-id-duplicated）で断られ、2 回続けば malformed で止まる（Issue #887）", async () => {
     const sameContent = {
       ambiguities: [
         { id: "OI-dup", requirementId: "R-1", text: "同じ文", critical: true },
@@ -4947,14 +4949,14 @@ describe("同じ ID の開いている事項の行を畳まず、衝突は問い
       unwritable: [],
     };
     for (const surface of [sameContent, differentRequirement]) {
-      const result = await runSurface(surface);
-      expect(result.kind).toBe("cannot-confirm");
-      if (result.kind !== "cannot-confirm") continue;
-      expect(result.reasons).toEqual([{ source: "session", code: "duplicate-open-issue", path: "open_issues" }]);
-      // 2 行のまま畳まれない（同じ出どころの組として記録する）
-      expect(result.openIssues.filter((issue) => issue.id === "OI-dup")).toHaveLength(2);
-      expect(result.openIssueConflicts.ids).toBe(1);
-      expect(result.openIssueConflicts.rows).toEqual([{ existing: "surface", added: "surface", count: 1 }]);
+      const result = await runSurfaceTwice(surface);
+      // 行を足す前（形の検査）に断るので、duplicate-open-issue の停止には至らない
+      expect(result.kind).toBe("stopped");
+      if (result.kind !== "stopped") continue;
+      expect(result.failure?.stage).toBe("surface");
+      expect(result.failure?.kind).toBe("malformed");
+      expect(result.failure?.problems?.some((problem) => problem.code === "issue-id-duplicated")).toBe(true);
+      expect(result.openIssueConflicts.ids).toBe(0);
       expect(result.closedByDefault).toEqual([]);
       expect(result.stages.some((stage) => stage.stage === "questions")).toBe(false);
     }
@@ -5438,8 +5440,8 @@ describe("差分点検：答えから生まれた要件が、答えの解いた�
     expect(result.openIssueConflicts.ids).toBe(0);
   });
 
-  it("見せていない既存の行（前の往復の P3 の行）との衝突は、今までどおり #460 の停止になる", async () => {
-    // 初回の P3 が OI-extra を開き、答えで閉じる。差分の P3 が、見せていない OI-extra を再び返す
+  it("答えで閉じた P3 の事項の ID を差分の P3 が使い回すと、形で断られ、2 回続けば段の失敗で止まる（duplicate-open-issue にはならない。Issue #887）", async () => {
+    // 初回の P3 が OI-extra を開き、答えで閉じる。差分の P3 が、データで見せた OI-extra を再び返す
     const sameId = {
       ambiguities: [{ id: "OI-extra", requirementId: "R:A:Q1-1", text: "同じ ID", critical: true }],
       unwritable: [],
@@ -5449,6 +5451,8 @@ describe("差分点検：答えから生まれた要件が、答えの解いた�
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_OUTPUT),
       structured(questionsFor("OI-extra")),
+      // 1 回目・やり直しの 2 回目とも、既存の行と同じ ID を返す
+      structured(sameId),
       structured(sameId),
     ]);
     const judge = createFakeJudge({
@@ -5465,21 +5469,19 @@ describe("差分点検：答えから生まれた要件が、答えの解いた�
       },
     };
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
-    expect(result.kind).toBe("cannot-confirm");
-    if (result.kind !== "cannot-confirm") return;
-    expect(result.reasons).toEqual([{ source: "session", code: "duplicate-open-issue", path: "open_issues" }]);
-    expect(result.openIssueConflicts.ids).toBe(1);
-    expect(result.openIssueConflicts.rows).toEqual([{ existing: "surface", added: "surface", count: 1 }]);
-    // 帰属の組は、前の往復の P3 の行（resolved）と、今回足した P3 の行（open）
-    expect(result.openIssueConflicts.attribution).toEqual([
-      {
-        first: { origin: "surface", status: "open", current: true },
-        second: { origin: "surface", status: "resolved", current: false },
-        count: 1,
-      },
+    // 既存のやり直し（2 回）の上限どおり、P3 の段の失敗で止まる
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface");
+    expect(result.failure?.kind).toBe("malformed");
+    expect(result.failure?.problems?.some((problem) => problem.code === "issue-id-reused")).toBe(true);
+    // 断った件は、版 2・試行 1 と 2 の両方に、提示元 existing として残る
+    expect(result.surfaceIdReuse).toEqual([
+      { check: 2, attempt: 1, responses: 1, distinctIds: 1, bySource: idReuseBySource({ existing: 1 }) },
+      { check: 2, attempt: 2, responses: 1, distinctIds: 1, bySource: idReuseBySource({ existing: 1 }) },
     ]);
-    // 使い回しとしては断っていない（見せていない ID）
-    expect(result.surfaceIdReuse).toEqual([]);
+    // 行を足す前に断るので、duplicate-open-issue の衝突には至らない
+    expect(result.openIssueConflicts.ids).toBe(0);
   });
 
   it("引き継ぎの前後で、判定の問いの数と目録の呼び出しの回数が変わらない", async () => {
@@ -5666,6 +5668,165 @@ describe("データで見せた事項 ID を使い回した応答を、行を足
     expect(result.surfaceIdReuse).toEqual([
       { check: 2, attempt: 1, responses: 1, distinctIds: 1, bySource: idReuseBySource({ decisions: 1 }) },
     ]);
+  });
+});
+
+// ── Issue #887：Plan の洗い出し（P3）に既存の事項の ID をすべて見せ、使い回しを断る ──────
+
+describe("Plan の洗い出し（P3）に既存の事項の ID をすべて見せ、使い回しを断る（04 §3 P3・Issue #887）", () => {
+  /** 問いに最初の選択肢で答える答える役（答えの ID はコードが組み直す） */
+  const ANSWER_FIRST_INLINE: PlanResponder = {
+    async answer(request) {
+      return { kind: "answers", answers: request.questions.map((question) => answerTo(question)) };
+    },
+    async confirm() {
+      return "build";
+    },
+  };
+
+  /** 差分の P3 が受ける、新しい ID の重大な事項 */
+  const NEW_DIFF = {
+    ambiguities: [{ id: "OI:new:1", requirementId: "R:A:Q1-1", text: "新しい事項", critical: true }],
+    unwritable: [],
+  };
+
+  it("初回に答えで閉じた P3 の事項と同じ ID を差分の P3 が付けると、1 回目の応答は断られ、2 回目の別の ID で先へ進む", async () => {
+    // 差分の P3 の 1 回目：答えで閉じた OI-extra と同じ ID を新しい事項に付ける
+    const reuseClosed = {
+      ambiguities: [{ id: "OI-extra", requirementId: "R:A:Q1-1", text: "使い回し", critical: true }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(questionsFor("OI-extra")),
+      structured(reuseClosed),
+      structured(NEW_DIFF),
+      structured(questionsFor("OI:new:1")),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST_INLINE));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 断った応答の事項は行にならず、2 回目の新しい ID の事項だけが開いた
+    expect(result.plan.open_issues.some((issue) => issue.text === "使い回し")).toBe(false);
+    expect(result.plan.open_issues.map((issue) => issue.id)).toContain("OI:new:1");
+    // 断った件は、版 2・試行 1 に、提示元 existing（答えで閉じた既存の行）として残る
+    expect(result.surfaceIdReuse).toEqual([
+      { check: 2, attempt: 1, responses: 1, distinctIds: 1, bySource: idReuseBySource({ existing: 1 }) },
+    ]);
+    // duplicate-open-issue の衝突には至らない
+    expect(result.openIssueConflicts.ids).toBe(0);
+  });
+
+  it("前の版から開いたままの P3 の事項の ID を使い回した場合も、同じく断られて先へ進む", async () => {
+    // 初回の P3 は 2 件を開く。答えは OI-extra だけを閉じ、OI-keep は開いたまま残す
+    const initialTwo = {
+      ambiguities: [
+        { id: "OI-extra", requirementId: "R-1", text: "答えで閉じる事項", critical: true },
+        { id: "OI-keep", requirementId: "R-1", text: "開いたままの事項", critical: true },
+      ],
+      unwritable: [],
+    };
+    // 差分の P3 の 1 回目：開いたままの OI-keep と同じ ID を新しい事項に付ける
+    const reuseOpen = {
+      ambiguities: [{ id: "OI-keep", requirementId: "R:A:Q1-1", text: "使い回し", critical: true }],
+      unwritable: [],
+    };
+    const firstQuestions = {
+      questions: [
+        ...(questionsFor("OI-extra", "Q-1").questions as readonly object[]),
+        ...(questionsFor("OI-keep", "Q-2").questions as readonly object[]),
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(initialTwo),
+      structured(firstQuestions),
+      structured(reuseOpen),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(questionsFor("OI-keep")),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+    // 1 往復目は OI-extra だけに答え、OI-keep は開いたまま残す
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        round += 1;
+        if (round === 1) {
+          const first = request.questions.find((question) => question.openIssueId === "OI-extra");
+          return { kind: "answers", answers: first === undefined ? [] : [answerTo(first)] };
+        }
+        return { kind: "answers", answers: request.questions.map((question) => answerTo(question)) };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 断った応答の事項は行にならない（OI-keep は 1 行だけのまま）
+    expect(result.plan.open_issues.filter((issue) => issue.id === "OI-keep")).toHaveLength(1);
+    expect(result.plan.open_issues.some((issue) => issue.text === "使い回し")).toBe(false);
+    // 断った件は、版 2・試行 1 に、提示元 existing（前の版から開いたままの行）として残る
+    expect(result.surfaceIdReuse).toEqual([
+      { check: 2, attempt: 1, responses: 1, distinctIds: 1, bySource: idReuseBySource({ existing: 1 }) },
+    ]);
+    expect(result.openIssueConflicts.ids).toBe(0);
+  });
+
+  it("差分の P3 の要求のデータに、既存の事項の ID があり、答えで閉じた事項と初回の未解決の行の ID を含む", async () => {
+    const listWithUnresolved = { ...REQUIREMENT_LIST_OUTPUT, unresolved: ["P1 の未解決"] };
+    const questions = {
+      questions: [
+        ...(questionsFor("OI-extra", "Q-1").questions as readonly object[]),
+        ...(questionsFor("OI:unresolved:1", "Q-2").questions as readonly object[]),
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(listWithUnresolved),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(questions),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q1-2"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q1-2"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST_INLINE));
+
+    expect(result.kind).toBe("confirmed");
+    const surfaceRequests = recording.structured.filter(
+      (request) => request.schemaName === SURFACE_SCHEMA_NAME || request.schemaName === SURFACE_DIFF_SCHEMA_NAME,
+    );
+    expect(surfaceRequests).toHaveLength(2);
+    const diffRequest = surfaceRequests[1];
+    const existing = JSON.parse(dataBlockOf(diffRequest?.input ?? "", "既存の事項の ID")) as readonly string[];
+    // 答えで閉じた P3 の事項（OI-extra）と、初回の要件化の未解決の行（OI:unresolved:1）
+    expect(existing).toContain("OI-extra");
+    expect(existing).toContain("OI:unresolved:1");
+    // 塊は ID の並びだけで、文は入らない
+    expect(dataBlockOf(diffRequest?.input ?? "", "既存の事項の ID")).not.toContain("誰の分を数えるか");
   });
 });
 
