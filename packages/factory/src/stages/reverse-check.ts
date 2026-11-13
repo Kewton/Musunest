@@ -8,8 +8,9 @@
 //   - 原文の文が、どれかの要件の位置に覆われているか
 //
 // 落ちがあれば ① をやり直す（1 回まで）。やり直しても残った落ちは**未達**として最後まで持つ。
+import { sha256Hex } from "@musunest/spec-engine";
 import type { CallGateway } from "../call.js";
-import type { RequirementList, ReverseCheckMiss, ReverseCheckResult, SourceRange } from "../pipeline.js";
+import type { Framing, Requirement, RequirementList, ReverseCheckMiss, ReverseCheckResult, SourceRange } from "../pipeline.js";
 import {
   buildStructuredRequest,
   callStructuredChecked,
@@ -22,7 +23,7 @@ import {
   type StageFailure,
   type StageOutcome,
 } from "./prompt.js";
-import { runRequirements } from "./requirements.js";
+import { decideQuotePosition, runRequirements, runQuoteRepair, type QuoteRepair } from "./requirements.js";
 
 /** ①' の JSON Schema の名前 */
 export const REVERSE_CHECK_SCHEMA_NAME = "reverse-check";
@@ -62,6 +63,10 @@ export interface ReverseCheckInput {
   readonly list: RequirementList;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
+  /**
+   * この往復がどの直し方の後か（有限の値。Issue #917）。省けば初回（`initial`）。診断の往復の要素に写す。
+   */
+  readonly fix?: ReverseCheckFix;
 }
 
 /** ①' の会話の答え */
@@ -313,6 +318,75 @@ export function checkReverseCheckOutput(output: unknown): ShapeCheck<ReverseChec
   return { ok: true, value: { uncovered } };
 }
 
+/**
+ * 会話が返した生の範囲 1 つの行き先（**有限の 5 つ**。Issue #919）。
+ *
+ *   - `remaining` … 枠を差し引いたあとに中身のある断片が残った（一部が残る）
+ *   - `framing` … 枠に全部含まれて消えた
+ *   - `blank` … 空白・改行と記号だけで捨てた
+ *   - `duplicate` … すでに落ちとして数えた範囲と同じで消えた
+ *   - `outside` … 原文の外か空の範囲
+ */
+export const REVERSE_CHECK_RANGE_DESTINATIONS = [
+  "remaining",
+  "framing",
+  "blank",
+  "duplicate",
+  "outside",
+] as const;
+export type ReverseCheckRangeDestination = (typeof REVERSE_CHECK_RANGE_DESTINATIONS)[number];
+
+/**
+ * 会話が返した生の範囲 1 つ（Issue #919）。**生の範囲**（会話が返した値）と、有限の行き先、残った断片の
+ * 範囲（複数可）を持つ。範囲を切り出した文字列は持たない。並びは会話の応答の順である。
+ */
+export interface ReverseCheckTraceReportedRange {
+  readonly range: SourceRange;
+  readonly destination: ReverseCheckRangeDestination;
+  /** 落ちとして残った断片の範囲（原文の上の位置。`remaining` 以外は空） */
+  readonly fragments: readonly SourceRange[];
+}
+
+/**
+ * コードが見つけた落ち 1 件（Issue #919）。種類・候補の添字（1 始まり。覆いの落ちは `null`）・範囲
+ * （覆いの落ちだけ。それ以外は `null`）。**落ちの説明の文は持たない**。
+ */
+export interface ReverseCheckTraceCodeMiss {
+  readonly kind: ReverseCheckMiss["kind"];
+  readonly requirement: number | null;
+  readonly range: SourceRange | null;
+}
+
+/** P2 に渡した要件の一覧の全体（Issue #919）。候補の本文・引用と枠の引用は「生成役が出した値」である */
+export interface ReverseCheckTraceList {
+  readonly requirements: readonly Requirement[];
+  readonly framing: readonly Framing[];
+  readonly decisions: readonly string[];
+  readonly unresolved: readonly string[];
+}
+
+/**
+ * 1 往復の逆照合の診断（Issue #919）。その往復を照らした一覧の全体と、「要件の一覧」のデータの文の
+ * SHA-256、会話が返した生の範囲（応答の順）、コードが見つけた落ち。
+ */
+export interface ReverseCheckTraceRound {
+  readonly fix: ReverseCheckFix;
+  readonly list: ReverseCheckTraceList;
+  readonly listSha256: string;
+  readonly reported: readonly ReverseCheckTraceReportedRange[];
+  readonly codeMisses: readonly ReverseCheckTraceCodeMiss[];
+}
+
+/**
+ * 逆照合の往復ごとの診断（Issue #919）。原文は複写せず、SHA-256 と長さだけを持つ。往復の並びは実行の順
+ * である。判定・やり直し・持ち越し・P3 以降の入力には使わない（点検の材料である）。
+ */
+export interface ReverseCheckTrace {
+  readonly sourceSha256: string;
+  readonly sourceLength: number;
+  readonly rounds: readonly ReverseCheckTraceRound[];
+}
+
 /** コードの落ちに会話の申告を足した結果（`droppedBlankMisses` は捨てた断片の数。Issue #377） */
 interface MergedUncovered {
   readonly misses: readonly ReverseCheckMiss[];
@@ -322,6 +396,8 @@ interface MergedUncovered {
    * 会話分（`uncovered-source` の会話の行）と同じ並びである。**真偽値だけ**で、元の範囲は持たない。
    */
   readonly conversationFramingOverlaps: readonly boolean[];
+  /** 会話が返した生の範囲ごとの行き先と残った断片（応答の順。Issue #919） */
+  readonly reported: readonly ReverseCheckTraceReportedRange[];
 }
 
 /**
@@ -350,19 +426,34 @@ function mergeUncovered(
       .map((miss) => `${miss.range.start}-${miss.range.end}`),
   );
   let droppedBlankMisses = 0;
+  const reportedTraces: ReverseCheckTraceReportedRange[] = [];
   for (const range of reported) {
-    if (range.start < 0 || range.end > source.length || range.start >= range.end) continue;
+    if (range.start < 0 || range.end > source.length || range.start >= range.end) {
+      reportedTraces.push({ range, destination: "outside", fragments: [] });
+      continue;
+    }
     // 差し引く前に、元の範囲が枠と一部でも重なったかを求める（残った断片へ真偽値だけを引き継ぐ）
     const overlappedFraming = framing.some((frame) => frame.start < range.end && range.start < frame.end);
-    for (const piece of removeFraming(range, framing)) {
+    const pieces = removeFraming(range, framing);
+    if (pieces.length === 0) {
+      reportedTraces.push({ range, destination: "framing", fragments: [] });
+      continue;
+    }
+    const fragments: SourceRange[] = [];
+    let sawDuplicate = false;
+    for (const piece of pieces) {
       const trimmed = trimWhitespace(source, piece);
       if (isBlankRange(source, trimmed)) {
         droppedBlankMisses += 1;
         continue;
       }
       const key = `${trimmed.start}-${trimmed.end}`;
-      if (seen.has(key)) continue;
+      if (seen.has(key)) {
+        sawDuplicate = true;
+        continue;
+      }
       seen.add(key);
+      fragments.push(trimmed);
       misses.push({
         kind: "uncovered-source",
         range: trimmed,
@@ -370,8 +461,11 @@ function mergeUncovered(
       });
       conversationFramingOverlaps.push(overlappedFraming);
     }
+    const destination: ReverseCheckRangeDestination =
+      fragments.length > 0 ? "remaining" : sawDuplicate ? "duplicate" : "blank";
+    reportedTraces.push({ range, destination, fragments });
   }
-  return { misses, droppedBlankMisses, conversationFramingOverlaps };
+  return { misses, droppedBlankMisses, conversationFramingOverlaps, reported: reportedTraces };
 }
 
 /**
@@ -383,13 +477,23 @@ function mergeUncovered(
  */
 export async function runReverseCheckWithDiagnosis(
   input: ReverseCheckInput,
-): Promise<StageOutcome<{ readonly result: ReverseCheckResult; readonly round: ReverseCheckRoundDiagnosis }>> {
+): Promise<
+  StageOutcome<{
+    readonly result: ReverseCheckResult;
+    readonly round: ReverseCheckRoundDiagnosis;
+    /** この往復の一覧・SHA-256・会話の生の範囲・コードの落ち（Issue #919） */
+    readonly trace: ReverseCheckTraceRound;
+  }>
+> {
   const framing = input.list.framing ?? [];
   const framingPositions = framing.map((entry) => entry.position);
+  // 「要件の一覧」のデータの文。要求にそのまま渡し、診断の SHA-256 もこの文から取る（Issue #919）
+  const listText = serializeJson({ ...input.list, framing });
+  const listSha256 = await sha256Hex(listText);
   const data: readonly PromptData[] = [
     { name: "原文", text: input.source },
     // 枠の文（要件にしない文）も一覧に含めて渡す（無いときは空の配列。Issue #372）
-    { name: "要件の一覧", text: serializeJson({ ...input.list, framing }) },
+    { name: "要件の一覧", text: listText },
   ];
   const request = buildStructuredRequest({
     rules: REVERSE_CHECK_RULES,
@@ -401,8 +505,10 @@ export async function runReverseCheckWithDiagnosis(
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkReverseCheckOutput });
   if (!answer.ok) return answer;
+  // コードの落ちは 1 回だけ求め、覆いの数え上げと診断の両方に使う（Issue #919）
+  const codeMisses = checkRequirementCoverageDetailed(input.source, input.list);
   const merged = mergeUncovered(
-    checkRequirementCoverage(input.source, input.list),
+    codeMisses.map((entry) => entry.miss),
     answer.value.uncovered,
     input.source,
     framingPositions,
@@ -419,8 +525,33 @@ export async function runReverseCheckWithDiagnosis(
     misses,
     merged.droppedBlankMisses,
     merged.conversationFramingOverlaps,
+    input.fix,
   );
-  return { ok: true, value: { result, round } };
+  const trace: ReverseCheckTraceRound = {
+    fix: input.fix ?? "initial",
+    list: {
+      requirements: input.list.requirements.map((requirement) => ({ ...requirement })),
+      framing: framing.map((entry) => ({ ...entry })),
+      decisions: [...input.list.decisions],
+      unresolved: [...input.list.unresolved],
+    },
+    listSha256,
+    reported: merged.reported.map((entry) => ({
+      range: { start: entry.range.start, end: entry.range.end },
+      destination: entry.destination,
+      fragments: entry.fragments.map((fragment) => ({ start: fragment.start, end: fragment.end })),
+    })),
+    // コードが見つけた落ちだけを写す（会話の申告は reported に残る）。説明の文は持たない
+    codeMisses: codeMisses.map((entry) => ({
+      kind: entry.miss.kind,
+      requirement: entry.requirementIndex === undefined ? null : entry.requirementIndex + 1,
+      range:
+        entry.miss.kind === "uncovered-source"
+          ? { start: entry.miss.range.start, end: entry.miss.range.end }
+          : null,
+    })),
+  };
+  return { ok: true, value: { result, round, trace } };
 }
 
 /**
@@ -501,7 +632,25 @@ export interface ReverseCheckRoundDiagnosis {
   readonly sentences: readonly ReverseCheckSentenceCoverage[];
   /** 指摘 1 件ごとの、番号と分類だけの記録（値は入れない） */
   readonly missEntries: readonly ReverseCheckMissEntry[];
+  /**
+   * この往復を照らした一覧を、どの直し方で作ったか（有限の値。Issue #917）。初回は `initial`。
+   * 値（引用・原文の断片・位置・要件 ID）は入れない。
+   */
+  readonly fix: ReverseCheckFix;
 }
+
+/**
+ * 一覧を直した方法（**有限の 3 つ**。Issue #917）。**診断の直下には欄を足さず**、往復の要素に載せる。
+ */
+export const REVERSE_CHECK_FIXES = [
+  /** 直していない（P1 の初回の一覧） */
+  "initial",
+  /** 一覧の全体を作り直した（従来のやり直し） */
+  "whole-redo",
+  /** 落ちを指された候補の引用と位置だけを直した（Issue #917） */
+  "quote-repair",
+] as const;
+export type ReverseCheckFix = (typeof REVERSE_CHECK_FIXES)[number];
 
 /** 逆照合の往復ごとの診断（Issue #430）。往復の一覧・やり直したか・やり直し後に残った落ちの内訳。 */
 export interface ReverseCheckDiagnosis {
@@ -572,6 +721,7 @@ export function diagnoseReverseCheckRound(
   misses: readonly ReverseCheckMiss[],
   droppedBlankMisses: number,
   conversationFramingOverlaps: readonly boolean[] = [],
+  fix: ReverseCheckFix = "initial",
 ): ReverseCheckRoundDiagnosis {
   const sentences = splitSourceSentences(source);
   const overlaps = (left: SourceRange, right: SourceRange): boolean =>
@@ -633,6 +783,7 @@ export function diagnoseReverseCheckRound(
     requirementCount: list.requirements.length,
     sentences: coverage,
     missEntries: entries,
+    fix,
   };
 }
 
@@ -641,6 +792,12 @@ export interface ReverseCheckLoopInput {
   readonly source: string;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
+  /**
+   * 落ちが来歴だけのときに**引用の修復**を使うか（Issue #917）。**Plan の経路が明示の選択で有効にする**。
+   * 省けば（Plan を経ない Build の経路）今までどおり全体の作り直しを使う——呼び出しの列・要求のバイト列・
+   * 結果を変えない。
+   */
+  readonly quoteRepair?: boolean;
 }
 
 /** ①' と ① のやり直しの結果 */
@@ -649,12 +806,63 @@ export interface ReverseCheckLoopResult {
   readonly list: RequirementList;
   /** やり直した後の逆照合の結果 */
   readonly report: ReverseCheckResult;
-  /** ① をやり直したか */
+  /** ① をやり直したか（**一覧の全体を作り直した**か。Issue #917 で意味を変えない） */
   readonly redone: boolean;
+  /** 引用の修復を当てたか（Issue #917。全体の作り直しとは別に数える） */
+  readonly repaired: boolean;
   /** やり直しても残った落ち（未達。無ければ空） */
   readonly unmet: readonly ReverseCheckMiss[];
   /** 往復ごとの落ちの内訳（種類ごと・出どころごと。Issue #430） */
   readonly diagnosis: ReverseCheckDiagnosis;
+  /**
+   * 往復ごとの一覧・SHA-256・会話の生の範囲・コードの落ち（Issue #919）。**任意の欄**——判定・やり直し・
+   * 持ち越しには使わず、Plan を経ない Build の経路は読まない。
+   */
+  readonly trace?: ReverseCheckTrace;
+}
+
+/** 引用・位置の落ち（来歴の落ち）の種類か（Issue #917） */
+function isProvenanceMiss(miss: ReverseCheckMiss): boolean {
+  return miss.kind === "quote-not-found" || miss.kind === "position-mismatch";
+}
+
+/** 落ちが**来歴だけ**か（覆いの落ちを 1 件も含まない。Issue #917）。**種類だけで決め**、題材・ID・文で決めない */
+export function isProvenanceOnlyMisses(misses: readonly ReverseCheckMiss[]): boolean {
+  return misses.length > 0 && misses.every(isProvenanceMiss);
+}
+
+/**
+ * 引用の修復の答えを、前の一覧へ当てる（Issue #917）。**指された候補だけ**を差し替え、id と本文は変えない。
+ * 位置の不一致の修復では、新しい引用が**元の引用を部分文字列として含む**ことを要求し、満たさない修復は
+ * 当てずに落ちとして残す（`source.slice` の比較に使う元の引用は、前の一覧の候補のものである）。当てた引用と
+ * 位置は、P1 の正規化（`decideQuotePosition`）を通し、決められなければそのまま残す——引用の実在と位置は
+ * P2 のコードの検査が落ちとして見つける。
+ */
+export function applyQuoteRepairs(
+  source: string,
+  previous: RequirementList,
+  repairs: readonly QuoteRepair[],
+  targets: readonly number[],
+): RequirementList {
+  const byIndex = new Map(repairs.map((repair) => [repair.index, repair] as const));
+  const wanted = new Set(targets);
+  return {
+    ...previous,
+    requirements: previous.requirements.map((requirement, index) => {
+      if (!wanted.has(index)) return requirement;
+      const repair = byIndex.get(index);
+      if (repair === undefined) return requirement;
+      // 位置の不一致の修復では、元の引用を含む引用だけを当てる（前後を足して 1 か所に決める）
+      const originalIsMissing = requirement.quote === "" || !source.includes(requirement.quote);
+      if (!originalIsMissing && !repair.quote.includes(requirement.quote)) return requirement;
+      const decided = decideQuotePosition(source, repair.quote, repair.position);
+      return {
+        ...requirement,
+        quote: repair.quote,
+        position: decided ?? repair.position,
+      };
+    }),
+  };
 }
 
 /**
@@ -677,6 +885,10 @@ export const REVERSE_CHECK_OPERATIONS = [
   "requirements-redo",
   /** 逆照合のやり直し（①' の 2 回目） */
   "reverse-check-redo",
+  /** 引用の修復（Issue #917。Plan の経路だけ） */
+  "quote-repair",
+  /** 引用の修復の後の逆照合（Issue #917） */
+  "reverse-check-repair",
 ] as const;
 export type ReverseCheckOperation = (typeof REVERSE_CHECK_OPERATIONS)[number];
 
@@ -693,6 +905,8 @@ export type ReverseCheckLoopOutcome =
       readonly operation: ReverseCheckOperation;
       /** 止まるまでに終えた往復の分の内訳（Issue #430） */
       readonly diagnosis: ReverseCheckDiagnosis;
+      /** 止まるまでに終えた往復の分の、一覧・SHA-256・会話の生の範囲・コードの落ち（Issue #919） */
+      readonly trace?: ReverseCheckTrace;
     };
 
 /**
@@ -706,14 +920,26 @@ export async function runReverseCheckLoopWithOperation(
 ): Promise<ReverseCheckLoopOutcome> {
   /** 終えた往復の診断（止まったときは、止まるまでに終えた分だけを持つ） */
   const rounds: ReverseCheckRoundDiagnosis[] = [];
-  /** ① のやり直しを**終えた**か（やり直しの要求が失敗したときは false のまま。Issue #430） */
+  /** 終えた往復の一覧・SHA-256・会話の生の範囲・コードの落ち（Issue #919） */
+  const traces: ReverseCheckTraceRound[] = [];
+  // 原文は複写せず、SHA-256 と長さだけを診断に持つ（Issue #919）。呼び出しの列・要求は変えない
+  const sourceSha256 = await sha256Hex(input.source);
+  const buildTrace = (): ReverseCheckTrace => ({
+    sourceSha256,
+    sourceLength: input.source.length,
+    rounds: traces,
+  });
+  /** ① のやり直し（**一覧の全体を作り直した**）を**終えた**か（Issue #430） */
   let redoCompleted = false;
+  /** 引用の修復を当てたか（Issue #917） */
+  let repaired = false;
   /** 止まったときの結果（終えた往復の分だけを持ち、やり直し後の落ちは無い） */
   const stop = (failure: StageFailure, operation: ReverseCheckOperation): ReverseCheckLoopOutcome => ({
     ok: false,
     failure,
     operation,
     diagnosis: { rounds, redone: redoCompleted, unmet: emptyReverseCheckMissCounts() },
+    trace: buildTrace(),
   });
   const first = await runRequirements({
     source: input.source,
@@ -726,10 +952,12 @@ export async function runReverseCheckLoopWithOperation(
     list: first.value,
     documents: input.documents,
     gateway: input.gateway,
+    fix: "initial",
   });
   if (!initial.ok) return stop(initial.failure, "reverse-check");
   // 往復の診断は、①' の実行の中で組んだものを使う（会話の断片の枠の重なりまで持つ。Issue #488）
   rounds.push(initial.value.round);
+  traces.push(initial.value.trace);
   if (initial.value.result.misses.length === 0) {
     return {
       ok: true,
@@ -737,40 +965,124 @@ export async function runReverseCheckLoopWithOperation(
         list: first.value,
         report: initial.value.result,
         redone: false,
+        repaired: false,
         unmet: [],
         diagnosis: { rounds, redone: false, unmet: emptyReverseCheckMissCounts() },
+        trace: buildTrace(),
       },
     };
   }
-  const redone = await runRequirements({
-    source: input.source,
-    documents: input.documents,
-    gateway: input.gateway,
-    redo: { previous: first.value, misses: initial.value.result.misses },
-  });
-  if (!redone.ok) return stop(redone.failure, "requirements-redo");
-  // ここから先は、① のやり直しが成功している（2 回目の逆照合で止まっても `redone` を true にする）
-  redoCompleted = true;
-  const second = await runReverseCheckWithDiagnosis({
-    source: input.source,
-    list: redone.value,
-    documents: input.documents,
-    gateway: input.gateway,
-  });
-  if (!second.ok) return stop(second.failure, "reverse-check-redo");
-  rounds.push(second.value.round);
-  return {
+
+  // ── 経路の表（Issue #917）───────────────────────────────────────────────
+  //   初回の落ち          経路
+  //   なし                  P1 → P2（ここまでで返る）
+  //   覆いを含む            作り直し → P2 →（来歴だけが残れば）修復 → P2
+  //   来歴だけ（修復 off）  作り直し → P2（従来のまま。Plan を経ない Build の既定）
+  //   来歴だけ（修復 on）   修復 → P2 →（覆いを含めば）作り直し → P2
+  // 修復も作り直しも、1 回の流れで最大 1 回。使い切って落ちが残れば、問いの前に確定を止める（呼ぶ側）。
+  let current = first.value;
+  let currentReport = initial.value.result;
+  let repairTried = false;
+  const useRepair = input.quoteRepair === true;
+
+  /** 引用の修復を 1 回だけ試す。`"ok"` なら `current` を直した一覧に差し替えた */
+  const tryQuoteRepair = async (): Promise<ReverseCheckLoopOutcome | "ok" | "skip"> => {
+    if (repairTried) return "skip";
+    repairTried = true;
+    // 対象は、この一覧のコードの検査（引用・位置）が出した候補の位置（添字）である
+    const detailed = checkRequirementCoverageDetailed(input.source, current);
+    const targets = detailed.flatMap((entry) =>
+      entry.requirementIndex !== undefined && isProvenanceMiss(entry.miss) ? [entry.requirementIndex] : [],
+    );
+    if (targets.length === 0) return "skip";
+    const outcome = await runQuoteRepair({
+      source: input.source,
+      documents: input.documents,
+      gateway: input.gateway,
+      previous: current,
+      targets,
+      misses: detailed.map((entry) => entry.miss).filter(isProvenanceMiss),
+    });
+    if (!outcome.ok) return stop(outcome.failure, "quote-repair");
+    current = applyQuoteRepairs(input.source, current, outcome.value.repairs, targets);
+    repaired = true;
+    const after = await runReverseCheckWithDiagnosis({
+      source: input.source,
+      list: current,
+      documents: input.documents,
+      gateway: input.gateway,
+      fix: "quote-repair",
+    });
+    if (!after.ok) return stop(after.failure, "reverse-check-repair");
+    rounds.push(after.value.round);
+    traces.push(after.value.trace);
+    currentReport = after.value.result;
+    return "ok";
+  };
+
+  /** 一覧の全体を作り直す（従来のやり直し。1 回だけ） */
+  const tryWholeRedo = async (): Promise<ReverseCheckLoopOutcome | "ok" | "skip"> => {
+    if (redoCompleted) return "skip";
+    const redone = await runRequirements({
+      source: input.source,
+      documents: input.documents,
+      gateway: input.gateway,
+      redo: { previous: current, misses: currentReport.misses },
+    });
+    if (!redone.ok) return stop(redone.failure, "requirements-redo");
+    // ここから先は、① のやり直しが成功している（2 回目の逆照合で止まっても `redone` を true にする）
+    redoCompleted = true;
+    const second = await runReverseCheckWithDiagnosis({
+      source: input.source,
+      list: redone.value,
+      documents: input.documents,
+      gateway: input.gateway,
+      fix: "whole-redo",
+    });
+    if (!second.ok) return stop(second.failure, "reverse-check-redo");
+    rounds.push(second.value.round);
+    traces.push(second.value.trace);
+    current = redone.value;
+    currentReport = second.value.result;
+    return "ok";
+  };
+
+  /** 直し方をすべて使い切ったときの終わり（落ちが残っていれば、そのまま未達として返す） */
+  const finish = (): ReverseCheckLoopOutcome => ({
     ok: true,
     value: {
-      list: redone.value,
-      report: second.value.result,
-      redone: true,
-      unmet: second.value.result.misses,
+      list: current,
+      report: currentReport,
+      redone: redoCompleted,
+      repaired,
+      unmet: currentReport.misses,
       diagnosis: {
         rounds,
-        redone: true,
-        unmet: countReverseCheckMisses(input.source, redone.value, second.value.result.misses),
+        redone: redoCompleted,
+        unmet: countReverseCheckMisses(input.source, current, currentReport.misses),
       },
+      trace: buildTrace(),
     },
-  };
+  });
+
+  // 修復を先に使う経路（来歴だけの落ち）と、作り直しを先に使う経路（覆いを含む・修復 off）。
+  if (useRepair && isProvenanceOnlyMisses(currentReport.misses)) {
+    const firstStep = await tryQuoteRepair();
+    if (firstStep !== "ok") return firstStep === "skip" ? finish() : firstStep;
+    // 修復の後の照らし直しで覆いを含めば、全体の作り直しへ 1 回進む
+    if (currentReport.misses.length > 0 && !isProvenanceOnlyMisses(currentReport.misses)) {
+      const secondStep = await tryWholeRedo();
+      if (secondStep !== "ok") return secondStep === "skip" ? finish() : secondStep;
+    }
+    return finish();
+  }
+
+  const redoStep = await tryWholeRedo();
+  if (redoStep !== "ok") return redoStep === "skip" ? finish() : redoStep;
+  // 作り直しの後に来歴だけが残れば、修復へ 1 回進む
+  if (useRepair && isProvenanceOnlyMisses(currentReport.misses)) {
+    const repairStep = await tryQuoteRepair();
+    if (repairStep !== "ok") return repairStep === "skip" ? finish() : repairStep;
+  }
+  return finish();
 }

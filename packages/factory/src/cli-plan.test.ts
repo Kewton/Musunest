@@ -37,6 +37,8 @@ import {
   PLAN_CLI_RECORD_SCHEMA,
   PLAN_ONLY_RESULT_FILE,
   PLAN_ONLY_RESULT_SCHEMA,
+  PLAN_REVERSE_CHECK_TRACE_FILE,
+  PLAN_REVERSE_CHECK_TRACE_SCHEMA,
   PLAN_SURFACE_CHECK_FILE,
   PLAN_FILE_ERROR_SCHEMA,
   PLAN_FILE_REJECT_SCHEMA,
@@ -444,6 +446,8 @@ interface PlanCliRecordShape {
         readonly requirements: readonly number[];
         readonly framing_overlap: boolean;
       }[];
+      /** この往復を照らした一覧を、どの直し方で作ったか（有限の値。Issue #917） */
+      readonly fix: string;
     }[];
     readonly redone: boolean;
     readonly unmet: {
@@ -1522,6 +1526,7 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
     const recording = createRecordingClient([
       structured(list),
       structured(conversation),
+      // 引用の不在のあとに覆いの落ちも残るので、Plan の経路は全体の作り直しへ進む（Issue #917）
       structured(list),
       structured(conversation),
     ]);
@@ -1581,7 +1586,10 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
       ],
     };
     expect(record.requirements_diagnosis).toEqual({
-      rounds: [expectedRound, expectedRound],
+      rounds: [
+        { ...expectedRound, fix: "initial" },
+        { ...expectedRound, fix: "whole-redo" },
+      ],
       redone: true,
       unmet: expected,
     });
@@ -2717,20 +2725,23 @@ describe("差分点検・§3：受理済み申告の再申告を除いた記録�
 describe("同じ ID の開いている事項の行の衝突を、値を含めずに plan-record に残す（Issue #460・#464）", () => {
   it("衝突した ID の件数・行の件数・帰属・0 行の件数・版が残り、duplicate-open-issue が other に消えず、値は転記されない", async () => {
     const mark = "MARK_CONFLICT_ZZZ";
-    // モデルが、**見せていない**同じ ID の事項を同一応答内に 2 件返す（足す時点で衝突する）
-    const surface = {
-      ambiguities: [
-        { id: "OI-dup", requirementId: "R-1", text: `${mark}の事項`, critical: true },
-        { id: "OI-dup", requirementId: "R-1", text: `${mark}の事項 2`, critical: true },
+    // 要件の ID が重複しているので、目録が同じ ID の行を 2 行作り、足す時点で衝突する
+    // （Issue #887 のあと、同一応答内の同じ ID は P3 の形の検査で断られるため、衝突の記録はこちらで作る）
+    const duplicateRequirementList = {
+      requirements: [
+        { id: "R-1", text: `${mark}を記録できる`, quote: "タスクを記録する", position: { start: 0, end: 8 } },
+        { id: "R-1", text: "件数を合計できる", quote: "件数を合計する", position: { start: 9, end: 16 } },
       ],
-      unwritable: [],
+      framing: [],
+      decisions: [],
+      unresolved: [],
     };
     const recording = createRecordingClient([
-      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(duplicateRequirementList),
       structured(REVERSE_CHECK_OUTPUT),
-      structured(surface),
+      structured(SURFACE_CLEAR),
     ]);
-    const judge = createFakeJudge({ ...catalogUnspecifiedFor({ "R-1": ["period"] }) });
+    const judge = createFakeJudge({ ...catalogUnspecifiedFor({ "R-1": ["period"] }, ["R-1"]) });
     const dir = `${directory}/open-issue-conflict`;
     const answersPath = "conflict-answers.json";
     const spy = vi.spyOn(runModule, "runGeneration");
@@ -2762,12 +2773,12 @@ describe("同じ ID の開いている事項の行の衝突を、値を含めず
     // 衝突の記録（件数と分類と版だけ。0 行の件数も残る）
     expect(record.open_issue_conflicts).toEqual({
       ids: 1,
-      rows: [{ existing: "surface", added: "surface", count: 1 }],
+      rows: [{ existing: "catalog", added: "catalog", count: 1 }],
       // 帰属の組（由来・状態・今回か以前か。足した順によらない）
       attribution: [
         {
-          first: { origin: "surface", status: "open", current: true },
-          second: { origin: "surface", status: "open", current: true },
+          first: { origin: "catalog", status: "open", current: true },
+          second: { origin: "catalog", status: "open", current: true },
           count: 1,
         },
       ],
@@ -2777,9 +2788,9 @@ describe("同じ ID の開いている事項の行の衝突を、値を含めず
     // 新しい記録に、事項 ID・要件 ID・文の目印が出ない
     const conflictsText = JSON.stringify(record.open_issue_conflicts);
     expect(conflictsText).not.toContain(mark);
-    expect(conflictsText).not.toContain("OI-dup");
+    expect(conflictsText).not.toContain("OI:catalog");
     expect(conflictsText).not.toContain("R-1");
-    // 使い回しの記録は、この衝突（見せていない ID）では空
+    // 使い回しの記録は、この衝突（コードが作った重複した行）では空
     expect(record.surface_id_reuse).toEqual([]);
     // もともと値を保存する既存の欄は変えない（問いの事項 ID・一緒に閉じる ID・答えの本文の形はそのまま）
     expect(record.rounds).toEqual([]);
@@ -2956,6 +2967,7 @@ describe("使い回しで断った応答を、plan-record の新しい欄に残�
           { source: "defaults", count: 1 },
           { source: "inherited", count: 0 },
           { source: "decisions", count: 0 },
+          { source: "existing", count: 0 },
         ],
       },
     ]);
@@ -3478,7 +3490,9 @@ describe("Plan の記録に、事項の流れ・残りの事項・P6 の覆い�
     const recording = createRecordingClient([
       structured(paraphrase),
       structured(REVERSE_CHECK_OUTPUT),
-      structured(paraphrase),
+      // 来歴だけの落ちなので Plan の経路は引用の修復を通る（Issue #917）。直らない引用を返す
+      // （対象は引用が原文に無い R-1 だけ。R-2 の引用は原文にある）
+      structured({ repairs: [{ index: 0, quote: "タスクを登録する", position: { start: 0, end: 8 } }] }),
       structured(REVERSE_CHECK_OUTPUT),
     ]);
     const dir = `${directory}/no-confirm-coverage`;
@@ -4675,5 +4689,151 @@ describe("(9) model-rate:v1-and-plan：Plan の入口でも terra の単価（Is
     expect(baseCost.plan_usd).toBeCloseTo(planCalls * planRecordedCost(DEFAULT_RATES), 12);
     expect(baseCost.build_usd).toBeCloseTo(buildCalls * planRecordedCost(DEFAULT_RATES), 12);
     expect(baseCost.total_usd).toBeCloseTo(baseCost.plan_usd + baseCost.build_usd, 12);
+  });
+});
+
+// ── Issue #917：来歴だけの落ちの Plan の記録に、直し方（有限の値）が載る ─────────
+
+describe("Plan の記録に、引用の修復の直し方が載る（Issue #917）", () => {
+  it("位置の不一致だけの初回の落ちでは、記録の往復の要素に quote-repair が載り、引用・位置の値は出ない", async () => {
+    // 同じ句が 2 か所ある原文（位置の不一致の修復の題材）
+    const source = "印を出す。印を出す。件数を合計する。";
+    const repairSpanOf = (quote: string, from = 0): { readonly start: number; readonly end: number } => {
+      const start = source.indexOf(quote, from);
+      return { start, end: start + quote.length };
+    };
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: repairSpanOf("件数を合計する。") },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+      // 引用の修復（1 か所に決まる引用へ直す）
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const dir = `${directory}/quote-repair-fix`;
+    const answersPath = "quote-repair-fix-answers.json";
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : source),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => createFakeJudge(catalogAnswers()),
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    const record = await readPlanRecord(dir);
+    // 記録の版は今のまま（欄の追加だけ。Issue #917）
+    expect(record.schema_version).toBe(PLAN_CLI_RECORD_SCHEMA);
+    // 往復の要素に、直し方（有限の値）が載る
+    expect(record.requirements_diagnosis.rounds.map((round) => round.fix)).toEqual(["initial", "quote-repair"]);
+    // 全体の作り直しはしていない
+    expect(record.requirements_diagnosis.redone).toBe(false);
+    // 引用・原文の断片・位置の値は、診断にも記録のどこにも出ない
+    const text = JSON.stringify(record.requirements_diagnosis);
+    expect(text).not.toContain("印を出す");
+    expect(text).not.toContain("件数を");
+  });
+});
+
+// ── 逆照合の往復ごとの診断を別ファイルに置く（Issue #919）──────────────────────
+
+describe("逆照合の往復ごとの診断を plan-reverse-check-trace.json に置く（Issue #919）", () => {
+  /** 1 文目だけを覆う一覧（2 文目が覆われず、やり直しが走る。決定・未解決も持つ） */
+  const PARTIAL_LIST = {
+    requirements: [{ id: "R-1", text: "記録できる", quote: "タスクを記録する。", position: { start: 0, end: 9 } }],
+    framing: [],
+    decisions: ["記録の形は 1 行とした"],
+    unresolved: ["残件の扱い"],
+  };
+
+  it("初回に覆いの落ちを挙げてやり直した走りでも、往復の順に一覧・SHA-256・生の範囲・コードの落ちが残り、plan-record.json には欄が増えない", async () => {
+    const recording = createRecordingClient([
+      structured(PARTIAL_LIST),
+      // 初回の会話は、覆われていない範囲を 2 回挙げる（残った・重複）
+      structured({ uncovered: [{ start: 9, end: 12 }, { start: 9, end: 12 }] }),
+      structured(PARTIAL_LIST),
+      structured({ uncovered: [] }),
+    ]);
+    const dir = `${directory}/reverse-check-trace`;
+    const answersPath = "reverse-check-trace-answers.json";
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan-only", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => createFakeJudge({}),
+      now: () => 0,
+      log: () => {},
+    });
+    expect(code).toBe(EXIT_RUN_FAILED);
+
+    const trace = JSON.parse(await fs.readFile(`${dir}/${PLAN_REVERSE_CHECK_TRACE_FILE}`, "utf8"));
+    expect(trace.schema_version).toBe(PLAN_REVERSE_CHECK_TRACE_SCHEMA);
+    // 原文は複写せず、SHA-256 と長さだけを持つ
+    expect(trace.source_sha256).toBe(await sha256Hex(SOURCE_TEXT));
+    expect(trace.source_length).toBe(SOURCE_TEXT.length);
+    // 往復の順（初回・全体の作り直し）
+    expect(trace.rounds.map((round: { readonly fix: string }) => round.fix)).toEqual(["initial", "whole-redo"]);
+
+    // 往復ごとの一覧の SHA-256 は、その往復の P2 の「要件の一覧」のデータの文の SHA-256 と一致する
+    const requests = recording.structured.filter((request) => request.schemaName === "reverse-check");
+    expect(requests).toHaveLength(2);
+    for (let index = 0; index < trace.rounds.length; index += 1) {
+      const input = requests[index]!.input;
+      const marker = '<data name="要件の一覧">\n';
+      const from = input.indexOf(marker) + marker.length;
+      const listText = input.slice(from, input.indexOf("\n</data>", from));
+      expect(trace.rounds[index].list_sha256).toBe(await sha256Hex(listText));
+    }
+
+    const [first, second] = trace.rounds;
+    // 一覧の全体（要件・枠・決定・未解決）が生成役の値のまま
+    expect(first.list).toEqual(PARTIAL_LIST);
+    // コードが見つけた落ち（2 文目が覆われていない）と、会話の生の範囲の行き先・残った断片
+    expect(first.code_misses).toEqual([
+      { kind: "uncovered-source", requirement: null, range: { start: 9, end: 17 } },
+    ]);
+    expect(first.reported).toEqual([
+      { range: { start: 9, end: 12 }, destination: "remaining", fragments: [{ start: 9, end: 12 }] },
+      { range: { start: 9, end: 12 }, destination: "duplicate", fragments: [] },
+    ]);
+    expect(second.fix).toBe("whole-redo");
+    expect(second.reported).toEqual([]);
+
+    // 原文の全文・切り出した文字列・落ちの説明の文は入らない
+    const text = JSON.stringify(trace);
+    expect(text).not.toContain(SOURCE_TEXT);
+    expect(text).not.toContain("覆われていない部分");
+
+    // plan-record.json には新しい欄が出ない
+    const record = await readPlanRecord(dir);
+    expect(record).not.toHaveProperty("reverse_check_trace");
+    expect(record).not.toHaveProperty("reverseCheckTrace");
   });
 });

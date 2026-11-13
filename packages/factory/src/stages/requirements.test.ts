@@ -4,7 +4,10 @@ import { AGENT_LIMITS } from "../limits.js";
 import type { RequirementList } from "../pipeline.js";
 import {
   REQUIREMENTS_SCHEMA_NAME,
+  REQUIREMENT_QUOTE_REPAIR_SCHEMA_NAME,
+  checkQuoteRepairOutput,
   checkRequirementOutput,
+  runQuoteRepair,
   runRequirements,
 } from "./requirements.js";
 import { checkRequirementCoverage, runReverseCheckLoop } from "./reverse-check.js";
@@ -18,6 +21,9 @@ import {
   expectNoAcceptanceMaterial,
   makeGateway,
 } from "./__tests__/prompt.js";
+
+/** 記録した構造化出力の 1 回（Issue #917 の試験で使う。既存の describe の `structured` とは別名にする） */
+const recordedStructured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
 
 describe("① が送る要求を観測する（02 §2.2）", () => {
   it("規則とデータが別で、データは原文だけ・JSON Schema が付く", async () => {
@@ -366,5 +372,103 @@ describe("① の位置の正規化（Issue #382）", () => {
     };
     const quoteMisses = checkRequirementCoverage(source, list).filter((miss) => miss.kind === "quote-not-found");
     expect(quoteMisses.map((miss) => miss.requirementId)).toEqual(["R-1", "R-2"]);
+  });
+});
+
+// ── 引用の修復（Issue #917）────────────────────────────────────────────────
+//
+// 落ちが来歴だけのとき、**指された候補の引用と位置だけ**を出し直させる。① の本文を出させない新しい schema
+// と、対象の番号の形の検査を固定する。
+
+describe("引用の修復の要求と応答の形（Issue #917）", () => {
+  it("要求に要件の本文を出させる欄が無く、対象の番号と引用・位置だけを返させる schema が付く", async () => {
+    const recording = createRecordingClient([
+      recordedStructured({
+        repairs: [{ index: 0, quote: "タスクを記録する。", position: { start: 0, end: 9 } }],
+      }),
+    ]);
+    const outcome = await runQuoteRepair({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      previous: REQUIREMENT_LIST,
+      targets: [0],
+      misses: [{ kind: "quote-not-found", requirementId: "R-1", detail: "引用が見つからない" }],
+    });
+    expect(outcome.ok).toBe(true);
+    const request = recording.structured[0];
+    expect(request).toBeDefined();
+    if (request === undefined) return;
+    expect(request.schemaName).toBe(REQUIREMENT_QUOTE_REPAIR_SCHEMA_NAME);
+    // schema の欄は repairs（index・quote・position）だけで、要件の本文（text）や id を出させない
+    const schema = request.schema as {
+      readonly properties: { readonly repairs: { readonly items: { readonly properties: Record<string, unknown> } } };
+    };
+    expect(new Set(Object.keys(schema.properties))).toEqual(new Set(["repairs"]));
+    expect(new Set(Object.keys(schema.properties.repairs.items.properties))).toEqual(new Set(["index", "position", "quote"]));
+    // 対象の番号と落ちがデータに載る
+    expect(request.input).toContain("直す対象の番号");
+    expect(request.input).toContain("直す対象の落ち");
+    expectNoAcceptanceMaterial([request.instructions, request.input, ...request.documents]);
+  });
+
+  it("対象外の番号を含む・番号が重複する・対象の番号が欠けるときは形の誤りにする", () => {
+    const targets = [0, 2];
+    const ok = checkQuoteRepairOutput(
+      {
+        repairs: [
+          { index: 0, quote: "あ", position: { start: 0, end: 1 } },
+          { index: 2, quote: "い", position: { start: 1, end: 2 } },
+        ],
+      },
+      targets,
+    );
+    expect(ok.ok).toBe(true);
+
+    const outOfTarget = checkQuoteRepairOutput(
+      {
+        repairs: [
+          { index: 0, quote: "あ", position: { start: 0, end: 1 } },
+          { index: 1, quote: "う", position: { start: 2, end: 3 } },
+          { index: 2, quote: "い", position: { start: 1, end: 2 } },
+        ],
+      },
+      targets,
+    );
+    expect(outOfTarget.ok).toBe(false);
+
+    const duplicated = checkQuoteRepairOutput(
+      {
+        repairs: [
+          { index: 0, quote: "あ", position: { start: 0, end: 1 } },
+          { index: 0, quote: "あ", position: { start: 0, end: 1 } },
+          { index: 2, quote: "い", position: { start: 1, end: 2 } },
+        ],
+      },
+      targets,
+    );
+    expect(duplicated.ok).toBe(false);
+
+    const missing = checkQuoteRepairOutput(
+      { repairs: [{ index: 0, quote: "あ", position: { start: 0, end: 1 } }] },
+      targets,
+    );
+    expect(missing.ok).toBe(false);
+  });
+
+  it("出力の上限は ① と同じ段（requirements）を使い、新しい段名を作らない", async () => {
+    const recording = createRecordingClient([
+      recordedStructured({ repairs: [{ index: 0, quote: "タスクを記録する。", position: { start: 0, end: 9 } }] }),
+    ]);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+    await runQuoteRepair({
+      source: SOURCE_TEXT,
+      documents: [],
+      gateway,
+      previous: REQUIREMENT_LIST,
+      targets: [0],
+      misses: [],
+    });
+    expect(recording.structured[0]?.maxOutputTokens).toBe(gateway.maxOutputTokens("requirements"));
   });
 });
