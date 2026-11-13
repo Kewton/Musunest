@@ -666,10 +666,6 @@ describe("データで見せた事項 ID を使い回した応答を、形の検
 // ── Issue #887：既存の行の ID をデータで見せ、応答の中の重複を形で断る ──────────────
 
 describe("既存の行の ID をデータで見せ、応答の中の重複を形で断る（04 §3 P3・Issue #887）", () => {
-  /** `<data name="…">…</data>` の中身を取り出す（データの欄ごとに確かめる） */
-  const dataBlockOf = (input: string, name: string): string =>
-    input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "";
-
   /** 4 つの提示元が空の「見せた ID」（existing の欄は省く） */
   const SHOWN_EMPTY: SurfaceShownIssueIds = { catalog: [], defaults: [], inherited: [], decisions: [] };
 
@@ -718,7 +714,8 @@ describe("既存の行の ID をデータで見せ、応答の中の重複を形
     expect(names.at(-1)).toBe("既存の事項の ID");
     expect(names.at(-2)).toBe("関係する問いと答え");
     // 中身は ID の並びだけである
-    expect(JSON.parse(dataBlockOf(input, "既存の事項の ID"))).toEqual(["OI:a", "OI:b"]);
+    const block = input.split(`<data name="既存の事項の ID">`)[1]?.split("</data>")[0] ?? "";
+    expect(JSON.parse(block)).toEqual(["OI:a", "OI:b"]);
     // 規則の側には足さない
     expect(SURFACE_RULES.join("\n")).not.toContain("既存の事項の ID");
   });
