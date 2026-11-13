@@ -18,16 +18,21 @@ import type {
 } from "../llm.js";
 import type { RequirementList } from "../pipeline.js";
 import {
+  REVERSE_CHECK_MEANING_RULE_DEFINITIONS,
+  REVERSE_CHECK_RULES,
+  REVERSE_CHECK_SCHEMA,
   REVERSE_CHECK_SCHEMA_NAME,
   checkRequirementCoverage,
   isBlankRange,
   overlappingSentences,
+  reverseCheckRulesOf,
   runReverseCheck,
   runReverseCheckLoop,
   runReverseCheckLoopWithOperation,
   runReverseCheckWithDiagnosis,
   splitSourceSentences,
 } from "./reverse-check.js";
+import { ruleDefinitionDefects } from "./prompt.js";
 import {
   INJECTED_INSTRUCTION,
   REQUIREMENT_LIST,
@@ -346,6 +351,325 @@ describe("①' が送る要求を観測する（02 §2.2・§1.2）", () => {
     expect(ranges).not.toContain("90-99");
     // 捨てた断片は無い（範囲外は元から落ちにしない）
     expect(outcome.value.droppedBlankMisses).toBe(0);
+  });
+});
+
+// ── 対応の意味の基準（Issue #925）──────────────────────────────────────
+
+describe("対応の意味の基準を、旗が有効なときだけ既存の 3 文の後ろに足す（Issue #925）", () => {
+  /** 意味の基準の 4 文（定義の `text`） */
+  const MEANING_TEXTS = REVERSE_CHECK_MEANING_RULE_DEFINITIONS.map((definition) => definition.text);
+
+  it("定義は ID が `R-rcm-01`〜`04` の順で、why・since があり、ruleDefinitionDefects で不備 0", () => {
+    expect(REVERSE_CHECK_MEANING_RULE_DEFINITIONS.map((definition) => definition.id)).toEqual([
+      "R-rcm-01",
+      "R-rcm-02",
+      "R-rcm-03",
+      "R-rcm-04",
+    ]);
+    for (const definition of REVERSE_CHECK_MEANING_RULE_DEFINITIONS) {
+      expect(definition.why.trim()).not.toBe("");
+      expect(definition.since.trim()).not.toBe("");
+    }
+    expect(ruleDefinitionDefects(REVERSE_CHECK_MEANING_RULE_DEFINITIONS)).toEqual([]);
+  });
+
+  it("ID が規則の台帳の既存の ID と重ならない（台帳の行を読み、自分の 4 つの行を除いて照らす）", async () => {
+    interface NodeFileSystem {
+      readFileSync(path: URL, encoding: "utf8"): string;
+    }
+    const fs = (await import(/* @vite-ignore */ "node:fs")) as NodeFileSystem;
+    const ledger = fs.readFileSync(
+      new URL("../../../../workspace/mvp/m1/agent/methodology/ledger/rules.md", import.meta.url),
+      "utf8",
+    );
+    const ours = new Set(REVERSE_CHECK_MEANING_RULE_DEFINITIONS.map((definition) => definition.id));
+    const ledgerIds = ledger
+      .split("\n")
+      .flatMap((line) => {
+        const match = /^\|\s*(R-[a-z0-9]+-\d+)\s*\|/.exec(line);
+        const id = match?.[1];
+        return id === undefined ? [] : [id];
+      })
+      // 自分の 4 つの行（窓口が後で足す）は除く——足した後も重なりを見ない
+      .filter((id) => !ours.has(id));
+    for (const id of ours) expect(ledgerIds, id).not.toContain(id);
+    // 照らした台帳に既存の行があること（空の台帳を相手に緑にしない）
+    expect(ledgerIds.length).toBeGreaterThan(0);
+  });
+
+  it("旗が無いときの規則は、既存の 3 文と同じ並び（バイト列を変えない）", () => {
+    expect(reverseCheckRulesOf()).toEqual(REVERSE_CHECK_RULES);
+    expect(reverseCheckRulesOf(false)).toEqual(REVERSE_CHECK_RULES);
+    // 4 文は入らない
+    expect(reverseCheckRulesOf().some((rule) => MEANING_TEXTS.includes(rule))).toBe(false);
+  });
+
+  it("旗が有効なときの規則は、既存の 3 文の後ろに `R-rcm-01`〜`04` の文が入る", () => {
+    const rules = reverseCheckRulesOf(true);
+    expect(rules.slice(0, REVERSE_CHECK_RULES.length)).toEqual(REVERSE_CHECK_RULES);
+    expect(rules.slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
+  });
+
+  it("規則の文は、条件のすべてを本文が表すか・一部だけ・修飾は項目ごと・引用が覆っても本文が欠けば対応しない・迷うときは挙げる、を含む", () => {
+    const joined = MEANING_TEXTS.join("\n");
+    for (const phrase of [
+      "条件のすべてを本文が表すとき対応",
+      "一部だけなら挙げる",
+      "修飾は項目ごとに確かめる",
+      "引用が覆っても本文が欠けば対応しない",
+      "迷うときは挙げる",
+    ]) {
+      expect(joined, phrase).toContain(phrase);
+    }
+  });
+
+  it("規則の文に、題材の語・P 番号・要件 ID・観測の外の反例に挙げた種類の具体の語・観測した断片の語を含まない", () => {
+    const joined = MEANING_TEXTS.join("\n").toLowerCase();
+    // 題材の語（受入の題材）
+    for (const word of ["タスク", "件数", "持ち寄り", "当番表", "会費", "出欠", "貸し出し"]) {
+      expect(joined, word).not.toContain(word);
+    }
+    // 観測の外の反例に挙げた種類の、具体の語（隣の条件の例・評価や挨拶の語の例）
+    for (const word of ["年齢", "人数", "画面", "使いやすい", "すばらしい", "ありがとう"]) {
+      expect(joined, word).not.toContain(word);
+    }
+    // 観測した断片の語（題材の名前）
+    for (const word of ["レシピ", "ログイン", "ボタン"]) {
+      expect(joined, word).not.toContain(word);
+    }
+    // P 番号（P1・P2 など）と要件 ID。規則の ID（`R-rcm-`）も文には入れない
+    expect(joined).not.toMatch(/(^|[^a-z])p[0-9]/);
+    expect(joined).not.toMatch(/r-[a-z]+-[0-9]/);
+    expect(joined).not.toContain("r-rcm-");
+  });
+
+  it("旗を渡すと P2 の 1 回の要求に 4 文が入り、渡さないと入らない（ループを通らない呼び出し）", async () => {
+    const withRule = createRecordingClient([structured(REVERSE_CHECK_OUTPUT)]);
+    await runReverseCheck({
+      source: SOURCE_TEXT,
+      list: REQUIREMENT_LIST,
+      documents: [],
+      gateway: makeGateway(withRule.client, { maxAttempts: 1 }),
+      meaningRule: true,
+    });
+    const withoutRule = createRecordingClient([structured(REVERSE_CHECK_OUTPUT)]);
+    await runReverseCheck({
+      source: SOURCE_TEXT,
+      list: REQUIREMENT_LIST,
+      documents: [],
+      gateway: makeGateway(withoutRule.client, { maxAttempts: 1 }),
+    });
+    const withRules = withRule.structured[0]?.rules ?? [];
+    const withoutRules = withoutRule.structured[0]?.rules ?? [];
+    expect(withRules.slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
+    expect(withRules.slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
+    expect(withoutRules).toEqual([...REVERSE_CHECK_RULES]);
+    // 規則の文が違うだけで、データと schema は同じである
+    expect(withRule.structured[0]?.input).toBe(withoutRule.structured[0]?.input);
+    expect(withRule.structured[0]?.schema).toEqual(REVERSE_CHECK_SCHEMA);
+    expect(withoutRule.structured[0]?.schema).toEqual(REVERSE_CHECK_SCHEMA);
+  });
+
+  it("旗を渡さないループの結果は、初回の落ちが無い組で前と変わらない（呼び出しの列も同じ）", async () => {
+    const recording = createRecordingClient([
+      structured({
+        requirements: REQUIREMENT_LIST.requirements,
+        decisions: REQUIREMENT_LIST.decisions,
+        unresolved: REQUIREMENT_LIST.unresolved,
+      }),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoop({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(false);
+    expect(outcome.value.unmet).toEqual([]);
+    expect(outcome.value.report.uncovered).toEqual([]);
+    // P1 → P2 の 2 回だけ。P2 の要求の規則は 3 文のままである
+    expect(recording.structured).toHaveLength(2);
+    expect(recording.structured[1]?.rules).toEqual([...REVERSE_CHECK_RULES]);
+  });
+});
+
+describe("ループの 3 つの P2 の要求に、旗が有効なときだけ意味の基準が入る（Issue #925）", () => {
+  /** 意味の基準の 4 文（定義の `text`） */
+  const MEANING_TEXTS = REVERSE_CHECK_MEANING_RULE_DEFINITIONS.map((definition) => definition.text);
+  /** 原文から引用の位置を求めて、要件 1 件を作る */
+  const requirementOf = (source: string, id: string, text: string, quote: string) => {
+    const start = source.indexOf(quote);
+    return { id, text, quote, position: { start, end: start + quote.length } };
+  };
+  /** P2 の要求か（schema の名前で見る） */
+  const isReverseCheck = (request: { readonly schemaName: string } | undefined): boolean =>
+    request?.schemaName === REVERSE_CHECK_SCHEMA_NAME;
+  /** 要求の規則（無ければ空） */
+  const rulesOf = (request: { readonly rules?: readonly string[] } | undefined): readonly string[] =>
+    request?.rules ?? [];
+
+  it("(a) 初回の P2 の要求に、既存の 3 文の後ろに 4 文が入る", async () => {
+    const recording = createRecordingClient([
+      structured({
+        requirements: REQUIREMENT_LIST.requirements,
+        decisions: REQUIREMENT_LIST.decisions,
+        unresolved: REQUIREMENT_LIST.unresolved,
+      }),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      meaningRule: true,
+    });
+    expect(outcome.ok).toBe(true);
+    const request = recording.structured[1];
+    expect(isReverseCheck(request)).toBe(true);
+    expect(rulesOf(request).slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
+    expect(rulesOf(request).slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
+  });
+
+  it("(b) 全体の作り直しの後の P2 の要求にも 4 文が入る", async () => {
+    // 初回の P2 が覆いの落ちを申告して作り直しへ進む（覆いを含む落ちは修復へ行かない）
+    const source = "タスクを記録する。件数を合計する。印を出す。";
+    const first = {
+      requirements: [
+        requirementOf(source, "R-1", "タスクを記録できる", "タスクを記録する。"),
+        requirementOf(source, "R-2", "件数を合計できる", "件数を合計する。"),
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const redone = {
+      requirements: [
+        ...first.requirements,
+        requirementOf(source, "R-3", "印を出せる", "印を出す。"),
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(first),
+      structured({ uncovered: [{ start: 17, end: 22 }] }),
+      structured(redone),
+      structured({ uncovered: [] }),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      meaningRule: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(true);
+    expect(recording.structured).toHaveLength(4);
+    // 2 回目の P2（添字 3）に 4 文が入る
+    const redoneRequest = recording.structured[3];
+    expect(isReverseCheck(redoneRequest)).toBe(true);
+    expect(rulesOf(redoneRequest).slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
+    expect(rulesOf(redoneRequest).slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
+  });
+
+  it("(c) 引用の修復の後の P2 の要求にも 4 文が入る", async () => {
+    // 初回の落ちが来歴だけ（引用が原文に無い）なので、修復へ進む
+    const source = "記録する。合計する。";
+    const list = {
+      requirements: [
+        requirementOf(source, "R-1", "記録できる", "記録する。"),
+        { id: "R-2", text: "合計できる", quote: "原文に無い", position: { start: 5, end: 10 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const repaired = {
+      requirements: [
+        requirementOf(source, "R-1", "記録できる", "記録する。"),
+        requirementOf(source, "R-2", "合計できる", "合計する。"),
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured({ uncovered: [] }),
+      structured({ repairs: [{ index: 1, quote: "合計する。", position: { start: 5, end: 10 } }] }),
+      structured({ uncovered: [] }),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      quoteRepair: true,
+      meaningRule: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.repaired).toBe(true);
+    // 修復で当たった一覧は、前の一覧のうち指された候補だけを差し替えたもの
+    expect(outcome.value.list.requirements[1]).toEqual(repaired.requirements[1]);
+    expect(outcome.value.trace?.rounds.map((round) => round.fix)).toEqual(["initial", "quote-repair"]);
+    expect(recording.structured).toHaveLength(4);
+    // 修復の後の P2（添字 3）に 4 文が入る
+    const afterRequest = recording.structured[3];
+    expect(isReverseCheck(afterRequest)).toBe(true);
+    expect(rulesOf(afterRequest).slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
+    expect(rulesOf(afterRequest).slice(REVERSE_CHECK_RULES.length)).toEqual(MEANING_TEXTS);
+  });
+
+  it("(d) 旗を渡さないときの 3 つの P2 の要求は、どれも 3 文のままである（バイト列を変えない）", async () => {
+    // 初回が来歴だけ（引用が 2 か所） → 修復 → 修復の後の P2 が覆いを含む → 作り直し → P2。3 つの往復がそろう
+    const source = "印を出す。印を出す。件数を合計する。";
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const redone = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: { start: 0, end: 10 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured({ uncovered: [] }),
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      structured({ uncovered: [{ start: 0, end: 3 }] }),
+      structured(redone),
+      structured({ uncovered: [] }),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      quoteRepair: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.repaired).toBe(true);
+    expect(outcome.value.redone).toBe(true);
+    const reverseRequests = recording.structured.filter(isReverseCheck);
+    expect(reverseRequests).toHaveLength(3);
+    for (const request of reverseRequests) {
+      expect(rulesOf(request)).toEqual([...REVERSE_CHECK_RULES]);
+      expect(rulesOf(request).some((rule) => MEANING_TEXTS.includes(rule))).toBe(false);
+    }
   });
 });
 
