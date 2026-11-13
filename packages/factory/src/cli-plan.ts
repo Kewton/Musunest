@@ -709,8 +709,8 @@ export interface PlanCliIssueFlowRecord {
 }
 
 /**
- * 記録に入れる、終わりに残った（開いている）事項 1 つぶん（Issue #488）。**値は入れない**——由来・開いた
- * 往復の版・重大か・対象の要件の種類・目録の観点 ID（目録の行だけ）だけである。
+ * 記録に入れる、終わりに残った（開いている）事項 1 つぶん（Issue #488・#930）。由来・開いた往復の版・
+ * 重大か・対象の要件の種類・目録の観点 ID（目録の行だけ）と、事項 ID・対象の要件 ID を持つ。**文は入れない**。
  */
 export interface PlanCliRemainingOpenIssueRecord {
   readonly origin: string;
@@ -718,6 +718,31 @@ export interface PlanCliRemainingOpenIssueRecord {
   readonly critical: boolean;
   readonly requirement_kind: string;
   readonly facet_id: string | null;
+  /** 事項の ID（Issue #930） */
+  readonly issue_id: string;
+  /** 対象の要件の ID（コードの対応から引く。引けなければ `null`。Issue #930） */
+  readonly requirement_id: string | null;
+}
+
+/** 記録に入れる、答えが閉じた事項 1 つぶん（文は入れない。Issue #930） */
+export interface PlanCliAnswerClosureIssueRecord {
+  readonly issue_id: string;
+  /** 閉じ方（`main` = 主の事項、`also` = 一緒に閉じる事項） */
+  readonly how: string;
+  readonly requirement_id: string | null;
+  readonly facet_id: string | null;
+}
+
+/**
+ * 記録に入れる、受理した答え 1 つぶんの閉じた事項（文は入れない。Issue #930）。答えの ID・問いの ID・
+ * 答えた往復の版・答え由来の要件 ID と、閉じた行（事項 ID・閉じ方・対象の要件 ID・観点 ID）を持つ。
+ */
+export interface PlanCliAnswerClosureRecord {
+  readonly answer_id: string;
+  readonly question_id: string;
+  readonly revision: number;
+  readonly answer_requirement_id: string | null;
+  readonly closed: readonly PlanCliAnswerClosureIssueRecord[];
 }
 
 /**
@@ -756,8 +781,10 @@ export interface PlanCliRecord {
   readonly surface_target_attempts: readonly PlanCliSurfaceTargetAttempt[];
   /** 往復ごとの事項の流れ（件数と有限の分類だけ。Issue #488） */
   readonly issue_flow: readonly PlanCliIssueFlowRecord[];
-  /** 終わりに残った（開いている）事項 1 つずつ（値は入れない。Issue #488） */
+  /** 終わりに残った（開いている）事項 1 つずつ（ID を含む。文は入れない。Issue #488・#930） */
   readonly remaining_open_issues: readonly PlanCliRemainingOpenIssueRecord[];
+  /** 受理した答えごとの、閉じた事項（ID だけ。文は入れない。Issue #930） */
+  readonly answer_closures: readonly PlanCliAnswerClosureRecord[];
   /** P6 の文ごとの覆い（文番号と分類。値は入れない。P6 まで届かなければ空。Issue #488） */
   readonly confirm_coverage: readonly PlanCliConfirmCoverageRecord[];
   readonly confirmation: "build" | "stop" | null;
@@ -1077,13 +1104,28 @@ export function buildPlanCliRecord(input: {
       end_open: { critical: row.endOpen.critical, non_critical: row.endOpen.nonCritical },
       end: row.end,
     })),
-    // 終わりに残った事項（値は入れない。Issue #488）
+    // 終わりに残った事項（ID を含む。文は入れない。Issue #488・#930）
     remaining_open_issues: input.result.remainingOpenIssues.map((issue) => ({
       origin: issue.origin,
       revision: issue.revision,
       critical: issue.critical,
       requirement_kind: issue.requirementKind,
       facet_id: issue.facetId,
+      issue_id: issue.issueId,
+      requirement_id: issue.requirementId,
+    })),
+    // 受理した答えごとの、閉じた事項（ID だけ。文は入れない。Issue #930）
+    answer_closures: input.result.answerClosures.map((closure) => ({
+      answer_id: closure.answerId,
+      question_id: closure.questionId,
+      revision: closure.revision,
+      answer_requirement_id: closure.answerRequirementId,
+      closed: closure.closed.map((entry) => ({
+        issue_id: entry.issueId,
+        how: entry.how,
+        requirement_id: entry.requirementId,
+        facet_id: entry.facetId,
+      })),
     })),
     // P6 の文ごとの覆い（P6 まで届かなければ空。値は入れない。Issue #488）
     confirm_coverage: input.result.confirmCoverage.map((sentence) => ({
