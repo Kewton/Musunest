@@ -1157,8 +1157,8 @@ describe("引用の修復：指された候補の引用と位置だけを直す�
     const schema = repairRequest?.schema as {
       readonly properties: { readonly repairs: { readonly items: { readonly properties: Record<string, unknown> } } };
     };
-    expect(Object.keys(schema.properties).sort()).toEqual(["repairs"]);
-    expect(Object.keys(schema.properties.repairs.items.properties).sort()).toEqual(["index", "position", "quote"]);
+    expect(new Set(Object.keys(schema.properties))).toEqual(new Set(["repairs"]));
+    expect(new Set(Object.keys(schema.properties.repairs.items.properties))).toEqual(new Set(["index", "position", "quote"]));
     // 直した一覧で、指されていない候補の id・本文・引用・位置と、枠・decisions・unresolved が前と同じ
     expect(outcome.value.list.requirements.slice(1)).toEqual(list.requirements.slice(1));
     expect(outcome.value.list.framing).toEqual(list.framing);

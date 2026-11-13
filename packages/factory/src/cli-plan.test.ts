@@ -4696,14 +4696,14 @@ describe("Plan の記録に、引用の修復の直し方が載る（Issue #917�
   it("位置の不一致だけの初回の落ちでは、記録の往復の要素に quote-repair が載り、引用・位置の値は出ない", async () => {
     // 同じ句が 2 か所ある原文（位置の不一致の修復の題材）
     const source = "印を出す。印を出す。件数を合計する。";
-    const spanOf = (quote: string, from = 0): { readonly start: number; readonly end: number } => {
+    const repairSpanOf = (quote: string, from = 0): { readonly start: number; readonly end: number } => {
       const start = source.indexOf(quote, from);
       return { start, end: start + quote.length };
     };
     const list = {
       requirements: [
         { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
-        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOf("件数を合計する。") },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: repairSpanOf("件数を合計する。") },
       ],
       framing: [],
       decisions: [],

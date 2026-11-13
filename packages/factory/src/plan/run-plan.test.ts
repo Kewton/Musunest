@@ -7091,7 +7091,7 @@ describe("Plan の経路の引用の修復（Issue #917）", () => {
   /** 同じ句が 2 か所ある原文（位置の不一致の修復の題材） */
   const REPAIR_SOURCE = "印を出す。印を出す。件数を合計する。";
   /** 原文の開始位置から引用の範囲を作る */
-  const spanOf = (quote: string, from = 0): { readonly start: number; readonly end: number } => {
+  const repairSpanOf = (quote: string, from = 0): { readonly start: number; readonly end: number } => {
     const start = REPAIR_SOURCE.indexOf(quote, from);
     return { start, end: start + quote.length };
   };
@@ -7101,7 +7101,7 @@ describe("Plan の経路の引用の修復（Issue #917）", () => {
     const list = {
       requirements: [
         { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
-        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOf("件数を合計する。") },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: repairSpanOf("件数を合計する。") },
       ],
       framing: [{ quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }],
       decisions: ["記録の形は 1 行とした"],
@@ -7126,8 +7126,8 @@ describe("Plan の経路の引用の修復（Issue #917）", () => {
     const schema = repairRequest?.schema as {
       readonly properties: { readonly repairs: { readonly items: { readonly properties: Record<string, unknown> } } };
     };
-    expect(Object.keys(schema.properties).sort()).toEqual(["repairs"]);
-    expect(Object.keys(schema.properties.repairs.items.properties).sort()).toEqual(["index", "position", "quote"]);
+    expect(new Set(Object.keys(schema.properties))).toEqual(new Set(["repairs"]));
+    expect(new Set(Object.keys(schema.properties.repairs.items.properties))).toEqual(new Set(["index", "position", "quote"]));
     // 修復の要求のデータに、前の一覧・対象の番号・対象の落ちが載り、指されていない候補もそのまま渡る
     expect(repairRequest?.input).toContain("前回の要件の一覧");
     expect(repairRequest?.input).toContain("直す対象の番号");
@@ -7145,14 +7145,14 @@ describe("Plan の経路の引用の修復（Issue #917）", () => {
     const list = {
       requirements: [
         { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
-        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOf("件数を合計する。") },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: repairSpanOf("件数を合計する。") },
       ],
       decisions: [],
       unresolved: [],
     };
     const cases: readonly { readonly label: string; readonly repairs: ReadingOnlyRepair[] }[] = [
       // 対象外の番号（1）を含む
-      { label: "out-of-target", repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }, { index: 1, quote: "件数を合計する。", position: spanOf("件数を合計する。") }] },
+      { label: "out-of-target", repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }, { index: 1, quote: "件数を合計する。", position: repairSpanOf("件数を合計する。") }] },
       // 番号が重複する（0 が 2 つ）
       { label: "duplicated", repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }, { index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] },
       // 対象の番号（0）が欠ける
@@ -7177,7 +7177,7 @@ describe("Plan の経路の引用の修復（Issue #917）", () => {
     const list = {
       requirements: [
         { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
-        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOf("件数を合計する。") },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: repairSpanOf("件数を合計する。") },
       ],
       decisions: [],
       unresolved: [],

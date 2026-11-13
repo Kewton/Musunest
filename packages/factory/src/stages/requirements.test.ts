@@ -22,8 +22,8 @@ import {
   makeGateway,
 } from "./__tests__/prompt.js";
 
-/** 記録した構造化出力の 1 回（Issue #917 の試験で使う） */
-const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+/** 記録した構造化出力の 1 回（Issue #917 の試験で使う。既存の describe の `structured` とは別名にする） */
+const recordedStructured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
 
 describe("① が送る要求を観測する（02 §2.2）", () => {
   it("規則とデータが別で、データは原文だけ・JSON Schema が付く", async () => {
@@ -383,7 +383,7 @@ describe("① の位置の正規化（Issue #382）", () => {
 describe("引用の修復の要求と応答の形（Issue #917）", () => {
   it("要求に要件の本文を出させる欄が無く、対象の番号と引用・位置だけを返させる schema が付く", async () => {
     const recording = createRecordingClient([
-      structured({
+      recordedStructured({
         repairs: [{ index: 0, quote: "タスクを記録する。", position: { start: 0, end: 9 } }],
       }),
     ]);
@@ -404,8 +404,8 @@ describe("引用の修復の要求と応答の形（Issue #917）", () => {
     const schema = request.schema as {
       readonly properties: { readonly repairs: { readonly items: { readonly properties: Record<string, unknown> } } };
     };
-    expect(Object.keys(schema.properties).sort()).toEqual(["repairs"]);
-    expect(Object.keys(schema.properties.repairs.items.properties).sort()).toEqual(["index", "position", "quote"]);
+    expect(new Set(Object.keys(schema.properties))).toEqual(new Set(["repairs"]));
+    expect(new Set(Object.keys(schema.properties.repairs.items.properties))).toEqual(new Set(["index", "position", "quote"]));
     // 対象の番号と落ちがデータに載る
     expect(request.input).toContain("直す対象の番号");
     expect(request.input).toContain("直す対象の落ち");
@@ -458,7 +458,7 @@ describe("引用の修復の要求と応答の形（Issue #917）", () => {
 
   it("出力の上限は ① と同じ段（requirements）を使い、新しい段名を作らない", async () => {
     const recording = createRecordingClient([
-      structured({ repairs: [{ index: 0, quote: "タスクを記録する。", position: { start: 0, end: 9 } }] }),
+      recordedStructured({ repairs: [{ index: 0, quote: "タスクを記録する。", position: { start: 0, end: 9 } }] }),
     ]);
     const gateway = makeGateway(recording.client, { maxAttempts: 1 });
     await runQuoteRepair({
