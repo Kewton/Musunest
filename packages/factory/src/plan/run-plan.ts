@@ -88,7 +88,7 @@ import {
   type PlanRemaining,
   type PlanTurn,
 } from "./session.js";
-import { SURFACE_SHOWN_ID_SOURCES, runSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceIdReuseRejection, type SurfaceOutOfScopeRef, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt, type SurfaceTargetAttemptResult } from "./surface.js";
+import { SURFACE_SHOWN_ID_SOURCES, answerClosureTableOf, runSurface, type PlanAnswerClosure, type PlanAnswerClosureIssue, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceIdReuseRejection, type SurfaceOutOfScopeRef, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt, type SurfaceTargetAttemptResult } from "./surface.js";
 import {
   PLAN_OPEN_ISSUE_ORIGINS,
   PLAN_OPEN_ISSUE_SOURCES,
@@ -908,36 +908,10 @@ export interface PlanAnswerIssueContext {
   readonly requirement: { readonly id: string; readonly text: string } | null;
 }
 
-/**
- * 答えが事項を閉じたときの閉じ方（2 つ。Issue #930）。`main` は問いの主の事項、`also` は「一緒に閉じる」事項。
- */
-export const PLAN_ANSWER_CLOSURE_HOWS = ["main", "also"] as const;
-export type PlanAnswerClosureHow = (typeof PLAN_ANSWER_CLOSURE_HOWS)[number];
-
-/**
- * 答えが閉じた事項 1 つぶんの記録（**文は入れない**。Issue #930）。事項 ID・閉じ方・対象の要件 ID・目録の
- * 観点 ID（目録の行だけ）を持つ。要件 ID はコードが持つ対応から引き、引けなければ `null` である。
- */
-export interface PlanAnswerClosureIssue {
-  readonly issueId: string;
-  readonly how: PlanAnswerClosureHow;
-  readonly requirementId: string | null;
-  readonly facetId: string | null;
-}
-
-/**
- * 受理した答え 1 つぶんの、閉じた事項の記録（**文は入れない**。Issue #930）。答えの ID・問いの ID・答えた
- * 往復の版・答え由来の要件 ID（`R:<答えの ID>` が一覧にあればその ID。無ければ `null`）と、閉じた事項の並び
- * （主の事項と `alsoCloses` のうち、**閉じる対象が見つかった行だけ**）を持つ。
- */
-export interface PlanAnswerClosure {
-  readonly answerId: string;
-  readonly questionId: string;
-  /** 答えた往復の版 */
-  readonly revision: number;
-  readonly answerRequirementId: string | null;
-  readonly closed: readonly PlanAnswerClosureIssue[];
-}
+// 閉じた事項の記録の型と閉じ方の一覧は、**差分の洗い出しに渡す表と同じ持ち主**（`surface.ts`）から
+// 取る——2 か所に写さない（Issue #930・#931）。この file の名前で使えるよう、そのまま再輸出する。
+export { PLAN_ANSWER_CLOSURE_HOWS } from "./surface.js";
+export type { PlanAnswerClosure, PlanAnswerClosureHow, PlanAnswerClosureIssue } from "./surface.js";
 
 /** 問い 1 つぶんの照合の文脈（Issue #444）。`main` は主の事項、`alsoCloses` は一緒に閉じる事項 */
 export interface PlanAnswerQuestionContext {
@@ -2815,6 +2789,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         decisions: [],
         unresolved: [],
       };
+      // 答えで閉じた事項の表（Issue #931）。**Plan の記録と同じ関数**（`answerClosureTableOf`）で組み、
+      // 表が空なら `undefined`（要求に塊を足さない）。値は `answerClosures` の写しである。
+      const answerClosureTable = answerClosureTableOf(answerClosures);
       const context: SurfaceContext = {
         requirements: requirements.map((requirement) => ({
           id: requirement.id,
@@ -2824,6 +2801,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         decisions: [...decisions, ...inheritDecisions.map((entry) => entry.decision)],
         acceptedUnwritable: acceptedUnwritable.slice(),
         questionsAndAnswers: relatedQuestionsAndAnswers(inputsNow),
+        // 答えで閉じた事項の表を、参照用の文脈の最後（`関係する問いと答え` の後ろ）にデータで渡す
+        // （Issue #931）。**表の持ち主は Plan の記録**（`answerClosures`）であり、組む関数も同じ
+        // 1 つ（`answerClosureTableOf`）を使う——差分の段で引き直さない。空なら要求に足さない。
+        ...(answerClosureTable === undefined ? {} : { answerClosures: answerClosureTable }),
       };
       // この往復の P3 に**データで見せた**事項 ID の集合（4 種。Issue #464）。呼ぶ側が構造化した対応から
       // 作る——文や ID の接頭辞の解析では作らない。目録の開いている事項・仮の既定・今回の引き継ぎ・
