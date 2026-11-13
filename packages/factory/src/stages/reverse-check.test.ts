@@ -4,6 +4,7 @@
 //   1. 原文に無い引用・位置のずれ・どの要件にも覆われない原文の文を、**コードが**見つける
 //   2. 落ちがあれば ① をやり直し、やり直しても残る落ちを未達として返す
 //   3. ①' が送る要求を観測する（規則とデータが別・原文と一覧だけ・JSON Schema が付く）
+import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import { JobBudget } from "../budget.js";
 import { CallGateway } from "../call.js";
@@ -1587,5 +1588,197 @@ describe("引用の修復の呼び出しの数の上限（Issue #917）", () => 
     // 停止は修復の呼び出しの番号で、種類は上限（今までどおり）
     expect(outcome.operation).toBe("quote-repair");
     expect(outcome.failure.kind).toBe("callLimit");
+  });
+});
+
+// ── 逆照合の往復ごとの診断（Issue #919）──────────────────────────────────
+
+describe("逆照合の往復ごとの診断を残す（Issue #919）", () => {
+  /** 3 文をそれぞれの要件で覆い、3 文目を枠にもする一覧 */
+  const TRACE_SOURCE = "記録する。合計する。印を出す。";
+  const TRACE_LIST: RequirementList = {
+    requirements: [
+      { id: "R-1", text: "記録できる", quote: "記録する。", position: { start: 0, end: 5 } },
+      { id: "R-2", text: "合計できる", quote: "合計する。", position: { start: 5, end: 10 } },
+      { id: "R-3", text: "印を出せる", quote: "印を出す。", position: { start: 10, end: 15 } },
+    ],
+    framing: [{ quote: "印を出す。", position: { start: 10, end: 15 } }],
+    decisions: [],
+    unresolved: [],
+  };
+
+  async function traceOnce(
+    source: string,
+    list: RequirementList,
+    uncovered: readonly { readonly start: number; readonly end: number }[],
+  ) {
+    const recording = createRecordingClient([structured({ uncovered })]);
+    const outcome = await runReverseCheckWithDiagnosis({
+      source,
+      list,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return undefined;
+    return { trace: outcome.value.trace, recording };
+  }
+
+  it("会話の生の範囲の行き先 5 種（残った・重複・空白だけ・枠に全部含まれる・範囲の外か空）を 1 本ずつ残す", async () => {
+    // 1: 枠 {10,15} の一部と重なり、{8,10} が残る／2: 1 と同じで重複／3: 「。」だけで空白／
+    // 4: 枠に全部含まれる／5: 空の範囲
+    const reported = [
+      { start: 8, end: 12 },
+      { start: 8, end: 12 },
+      { start: 4, end: 5 },
+      { start: 10, end: 15 },
+      { start: 5, end: 5 },
+    ];
+    const result = await traceOnce(TRACE_SOURCE, TRACE_LIST, reported);
+    expect(result).toBeDefined();
+    if (result === undefined) return;
+    expect(result.trace.reported).toEqual([
+      { range: { start: 8, end: 12 }, destination: "remaining", fragments: [{ start: 8, end: 10 }] },
+      { range: { start: 8, end: 12 }, destination: "duplicate", fragments: [] },
+      { range: { start: 4, end: 5 }, destination: "blank", fragments: [] },
+      { range: { start: 10, end: 15 }, destination: "framing", fragments: [] },
+      { range: { start: 5, end: 5 }, destination: "outside", fragments: [] },
+    ]);
+  });
+
+  it("往復の一覧の SHA-256 は、P2 の要求の「要件の一覧」のデータの文の SHA-256 と一致する", async () => {
+    const result = await traceOnce(TRACE_SOURCE, TRACE_LIST, []);
+    expect(result).toBeDefined();
+    if (result === undefined) return;
+    // 実際に送った要求から「要件の一覧」のデータの文を取り出して照らす（要求のバイト列は変えない）
+    const request = result.recording.structured[0];
+    expect(request).toBeDefined();
+    const input = request?.input ?? "";
+    const marker = '<data name="要件の一覧">\n';
+    const from = input.indexOf(marker) + marker.length;
+    const to = input.indexOf("\n</data>", from);
+    const dataText = input.slice(from, to);
+    expect(result.trace.listSha256).toBe(await sha256Hex(dataText));
+    // 一覧の全体（要件・枠・決定・未解決）を、生成役が出した値のまま持つ
+    expect(result.trace.list).toEqual({
+      requirements: TRACE_LIST.requirements,
+      framing: TRACE_LIST.framing ?? [],
+      decisions: TRACE_LIST.decisions,
+      unresolved: TRACE_LIST.unresolved,
+    });
+  });
+
+  it("コードが見つけた落ちは、種類・候補の添字・範囲（説明の文は無し）で残る", async () => {
+    const source = "記録する。合計する。";
+    const list: RequirementList = {
+      requirements: [
+        // 引用が原文に無い（候補の添字 1）
+        { id: "R-1", text: "記録できる", quote: "原文に無い", position: { start: 0, end: 5 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const result = await traceOnce(source, list, []);
+    expect(result).toBeDefined();
+    if (result === undefined) return;
+    expect(result.trace.codeMisses).toEqual([
+      { kind: "quote-not-found", requirement: 1, range: null },
+      { kind: "uncovered-source", requirement: null, range: { start: 5, end: 10 } },
+    ]);
+  });
+
+  it("原文は複写せず、SHA-256 と長さを持つ", async () => {
+    // 原文に戻る単位（ループ）で組む。原文の全文は持たず、SHA-256 と長さだけを残す
+    const recording = createRecordingClient([structured(TRACE_LIST), structured({ uncovered: [] })]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: TRACE_SOURCE,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.trace?.sourceSha256).toBe(await sha256Hex(TRACE_SOURCE));
+    expect(outcome.value.trace?.sourceLength).toBe(TRACE_SOURCE.length);
+    // 原文の全文・範囲を切り出した文字列は入らない
+    const serialized = JSON.stringify(outcome.value.trace);
+    expect(serialized).not.toContain(TRACE_SOURCE);
+  });
+});
+
+describe("逆照合の診断を、止まるまでに終えた往復の分だけ返す（Issue #919）", () => {
+  it("やり直しの逆照合で止まると、終えた往復（初回）の分だけを返す", async () => {
+    const source = "記録する。合計する。印を出す。";
+    // 3 文目が覆われない一覧（やり直しが走る）
+    const list = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "記録する。", position: { start: 0, end: 5 } },
+        { id: "R-2", text: "合計できる", quote: "合計する。", position: { start: 5, end: 10 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    let calls = 0;
+    const inner = createRecordingClient([structured(list), structured({ uncovered: [] }), structured(list)]);
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest) {
+        calls += 1;
+        if (calls === 4) throw new Error("止める");
+        return inner.client.callStructured<T>(request);
+      },
+      async callWithTools(request: LlmToolRequest) {
+        return inner.client.callWithTools(request);
+      },
+    };
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.operation).toBe("reverse-check-redo");
+    expect(outcome.trace).toBeDefined();
+    expect(outcome.trace?.sourceSha256).toBe(await sha256Hex(source));
+    expect(outcome.trace?.sourceLength).toBe(source.length);
+    expect(outcome.trace?.rounds.map((round) => round.fix)).toEqual(["initial"]);
+  });
+
+  it("修復のあとの逆照合まで終えると、往復の順（initial・quote-repair）で返す", async () => {
+    const source = "記録する。合計する。";
+    const list = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "記録する。", position: { start: 0, end: 5 } },
+        { id: "R-2", text: "合計できる", quote: "原文に無い", position: { start: 5, end: 10 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const repaired = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "記録する。", position: { start: 0, end: 5 } },
+        { id: "R-2", text: "合計できる", quote: "合計する。", position: { start: 5, end: 10 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured({ uncovered: [] }),
+      structured({ repairs: [{ index: 1, quote: "合計する。", position: { start: 5, end: 10 } }] }),
+      structured(repaired),
+      structured({ uncovered: [] }),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      quoteRepair: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.trace?.rounds.map((round) => round.fix)).toEqual(["initial", "quote-repair"]);
   });
 });

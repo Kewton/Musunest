@@ -37,6 +37,8 @@ import {
   PLAN_CLI_RECORD_SCHEMA,
   PLAN_ONLY_RESULT_FILE,
   PLAN_ONLY_RESULT_SCHEMA,
+  PLAN_REVERSE_CHECK_TRACE_FILE,
+  PLAN_REVERSE_CHECK_TRACE_SCHEMA,
   PLAN_SURFACE_CHECK_FILE,
   PLAN_FILE_ERROR_SCHEMA,
   PLAN_FILE_REJECT_SCHEMA,
@@ -4748,5 +4750,91 @@ describe("Plan の記録に、引用の修復の直し方が載る（Issue #917�
     const text = JSON.stringify(record.requirements_diagnosis);
     expect(text).not.toContain("印を出す");
     expect(text).not.toContain("件数を");
+  });
+});
+
+// ── 逆照合の往復ごとの診断を別ファイルに置く（Issue #919）──────────────────────
+
+describe("逆照合の往復ごとの診断を plan-reverse-check-trace.json に置く（Issue #919）", () => {
+  /** 1 文目だけを覆う一覧（2 文目が覆われず、やり直しが走る。決定・未解決も持つ） */
+  const PARTIAL_LIST = {
+    requirements: [{ id: "R-1", text: "記録できる", quote: "タスクを記録する。", position: { start: 0, end: 9 } }],
+    framing: [],
+    decisions: ["記録の形は 1 行とした"],
+    unresolved: ["残件の扱い"],
+  };
+
+  it("初回に覆いの落ちを挙げてやり直した走りでも、往復の順に一覧・SHA-256・生の範囲・コードの落ちが残り、plan-record.json には欄が増えない", async () => {
+    const recording = createRecordingClient([
+      structured(PARTIAL_LIST),
+      // 初回の会話は、覆われていない範囲を 2 回挙げる（残った・重複）
+      structured({ uncovered: [{ start: 9, end: 12 }, { start: 9, end: 12 }] }),
+      structured(PARTIAL_LIST),
+      structured({ uncovered: [] }),
+    ]);
+    const dir = `${directory}/reverse-check-trace`;
+    const answersPath = "reverse-check-trace-answers.json";
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan-only", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => createFakeJudge({}),
+      now: () => 0,
+      log: () => {},
+    });
+    expect(code).toBe(EXIT_RUN_FAILED);
+
+    const trace = JSON.parse(await fs.readFile(`${dir}/${PLAN_REVERSE_CHECK_TRACE_FILE}`, "utf8"));
+    expect(trace.schema_version).toBe(PLAN_REVERSE_CHECK_TRACE_SCHEMA);
+    // 原文は複写せず、SHA-256 と長さだけを持つ
+    expect(trace.source_sha256).toBe(await sha256Hex(SOURCE_TEXT));
+    expect(trace.source_length).toBe(SOURCE_TEXT.length);
+    // 往復の順（初回・全体の作り直し）
+    expect(trace.rounds.map((round: { readonly fix: string }) => round.fix)).toEqual(["initial", "whole-redo"]);
+
+    // 往復ごとの一覧の SHA-256 は、その往復の P2 の「要件の一覧」のデータの文の SHA-256 と一致する
+    const requests = recording.structured.filter((request) => request.schemaName === "reverse-check");
+    expect(requests).toHaveLength(2);
+    const dataTextOf = (input: string): string => {
+      const marker = '<data name="要件の一覧">\n';
+      const from = input.indexOf(marker) + marker.length;
+      return input.slice(from, input.indexOf("\n</data>", from));
+    };
+    for (let index = 0; index < trace.rounds.length; index += 1) {
+      expect(trace.rounds[index].list_sha256).toBe(await sha256Hex(dataTextOf(requests[index]!.input)));
+    }
+
+    const [first, second] = trace.rounds;
+    // 一覧の全体（要件・枠・決定・未解決）が生成役の値のまま
+    expect(first.list).toEqual(PARTIAL_LIST);
+    // コードが見つけた落ち（2 文目が覆われていない）と、会話の生の範囲の行き先・残った断片
+    expect(first.code_misses).toEqual([
+      { kind: "uncovered-source", requirement: null, range: { start: 9, end: 17 } },
+    ]);
+    expect(first.reported).toEqual([
+      { range: { start: 9, end: 12 }, destination: "remaining", fragments: [{ start: 9, end: 12 }] },
+      { range: { start: 9, end: 12 }, destination: "duplicate", fragments: [] },
+    ]);
+    expect(second.fix).toBe("whole-redo");
+    expect(second.reported).toEqual([]);
+
+    // 原文の全文・切り出した文字列・落ちの説明の文は入らない
+    const text = JSON.stringify(trace);
+    expect(text).not.toContain(SOURCE_TEXT);
+    expect(text).not.toContain("覆われていない部分");
+
+    // plan-record.json には新しい欄が出ない
+    const record = await readPlanRecord(dir);
+    expect(record).not.toHaveProperty("reverse_check_trace");
+    expect(record).not.toHaveProperty("reverseCheckTrace");
   });
 });

@@ -33,7 +33,12 @@ import {
 } from "./plan/run-plan.js";
 import { SCRIPT_MATCHER_VERSION, type PlanScriptMatch, type ScriptMatchState } from "./plan/script-responder.js";
 import { isRecord } from "./stages/prompt.js";
-import type { ReverseCheckDiagnosis, ReverseCheckMissCounts } from "./stages/reverse-check.js";
+import type {
+  ReverseCheckDiagnosis,
+  ReverseCheckMissCounts,
+  ReverseCheckTrace,
+  ReverseCheckTraceList,
+} from "./stages/reverse-check.js";
 
 /** 端末の口（1 行を出し、1 行を読む）。本物と偽物を差し替えられる。入力が尽きたら `undefined` */
 export interface Terminal {
@@ -299,6 +304,14 @@ export const PLAN_CLI_RECORD_SCHEMA = "musunest-factory/plan-cli-record/v1" as c
 export const PLAN_SURFACE_CHECK_FILE = "plan-surface-check.json" as const;
 /** 点検の診断の版 */
 export const PLAN_SURFACE_CHECK_SCHEMA = "musunest-factory/plan-surface-check/v1" as const;
+/**
+ * 逆照合の往復ごとの診断を置くファイルの名前（`--out` の直下。`plan-record.json` とは**別**。Issue #919）。
+ * 往復ごとの一覧の全体・その SHA-256・会話の生の範囲と行き先・コードの落ちを持ち、`plan-record.json` は
+ * 今の要約のままにする。
+ */
+export const PLAN_REVERSE_CHECK_TRACE_FILE = "plan-reverse-check-trace.json" as const;
+/** 逆照合の診断の版 */
+export const PLAN_REVERSE_CHECK_TRACE_SCHEMA = "musunest-factory/plan-reverse-check-trace/v1" as const;
 
 /** 記録に入れる問い（安定した形に写す） */
 export interface PlanCliQuestionRecord {
@@ -860,6 +873,85 @@ export function buildSurfaceCheckDiagnostic(input: {
       adapter: claim.adapter,
       confidence: claim.confidence,
       evidence_id: claim.evidenceId,
+    })),
+  };
+}
+
+/** 逆照合の診断に入れる原文の上の位置（Issue #919） */
+export interface PlanCliTraceRange {
+  readonly start: number;
+  readonly end: number;
+}
+
+/** 会話が返した生の範囲 1 つ（行き先と残った断片。Issue #919） */
+export interface PlanCliTraceReportedRange {
+  readonly range: PlanCliTraceRange;
+  /** 有限の行き先（`remaining`・`framing`・`blank`・`duplicate`・`outside`） */
+  readonly destination: string;
+  readonly fragments: readonly PlanCliTraceRange[];
+}
+
+/** コードが見つけた落ち 1 件（種類・候補の添字・範囲。説明の文は持たない。Issue #919） */
+export interface PlanCliTraceCodeMiss {
+  readonly kind: string;
+  readonly requirement: number | null;
+  readonly range: PlanCliTraceRange | null;
+}
+
+/** 1 往復の逆照合の診断（Issue #919）。一覧の全体とその SHA-256・会話の生の範囲・コードの落ち */
+export interface PlanCliReverseCheckTraceRound {
+  readonly fix: string;
+  readonly list: ReverseCheckTraceList;
+  readonly list_sha256: string;
+  readonly reported: readonly PlanCliTraceReportedRange[];
+  readonly code_misses: readonly PlanCliTraceCodeMiss[];
+}
+
+/** 逆照合の往復ごとの診断（`--out` の `plan-reverse-check-trace.json`。Issue #919） */
+export interface PlanCliReverseCheckTraceDiagnostic {
+  readonly schema_version: string;
+  readonly plan_id: string;
+  /** 原文の SHA-256（原文は複写しない） */
+  readonly source_sha256: string;
+  /** 原文の長さ（文字数） */
+  readonly source_length: number;
+  readonly rounds: readonly PlanCliReverseCheckTraceRound[];
+}
+
+/**
+ * 逆照合の往復ごとの診断を、別ファイルに書く形（snake_case）に組む（Issue #919）。往復が無ければ
+ * （P1/P2 の最初の呼び出しで止まったとき）空の往復で書く。診断が無ければ `undefined`。
+ */
+export function buildReverseCheckTraceDiagnostic(input: {
+  readonly result: PlanResult;
+  readonly planId: string;
+}): PlanCliReverseCheckTraceDiagnostic | undefined {
+  const trace: ReverseCheckTrace | undefined = input.result.reverseCheckTrace;
+  if (trace === undefined) return undefined;
+  return {
+    schema_version: PLAN_REVERSE_CHECK_TRACE_SCHEMA,
+    plan_id: input.planId,
+    source_sha256: trace.sourceSha256,
+    source_length: trace.sourceLength,
+    rounds: trace.rounds.map((round) => ({
+      fix: round.fix,
+      list: {
+        requirements: round.list.requirements.map((requirement) => ({ ...requirement })),
+        framing: round.list.framing.map((entry) => ({ ...entry })),
+        decisions: round.list.decisions.slice(),
+        unresolved: round.list.unresolved.slice(),
+      },
+      list_sha256: round.listSha256,
+      reported: round.reported.map((entry) => ({
+        range: { start: entry.range.start, end: entry.range.end },
+        destination: entry.destination,
+        fragments: entry.fragments.map((fragment) => ({ start: fragment.start, end: fragment.end })),
+      })),
+      code_misses: round.codeMisses.map((miss) => ({
+        kind: miss.kind,
+        requirement: miss.requirement,
+        range: miss.range === null ? null : { start: miss.range.start, end: miss.range.end },
+      })),
     })),
   };
 }
