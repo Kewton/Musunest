@@ -2717,20 +2717,23 @@ describe("差分点検・§3：受理済み申告の再申告を除いた記録�
 describe("同じ ID の開いている事項の行の衝突を、値を含めずに plan-record に残す（Issue #460・#464）", () => {
   it("衝突した ID の件数・行の件数・帰属・0 行の件数・版が残り、duplicate-open-issue が other に消えず、値は転記されない", async () => {
     const mark = "MARK_CONFLICT_ZZZ";
-    // モデルが、**見せていない**同じ ID の事項を同一応答内に 2 件返す（足す時点で衝突する）
-    const surface = {
-      ambiguities: [
-        { id: "OI-dup", requirementId: "R-1", text: `${mark}の事項`, critical: true },
-        { id: "OI-dup", requirementId: "R-1", text: `${mark}の事項 2`, critical: true },
+    // 要件の ID が重複しているので、目録が同じ ID の行を 2 行作り、足す時点で衝突する
+    // （Issue #887 のあと、同一応答内の同じ ID は P3 の形の検査で断られるため、衝突の記録はこちらで作る）
+    const duplicateRequirementList = {
+      requirements: [
+        { id: "R-1", text: `${mark}を記録できる`, quote: "タスクを記録する", position: { start: 0, end: 8 } },
+        { id: "R-1", text: "件数を合計できる", quote: "件数を合計する", position: { start: 9, end: 16 } },
       ],
-      unwritable: [],
+      framing: [],
+      decisions: [],
+      unresolved: [],
     };
     const recording = createRecordingClient([
-      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(duplicateRequirementList),
       structured(REVERSE_CHECK_OUTPUT),
-      structured(surface),
+      structured(SURFACE_CLEAR),
     ]);
-    const judge = createFakeJudge({ ...catalogUnspecifiedFor({ "R-1": ["period"] }) });
+    const judge = createFakeJudge({ ...catalogUnspecifiedFor({ "R-1": ["period"] }, ["R-1"]) });
     const dir = `${directory}/open-issue-conflict`;
     const answersPath = "conflict-answers.json";
     const spy = vi.spyOn(runModule, "runGeneration");
@@ -2762,12 +2765,12 @@ describe("同じ ID の開いている事項の行の衝突を、値を含めず
     // 衝突の記録（件数と分類と版だけ。0 行の件数も残る）
     expect(record.open_issue_conflicts).toEqual({
       ids: 1,
-      rows: [{ existing: "surface", added: "surface", count: 1 }],
+      rows: [{ existing: "catalog", added: "catalog", count: 1 }],
       // 帰属の組（由来・状態・今回か以前か。足した順によらない）
       attribution: [
         {
-          first: { origin: "surface", status: "open", current: true },
-          second: { origin: "surface", status: "open", current: true },
+          first: { origin: "catalog", status: "open", current: true },
+          second: { origin: "catalog", status: "open", current: true },
           count: 1,
         },
       ],
@@ -2777,9 +2780,9 @@ describe("同じ ID の開いている事項の行の衝突を、値を含めず
     // 新しい記録に、事項 ID・要件 ID・文の目印が出ない
     const conflictsText = JSON.stringify(record.open_issue_conflicts);
     expect(conflictsText).not.toContain(mark);
-    expect(conflictsText).not.toContain("OI-dup");
+    expect(conflictsText).not.toContain("OI:catalog");
     expect(conflictsText).not.toContain("R-1");
-    // 使い回しの記録は、この衝突（見せていない ID）では空
+    // 使い回しの記録は、この衝突（コードが作った重複した行）では空
     expect(record.surface_id_reuse).toEqual([]);
     // もともと値を保存する既存の欄は変えない（問いの事項 ID・一緒に閉じる ID・答えの本文の形はそのまま）
     expect(record.rounds).toEqual([]);
@@ -2956,6 +2959,7 @@ describe("使い回しで断った応答を、plan-record の新しい欄に残�
           { source: "defaults", count: 1 },
           { source: "inherited", count: 0 },
           { source: "decisions", count: 0 },
+          { source: "existing", count: 0 },
         ],
       },
     ]);

@@ -238,24 +238,30 @@ export interface SurfaceContext {
   readonly questionsAndAnswers: readonly SurfaceContextQuestionAnswer[];
 }
 
-/** P3 に**データで見せた**事項 ID の提示元（有限。Issue #464） */
-export const SURFACE_SHOWN_ID_SOURCES = ["catalog", "defaults", "inherited", "decisions"] as const;
+/**
+ * P3 に**データで見せた**事項 ID の提示元（有限。Issue #464・#887）。`existing` は**末尾**に置く——
+ * 既存の 4 つの提示元の並びを変えない。
+ */
+export const SURFACE_SHOWN_ID_SOURCES = ["catalog", "defaults", "inherited", "decisions", "existing"] as const;
 export type SurfaceShownIdSource = (typeof SURFACE_SHOWN_ID_SOURCES)[number];
 
 /**
- * P3 に**データで見せた**事項 ID（提示元ごと。Issue #464）。呼ぶ側が**構造化した対応から作る**——文や
- * ID の接頭辞の解析では作らない。`ambiguities[].id` との**完全一致**で使い回しを断る。
+ * P3 に**データで見せた**事項 ID（提示元ごと。Issue #464・#887）。呼ぶ側が**構造化した対応から作る**——
+ * 文や ID の接頭辞の解析では作らない。`ambiguities[].id` との**完全一致**で使い回しを断る。
  *
  *   - `catalog` … その往復の目録の開いている事項の ID
  *   - `defaults` … その往復の**仮に適用した既定**の事項の ID
  *   - `inherited` … その往復で**引き継ぐ観点**の事項の ID
  *   - `decisions` … 参照用の文脈の既存の決定に `resolution.decision_id` で結ばれた既存の事項の ID
+ *   - `existing` … P3 を呼ぶ時点の事項の行のうち、ほかの 4 つの提示元に入らない ID すべて（状態を問わない）
  */
 export interface SurfaceShownIssueIds {
   readonly catalog: readonly string[];
   readonly defaults: readonly string[];
   readonly inherited: readonly string[];
   readonly decisions: readonly string[];
+  /** 既存の行の ID。**省略できる**——省略は空と同じである（Issue #887）。 */
+  readonly existing?: readonly string[];
 }
 
 /**
@@ -421,7 +427,7 @@ export function surfaceReusedAmbiguityIndexes(output: unknown, shown: SurfaceSho
   if (!Array.isArray(raw)) return [];
   const shownAll = new Set<string>();
   for (const source of SURFACE_SHOWN_ID_SOURCES) {
-    for (const id of shown[source]) shownAll.add(id);
+    for (const id of shown[source] ?? []) shownAll.add(id);
   }
   const indexes: number[] = [];
   raw.forEach((item, index) => {
@@ -446,7 +452,7 @@ export function surfaceIdReuseOf(output: unknown, shown: SurfaceShownIssueIds): 
     }
   }
   const bySource = SURFACE_SHOWN_ID_SOURCES.map((source) => {
-    const set = new Set(shown[source]);
+    const set = new Set(shown[source] ?? []);
     let count = 0;
     for (const id of rejected) if (set.has(id)) count += 1;
     return { source, count };
@@ -481,6 +487,26 @@ export function checkSurfaceOutput(output: unknown, shown?: SurfaceShownIssueIds
     rawUnwritable.forEach((item, index) => {
       const checked = checkUnwritable(item, `unwritable[${index}]`, problems);
       if (checked !== undefined) unwritable.push(checked);
+    });
+  }
+  // 1 つの応答の中の `ambiguities[].id` の重複は、形の誤りとして断る（Issue #887）。同じ ID の行が 2 つ
+  // できると、行を足すときの衝突の検出（`duplicate-open-issue`）でループの頭まで進んでから止まる。
+  // **使い回し（`issue-id-reused`）とは別の符号**にし、誤りの文に ID の値を埋めない（固定文）。
+  if (Array.isArray(rawAmbiguities)) {
+    const seenIds = new Set<string>();
+    rawAmbiguities.forEach((item, index) => {
+      if (!isRecord(item)) return;
+      const id = item["id"];
+      if (typeof id !== "string" || id === "") return;
+      if (seenIds.has(id)) {
+        problems.push({
+          field: `ambiguities[${index}].id`,
+          code: "issue-id-duplicated",
+          message: "1 つの応答の中で、同じ ID の未解決の事項を 2 つ以上挙げない（新しい事項には別の ID を付ける）",
+        });
+      } else {
+        seenIds.add(id);
+      }
     });
   }
   // 使い回し（`ambiguities[].id` が見せた ID と一致する）は、**応答全体**を断る（Issue #464）。
@@ -658,6 +684,12 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
     data.push({ name: "既存の決定", text: serializeJson(input.context.decisions) });
     data.push({ name: "了承除外", text: serializeJson(input.context.acceptedUnwritable) });
     data.push({ name: "関係する問いと答え", text: serializeJson(input.context.questionsAndAnswers) });
+  }
+  // 既存の事項の ID（ほかの 4 つの提示元に入らない行の ID。Issue #887）。**空でないときだけ**、参照用の
+  // 文脈の後ろに**ID の並びだけ**を足す——空のときの要求は変更前と byte で同じである。規則の文は足さない。
+  const existingIssueIds = input.shownIssueIds?.existing ?? [];
+  if (existingIssueIds.length > 0) {
+    data.push({ name: "既存の事項の ID", text: serializeJson(existingIssueIds) });
   }
   // 差分の要件 ID を渡されたときだけ、差分専用の schema（`enum` つき）と名前を使う（Issue #483）。
   // 渡されないとき（初回の洗い出し）の要求は、変更前と byte で同じである。
