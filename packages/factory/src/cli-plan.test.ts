@@ -4804,13 +4804,12 @@ describe("逆照合の往復ごとの診断を plan-reverse-check-trace.json に
     // 往復ごとの一覧の SHA-256 は、その往復の P2 の「要件の一覧」のデータの文の SHA-256 と一致する
     const requests = recording.structured.filter((request) => request.schemaName === "reverse-check");
     expect(requests).toHaveLength(2);
-    const dataTextOf = (input: string): string => {
+    for (let index = 0; index < trace.rounds.length; index += 1) {
+      const input = requests[index]!.input;
       const marker = '<data name="要件の一覧">\n';
       const from = input.indexOf(marker) + marker.length;
-      return input.slice(from, input.indexOf("\n</data>", from));
-    };
-    for (let index = 0; index < trace.rounds.length; index += 1) {
-      expect(trace.rounds[index].list_sha256).toBe(await sha256Hex(dataTextOf(requests[index]!.input)));
+      const listText = input.slice(from, input.indexOf("\n</data>", from));
+      expect(trace.rounds[index].list_sha256).toBe(await sha256Hex(listText));
     }
 
     const [first, second] = trace.rounds;
