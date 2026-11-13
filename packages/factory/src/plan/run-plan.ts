@@ -2027,6 +2027,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         // 落ちが来歴だけのときは、全体の作り直しではなく引用の修復を使う（Issue #917。**Plan の経路だけ**の
         // 明示の選択である。既定の Build の経路は今までどおり全体の作り直し）
         quoteRepair: true,
+        // 対応の意味の基準（Issue #925。**Plan の経路だけ**の明示の選択である。既定の Build の経路は
+        // 今までどおり 3 文だけを送る）
+        meaningRule: true,
       });
       // 止まったときも、止まるまでに終えた往復の分を結果へ残す（Issue #430・#919）
       requirementsDiagnosis = outcome.ok ? outcome.value.diagnosis : outcome.diagnosis;
