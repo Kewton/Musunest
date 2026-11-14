@@ -476,6 +476,11 @@ interface PlanCliRecordShape {
       }[];
       /** この往復を照らした一覧を、どの直し方で作ったか（有限の値。Issue #917） */
       readonly fix: string;
+      /** 作り直しで前の引用と位置へ戻した要件の件数と通し番号（戻したときだけ。Issue #942） */
+      readonly restored?: {
+        readonly count: number;
+        readonly requirements: readonly number[];
+      };
     }[];
     readonly redone: boolean;
     readonly unmet: {
@@ -4914,6 +4919,87 @@ describe("逆照合の往復ごとの診断を plan-reverse-check-trace.json に
     const record = await readPlanRecord(dir);
     expect(record).not.toHaveProperty("reverse_check_trace");
     expect(record).not.toHaveProperty("reverseCheckTrace");
+  });
+});
+
+// ── Issue #942：作り直しが壊した引用と位置を前の値に戻し、件数と戻す前の値を残す ──────────
+
+describe("作り直しが壊した引用と位置を前の値に戻し、件数と戻す前の値を残す（Issue #942）", () => {
+  /** 4 文の原文。1・2 文目が同じ句で、前後を含めた引用だけが 1 か所に決まる */
+  const KEEP_SOURCE = "印を出す。印を出す。件数を合計する。印を数える。";
+  const spanOf = (quote: string, from = 0): { readonly start: number; readonly end: number } => {
+    const start = KEEP_SOURCE.indexOf(quote, from);
+    return { start, end: start + quote.length };
+  };
+  /** 作り直しの前の一覧（R-1 の引用は 1 か所に決まる。4 文目が覆われていない） */
+  const BEFORE_LIST = {
+    requirements: [
+      { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: spanOf("印を出す。印を出す。") },
+      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOf("件数を合計する。") },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+  /** 作り直しの後の一覧（4 文すべてを覆うが、R-1 の引用を 2 か所に決まらない短い語へ縮めている） */
+  const SHRUNK_LIST = {
+    requirements: [
+      { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 20 } },
+      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOf("件数を合計する。") },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+
+  it("plan-record の診断には戻した通し番号と件数だけが出て、trace には戻す前の引用と位置と ID が出る", async () => {
+    const recording = createRecordingClient([
+      structured(BEFORE_LIST),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SHRUNK_LIST),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const dir = `${directory}/restore-provenance`;
+    const answersPath = "restore-provenance-answers.json";
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan-only", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : KEEP_SOURCE),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => createFakeJudge({}),
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+
+    // plan-record.json の診断には、2 回目の往復（作り直しの後）に戻した通し番号と件数だけが出る
+    const record = await readPlanRecord(dir);
+    expect(record.schema_version).toBe(PLAN_CLI_RECORD_SCHEMA);
+    expect(record.requirements_diagnosis.rounds.map((round) => round.fix)).toEqual(["initial", "whole-redo"]);
+    expect(record.requirements_diagnosis.rounds[1]?.restored).toEqual({ count: 1, requirements: [1] });
+    expect(record.requirements_diagnosis.rounds[0]?.restored).toBeUndefined();
+    // ID・引用・原文の文字列は計画の記録に現れない
+    const recordText = JSON.stringify(record.requirements_diagnosis);
+    expect(recordText).not.toContain("印を出す");
+    expect(recordText).not.toContain("R-1");
+
+    // 別ファイルの trace には、戻した要件の ID と、戻す前（作り直しが出した）引用・位置が出る
+    const trace = JSON.parse(await fs.readFile(`${dir}/${PLAN_REVERSE_CHECK_TRACE_FILE}`, "utf8"));
+    expect(trace.schema_version).toBe(PLAN_REVERSE_CHECK_TRACE_SCHEMA);
+    expect(trace.rounds.map((round: { readonly fix: string }) => round.fix)).toEqual(["initial", "whole-redo"]);
+    expect(trace.rounds[1].restored).toEqual([
+      { id: "R-1", requirement: 1, quote: "印を出す。", position: { start: 1, end: 20 } },
+    ]);
+    expect(trace.rounds[0].restored).toBeUndefined();
   });
 });
 
