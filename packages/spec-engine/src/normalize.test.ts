@@ -620,3 +620,43 @@ describe("ダッシュボード（dashboard）と数値の部品の正規化（M
     });
   });
 });
+
+// ── 一覧の宣言の順（Issue #943） ────────────────────────────────
+//
+// **正規化は view の宣言の順を変えない**（規約 3）。画面は宣言の順で先頭の一覧を初めに開くので
+// （docs/semantics.md「view」）、名前の辞書順に並べ替えると初期画面が変わってしまう。ここでは名前の
+// 辞書順と違う順に 3 つ以上を宣言し、その順のまま出ることを固定する。
+
+describe("一覧の宣言の順を並べ替えない（Issue #943）", () => {
+  const VIEWS_SOURCE = [
+    "entities:",
+    "  - name: expense",
+    "    fields:",
+    "      amount: number",
+    "views:",
+    // 名前の辞書順（alpha・bravo・charlie）と**違う**順に宣言する
+    "  - name: charlie",
+    "    entity: expense",
+    "  - name: alpha",
+    "    entity: expense",
+    "  - name: bravo",
+    "    entity: expense",
+    "actions: []",
+    "validations: []",
+    "computed: []",
+    "permissions: []",
+    "minIdentity:",
+    "  mode: anonymous",
+  ].join("\n");
+
+  it("名前の辞書順と違う順に宣言した view が、その順のまま JSON に出る", async () => {
+    const result = await normalized(VIEWS_SOURCE);
+    // 名前の辞書順（alpha・bravo・charlie）に並べ替えない
+    expect(result.app.spec.views.map((view) => view.name)).toEqual(["charlie", "alpha", "bravo"]);
+    // 先頭は charlie のままである（画面が初めに開く一覧である）
+    expect(result.app.spec.views[0]?.name).toBe("charlie");
+    const json = result.json;
+    expect(json.indexOf('"charlie"')).toBeLessThan(json.indexOf('"alpha"'));
+    expect(json.indexOf('"alpha"')).toBeLessThan(json.indexOf('"bravo"'));
+  });
+});
