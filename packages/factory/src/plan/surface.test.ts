@@ -18,11 +18,13 @@ import {
   createRecordingClient,
   makeGateway,
 } from "../stages/__tests__/prompt.js";
-import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_RULES, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME, SURFACE_SHOWN_ID_SOURCES, buildSurfaceDiffSchema, checkSurfaceOutput, checkSurfaceTargets, runSurface, surfaceIdReuseOf, type PlanSurface, type SurfaceCatalogData, type SurfaceContext, type SurfaceInput, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt } from "./surface.js";
+import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_RELATIONS, SURFACE_RULES, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME, SURFACE_SHOWN_ID_SOURCES, buildSurfaceDiffSchema, checkSurfaceOutput, checkSurfaceTargets, runSurface, surfaceIdReuseOf, type PlanSurface, type SurfaceCatalogData, type SurfaceContext, type SurfaceInput, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt } from "./surface.js";
 
 /** 正しい応答（未解決の事項 1 件・書けないこと 1 件） */
 const SURFACE_OUTPUT = {
-  ambiguities: [{ id: "OI-1", requirementId: "R-1", text: "誰の分を数えるか", critical: true }],
+  ambiguities: [
+    { id: "OI-1", requirementId: "R-1", text: "誰の分を数えるか", critical: true, relation: "new", answerId: null },
+  ],
   unwritable: [
     {
       id: "U-1",
@@ -799,16 +801,37 @@ describe("差分の洗い出しの schema（enum）を、その往復の差分�
   const dataBlockOf = (input: string, name: string): string =>
     input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "";
 
-  /** `requirementId` の欄の `enum` と `description` を落とした写し（形の比較に使う） */
-  function withoutRequirementIdContract(schema: unknown): unknown {
+  /**
+   * 差分専用の契約（`requirementId` の `enum`・`description` と、`ambiguities[]` の `relation`・
+   * `answerId`）を落とした写し（形の比較に使う。Issue #483・#938）
+   */
+  function withoutDiffContract(schema: unknown): unknown {
     const copy = JSON.parse(JSON.stringify(schema)) as {
-      properties: Record<string, { items: { properties: Record<string, Record<string, unknown>> } }>;
+      properties: Record<
+        string,
+        {
+          items: {
+            required?: readonly string[];
+            properties: Record<string, Record<string, unknown>>;
+          };
+        }
+      >;
     };
     for (const section of ["ambiguities", "unwritable"]) {
       const field = copy.properties[section]?.items.properties.requirementId;
       if (field !== undefined) {
         delete field.enum;
         delete field.description;
+      }
+    }
+    const ambiguity = copy.properties.ambiguities?.items;
+    if (ambiguity !== undefined) {
+      delete ambiguity.properties.relation;
+      delete ambiguity.properties.answerId;
+      if (ambiguity.required !== undefined) {
+        ambiguity.required = ambiguity.required.filter(
+          (name) => name !== "relation" && name !== "answerId",
+        );
       }
     }
     return copy;
@@ -847,7 +870,7 @@ describe("差分の洗い出しの schema（enum）を、その往復の差分�
     expect(schema.properties.ambiguities.items.properties.requirementId.enum).toEqual([...DIFF_IDS]);
     expect(schema.properties.unwritable.items.properties.requirementId.enum).toEqual([...DIFF_IDS]);
     // enum と description を除いた schema は、SURFACE_SCHEMA と等しい
-    expect(withoutRequirementIdContract(request.schema)).toEqual(withoutRequirementIdContract(SURFACE_SCHEMA));
+    expect(withoutDiffContract(request.schema)).toEqual(withoutDiffContract(SURFACE_SCHEMA));
     // SURFACE_SCHEMA そのものは、呼んだあとも変わらない
     expect(SURFACE_SCHEMA.properties.ambiguities.items.properties.requirementId).toEqual({
       type: "string",
@@ -871,8 +894,8 @@ describe("差分の洗い出しの schema（enum）を、その往復の差分�
     expect(single.ambiguities).toEqual(["R:a"]);
     expect(single.unwritable).toEqual(["R:a"]);
     // enum と description を除いた形は SURFACE_SCHEMA と等しく、SURFACE_SCHEMA は変わらない（enum を持たない）
-    expect(withoutRequirementIdContract(buildSurfaceDiffSchema(["R:b", "R:a", "R:b"] as const))).toEqual(
-      withoutRequirementIdContract(SURFACE_SCHEMA),
+    expect(withoutDiffContract(buildSurfaceDiffSchema(["R:b", "R:a", "R:b"] as const))).toEqual(
+      withoutDiffContract(SURFACE_SCHEMA),
     );
     expect("enum" in SURFACE_SCHEMA.properties.ambiguities.items.properties.requirementId).toBe(false);
     expect("enum" in SURFACE_SCHEMA.properties.unwritable.items.properties.requirementId).toBe(false);
@@ -976,12 +999,16 @@ describe("照合を check の中へ移し、対象外の参照を形のやり直
     input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "";
   /** 対象外の要件 ID を指す未解決の事項 1 件 */
   const OUT_OF_SCOPE = {
-    ambiguities: [{ id: "OI-x", requirementId: "R-1", text: "対象外の事項", critical: true }],
+    ambiguities: [
+      { id: "OI-x", requirementId: "R-1", text: "対象外の事項", critical: true, relation: "new", answerId: null },
+    ],
     unwritable: [],
   };
   /** 点検の対象の内側を指す未解決の事項 1 件 */
   const IN_SCOPE = {
-    ambiguities: [{ id: "OI-y", requirementId: "R:A:Q1-1", text: "対象内の事項", critical: true }],
+    ambiguities: [
+      { id: "OI-y", requirementId: "R:A:Q1-1", text: "対象内の事項", critical: true, relation: "new", answerId: null },
+    ],
     unwritable: [],
   };
   /** 対象外の要件 ID を指す「書けない」の申告 1 件 */
@@ -1007,7 +1034,9 @@ describe("照合を check の中へ移し、対象外の参照を形のやり直
   };
   /** 対象外の参照と制約の誤り（空の制約）が同居する応答 */
   const MIXED_CONSTRAINT = {
-    ambiguities: [{ id: "OI-o", requirementId: "R-1", text: "対象外の事項", critical: true }],
+    ambiguities: [
+      { id: "OI-o", requirementId: "R-1", text: "対象外の事項", critical: true, relation: "new", answerId: null },
+    ],
     unwritable: [
       { id: "U-1", requirementId: "R:A:Q1-1", part: "部分", constraintIds: [], reason: "理由", alternative: "代案" },
     ],
@@ -1097,7 +1126,9 @@ describe("照合を check の中へ移し、対象外の参照を形のやり直
   it("(c2) 1 試行目が事項 ID の使い回し、2 試行目が対象外を指すと、unmet・試行 2・やり直しの告知 1・呼び出し 2（追加の開始なし）", async () => {
     const SHOWN: SurfaceShownIssueIds = { catalog: ["OI:shown"], defaults: [], inherited: [], decisions: [] };
     const REUSE = {
-      ambiguities: [{ id: "OI:shown", requirementId: "R:A:Q1-1", text: "使い回し", critical: true }],
+      ambiguities: [
+        { id: "OI:shown", requirementId: "R:A:Q1-1", text: "使い回し", critical: true, relation: "new", answerId: null },
+      ],
       unwritable: [],
     };
     const { gateway, outcome } = runTarget([REUSE, OUT_OF_SCOPE], { shownIssueIds: SHOWN });
@@ -1250,5 +1281,137 @@ describe("照合を check の中へ移し、対象外の参照を形のやり直
     expect(recording.structured).toHaveLength(1);
     expect(recording.structured[0]?.input.match(/<data name=/g)).toHaveLength(1);
     expect(recording.structured[0]?.input).not.toContain(SHAPE_PROBLEMS_DATA_NAME);
+  });
+});
+
+// ── Issue #938：差分の洗い出しに、前の答えとの関係と答えの ID を足す ──────────────────
+
+/** 差分専用の schema の、`ambiguities[]` の行の契約を読む（Issue #938） */
+function ambiguityContract(schema: unknown): {
+  readonly required: readonly string[];
+  readonly properties: Record<string, Record<string, unknown>>;
+} {
+  const built = schema as {
+    properties: {
+      ambiguities: { items: { required: readonly string[]; properties: Record<string, Record<string, unknown>> } };
+    };
+  };
+  return built.properties.ambiguities.items;
+}
+
+describe("差分の洗い出しに、前の答えとの関係と答えの ID を足す（04 §3 P3・Issue #938）", () => {
+  const DIFF_IDS = ["R:A:Q1-1"] as const;
+
+  it("(a) ambiguities[] の行に relation（4 値）と answerId（string|null）が必須で入り、unwritable[] と初回の schema は変わらない", () => {
+    const contract = ambiguityContract(buildSurfaceDiffSchema(DIFF_IDS, ["A:Q1-1", "A:Q1-2"]));
+    expect(contract.required).toEqual(["id", "requirementId", "text", "critical", "relation", "answerId"]);
+    expect(contract.properties.relation).toEqual({
+      type: "string",
+      enum: [...SURFACE_RELATIONS],
+      description: expect.any(String),
+    });
+    expect(contract.properties.answerId).toMatchObject({
+      type: ["string", "null"],
+      enum: ["A:Q1-1", "A:Q1-2", null],
+      description: expect.any(String),
+    });
+    // 書けない部分の契約は変えない
+    const unwritable = (buildSurfaceDiffSchema(DIFF_IDS, ["A:Q1-1"]) as {
+      properties: { unwritable: { items: { required: readonly string[]; properties: Record<string, unknown> } } };
+    }).properties.unwritable.items;
+    expect(unwritable.required).toEqual(["id", "requirementId", "part", "constraintIds", "reason", "alternative"]);
+    expect(Object.keys(unwritable.properties)).toEqual([
+      "id",
+      "requirementId",
+      "part",
+      "constraintIds",
+      "reason",
+      "alternative",
+    ]);
+    // 初回の schema は 1 文字も変えない（relation・answerId を持たない）
+    expect(Object.keys(SURFACE_SCHEMA.properties.ambiguities.items.properties)).toEqual([
+      "id",
+      "requirementId",
+      "text",
+      "critical",
+    ]);
+    expect(SURFACE_SCHEMA.properties.ambiguities.items.required).toEqual(["id", "requirementId", "text", "critical"]);
+    expect("relation" in SURFACE_SCHEMA.properties.ambiguities.items.properties).toBe(false);
+    expect("answerId" in SURFACE_SCHEMA.properties.ambiguities.items.properties).toBe(false);
+  });
+
+  it("(b) 答えが 0 件の往復は、answerId の enum が [null] になる（重複は最初の出現の順で一意）", () => {
+    expect(ambiguityContract(buildSurfaceDiffSchema(DIFF_IDS)).properties.answerId).toMatchObject({ enum: [null] });
+    expect(
+      ambiguityContract(buildSurfaceDiffSchema(DIFF_IDS, ["A:Q1-1", "A:Q1-1"])).properties.answerId,
+    ).toMatchObject({ enum: ["A:Q1-1", null] });
+  });
+
+  it("(c) 要求の規則とデータは変わらず、schema だけが変わる（答えの ID はデータの塊を増やさない）", async () => {
+    const context: SurfaceContext = {
+      requirements: [{ id: "R-1", text: "タスクを記録できる", origin: "S-1" }],
+      decisions: [],
+      acceptedUnwritable: [],
+      questionsAndAnswers: [
+        { questionId: "Q1-1", question: "誰の分を数えるか", answerId: "A:Q1-1", answer: "全員" },
+      ],
+    };
+    const recording = createRecordingClient([
+      { kind: "structured" as const, output: SURFACE_OUTPUT, usage: undefined },
+      { kind: "structured" as const, output: SURFACE_OUTPUT, usage: undefined },
+    ]);
+    const outcome = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      targetRequirementIds: ["R-1"],
+      context,
+    });
+    expect(outcome.ok).toBe(true);
+    const request = recording.structured[0];
+    expect(request).toBeDefined();
+    if (request === undefined) return;
+    expect(request.schemaName).toBe(SURFACE_DIFF_SCHEMA_NAME);
+    // 答えの ID は schema の enum にだけ入り、データの塊は増えない（規則・文書・前置きも変えない）
+    expect(ambiguityContract(request.schema).properties.answerId).toMatchObject({
+      enum: ["A:Q1-1", null],
+    });
+    const names = [...request.input.matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
+    expect(names).toEqual([
+      "要件の一覧",
+      "出力に許される要件 ID",
+      "点検時点の全要件",
+      "既存の決定",
+      "了承除外",
+      "関係する問いと答え",
+    ]);
+    expect(request.rules).toEqual(SURFACE_RULES);
+    expect(request.documents).toEqual(SAMPLE_DOCUMENTS.map((document) => `${document.name}\n${document.text}`));
+    expect(request.instructions).toBe(COMMON_RULES.join("\n"));
+  });
+
+  it("(d) relation か answerId が無い差分の応答は、形の誤りとして既存のやり直しに回る（新しいやり直しは足さない）", async () => {
+    const noRelation = {
+      ambiguities: [{ id: "OI-x", requirementId: "R-1", text: "関係の無い事項", critical: true }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      { kind: "structured" as const, output: noRelation, usage: undefined },
+      { kind: "structured" as const, output: noRelation, usage: undefined },
+    ]);
+    const outcome = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      targetRequirementIds: ["R-1"],
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("malformed");
+    if (outcome.failure.kind !== "malformed") return;
+    expect(outcome.failure.problems.map((problem) => problem.field)).toEqual([
+      "ambiguities[0].relation",
+      "ambiguities[0].answerId",
+    ]);
   });
 });

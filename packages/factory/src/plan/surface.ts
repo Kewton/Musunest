@@ -48,6 +48,21 @@ export const SURFACE_RULES: readonly string[] = [
   "新しい事項の ID は、データで見せた事項の ID と同じにしない。既存の事項が重大・矛盾なら、新しい ID で挙げる。",
 ];
 
+/**
+ * 差分の洗い出しが、挙げる事項ごとに申告する、前の答えとの関係（有限の 4 値。Issue #938）。
+ * **初回の洗い出しの schema には載せない**——差分専用の schema だけが要求する。
+ */
+export const SURFACE_RELATIONS = ["new", "same-as-answer", "contradicts-answer", "unclear"] as const;
+export type SurfaceRelation = (typeof SURFACE_RELATIONS)[number];
+
+/** 前の答えとの関係の説明（schema の `description` にそのまま届ける。Issue #938） */
+const SURFACE_RELATION_DESCRIPTION =
+  "この事項と、前に答えた答えとの関係。new は前の答えでは決まらない判断（答えの値が生んだ新しい判断を含む）／same-as-answer は answerId の答えが同じ対象の同じ決めどころを既に決めている／contradicts-answer は answerId の答えと食い違う／unclear はどれか決められない";
+
+/** 答えの ID の説明（schema の `description` にそのまま届ける。Issue #938） */
+const SURFACE_ANSWER_ID_DESCRIPTION =
+  "関係の相手にした答えの ID（同じ往復の関係する問いと答えの答えの ID のどれか）。new で生んだ答えが無ければ null。same-as-answer・contradicts-answer では相手の答えの ID を書く";
+
 /** P3 の洗い出しの JSON Schema（構造化出力） */
 export const SURFACE_SCHEMA = {
   type: "object",
@@ -106,12 +121,30 @@ export const SURFACE_SCHEMA = {
  *
  * **重複は `enum` に残さない**——渡された並びを**最初の出現の順**で一意にしてから載せる（Issue #483 の
  * レビュー）。行（差分の要件）は畳まない。**値だけ**を一意にする。
+ *
+ * **`ambiguities[]` の行に、前の答えとの関係（`relation`）と答えの ID（`answerId`）を必須で足す**
+ * （Issue #938）。`answerId` の `enum` は、その往復の「関係する問いと答え」の答えの ID と `null` である
+ * （答えが 0 件なら `[null]`。重複は最初の出現の順で一意にする）。**`unwritable[]` と初回の
+ * `SURFACE_SCHEMA` は変えない**。
  */
-export function buildSurfaceDiffSchema(requirementIds: readonly [string, ...string[]]): Record<string, unknown> {
+export function buildSurfaceDiffSchema(
+  requirementIds: readonly [string, ...string[]],
+  answerIds: readonly string[] = [],
+): Record<string, unknown> {
   const requirementId = {
     type: "string",
     enum: [...new Set(requirementIds)],
     description: "点検の対象（出力に許される要件 ID）のどれか。参照用の全要件の ID は書かない",
+  };
+  const relation = {
+    type: "string",
+    enum: [...SURFACE_RELATIONS],
+    description: SURFACE_RELATION_DESCRIPTION,
+  };
+  const answerId = {
+    type: ["string", "null"],
+    enum: [...new Set(answerIds), null],
+    description: SURFACE_ANSWER_ID_DESCRIPTION,
   };
   return {
     ...SURFACE_SCHEMA,
@@ -121,9 +154,12 @@ export function buildSurfaceDiffSchema(requirementIds: readonly [string, ...stri
         ...SURFACE_SCHEMA.properties.ambiguities,
         items: {
           ...SURFACE_SCHEMA.properties.ambiguities.items,
+          required: [...SURFACE_SCHEMA.properties.ambiguities.items.required, "relation", "answerId"],
           properties: {
             ...SURFACE_SCHEMA.properties.ambiguities.items.properties,
             requirementId,
+            relation,
+            answerId,
           },
         },
       },
@@ -148,6 +184,13 @@ export interface PlanAmbiguity {
   /** 利用者の言葉で書いた問い */
   readonly text: string;
   readonly critical: boolean;
+  /**
+   * 前の答えとの関係（**差分の洗い出しだけが持つ**。初回の洗い出しの応答には無い。Issue #938）。
+   * 差分の洗い出しでは schema が必須にするので、受理した行には必ず入る。
+   */
+  readonly relation?: SurfaceRelation;
+  /** 関係の相手にした答えの ID（無ければ `null`。差分の洗い出しだけが持つ。Issue #938） */
+  readonly answerId?: string | null;
 }
 
 /** 書けない部分 1 つ（04 §4 `accepted_unwritable` の候補。U-P2 の代わりの案つき） */
@@ -343,7 +386,16 @@ export interface SurfaceInput {
   readonly onIdReuse?: (rejection: SurfaceIdReuseRejection) => void;
 }
 
-function checkAmbiguity(value: unknown, field: string, problems: Problem[]): PlanAmbiguity | undefined {
+/**
+ * 未解決の事項 1 行を確かめる。`requireRelation` のとき（差分の洗い出し）だけ、前の答えとの関係と
+ * 答えの ID を必須にする（Issue #938）。初回の洗い出しでは今までどおり読まない。
+ */
+function checkAmbiguity(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  requireRelation: boolean,
+): PlanAmbiguity | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "未解決の事項は写像（object）であること" });
     return undefined;
@@ -353,6 +405,8 @@ function checkAmbiguity(value: unknown, field: string, problems: Problem[]): Pla
   const requirementId = value["requirementId"];
   const text = value["text"];
   const critical = value["critical"];
+  let relation: SurfaceRelation | undefined;
+  let answerId: string | null | undefined;
   if (typeof id !== "string" || id === "") {
     problems.push({ field: `${field}.id`, message: "識別子は空でない文字列であること" });
     good = false;
@@ -369,8 +423,33 @@ function checkAmbiguity(value: unknown, field: string, problems: Problem[]): Pla
     problems.push({ field: `${field}.critical`, message: "重大かは真偽（boolean）であること" });
     good = false;
   }
+  if (requireRelation) {
+    const rawRelation = value["relation"];
+    if (typeof rawRelation !== "string" || !(SURFACE_RELATIONS as readonly string[]).includes(rawRelation)) {
+      problems.push({
+        field: `${field}.relation`,
+        message: "前の答えとの関係は new・same-as-answer・contradicts-answer・unclear のどれかであること",
+      });
+      good = false;
+    } else {
+      relation = rawRelation as SurfaceRelation;
+    }
+    const rawAnswerId = value["answerId"];
+    if (rawAnswerId !== null && (typeof rawAnswerId !== "string" || rawAnswerId === "")) {
+      problems.push({ field: `${field}.answerId`, message: "答えの ID は空でない文字列か null であること" });
+      good = false;
+    } else {
+      answerId = rawAnswerId;
+    }
+  }
   if (!good) return undefined;
-  return { id: id as string, requirementId: requirementId as string, text: text as string, critical: critical as boolean };
+  return {
+    id: id as string,
+    requirementId: requirementId as string,
+    text: text as string,
+    critical: critical as boolean,
+    ...(requireRelation ? { relation: relation as SurfaceRelation, answerId: answerId as string | null } : {}),
+  };
 }
 
 function checkUnwritable(value: unknown, field: string, problems: Problem[]): PlanUnwritable | undefined {
@@ -464,7 +543,12 @@ export function surfaceIdReuseOf(output: unknown, shown: SurfaceShownIssueIds): 
  * P3 の洗い出しの応答の形を確かめる。`shown` を渡すと、`ambiguities[].id` が**データで見せた事項 ID**と
  * 完全一致する応答を**応答全体で断る**（`issue-id-reused`。値は文に埋めない。Issue #464）。
  */
-export function checkSurfaceOutput(output: unknown, shown?: SurfaceShownIssueIds): ShapeCheck<PlanSurface> {
+export function checkSurfaceOutput(
+  output: unknown,
+  shown?: SurfaceShownIssueIds,
+  options: { readonly requireRelation?: boolean } = {},
+): ShapeCheck<PlanSurface> {
+  const requireRelation = options.requireRelation ?? false;
   if (!isRecord(output)) {
     return { ok: false, problems: [{ field: "", code: "shape", message: "応答は写像（object）であること" }] };
   }
@@ -475,7 +559,7 @@ export function checkSurfaceOutput(output: unknown, shown?: SurfaceShownIssueIds
     problems.push({ field: "ambiguities", message: "未解決の事項の並び（array）であること" });
   } else {
     rawAmbiguities.forEach((item, index) => {
-      const checked = checkAmbiguity(item, `ambiguities[${index}]`, problems);
+      const checked = checkAmbiguity(item, `ambiguities[${index}]`, problems, requireRelation);
       if (checked !== undefined) ambiguities.push(checked);
     });
   }
@@ -693,12 +777,17 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
   }
   // 差分の要件 ID を渡されたときだけ、差分専用の schema（`enum` つき）と名前を使う（Issue #483）。
   // 渡されないとき（初回の洗い出し）の要求は、変更前と byte で同じである。
+  // **前の答えとの関係の `answerId` の選択肢は、その往復の「関係する問いと答え」の答えの ID から組む**
+  // （データは足さない。Issue #938）。渡されていないとき（初回・文脈なし）は `[null]` になる。
+  const answerIds = input.context?.questionsAndAnswers.map((entry) => entry.answerId) ?? [];
+  const targetIds = input.targetRequirementIds;
+  const requireRelation = targetIds !== undefined;
   const request = buildStructuredRequest({
     rules: SURFACE_RULES,
     documents: input.documents,
     data,
-    schemaName: input.targetRequirementIds === undefined ? SURFACE_SCHEMA_NAME : SURFACE_DIFF_SCHEMA_NAME,
-    schema: input.targetRequirementIds === undefined ? SURFACE_SCHEMA : buildSurfaceDiffSchema(input.targetRequirementIds),
+    schemaName: targetIds === undefined ? SURFACE_SCHEMA_NAME : SURFACE_DIFF_SCHEMA_NAME,
+    schema: targetIds === undefined ? SURFACE_SCHEMA : buildSurfaceDiffSchema(targetIds, answerIds),
     maxOutputTokens: input.gateway.maxOutputTokens("surface"),
   });
   // 使い回しの検査の試行（1 始まり）。形のやり直しと同じく 2 回まで（Issue #464）
@@ -725,7 +814,7 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
     check: (output: unknown): ShapeCheck<PlanSurface> => {
       attempt += 1;
       lastRejectionWasTarget = false;
-      const result = checkSurfaceOutput(output, input.shownIssueIds);
+      const result = checkSurfaceOutput(output, input.shownIssueIds, { requireRelation });
       if (!result.ok) {
         if (input.shownIssueIds !== undefined) {
           const reuse = surfaceIdReuseOf(output, input.shownIssueIds);

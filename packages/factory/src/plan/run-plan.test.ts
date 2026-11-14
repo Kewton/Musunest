@@ -26,6 +26,7 @@ import type {
 } from "../llm.js";
 import type { RecordedCall } from "../llm-fake.js";
 import {
+  checkSurfaceAnswerLineage,
   diffChangeKey,
   isAcceptedUnwritableDuplicate,
   planDiagnosisCode,
@@ -33,7 +34,9 @@ import {
   runPlan,
   selectDiffRequirements,
   sessionCannotConfirmReason,
+  surfaceAnswerLineage,
   type AcceptedClaimSnapshot,
+  type PlanAnswerClosure,
   type PlanAnswerRequest,
   type PlanResponder,
   type PlanResult,
@@ -79,7 +82,33 @@ import {
   REVERSE_CHECK_SCHEMA_NAME,
   runReverseCheckLoop,
 } from "../stages/reverse-check.js";
-import { structured } from "../__tests__/run.js";
+import { USAGE, structured as rawStructured } from "../__tests__/run.js";
+
+/**
+ * 差分の洗い出しの応答に、必須の 2 欄（`relation`・`answerId`。Issue #938）が無ければ足す。**録画の形を
+ * 変えずに、今までの偽の応答をそのまま流すため**の試験側の補助である（各試験が明示した欄は変えない）。
+ * 関係は `unclear`・答えは `null` にする——系統の照合は「対象外」になり、行き先は変わらない。
+ * **変更前の応答（2 欄の無いもの）を流す試験は、この補助を通さず `rawStructured` を使う。**
+ */
+function withSurfaceRelations(output: unknown): unknown {
+  if (typeof output !== "object" || output === null) return output;
+  const record = output as Record<string, unknown>;
+  const ambiguities = record["ambiguities"];
+  if (!Array.isArray(ambiguities)) return output;
+  return {
+    ...record,
+    ambiguities: ambiguities.map((row) => {
+      if (typeof row !== "object" || row === null) return row;
+      const item = row as Record<string, unknown>;
+      if ("relation" in item && "answerId" in item) return item;
+      return { relation: "unclear", answerId: null, ...item };
+    }),
+  };
+}
+
+function structured(output: unknown, usage: LlmUsage | undefined = USAGE): RecordedCall {
+  return rawStructured(withSurfaceRelations(output), usage);
+}
 
 const RATES = { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 };
 
@@ -276,6 +305,16 @@ function inheritRecord(
       count: overrides.openBySource?.[source] ?? 0,
     })),
   };
+}
+
+/** 差分の洗い出しの関係ごとの件数（Issue #938。既定はすべて 0） */
+function relationCounts(
+  overrides: Partial<Record<"new" | "same-as-answer" | "contradicts-answer" | "unclear", number>> = {},
+) {
+  return (["new", "same-as-answer", "contradicts-answer", "unclear"] as const).map((relation) => ({
+    relation,
+    count: overrides[relation] ?? 0,
+  }));
 }
 
 /** 使い回しで断った件の「提示元ごとの数」（Issue #464・#887。既定はすべて 0） */
@@ -6692,6 +6731,8 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
         inheritedResolved: 0,
         endOpen: { critical: 2, nonCritical: 0 },
         end: "judged",
+        relations: relationCounts(),
+        relationCheckFailed: 0,
       },
       {
         revision: 2,
@@ -6706,6 +6747,8 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
         inheritedResolved: 0,
         endOpen: { critical: 0, nonCritical: 0 },
         end: "judged",
+        relations: relationCounts(),
+        relationCheckFailed: 0,
       },
     ]);
     // 件数の収支が合う：終了時の開いている件数＝開始時＋開いた−閉じた
@@ -6770,6 +6813,8 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
         inheritedResolved: 0,
         endOpen: { critical: 2, nonCritical: 0 },
         end: "judged",
+        relations: relationCounts(),
+        relationCheckFailed: 0,
       },
       {
         revision: 2,
@@ -6780,6 +6825,8 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
         inheritedResolved: 1,
         endOpen: { critical: 0, nonCritical: 0 },
         end: "judged",
+        relations: relationCounts(),
+        relationCheckFailed: 0,
       },
     ]);
     expectBalanced(result);
@@ -6826,6 +6873,8 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
         inheritedResolved: 0,
         endOpen: { critical: 1, nonCritical: 0 },
         end: "judged",
+        relations: relationCounts(),
+        relationCheckFailed: 0,
       },
       // 1 往復目に答えが無く、2 往復目の版も何も閉じない
       {
@@ -6836,6 +6885,8 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
         inheritedResolved: 0,
         endOpen: { critical: 1, nonCritical: 0 },
         end: "judged",
+        relations: relationCounts(),
+        relationCheckFailed: 0,
       },
       {
         revision: 3,
@@ -6845,6 +6896,8 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
         inheritedResolved: 0,
         endOpen: { critical: 0, nonCritical: 0 },
         end: "judged",
+        relations: relationCounts(),
+        relationCheckFailed: 0,
       },
     ]);
     expectBalanced(result);
@@ -6882,6 +6935,8 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
         inheritedResolved: 0,
         endOpen: { critical: 1, nonCritical: 0 },
         end: "judged",
+        relations: relationCounts(),
+        relationCheckFailed: 0,
       },
       {
         revision: 2,
@@ -6892,6 +6947,8 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
         endOpen: { critical: 0, nonCritical: 0 },
         // 停止した行も、観測済みの分を残し、終わり方を「途中停止」で示す
         end: "stopped",
+        relations: relationCounts(),
+        relationCheckFailed: 0,
       },
     ]);
     expectBalanced(result);
@@ -7643,5 +7700,353 @@ describe("Plan の経路の P2 の要求に、対応の意味の基準が入る�
     expect(isMeaningReverseCheck(request)).toBe(true);
     expect(meaningRulesOf(request)).toEqual([...REVERSE_CHECK_RULES]);
     expect(meaningRulesOf(request).some((rule) => MEANING_TEXTS.includes(rule))).toBe(false);
+  });
+});
+
+// ── Issue #938：差分の洗い出しに前の答えとの関係と答えの ID を足し、答えの系統を照らす ──────────
+
+/** 答えの閉じた記録（主の行だけを、親の要件 ID つきで組む。Issue #938） */
+function closure(answerId: string, requirementId: string | null, how: "main" | "also" = "main"): PlanAnswerClosure {
+  return {
+    answerId,
+    questionId: `Q:${answerId}`,
+    revision: 1,
+    answerRequirementId: `R:${answerId}`,
+    closed: [{ issueId: `OI:${answerId}`, how, requirementId, facetId: null }],
+  };
+}
+
+/** 結果に残った事項の ID と重大の値（開いた順。Issue #938 の前後比較に使う） */
+function remainingOf(result: PlanResult) {
+  return result.remainingOpenIssues.map((issue) => [issue.issueId, issue.critical] as const);
+}
+
+/** 差分の洗い出しの要求を除いた、LLM の要求のバイト列（Issue #938 の前後比較に使う） */
+function requestsOf(recording: ReturnType<typeof createRecordingClient>): readonly string[] {
+  return recording.structured
+    .filter((request) => request.schemaName !== SURFACE_DIFF_SCHEMA_NAME)
+    .map((request) => JSON.stringify(request));
+}
+
+describe("答えの系統の照合（04 §3 P3・Issue #938）", () => {
+
+  /** X=A:3 → 親 A:2 → 祖父 A:1 → R:1（そこで止まる） */
+  const CHAIN: readonly PlanAnswerClosure[] = [
+    closure("A:3", "R:A:2"),
+    closure("A:2", "R:A:1"),
+    closure("A:1", "R:1"),
+  ];
+
+  it("answerId が X 自身・親・祖父の答えなら「通った」", () => {
+    expect(surfaceAnswerLineage("R:A:3", CHAIN)).toEqual(["A:3", "A:2", "A:1", "1"]);
+    for (const answerId of ["A:3", "A:2", "A:1"]) {
+      expect(
+        checkSurfaceAnswerLineage({
+          requirementId: "R:A:3",
+          relation: "same-as-answer",
+          answerId,
+          answerClosures: CHAIN,
+        }),
+        answerId,
+      ).toBe("passed");
+    }
+  });
+
+  it("系統の外の答え・答えの ID が null・要件が R:X でないときは「落ちた」", () => {
+    expect(
+      checkSurfaceAnswerLineage({
+        requirementId: "R:A:3",
+        relation: "contradicts-answer",
+        answerId: "A:9",
+        answerClosures: CHAIN,
+      }),
+    ).toBe("failed");
+    expect(
+      checkSurfaceAnswerLineage({
+        requirementId: "R:A:3",
+        relation: "same-as-answer",
+        answerId: null,
+        answerClosures: CHAIN,
+      }),
+    ).toBe("failed");
+    expect(
+      checkSurfaceAnswerLineage({
+        requirementId: "R-1",
+        relation: "same-as-answer",
+        answerId: "A:1",
+        answerClosures: CHAIN,
+      }),
+    ).toBe("failed");
+  });
+
+  it("主の行が複数（別の対象を一緒に閉じた答え）なら、そこで辿るのをやめて「落ちた」", () => {
+    const multiple: readonly PlanAnswerClosure[] = [
+      {
+        ...closure("A:3", "R:A:2"),
+        closed: [
+          { issueId: "OI:1", how: "main", requirementId: "R:A:2", facetId: null },
+          { issueId: "OI:2", how: "main", requirementId: "R:A:1", facetId: null },
+        ],
+      },
+      closure("A:2", "R:A:1"),
+    ];
+    expect(surfaceAnswerLineage("R:A:3", multiple)).toEqual(["A:3"]);
+    expect(
+      checkSurfaceAnswerLineage({
+        requirementId: "R:A:3",
+        relation: "same-as-answer",
+        answerId: "A:2",
+        answerClosures: multiple,
+      }),
+    ).toBe("failed");
+    expect(
+      checkSurfaceAnswerLineage({
+        requirementId: "R:A:3",
+        relation: "same-as-answer",
+        answerId: "A:3",
+        answerClosures: multiple,
+      }),
+    ).toBe("passed");
+  });
+
+  it("対象の要件 ID が null の親を経る答えは「落ちた」", () => {
+    const nullParent: readonly PlanAnswerClosure[] = [closure("A:3", null), closure("A:2", "R:A:1")];
+    expect(surfaceAnswerLineage("R:A:3", nullParent)).toEqual(["A:3"]);
+    expect(
+      checkSurfaceAnswerLineage({
+        requirementId: "R:A:3",
+        relation: "contradicts-answer",
+        answerId: "A:2",
+        answerClosures: nullParent,
+      }),
+    ).toBe("failed");
+  });
+
+  it("new・unclear は「対象外」", () => {
+    for (const relation of ["new", "unclear"] as const) {
+      expect(
+        checkSurfaceAnswerLineage({
+          requirementId: "R:A:3",
+          relation,
+          answerId: null,
+          answerClosures: CHAIN,
+        }),
+        relation,
+      ).toBe("not-applicable");
+    }
+  });
+});
+
+/** 差分の洗い出しの行（対象は R:A:Q1-1。critical は既定で false。Issue #938） */
+function relationRow(
+  id: string,
+  relation: "new" | "same-as-answer" | "contradicts-answer" | "unclear",
+  answerId: string | null,
+) {
+  return { id, requirementId: "R:A:Q1-1", text: `${id} の事項の文`, critical: false, relation, answerId };
+}
+
+describe("差分の洗い出しの関係を、件数と trace に残す（04 §3 P3・Issue #938）", () => {
+
+  /** 4 値の関係を混ぜた差分の応答（A:Q2-1 はまだ存在しない系統の外の答え） */
+  const MIXED_DIFF = {
+    ambiguities: [
+      relationRow("OI-rel-new", "new", null),
+      relationRow("OI-rel-same", "same-as-answer", "A:Q1-1"),
+      relationRow("OI-rel-out", "contradicts-answer", "A:Q2-1"),
+      relationRow("OI-rel-unclear", "unclear", null),
+    ],
+    unwritable: [],
+  };
+
+  /** 同じ応答の行から、関係と答えの ID だけを中立（unclear・null）にしたもの（振る舞いの比較の基準） */
+  const NEUTRAL_DIFF = {
+    ambiguities: MIXED_DIFF.ambiguities.map((row) => ({ ...row, relation: "unclear" as const, answerId: null })),
+    unwritable: [],
+  };
+
+  /** 2 往復目の P4 の応答（OI-2 と、差分で開いた 4 件をすべて覆う） */
+  const RELATION_ROUND_2_QUESTIONS = {
+    questions: ["OI-2", "OI-rel-new", "OI-rel-same", "OI-rel-out", "OI-rel-unclear"].map((openIssueId) => ({
+      ...questionFor(openIssueId),
+      id: `Q-${openIssueId}`,
+    })),
+  };
+
+  /** 答える役（各往復の最初の問いだけに答える） */
+  const responder: PlanResponder = {
+    async answer(request) {
+      return { kind: "answers", answers: [answerTo(request.questions[0])] };
+    },
+    async confirm() {
+      return "build";
+    },
+  };
+
+  /**
+   * 2 往復の差分点検を通す（往復の上限を 2 にして、2 回目の差分の後に確定できない側で止める）。
+   * 1 往復目は OI-1 に答え、2 往復目は OI-2 に答える——どちらの往復でも、その答えが R:A:Qn-1 を増やす。
+   */
+  async function runRelationFlow(diffOutput: unknown) {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_MIX),
+      structured(ROUND_1_QUESTION),
+      structured(diffOutput),
+      structured(RELATION_ROUND_2_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judgeRequests: JudgeRequest[] = [];
+    const inner = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        judgeRequests.push(request);
+        return inner.judge(request);
+      },
+    };
+    const result = await runPlan(
+      makePlanInput(recording.client, judge, responder, {
+        limits: { ...AGENT_LIMITS, planRoundTrips: 2 },
+      }),
+    );
+    return { result, recording, judgeRequests };
+  }
+
+  it("2 往復の差分の往復に、関係ごとの件数と照合で落ちた件数が出て、受理した行ごとの trace が残る（文は trace だけ）", async () => {
+    const { result } = await runRelationFlow(MIXED_DIFF);
+
+    // 往復の版 2（1 往復目の P5 のあとの差分点検）に、4 値の件数と照合で落ちた 1 件が載る
+    const row = result.issueFlow.find((entry) => entry.revision === 2);
+    expect(row).toBeDefined();
+    expect(row?.relations).toEqual([
+      { relation: "new", count: 1 },
+      { relation: "same-as-answer", count: 1 },
+      { relation: "contradicts-answer", count: 1 },
+      { relation: "unclear", count: 1 },
+    ]);
+    expect(row?.relationCheckFailed).toBe(1);
+    // 2 往復目の差分（版 3）は、関係の行が無いので 0 件
+    const last = result.issueFlow.at(-1);
+    expect(last?.revision).toBe(3);
+    expect(last?.relations).toEqual(relationCounts());
+    expect(last?.relationCheckFailed).toBe(0);
+
+    // 受理した行ごとの欄（往復の版・事項の ID・対象の要件 ID・関係・答えの ID・照合の結果・文・重大か）
+    expect(result.surfaceRelationTrace).toEqual([
+      {
+        revision: 2,
+        issueId: "OI-rel-new",
+        requirementId: "R:A:Q1-1",
+        relation: "new",
+        answerId: null,
+        check: "not-applicable",
+        text: "OI-rel-new の事項の文",
+        critical: false,
+      },
+      {
+        revision: 2,
+        issueId: "OI-rel-same",
+        requirementId: "R:A:Q1-1",
+        relation: "same-as-answer",
+        answerId: "A:Q1-1",
+        check: "passed",
+        text: "OI-rel-same の事項の文",
+        critical: false,
+      },
+      {
+        revision: 2,
+        issueId: "OI-rel-out",
+        requirementId: "R:A:Q1-1",
+        relation: "contradicts-answer",
+        answerId: "A:Q2-1",
+        check: "failed",
+        text: "OI-rel-out の事項の文",
+        critical: false,
+      },
+      {
+        revision: 2,
+        issueId: "OI-rel-unclear",
+        requirementId: "R:A:Q1-1",
+        relation: "unclear",
+        answerId: null,
+        check: "not-applicable",
+        text: "OI-rel-unclear の事項の文",
+        critical: false,
+      },
+    ]);
+    // 行き先は変えない——関係によらず、4 件とも開いたまま残る
+    const flowOpen = last?.endOpen;
+    expect(flowOpen).toEqual({ critical: 0, nonCritical: 4 });
+  });
+
+  it("関係と答えの ID を足しても、段・回数・開いた事項・P4/P5/P6 の要求は変わらない", async () => {
+    const neutral = await runRelationFlow(NEUTRAL_DIFF);
+    const mixed = await runRelationFlow(MIXED_DIFF);
+    // 結果と、段と回数の列
+    expect(mixed.result.kind).toBe(neutral.result.kind);
+    expect(mixed.result.stages.map((stage) => [stage.stage, stage.status, stage.calls])).toEqual(
+      neutral.result.stages.map((stage) => [stage.stage, stage.status, stage.calls]),
+    );
+    // 開いた事項の ID と重大の値（差分の行は同じ ID・同じ critical で開く）
+    expect(remainingOf(mixed.result)).toEqual(remainingOf(neutral.result));
+    expect(remainingOf(mixed.result)).toEqual([
+      ["OI-rel-new", false],
+      ["OI-rel-same", false],
+      ["OI-rel-out", false],
+      ["OI-rel-unclear", false],
+    ]);
+    // P4（質問の組み立て）などの要求は、差分の洗い出しの要求を除いてバイト列で同じ
+    expect(requestsOf(mixed.recording)).toEqual(requestsOf(neutral.recording));
+    // P5・P6 の判定の要求も同じ
+    expect(mixed.judgeRequests.map((request) => JSON.stringify(request))).toEqual(
+      neutral.judgeRequests.map((request) => JSON.stringify(request)),
+    );
+  });
+
+  it("見せた ID と同じ ID の行は、関係が same-as-answer でも今までどおり断られる", async () => {
+    const reuse = {
+      ambiguities: [
+        {
+          id: "OI-extra",
+          requirementId: "R:A:Q1-1",
+          text: "使い回しの事項",
+          critical: true,
+          relation: "same-as-answer",
+          answerId: "A:Q1-1",
+        },
+      ],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(reuse),
+      structured(reuse),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.kind).toBe("malformed");
+    expect(result.failure?.problems?.some((problem) => problem.code === "issue-id-reused")).toBe(true);
+    // 断った記録も今までどおり（版 2・試行 1 と 2）
+    expect(result.surfaceIdReuse).toEqual([
+      { check: 2, attempt: 1, responses: 1, distinctIds: 1, bySource: idReuseBySource({ existing: 1 }) },
+      { check: 2, attempt: 2, responses: 1, distinctIds: 1, bySource: idReuseBySource({ existing: 1 }) },
+    ]);
+    // 関係の trace には、断った行を載せない（受理していない）
+    expect(result.surfaceRelationTrace).toEqual([]);
   });
 });

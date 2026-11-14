@@ -88,7 +88,7 @@ import {
   type PlanRemaining,
   type PlanTurn,
 } from "./session.js";
-import { SURFACE_SHOWN_ID_SOURCES, runSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceIdReuseRejection, type SurfaceOutOfScopeRef, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt, type SurfaceTargetAttemptResult } from "./surface.js";
+import { SURFACE_RELATIONS, SURFACE_SHOWN_ID_SOURCES, runSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceIdReuseRejection, type SurfaceOutOfScopeRef, type SurfaceRelation, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt, type SurfaceTargetAttemptResult } from "./surface.js";
 import {
   PLAN_OPEN_ISSUE_ORIGINS,
   PLAN_OPEN_ISSUE_SOURCES,
@@ -721,6 +721,43 @@ export interface PlanIssueFlowOpenCounts {
 }
 
 /**
+ * 前の答えとの関係の、系統の照合の結果（有限の 3 値。Issue #938）。`not-applicable` は `new`・`unclear`
+ * の行（系統を照らさない）。`passed` は `answerId` が行の要件の答えの系統（その答え自身と祖先）に入る、
+ * `failed` は入らない（落ちた行もそのまま受ける。やり直しに回さない）である。
+ */
+export const SURFACE_RELATION_CHECKS = ["passed", "failed", "not-applicable"] as const;
+export type SurfaceRelationCheck = (typeof SURFACE_RELATION_CHECKS)[number];
+
+/** 関係ごとの、差分の洗い出しが受理した行の件数（Issue #938） */
+export interface PlanIssueFlowRelationCount {
+  readonly relation: SurfaceRelation;
+  readonly count: number;
+}
+
+/**
+ * 差分の洗い出しが受理した行 1 つぶんの、前の答えとの関係の記録（Issue #938）。**値（事項の文）を含む**
+ * ——呼ぶ側が別ファイル（`plan-surface-relation-trace.json`）にだけ書き、`plan-record.json` には写さない。
+ */
+export interface PlanSurfaceRelationTrace {
+  /** その行を受理した往復の版 */
+  readonly revision: number;
+  /** 事項の ID */
+  readonly issueId: string;
+  /** 対象の要件の ID */
+  readonly requirementId: string;
+  /** 前の答えとの関係（4 値） */
+  readonly relation: SurfaceRelation;
+  /** 関係の相手にした答えの ID（無ければ `null`） */
+  readonly answerId: string | null;
+  /** 系統の照合の結果（通った／落ちた／対象外） */
+  readonly check: SurfaceRelationCheck;
+  /** 事項の文（申告の当たり外れを人が読むため。plan-record には入れない） */
+  readonly text: string;
+  /** 重大か（効いたかの確認に使う） */
+  readonly critical: boolean;
+}
+
+/**
  * 往復 1 つぶんの事項の流れ（Issue #488）。版（初回 1、差分で増える）ごとに、開始時の開いている件数・
  * 新しく開いた件数（由来・初回／差分別）・実際に閉じた件数（閉じ方の別）・追加時から resolved の引き継ぎ・
  * 終了時の開いている件数（重大・重大でない別）・終わり方（判定済み／途中停止）を持つ。**事項 ID・要件 ID・
@@ -735,6 +772,13 @@ export interface PlanIssueFlowRecord {
   readonly inheritedResolved: number;
   readonly endOpen: PlanIssueFlowOpenCounts;
   readonly end: PlanIssueFlowEnd;
+  /**
+   * 差分の洗い出しが受理した行の、前の答えとの関係ごとの件数（4 値。Issue #938）。差分の点検を回した
+   * 往復だけ数える（回していない往復はすべて 0）。**文は入れない**。
+   */
+  readonly relations: readonly PlanIssueFlowRelationCount[];
+  /** `same-as-answer`・`contradicts-answer` のうち、系統の照合で落ちた件数（Issue #938） */
+  readonly relationCheckFailed: number;
 }
 
 /**
@@ -839,6 +883,13 @@ export interface PlanResultBase {
    */
   readonly surfaceTargetAttempts: readonly PlanSurfaceTargetAttempt[];
   /**
+   * 差分の洗い出しが受理した行 1 つずつの、前の答えとの関係の記録（Issue #938）。往復の版・事項の ID・
+   * 対象の要件 ID・関係・答えの ID・系統の照合の結果・事項の文・重大かを持つ。**値（事項の文）を含むので、
+   * `plan-record.json` には写さない**——呼ぶ側（`cli.ts`）が別のファイル（`plan-surface-relation-trace.json`）に
+   * だけ書く。行き先（開く・閉じる）は変えない。
+   */
+  readonly surfaceRelationTrace: readonly PlanSurfaceRelationTrace[];
+  /**
    * 往復ごとの事項の流れ（版ごとの、開いた・閉じた・残りの件数。Issue #488）。確定・確定できない・止まった
    * の 3 つの結果に共通で、途中で止まった行も観測済みの分を残す。**値は入れず、件数と有限の分類だけ**。
    */
@@ -937,6 +988,64 @@ export interface PlanAnswerClosure {
   readonly revision: number;
   readonly answerRequirementId: string | null;
   readonly closed: readonly PlanAnswerClosureIssue[];
+}
+
+/**
+ * 答え `answerId` の**親**の答えの ID を、`answerClosures` から引く（Issue #938）。親は、答え
+ * `answerId` の行の閉じた事項のうち、閉じ方が主（`main`）の行の対象の要件 ID が `R:Y` のときの `Y` である。
+ * **1 つに決まるときだけ**返す——主の行が無い・複数・対象の要件 ID が `null`・`R:` で始まらないなら
+ * `undefined`（そこで辿るのをやめる）。**値の推測はしない**（要件 ID の字面と、コードが持つ閉じた記録だけ）。
+ */
+function parentAnswerOf(
+  answerId: string,
+  answerClosures: readonly PlanAnswerClosure[],
+): string | undefined {
+  const mainRows = answerClosures
+    .filter((closure) => closure.answerId === answerId)
+    .flatMap((closure) => closure.closed.filter((issue) => issue.how === "main"));
+  if (mainRows.length !== 1) return undefined;
+  const requirementId = mainRows[0]?.requirementId ?? null;
+  if (requirementId === null || !requirementId.startsWith("R:")) return undefined;
+  return requirementId.slice(2);
+}
+
+/**
+ * 要件 `R:X` の、答えの**系統**（`X` 自身と、`answerClosures` から一意にたどれる祖先）を返す（Issue #938）。
+ * 行の要件が `R:X` でなければ空である。循環しても止まる（同じ答えを 2 度たどらない）。
+ */
+export function surfaceAnswerLineage(
+  requirementId: string,
+  answerClosures: readonly PlanAnswerClosure[],
+): readonly string[] {
+  if (!requirementId.startsWith("R:")) return [];
+  const lineage: string[] = [];
+  const seen = new Set<string>();
+  let current: string | undefined = requirementId.slice(2);
+  while (current !== undefined && !seen.has(current)) {
+    lineage.push(current);
+    seen.add(current);
+    current = parentAnswerOf(current, answerClosures);
+  }
+  return lineage;
+}
+
+/**
+ * 差分の洗い出しが申告した関係を、行の要件の答えの系統と照らす（Issue #938。**形の検査の後の、コードの
+ * 照合**——新しい呼び出しも、やり直しも作らない）。`same-as-answer`・`contradicts-answer` だけが対象で、
+ * `answerId` が系統（`R:X` の `X` 自身と祖先）に入れば `passed`、入らなければ `failed`。`new`・`unclear`
+ * は `not-applicable`。**落ちた行もそのまま受ける**（行き先は変えない）。
+ */
+export function checkSurfaceAnswerLineage(input: {
+  readonly requirementId: string;
+  readonly relation: SurfaceRelation;
+  readonly answerId: string | null;
+  readonly answerClosures: readonly PlanAnswerClosure[];
+}): SurfaceRelationCheck {
+  if (input.relation !== "same-as-answer" && input.relation !== "contradicts-answer") return "not-applicable";
+  if (input.answerId === null) return "failed";
+  return surfaceAnswerLineage(input.requirementId, input.answerClosures).includes(input.answerId)
+    ? "passed"
+    : "failed";
 }
 
 /** 問い 1 つぶんの照合の文脈（Issue #444）。`main` は主の事項、`alsoCloses` は一緒に閉じる事項 */
@@ -1234,6 +1343,10 @@ interface MutableIssueFlowRow {
   inheritedResolved: number;
   endOpen: PlanIssueFlowOpenCounts | null;
   end: PlanIssueFlowEnd | null;
+  /** 差分の洗い出しが受理した行の、関係ごとの件数（Issue #938） */
+  relations: Map<SurfaceRelation, number>;
+  /** 系統の照合で落ちた件数（Issue #938） */
+  relationCheckFailed: number;
 }
 
 /** 受理した申告 1 つぶんの控え（重複の照合に使う。Issue #434） */
@@ -1629,6 +1742,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const surfaceIdReuse: PlanSurfaceIdReuseEntry[] = [];
   /** 照合まで届いた試行 1 つずつの記録（値は入れない。Issue #484） */
   const surfaceTargetAttempts: PlanSurfaceTargetAttempt[] = [];
+  /** 差分の洗い出しが受理した行の、前の答えとの関係の記録（値（事項の文）を含む。Issue #938） */
+  const surfaceRelationTrace: PlanSurfaceRelationTrace[] = [];
 
   // ── 往復ごとの事項の流れの記録（件数と有限の分類だけ。Issue #488）────────────────
   const issueFlowRows: MutableIssueFlowRow[] = [];
@@ -1662,6 +1777,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       inheritedResolved: 0,
       endOpen: null,
       end: null,
+      relations: new Map(),
+      relationCheckFailed: 0,
     };
     issueFlowRows.push(currentIssueFlow);
   };
@@ -1716,6 +1833,12 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       inheritedResolved: row.inheritedResolved,
       endOpen: row.endOpen ?? { critical: 0, nonCritical: 0 },
       end: row.end ?? "stopped",
+      // 関係ごとの件数は有限の 4 値の順で並べる（0 件も載せる。Issue #938）
+      relations: SURFACE_RELATIONS.map((relation) => ({
+        relation,
+        count: row.relations.get(relation) ?? 0,
+      })),
+      relationCheckFailed: row.relationCheckFailed,
     }));
   /**
    * 対象の要件の種類を分類する（Issue #488）。要件の対応（`requirements`・`sourceInputs`・`answerInputs`・
@@ -2047,6 +2170,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       openIssueConflicts: buildOpenIssueConflicts(),
       surfaceIdReuse: surfaceIdReuse.slice(),
       surfaceTargetAttempts: surfaceTargetAttempts.slice(),
+      surfaceRelationTrace: surfaceRelationTrace.slice(),
       issueFlow: buildIssueFlow(),
       remainingOpenIssues: buildRemainingOpenIssues(),
       answerClosures: answerClosures.slice(),
@@ -2919,6 +3043,35 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           onIdReuse: (rejection) => recordIdReuse(diffCheckNumber, rejection),
         }),
       );
+      // ── 前の答えとの関係を、コードが答えの系統と照らして記録する（Issue #938）────────────
+      // 形の検査の後に行う。**新しい呼び出しも、やり直しも作らない**——落ちた行もそのまま受け、行き先は
+      // 変えない（すべて今までどおり開く）。件数は `issue_flow` の、この往復の行に数える。
+      const relationTrace: PlanSurfaceRelationTrace[] = diffSurface.ambiguities.map((ambiguity) => {
+        const relation = ambiguity.relation ?? "unclear";
+        const answerId = ambiguity.answerId ?? null;
+        return {
+          revision: currentIssueFlow?.revision ?? revision,
+          issueId: ambiguity.id,
+          requirementId: ambiguity.requirementId,
+          relation,
+          answerId,
+          check: checkSurfaceAnswerLineage({
+            requirementId: ambiguity.requirementId,
+            relation,
+            answerId,
+            answerClosures,
+          }),
+          text: ambiguity.text,
+          critical: ambiguity.critical,
+        };
+      });
+      surfaceRelationTrace.push(...relationTrace);
+      if (currentIssueFlow !== null) {
+        for (const row of relationTrace) {
+          currentIssueFlow.relations.set(row.relation, (currentIssueFlow.relations.get(row.relation) ?? 0) + 1);
+          if (row.check === "failed") currentIssueFlow.relationCheckFailed += 1;
+        }
+      }
       reviewRecord.openIssues = diffSurface.ambiguities.length + effectiveUnspecified.length;
       reviewRecord.openBySource.set("catalog", effectiveUnspecified.length);
       reviewRecord.openBySource.set("surface", diffSurface.ambiguities.length);

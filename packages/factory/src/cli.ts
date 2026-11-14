@@ -63,6 +63,7 @@ import {
   buildPlanOnlyResult,
   buildReverseCheckTraceDiagnostic,
   buildSurfaceCheckDiagnostic,
+  buildSurfaceRelationTraceDiagnostic,
   createAnswersFilePlanResponder,
   createInteractivePlanResponder,
   createPlanTranscript,
@@ -72,6 +73,7 @@ import {
   PLAN_ONLY_RESULT_FILE,
   PLAN_REVERSE_CHECK_TRACE_FILE,
   PLAN_SURFACE_CHECK_FILE,
+  PLAN_SURFACE_RELATION_TRACE_FILE,
   planBuildCostLine,
   planFileErrorLine,
   planFileRejectLine,
@@ -1094,6 +1096,11 @@ async function writePlanRecords(
   if (reverseCheckTrace !== undefined) {
     await deps.writeFile(joinPath(outDir, PLAN_REVERSE_CHECK_TRACE_FILE), JSON.stringify(reverseCheckTrace));
   }
+  // 差分の洗い出しが受理した行の、前の答えとの関係の記録を、**別のファイル**に置く（Issue #938）。
+  // 事項の文を含むので `plan-record.json` には写さない。差分の洗い出しが 1 回も無い走りでも、
+  // 空の `rows` で書く（組み立て関数は常に値を返す。書かない判定の材料を結果が持たない）。
+  const surfaceRelationTrace = buildSurfaceRelationTraceDiagnostic({ result: input.result, planId: input.planId });
+  await deps.writeFile(joinPath(outDir, PLAN_SURFACE_RELATION_TRACE_FILE), JSON.stringify(surfaceRelationTrace));
 }
 
 /** Plan を 1 回流し、往復の記録と点検の診断を書く（`--plan`・`--plan-only` が共有する。Issue #495） */

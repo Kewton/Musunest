@@ -40,10 +40,14 @@ import {
   PLAN_REVERSE_CHECK_TRACE_FILE,
   PLAN_REVERSE_CHECK_TRACE_SCHEMA,
   PLAN_SURFACE_CHECK_FILE,
+  PLAN_SURFACE_RELATION_TRACE_FILE,
+  PLAN_SURFACE_RELATION_TRACE_SCHEMA,
   PLAN_FILE_ERROR_SCHEMA,
   PLAN_FILE_REJECT_SCHEMA,
   RECOMMENDED_INPUT,
   buildBuildCliRecord,
+  buildPlanCliRecord,
+  buildSurfaceRelationTraceDiagnostic,
   createAnswersFilePlanResponder,
   createInteractivePlanResponder,
   createPlanTranscript,
@@ -71,7 +75,7 @@ import {
 import { confirmQuestionName } from "./plan/confirm.js";
 import { freeTextQuestionName } from "./plan/answers.js";
 import type { PlanQuestion } from "./plan/questions.js";
-import type { PlanAnswerRequest } from "./plan/run-plan.js";
+import type { PlanAnswerRequest, PlanResult } from "./plan/run-plan.js";
 import type { PlanRemaining } from "./plan/session.js";
 import {
   SURFACE_RECHECK_NO_EVIDENCE,
@@ -93,9 +97,33 @@ import {
   CONFIRMED_PLAN_ACCEPTED,
   recordedRun,
   recordedRunFromPlan,
-  structured,
+  structured as rawStructured,
   USAGE as RECORDED_USAGE,
 } from "./__tests__/run.js";
+
+/**
+ * 差分の洗い出しの応答に、必須の 2 欄（`relation`・`answerId`。Issue #938）が無ければ足す（run-plan の
+ * 試験と同じ補助）。各試験が明示した欄は変えない。
+ */
+function withSurfaceRelations(output: unknown): unknown {
+  if (typeof output !== "object" || output === null) return output;
+  const record = output as Record<string, unknown>;
+  const ambiguities = record["ambiguities"];
+  if (!Array.isArray(ambiguities)) return output;
+  return {
+    ...record,
+    ambiguities: ambiguities.map((row) => {
+      if (typeof row !== "object" || row === null) return row;
+      const item = row as Record<string, unknown>;
+      if ("relation" in item && "answerId" in item) return item;
+      return { relation: "unclear", answerId: null, ...item };
+    }),
+  };
+}
+
+function structured(output: unknown, usage: LlmUsage | undefined = RECORDED_USAGE): RecordedCall {
+  return rawStructured(withSurfaceRelations(output), usage);
+}
 
 interface NodeFs {
   mkdtemp(prefix: string): Promise<string>;
@@ -546,6 +574,10 @@ interface PlanCliRecordShape {
     readonly inherited_resolved: number;
     readonly end_open: { readonly critical: number; readonly non_critical: number };
     readonly end: string;
+    /** 差分の洗い出しの関係ごとの件数（Issue #938） */
+    readonly relations: readonly { readonly relation: string; readonly count: number }[];
+    /** 系統の照合で落ちた件数（Issue #938） */
+    readonly relation_check_failed: number;
   }[];
   /** 終わりに残った（開いている）事項 1 つずつ（ID を含む。文は入れない。Issue #488・#930） */
   readonly remaining_open_issues: readonly {
@@ -4882,5 +4914,136 @@ describe("逆照合の往復ごとの診断を plan-reverse-check-trace.json に
     const record = await readPlanRecord(dir);
     expect(record).not.toHaveProperty("reverse_check_trace");
     expect(record).not.toHaveProperty("reverseCheckTrace");
+  });
+});
+
+// ── Issue #938：差分の洗い出しの関係を、別ファイルの trace と plan-record の件数に残す ────────
+
+/** 試験用の結果（buildPlanCliRecord が読む欄だけを持つ。関係の trace は 2 行。Issue #938） */
+function relationResult(): PlanResult {
+  return {
+    kind: "stopped",
+    reason: "declined",
+    failure: null,
+    stages: [],
+    spentUsd: 0,
+    remainingUsd: 10,
+    judge: { calls_by_adapter: {}, cost_usd: 0 },
+    closedBySource: [],
+    closedByDefault: [],
+    requirementsDiagnosis: {
+      rounds: [],
+      redone: 0,
+      unmet: { quoteNotFound: 0, positionMismatch: 0, uncoveredSource: { code: 0, conversation: 0 } },
+    },
+    surfaceCheck: { accepted: 0, dropped: 0, ambiguity: 0, unchecked: 0, judgments: [], completed: false },
+    surfaceCheckDiagnostics: [],
+    diffReviews: [],
+    openIssueConflicts: { ids: 0, rows: [], attribution: [], emptyTargets: 0, round: null },
+    surfaceIdReuse: [],
+    surfaceTargetAttempts: [],
+    issueFlow: [
+      {
+        revision: 2,
+        startOpen: 0,
+        opened: { total: 2, initial: 0, diff: 2, byOrigin: [{ origin: "surface", count: 2 }] },
+        closed: { total: 0, answerMain: 0, alsoCloses: 0, source: 0, default: 0 },
+        inheritedResolved: 0,
+        endOpen: { critical: 1, nonCritical: 1 },
+        end: "judged",
+        relations: [
+          { relation: "new", count: 1 },
+          { relation: "same-as-answer", count: 1 },
+          { relation: "contradicts-answer", count: 0 },
+          { relation: "unclear", count: 0 },
+        ],
+        relationCheckFailed: 1,
+      },
+    ],
+    remainingOpenIssues: [],
+    answerClosures: [],
+    confirmCoverage: [],
+    surfaceRelationTrace: [
+      {
+        revision: 2,
+        issueId: "OI:relation:1",
+        requirementId: "R:A:Q1-1",
+        relation: "same-as-answer",
+        answerId: "A:Q1-1",
+        check: "passed",
+        text: "関係の trace の文（同じ答えで閉じている）",
+        critical: true,
+      },
+      {
+        revision: 2,
+        issueId: "OI:relation:2",
+        requirementId: "R:A:Q1-1",
+        relation: "new",
+        answerId: null,
+        check: "not-applicable",
+        text: "関係の trace の文（新しい判断）",
+        critical: false,
+      },
+    ],
+  } as unknown as PlanResult;
+}
+
+describe("差分の洗い出しの関係を、別ファイルの trace と plan-record の件数に残す（04 §7・Issue #938）", () => {
+  it("plan-surface-relation-trace.json に受理した行ごとの欄が出て、plan-record.json には事項の文が出ない", async () => {
+    const result = relationResult();
+    const dir = `${directory}/relation-trace`;
+    await fs.mkdir(dir, { recursive: true });
+
+    // 別ファイルは、受理した行ごとの欄（往復の版・事項の ID・対象の要件 ID・関係・答えの ID・
+    // 照合の結果・事項の文・重大か）を持つ
+    const trace = buildSurfaceRelationTraceDiagnostic({ result, planId: "plan-1" });
+    expect(trace.schema_version).toBe(PLAN_SURFACE_RELATION_TRACE_SCHEMA);
+    expect(trace.plan_id).toBe("plan-1");
+    await fs.writeFile(`${dir}/${PLAN_SURFACE_RELATION_TRACE_FILE}`, JSON.stringify(trace), "utf8");
+    const written = JSON.parse(
+      await fs.readFile(`${dir}/${PLAN_SURFACE_RELATION_TRACE_FILE}`, "utf8"),
+    ) as { rows: readonly Record<string, unknown>[] };
+    expect(written.rows).toEqual([
+      {
+        revision: 2,
+        issue_id: "OI:relation:1",
+        requirement_id: "R:A:Q1-1",
+        relation: "same-as-answer",
+        answer_id: "A:Q1-1",
+        check: "passed",
+        text: "関係の trace の文（同じ答えで閉じている）",
+        critical: true,
+      },
+      {
+        revision: 2,
+        issue_id: "OI:relation:2",
+        requirement_id: "R:A:Q1-1",
+        relation: "new",
+        answer_id: null,
+        check: "not-applicable",
+        text: "関係の trace の文（新しい判断）",
+        critical: false,
+      },
+    ]);
+
+    // plan-record.json には、関係ごとの件数と落ちた件数だけを載せ、事項の文・答えの ID は載せない
+    const record = buildPlanCliRecord({
+      result,
+      transcript: createPlanTranscript(),
+      budgetUsd: 10,
+      planId: "plan-1",
+    });
+    expect(record.issue_flow[0]?.relations).toEqual([
+      { relation: "new", count: 1 },
+      { relation: "same-as-answer", count: 1 },
+      { relation: "contradicts-answer", count: 0 },
+      { relation: "unclear", count: 0 },
+    ]);
+    expect(record.issue_flow[0]?.relation_check_failed).toBe(1);
+    const recordText = JSON.stringify(record);
+    expect(recordText).not.toContain("関係の trace の文");
+    expect(recordText).not.toContain("A:Q1-1");
+    expect(record).not.toHaveProperty("surface_relation_trace");
+    expect(record).not.toHaveProperty("surfaceRelationTrace");
   });
 });

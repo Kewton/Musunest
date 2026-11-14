@@ -45,7 +45,7 @@ import { createOllamaLlmClient, DEFAULT_OLLAMA_MODEL, OLLAMA_STAGE_OUTPUT_LIMITS
 import { createOpenRouterLlmClient, DEFAULT_OPENROUTER_MODEL } from "./openrouter.js";
 import * as planRunModule from "./plan/run-plan.js";
 import type { PlanResult } from "./plan/run-plan.js";
-import { BUILD_CLI_RECORD_FILE, PLAN_ONLY_RESULT_SCHEMA } from "./cli-plan.js";
+import { BUILD_CLI_RECORD_FILE, PLAN_CLI_RECORD_FILE, PLAN_ONLY_RESULT_SCHEMA, PLAN_SURFACE_RELATION_TRACE_FILE, PLAN_SURFACE_RELATION_TRACE_SCHEMA } from "./cli-plan.js";
 import * as factory from "./index.js";
 import { createFakeJudge } from "./judge-fake.js";
 import type { JudgeAnswer } from "./judge.js";
@@ -177,9 +177,11 @@ import { createBudgetedJudge } from "./judge-budget.js";
 import { createJevJudge } from "./judge-jev.js";
 import { createLlmJudge, DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS } from "./judge-llm.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse, LlmUsage } from "./llm.js";
-import { createRecordingClient, expectNoAcceptanceMaterial, ACCEPTANCE_MATERIAL_WORDS } from "./stages/__tests__/prompt.js";
+import { createRecordingClient, expectNoAcceptanceMaterial, ACCEPTANCE_MATERIAL_WORDS, REQUIREMENT_LIST_OUTPUT, REVERSE_CHECK_OUTPUT } from "./stages/__tests__/prompt.js";
 import { ATTEMPT_KEYS, FAILURE_KINDS, RETRY_KEYS, STAGE_IDS } from "./record.js";
 import { CONFIRMED_PLAN, DESIGN_OUTPUT_MAPPED, SOURCE_TEXT, recordedRun, structured, USAGE as RECORDED_USAGE } from "./__tests__/run.js";
+import { CATALOG_FACETS, catalogAppliesQuestionName, catalogGateQuestionName, catalogQuestionName } from "./plan/catalog.js";
+import { confirmQuestionName } from "./plan/confirm.js";
 
 /** 旗 v12.ids が on の v1.2 の実効の旗（checkpoint の版の期待を組む。Issue #806） */
 const V12_IDS_FLAGS = ledgerModule.fromPublicV12Flags(factory.V12_PIPELINE_FLAGS);
@@ -9789,5 +9791,208 @@ describe("(6)(10) 不変：--stage-model を付けない luna・表に無いモ�
         expect(fixedText, path).toBe(await fs.readFile(`${directory}/sm-invariant-${model}-base/${path}`, "utf8"));
       }
     }
+  });
+});
+
+// ── 差分の洗い出しの関係の trace を、実走の --out に置く（Issue #938）────────────────────
+
+/** 「決まっている・当てはまる」の判定の答え（Issue #938 の試験） */
+const noulJudge = (value: number): JudgeAnswer => ({ kind: "noul", noul: value });
+
+describe("差分の洗い出しの関係の trace を、実走の --out に置く（Issue #938）", () => {
+  /** 最初の P3 が開く重大な事項 3 件（答えを 3 つ作る） */
+  const SURFACE_THREE = {
+    ambiguities: [
+      { id: "OI-1", requirementId: "R-1", text: "誰の分を数えるか", critical: true },
+      { id: "OI-2", requirementId: "R-1", text: "いつの分を数えるか", critical: true },
+      { id: "OI-3", requirementId: "R-2", text: "合計の丸め方", critical: true },
+    ],
+    unwritable: [],
+  };
+  /** 1 往復目の P4 の問い（3 件） */
+  const QUESTIONS_THREE = {
+    questions: [
+      {
+        id: "Q-1",
+        openIssueId: "OI-1",
+        text: "誰の分を数えますか",
+        choices: [{ id: "c1", text: "全員" }, { id: "c2", text: "自分のみ" }],
+        recommended: { choiceId: "c1", reason: "依頼に沿う" },
+        allowFreeText: true,
+      },
+      {
+        id: "Q-2",
+        openIssueId: "OI-2",
+        text: "いつの分を数えますか",
+        choices: [{ id: "c1", text: "今日" }, { id: "c2", text: "今週" }],
+        recommended: { choiceId: "c2", reason: "広く見る" },
+        allowFreeText: true,
+      },
+      {
+        id: "Q-3",
+        openIssueId: "OI-3",
+        text: "合計はどう丸めますか",
+        choices: [{ id: "c1", text: "切り捨て" }, { id: "c2", text: "四捨五入" }],
+        recommended: { choiceId: "c1", reason: "素直" },
+        allowFreeText: true,
+      },
+    ],
+  };
+  /** 1 往復目の答えの後の差分の P3（4 値の関係を混ぜる。A:Q2-1 はまだ無い系統の外の答え） */
+  const RELATION_DIFF = {
+    ambiguities: [
+      { id: "OI-rel-new", requirementId: "R:A:Q1-1", text: "新しい判断の事項", critical: true, relation: "new", answerId: null },
+      { id: "OI-rel-same", requirementId: "R:A:Q1-1", text: "答えと同じ事項", critical: true, relation: "same-as-answer", answerId: "A:Q1-1" },
+      { id: "OI-rel-out", requirementId: "R:A:Q1-1", text: "系統の外を指す事項", critical: true, relation: "contradicts-answer", answerId: "A:Q2-1" },
+      { id: "OI-rel-unclear", requirementId: "R:A:Q1-1", text: "決められない事項", critical: true, relation: "unclear", answerId: null },
+    ],
+    unwritable: [],
+  };
+  /** 2 往復目の P4 の問い（差分で開いた 4 件） */
+  const QUESTIONS_DIFF = {
+    questions: RELATION_DIFF.ambiguities.map((row) => ({
+      id: `Q-${row.id}`,
+      openIssueId: row.id,
+      text: `${row.id} をどうしますか`,
+      choices: [{ id: "c1", text: "こちら" }, { id: "c2", text: "あちら" }],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    })),
+  };
+  /** 2 往復の差分の P3（もう開かない） */
+  const SURFACE_CLEAR = { ambiguities: [], unwritable: [] };
+
+  /** 目録の問いすべてに「当てはまる・決まっている」を返す答え（未指定の観点を作らない） */
+  function catalogAnswers(): Record<string, JudgeAnswer> {
+    const answers: Record<string, JudgeAnswer> = {};
+    for (const requirementId of [
+      "R-1",
+      "R-2",
+      "R:A:Q1-1",
+      "R:A:Q1-2",
+      "R:A:Q1-3",
+      "R:A:Q2-1",
+      "R:A:Q2-2",
+      "R:A:Q2-3",
+      "R:A:Q2-4",
+    ]) {
+      answers[catalogGateQuestionName(requirementId)] = noulJudge(1);
+      for (const facet of CATALOG_FACETS) {
+        answers[catalogAppliesQuestionName(requirementId, facet.id)] = noulJudge(1);
+        answers[catalogQuestionName(requirementId, facet.id)] = noulJudge(1);
+      }
+    }
+    return answers;
+  }
+
+  it("2 往復の差分の行が --out と bundle の隣に出て、事項の文は plan-record.json に出ない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      structured(RELATION_DIFF),
+      structured(QUESTIONS_DIFF),
+      structured(SURFACE_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [confirmQuestionName("S-1")]: noulJudge(0.95),
+      [confirmQuestionName("S-2")]: noulJudge(0.95),
+      ...Object.fromEntries(
+        ["A:Q1-1", "A:Q1-2", "A:Q1-3", "A:Q2-1", "A:Q2-2", "A:Q2-3", "A:Q2-4"].map((answerId) => [
+          confirmQuestionName(answerId),
+          noulJudge(0.9),
+        ]),
+      ),
+    });
+    const dir = `${directory}/surface-relation-trace`;
+    const answersPath = "surface-relation-trace-answers.json";
+    const lines: string[] = [];
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan-only", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: (line) => lines.push(line),
+    });
+    expect(code, `${recording.structured.map((request) => request.schemaName).join(",")}\n${lines.join("\n")}`).toBe(EXIT_OK);
+
+    // `--out`（bundle と同じ置き場）に、受理した行ごとの欄が出る
+    const trace = JSON.parse(await fs.readFile(`${dir}/${PLAN_SURFACE_RELATION_TRACE_FILE}`, "utf8")) as {
+      readonly schema_version: string;
+      readonly plan_id: string;
+      readonly rows: readonly Record<string, unknown>[];
+    };
+    expect(trace.schema_version).toBe(PLAN_SURFACE_RELATION_TRACE_SCHEMA);
+    expect(trace.plan_id).toBe("local-plan-0");
+    // 往復の版・事項 ID・要件 ID・関係・答えの ID・照合の結果・文・重大か
+    expect(trace.rows).toEqual([
+      {
+        revision: 2,
+        issue_id: "OI-rel-new",
+        requirement_id: "R:A:Q1-1",
+        relation: "new",
+        answer_id: null,
+        check: "not-applicable",
+        text: "新しい判断の事項",
+        critical: true,
+      },
+      {
+        revision: 2,
+        issue_id: "OI-rel-same",
+        requirement_id: "R:A:Q1-1",
+        relation: "same-as-answer",
+        answer_id: "A:Q1-1",
+        check: "passed",
+        text: "答えと同じ事項",
+        critical: true,
+      },
+      {
+        revision: 2,
+        issue_id: "OI-rel-out",
+        requirement_id: "R:A:Q1-1",
+        relation: "contradicts-answer",
+        answer_id: "A:Q2-1",
+        check: "failed",
+        text: "系統の外を指す事項",
+        critical: true,
+      },
+      {
+        revision: 2,
+        issue_id: "OI-rel-unclear",
+        requirement_id: "R:A:Q1-1",
+        relation: "unclear",
+        answer_id: null,
+        check: "not-applicable",
+        text: "決められない事項",
+        critical: true,
+      },
+    ]);
+
+    // plan-record.json には事項の文を写さず、関係ごとの件数と落ちた件数だけを載せる
+    const recordText = await fs.readFile(`${dir}/${PLAN_CLI_RECORD_FILE}`, "utf8");
+    for (const row of trace.rows) expect(recordText, String(row["issue_id"])).not.toContain(String(row["text"]));
+    const record = JSON.parse(recordText) as {
+      readonly issue_flow: readonly { readonly relations: readonly unknown[]; readonly relation_check_failed: number }[];
+    };
+    expect(record.issue_flow[1]?.relations).toEqual([
+      { relation: "new", count: 1 },
+      { relation: "same-as-answer", count: 1 },
+      { relation: "contradicts-answer", count: 1 },
+      { relation: "unclear", count: 1 },
+    ]);
+    expect(record.issue_flow[1]?.relation_check_failed).toBe(1);
+    expect(record).not.toHaveProperty("surface_relation_trace");
   });
 });
