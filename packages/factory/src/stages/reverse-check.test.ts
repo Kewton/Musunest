@@ -2115,34 +2115,35 @@ describe("逆照合の診断を、止まるまでに終えた往復の分だけ�
 // 原文に 1 か所に決まらない短い語へ縮めたとき、**本文も ID も同じ**なら前の引用と位置に戻す。
 // **Plan の経路だけ**が `keepValidProvenance` で有効にする。
 
+/** 作り直しの前の一覧（R-1 の引用は前後を含めて 1 か所に決まる。4 文目は覆わない） */
+const beforeList = (): RequirementList => ({
+  requirements: [
+    { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: { start: 0, end: 10 } },
+    { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
+  ],
+  framing: [],
+  decisions: [],
+  unresolved: [],
+});
+
+/** 作り直しの後の一覧（R-1 の引用を 2 か所に決まらない短い語へ縮め、4 文目を覆う R-3 を足す） */
+const shrunkList = (): RequirementList => ({
+  requirements: [
+    { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+    { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
+    { id: "R-3", text: "数えられる", quote: "印を数える。", position: { start: 18, end: 24 } },
+  ],
+  framing: [{ quote: "印を数える。", position: { start: 18, end: 24 } }],
+  decisions: ["記録の形は 1 行とした"],
+  unresolved: ["残件の扱い"],
+});
+
 describe("作り直しで、落ちていなかった要件の有効な引用と位置を戻す（Issue #942）", () => {
   /**
    * 4 文の原文。1・2 文目が同じ句で、**前後を含めた引用だけが 1 か所に決まる**。
    *   1-2 文目「印を出す。印を出す。」（0-10）／3 文目「件数を合計する。」（10-18）／4 文目「印を数える。」（18-24）
    */
   const KEEP_SOURCE = "印を出す。印を出す。件数を合計する。印を数える。";
-
-  const beforeList = (): RequirementList => ({
-    requirements: [
-      { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: { start: 0, end: 10 } },
-      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
-    ],
-    framing: [],
-    decisions: [],
-    unresolved: [],
-  });
-
-  /** 作り直しの後の一覧（R-1 の引用を 2 か所に決まらない短い語へ縮め、4 文目を覆う R-3 を足す） */
-  const shrunkList = (): RequirementList => ({
-    requirements: [
-      { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
-      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
-      { id: "R-3", text: "数えられる", quote: "印を数える。", position: { start: 18, end: 24 } },
-    ],
-    framing: [{ quote: "印を数える。", position: { start: 18, end: 24 } }],
-    decisions: ["記録の形は 1 行とした"],
-    unresolved: ["残件の扱い"],
-  });
 
   it("4 条件を満たす要件だけ、引用と位置が前の値に戻り、本文・ID・部分・並び・ほかの要件は変わらない", () => {
     const before = beforeList();
