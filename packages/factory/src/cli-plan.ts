@@ -602,6 +602,17 @@ export interface PlanCliRoundDiagnosisRecord {
    * `quote-repair`）。**欄の追加だけ**なので、記録の schema の版は今のまま。
    */
   readonly fix: string;
+  /**
+   * この往復の一覧で、作り直しの前に有効だった引用と位置へ戻した要件の件数と通し番号（Issue #942）。
+   * **戻した要件があるときだけ**載せる。**ID・引用・原文の文字列は入れない**。
+   */
+  readonly restored?: PlanCliRestoredRecord;
+}
+
+/** 記録に入れる、作り直しで戻した要件の件数と通し番号（値は入れない。Issue #942） */
+export interface PlanCliRestoredRecord {
+  readonly count: number;
+  readonly requirements: readonly number[];
 }
 
 /** 記録に入れる、P1/P2 の往復ごとの逆照合の診断（Issue #430）。 */
@@ -871,6 +882,15 @@ function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCl
         framing_overlap: entry.framingOverlap,
       })),
       fix: round.fix,
+      // 戻した要件があるときだけ、件数と通し番号を載せる（値は入れない。Issue #942）
+      ...(round.restored === undefined
+        ? {}
+        : {
+            restored: {
+              count: round.restored.count,
+              requirements: round.restored.requirements.slice(),
+            },
+          }),
     })),
     redone: diagnosis.redone,
     unmet: toMissCountsRecord(diagnosis.unmet),
@@ -942,6 +962,18 @@ export interface PlanCliTraceCodeMiss {
   readonly range: PlanCliTraceRange | null;
 }
 
+/** 作り直しで前の一覧の引用と位置へ戻した要件 1 つ（戻す前の値。Issue #942） */
+export interface PlanCliTraceRestoredRequirement {
+  /** 要件の ID */
+  readonly id: string;
+  /** その要件の、その往復の一覧での通し番号（1 始まり） */
+  readonly requirement: number;
+  /** 作り直しが出した引用（戻す前の値） */
+  readonly quote: string;
+  /** 作り直しが出した位置（戻す前の値） */
+  readonly position: PlanCliTraceRange;
+}
+
 /** 1 往復の逆照合の診断（Issue #919）。一覧の全体とその SHA-256・会話の生の範囲・コードの落ち */
 export interface PlanCliReverseCheckTraceRound {
   readonly fix: string;
@@ -949,6 +981,8 @@ export interface PlanCliReverseCheckTraceRound {
   readonly list_sha256: string;
   readonly reported: readonly PlanCliTraceReportedRange[];
   readonly code_misses: readonly PlanCliTraceCodeMiss[];
+  /** 前の一覧の引用と位置へ戻した要件（戻す前の値。戻さない往復は欄を持たない。Issue #942） */
+  readonly restored?: readonly PlanCliTraceRestoredRequirement[];
 }
 
 /** 逆照合の往復ごとの診断（`--out` の `plan-reverse-check-trace.json`。Issue #919） */
@@ -996,6 +1030,17 @@ export function buildReverseCheckTraceDiagnostic(input: {
         requirement: miss.requirement,
         range: miss.range === null ? null : { start: miss.range.start, end: miss.range.end },
       })),
+      // 戻した要件は、ID と、戻す前（作り直しが出した）引用・位置を残す（無ければ欄を持たない。Issue #942）
+      ...(round.restored === undefined
+        ? {}
+        : {
+            restored: round.restored.map((entry) => ({
+              id: entry.id,
+              requirement: entry.requirement,
+              quote: entry.quote,
+              position: { start: entry.position.start, end: entry.position.end },
+            })),
+          }),
     })),
   };
 }
