@@ -2203,6 +2203,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         // 対応の意味の基準（Issue #925。**Plan の経路だけ**の明示の選択である。既定の Build の経路は
         // 今までどおり 3 文だけを送る）
         meaningRule: true,
+        // 全体の作り直しの後、落ちていなかった要件の有効な引用と位置を前の一覧の値に戻す（Issue #942。
+        // **Plan の経路だけ**の明示の選択である。既定の Build の経路は呼び出しの列・要求・結果を変えない）
+        keepValidProvenance: true,
       });
       // 止まったときも、止まるまでに終えた往復の分を結果へ残す（Issue #430・#919）
       requirementsDiagnosis = outcome.ok ? outcome.value.diagnosis : outcome.diagnosis;
