@@ -2501,3 +2501,96 @@ describe("直す：`set` を持たない `kind: update` のフォーム（M1.5�
     expect(screen.getAllByRole("button", { name: "finish" })).toHaveLength(1);
   });
 });
+
+// ── 初めに開く一覧（Issue #943） ─────────────────────────────────
+//
+// 画面は**宣言の順で先頭の一覧を初めに開く**（docs/semantics.md「view」）。種類によらず、初めに
+// 見せたい一覧は `views` の先頭に書く——専用の初期画面の欄は無い。ここでは今の実装の挙動を固定する
+// （**実装は変えない**）。初めに開くことは読む許可を与えない——許可は data-api が決める。
+
+/** 一覧の宣言だけを差し替えた宣言（`dashboard` の部品が指す `scope: app` の計算はそのまま残す） */
+const viewsWith = (views: ApiSpecBody["spec"]["views"]): ApiSpecBody => ({
+  ...DASHBOARD_SPEC,
+  spec: { ...DASHBOARD_SPEC.spec, views },
+});
+
+/** ダッシュボードの一覧の宣言（初めに開くことを見るための最小の形） */
+const DASHBOARD_DECL: ApiSpecBody["spec"]["views"][number] = {
+  name: "dashboard",
+  type: "dashboard",
+  widgets: [{ type: "number", label: "今月の活動", value: "activityCount", unit: "回" }],
+};
+
+describe("初めに開く一覧（Issue #943）", () => {
+  it("先頭が dashboard なら、初めに dashboard を開く", async () => {
+    const getView = vi.fn((_instanceId: string, name: string) =>
+      Promise.resolve(okResult(name === "dashboard" ? DASHBOARD_VIEW : VIEW)),
+    );
+    const client = makeClient({
+      spec: () => Promise.resolve(okResult(viewsWith([DASHBOARD_DECL, { name: "expenseList", entity: "expense" }]))),
+      view: getView,
+    });
+    const { container } = await renderScreen(client);
+
+    await screen.findByText("今月の活動");
+    // 初めに読むのは宣言の先頭（dashboard）である
+    expect(getView.mock.calls[0]?.[1]).toBe("dashboard");
+    // 開くのは部品を持つダッシュボードである（行を並べる表ではない）
+    expect(container.querySelector(".dashboard")).not.toBeNull();
+    expect(container.querySelector(".instant-table")).toBeNull();
+  });
+
+  it("先頭が別の種類なら、dashboard が後ろにあっても先頭の一覧を開く", async () => {
+    const getView = vi.fn((_instanceId: string, name: string) =>
+      Promise.resolve(okResult(name === "dashboard" ? DASHBOARD_VIEW : VIEW)),
+    );
+    const client = makeClient({
+      spec: () => Promise.resolve(okResult(viewsWith([{ name: "expenseList", entity: "expense" }, DASHBOARD_DECL]))),
+      view: getView,
+    });
+    const { container } = await renderScreen(client);
+
+    await screen.findByText("夕食");
+    // 初めに読むのは宣言の先頭（expenseList）である——dashboard を優先して探しに行かない
+    expect(getView.mock.calls[0]?.[1]).toBe("expenseList");
+    expect(container.querySelector(".dashboard")).toBeNull();
+    expect(screen.queryByText("今月の活動")).toBeNull();
+  });
+
+  it("一覧が 0 個なら、一覧が無い状態（noview）を出す", async () => {
+    const getView = vi.fn(() => Promise.resolve(okResult(VIEW)));
+    const client = makeClient({
+      spec: () => Promise.resolve(okResult(viewsWith([]))),
+      view: getView,
+    });
+    const { container } = await renderScreen(client);
+
+    await screen.findByText("表示できる一覧がありません");
+    expect(container.querySelector('[data-state="noview"]')).not.toBeNull();
+    // 開く一覧が無いので、一覧は 1 つも読まない
+    expect(getView).not.toHaveBeenCalled();
+    expect(container.querySelector(".instant-table")).toBeNull();
+  });
+
+  it("先頭の一覧の読み込みが 403 なら禁止の状態を出し、2 番目の一覧を読まない", async () => {
+    const getView = vi.fn((_instanceId: string, name: string) =>
+      Promise.resolve(
+        name === "expenseList" ? errResult("PERMISSION_DENIED", 403) : okResult(viewWith({ view: "byPayer" })),
+      ),
+    );
+    const client = makeClient({
+      spec: () =>
+        Promise.resolve(
+          okResult(viewsWith([{ name: "expenseList", entity: "expense" }, { name: "byPayer", entity: "expense" }])),
+        ),
+      view: getView,
+    });
+    const { container } = await renderScreen(client);
+
+    await screen.findByText("このアプリを表示する権限がありません");
+    expect(container.querySelector('[data-state="forbidden"]')).not.toBeNull();
+    // 許可を避けて 2 番目の一覧へ移らない（読むのは先頭の 1 回だけである）
+    expect(getView).toHaveBeenCalledTimes(1);
+    expect(getView.mock.calls[0]?.[1]).toBe("expenseList");
+  });
+});
