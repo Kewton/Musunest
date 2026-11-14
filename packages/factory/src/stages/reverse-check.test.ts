@@ -26,6 +26,7 @@ import {
   isBlankRange,
   overlappingSentences,
   reverseCheckRulesOf,
+  restoreValidProvenance,
   runReverseCheck,
   runReverseCheckLoop,
   runReverseCheckLoopWithOperation,
@@ -2105,5 +2106,308 @@ describe("逆照合の診断を、止まるまでに終えた往復の分だけ�
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     expect(outcome.value.trace?.rounds.map((round) => round.fix)).toEqual(["initial", "quote-repair"]);
+  });
+});
+
+// ── 作り直しで、落ちていなかった要件の有効な引用と位置を戻す（Issue #942）──────────
+//
+// 全体の作り直しは、落ちていなかった要件の引用と位置まで出し直す。作り直しが有効だった引用を、
+// 原文に 1 か所に決まらない短い語へ縮めたとき、**本文も ID も同じ**なら前の引用と位置に戻す。
+// **Plan の経路だけ**が `keepValidProvenance` で有効にする。
+
+describe("作り直しで、落ちていなかった要件の有効な引用と位置を戻す（Issue #942）", () => {
+  /**
+   * 4 文の原文。1・2 文目が同じ句で、**前後を含めた引用だけが 1 か所に決まる**。
+   *   1-2 文目「印を出す。印を出す。」（0-10）／3 文目「件数を合計する。」（10-18）／4 文目「印を数える。」（18-24）
+   */
+  const KEEP_SOURCE = "印を出す。印を出す。件数を合計する。印を数える。";
+
+  const beforeList = (): RequirementList => ({
+    requirements: [
+      { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: { start: 0, end: 10 } },
+      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  });
+
+  /** 作り直しの後の一覧（R-1 の引用を 2 か所に決まらない短い語へ縮め、4 文目を覆う R-3 を足す） */
+  const shrunkList = (): RequirementList => ({
+    requirements: [
+      { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
+      { id: "R-3", text: "数えられる", quote: "印を数える。", position: { start: 18, end: 24 } },
+    ],
+    framing: [{ quote: "印を数える。", position: { start: 18, end: 24 } }],
+    decisions: ["記録の形は 1 行とした"],
+    unresolved: ["残件の扱い"],
+  });
+
+  it("4 条件を満たす要件だけ、引用と位置が前の値に戻り、本文・ID・部分・並び・ほかの要件は変わらない", () => {
+    const before = beforeList();
+    const shrunk = shrunkList();
+    const kept = restoreValidProvenance(KEEP_SOURCE, before, shrunk);
+    // R-1 だけが戻る（本文も ID も同じで、前が有効・後が落ち・後の引用が前の部分文字列）
+    expect(kept.restored).toEqual([
+      { id: "R-1", requirement: 1, quote: "印を出す。", position: { start: 1, end: 6 } },
+    ]);
+    expect(kept.list.requirements[0]).toEqual({
+      id: "R-1",
+      text: "印を出せる",
+      quote: "印を出す。印を出す。",
+      position: { start: 0, end: 10 },
+    });
+    // 戻さない要件・本文・ID・部分・並びは作り直しの値のまま（一覧のほかの欄もそのまま）
+    expect(kept.list.requirements.slice(1)).toEqual(shrunk.requirements.slice(1));
+    expect(kept.list.framing).toEqual(shrunk.framing);
+    expect(kept.list.decisions).toEqual(shrunk.decisions);
+    expect(kept.list.unresolved).toEqual(shrunk.unresolved);
+    // 前の一覧は書き換えない（純粋な関数）
+    expect(before.requirements[0]?.quote).toBe("印を出す。印を出す。");
+  });
+
+  it("(反例1) 本文が変わった要件は戻さない", () => {
+    const shrunk = shrunkList();
+    const changedText: RequirementList = {
+      ...shrunk,
+      requirements: shrunk.requirements.map((requirement) =>
+        requirement.id === "R-1" ? { ...requirement, text: "印を二度出せる" } : requirement,
+      ),
+    };
+    expect(restoreValidProvenance(KEEP_SOURCE, beforeList(), changedText).restored).toEqual([]);
+  });
+
+  it("(反例2) ID が重複する・前の一覧に無い要件は戻さない", () => {
+    const before = beforeList();
+    // 前の一覧の R-1 が 2 つ（どちらの本文か決まらない）
+    const duplicatedBefore: RequirementList = {
+      ...before,
+      requirements: [...before.requirements, { ...before.requirements[0]!, text: "印を三度出せる" }],
+    };
+    expect(restoreValidProvenance(KEEP_SOURCE, duplicatedBefore, shrunkList()).restored).toEqual([]);
+    // 作り直しの一覧の R-1 が 2 つ
+    const shrunk = shrunkList();
+    const duplicatedAfter: RequirementList = {
+      ...shrunk,
+      requirements: [...shrunk.requirements, { ...shrunk.requirements[0]! }],
+    };
+    expect(restoreValidProvenance(KEEP_SOURCE, beforeList(), duplicatedAfter).restored).toEqual([]);
+    // 前の一覧に無い ID（R-9）
+    const absentBefore: RequirementList = {
+      ...shrunk,
+      requirements: shrunk.requirements.map((requirement) =>
+        requirement.id === "R-1" ? { ...requirement, id: "R-9" } : requirement,
+      ),
+    };
+    expect(restoreValidProvenance(KEEP_SOURCE, beforeList(), absentBefore).restored).toEqual([]);
+  });
+
+  it("(反例3) 前の引用も落ちていた要件は戻さない（修復の経路に任せる）", () => {
+    const before = beforeList();
+    const brokenBefore: RequirementList = {
+      ...before,
+      requirements: before.requirements.map((requirement) =>
+        requirement.id === "R-1" ? { ...requirement, quote: "印を出す。", position: { start: 1, end: 6 } } : requirement,
+      ),
+    };
+    expect(restoreValidProvenance(KEEP_SOURCE, brokenBefore, shrunkList()).restored).toEqual([]);
+  });
+
+  it("(反例4) 後の引用が有効なら戻さない（作り直しが引用を良くした場合を壊さない）", () => {
+    const shrunk = shrunkList();
+    const validAfter: RequirementList = {
+      ...shrunk,
+      requirements: shrunk.requirements.map((requirement) =>
+        requirement.id === "R-1" ? { ...requirement, quote: "印を出す。", position: { start: 5, end: 10 } } : requirement,
+      ),
+    };
+    const kept = restoreValidProvenance(KEEP_SOURCE, beforeList(), validAfter);
+    expect(kept.restored).toEqual([]);
+    expect(kept.list.requirements[0]?.position).toEqual({ start: 5, end: 10 });
+  });
+
+  it("(反例5) 後の引用が前の引用の部分文字列でない（広げた・別の所）なら戻さない", () => {
+    const shrunk = shrunkList();
+    // 原文に無い（前後をまたいだ）引用へ広げようとして写し損ねた
+    const widened: RequirementList = {
+      ...shrunk,
+      requirements: shrunk.requirements.map((requirement) =>
+        requirement.id === "R-1"
+          ? { ...requirement, quote: "印を出す。件数を合計する。", position: { start: 0, end: 18 } }
+          : requirement,
+      ),
+    };
+    expect(restoreValidProvenance(KEEP_SOURCE, beforeList(), widened).restored).toEqual([]);
+    // 前の引用を部分文字列として持たない、別の所を指した引用
+    const elsewhere: RequirementList = {
+      ...shrunk,
+      requirements: shrunk.requirements.map((requirement) =>
+        requirement.id === "R-1"
+          ? { ...requirement, quote: "数を合計する。", position: { start: 8, end: 16 } }
+          : requirement,
+      ),
+    };
+    expect(restoreValidProvenance(KEEP_SOURCE, beforeList(), elsewhere).restored).toEqual([]);
+  });
+
+  it("(反例6) 戻したことで覆いの落ちが出るときも、戻したうえで落ちとして点検する（門を強める側）", () => {
+    // 3 文（S1 0-5「印を出す。」／S2 5-13「件数を合計する。」／S3 13-19「印を数える。」）。
+    // 前の一覧は S1・S2 を覆い、作り直しは R-1 の位置を広げて全 3 文を覆った（引用は縮んで落ちている）
+    const source = "印を出す。件数を合計する。印を数える。";
+    const before: RequirementList = { requirements: [
+      { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 0, end: 5 } },
+      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 5, end: 13 } },
+    ], framing: [], decisions: [], unresolved: [] };
+    const shrunk: RequirementList = { requirements: [
+      // 「印を」は原文に 2 か所あり、位置 0-16 は引用と一致しない（落ち）。位置は全 3 文に重なる
+      { id: "R-1", text: "印を出せる", quote: "印を", position: { start: 0, end: 16 } },
+      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 5, end: 13 } },
+    ], framing: [], decisions: [], unresolved: [] };
+    // 作り直しの一覧は覆いがそろっている
+    expect(checkRequirementCoverage(source, shrunk).filter((miss) => miss.kind === "uncovered-source")).toEqual([]);
+    const kept = restoreValidProvenance(source, before, shrunk);
+    // 条件を満たすので戻す（覆いの落ちが出ても戻す）
+    expect(kept.restored.map((entry) => entry.id)).toEqual(["R-1"]);
+    // 戻した後の一覧を、コードの覆いの検査が落ちとして見つける（覆いの門は緩めない）
+    const uncovered = checkRequirementCoverage(source, kept.list).filter(
+      (miss) => miss.kind === "uncovered-source",
+    );
+    expect(uncovered).toEqual([{ kind: "uncovered-source", range: { start: 13, end: 19 }, detail: expect.any(String) }]);
+  });
+
+  it("作り直しが先の経路：呼び出しの列が P1 → P2 → P1（作り直し）→ P2 の 4 回になる", async () => {
+    const recording = createRecordingClient([
+      structured(beforeList()),
+      structured({ uncovered: [] }),
+      structured(shrunkList()),
+      structured({ uncovered: [] }),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: KEEP_SOURCE,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      quoteRepair: true,
+      keepValidProvenance: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 修復は呼ばない（作り直しで戻したので、来歴の落ちが残らない）
+    expect(recording.structured.map((request) => request.schemaName)).toEqual([
+      "requirement-list",
+      "reverse-check",
+      "requirement-list",
+      "reverse-check",
+    ]);
+    expect(outcome.value.repaired).toBe(false);
+    expect(outcome.value.redone).toBe(true);
+    expect(outcome.value.unmet).toEqual([]);
+    // P2 に渡る一覧では、R-1 が前の引用と位置に戻っている
+    expect(outcome.value.list.requirements[0]?.quote).toBe("印を出す。印を出す。");
+    expect(outcome.value.list.requirements[0]?.position).toEqual({ start: 0, end: 10 });
+    // 往復の診断には、戻した要件の通し番号と件数だけが載る（ID・引用・原文は載らない）
+    expect(outcome.value.diagnosis.rounds.map((round) => round.fix)).toEqual(["initial", "whole-redo"]);
+    expect(outcome.value.diagnosis.rounds[1]?.restored).toEqual({ count: 1, requirements: [1] });
+    expect(outcome.value.diagnosis.rounds[0]?.restored).toBeUndefined();
+    const diagnosisText = JSON.stringify(outcome.value.diagnosis);
+    expect(diagnosisText).not.toContain("印を出す");
+    expect(diagnosisText).not.toContain("R-1");
+    // trace には、戻した要件の ID と、戻す前（作り直しが出した）引用・位置が載る
+    expect(outcome.value.trace?.rounds[1]?.restored).toEqual([
+      { id: "R-1", requirement: 1, quote: "印を出す。", position: { start: 1, end: 6 } },
+    ]);
+    expect(outcome.value.trace?.rounds[0]?.restored).toBeUndefined();
+  });
+
+  it("修復が先に当たった経路（来歴だけ → 修復 → 覆いを含む → 作り直し）でも戻る", async () => {
+    // 4 文すべてを覆い、R-1 だけが 1 か所に決まらない引用（来歴だけの落ち）の一覧
+    const initial = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
+        { id: "R-3", text: "数えられる", quote: "印を数える。", position: { start: 18, end: 24 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    // 修復で R-1 が 1 か所に決まる引用へ直る（この一覧が「前」になる）
+    const repaired = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: { start: 0, end: 10 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 18 } },
+        { id: "R-3", text: "数えられる", quote: "印を数える。", position: { start: 18, end: 24 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(initial),
+      structured({ uncovered: [] }),
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      // 修復の後の P2 が 4 文目の覆いの落ちを挙げ、全体の作り直しへ進む
+      structured({ uncovered: [{ start: 18, end: 24 }] }),
+      structured(shrunkList()),
+      structured({ uncovered: [] }),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: KEEP_SOURCE,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      quoteRepair: true,
+      keepValidProvenance: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 修復 1 回・作り直し 1 回のまま（呼び出しは 6 回）
+    expect(outcome.value.repaired).toBe(true);
+    expect(outcome.value.redone).toBe(true);
+    expect(recording.structured).toHaveLength(6);
+    // 前は修復した一覧である（R-1 の引用が修復の値に戻る）
+    expect(outcome.value.list.requirements[0]?.quote).toBe("印を出す。印を出す。");
+    expect(outcome.value.list.requirements[0]?.position).toEqual({ start: 0, end: 10 });
+    expect(repaired.requirements[0]?.quote).toBe("印を出す。印を出す。");
+    expect(outcome.value.diagnosis.rounds.map((round) => round.fix)).toEqual([
+      "initial",
+      "quote-repair",
+      "whole-redo",
+    ]);
+    expect(outcome.value.diagnosis.rounds[2]?.restored).toEqual({ count: 1, requirements: [1] });
+  });
+
+  it("選択を省いた呼び出し（Build の経路）では、呼び出しの列・結果・診断が今までどおり（欄が増えない）", async () => {
+    const recording = createRecordingClient([
+      structured(beforeList()),
+      structured({ uncovered: [] }),
+      structured(shrunkList()),
+      structured({ uncovered: [] }),
+      // 作り直しの後の来歴だけの落ちを、今までどおり引用の修復で直す
+      structured({ repairs: [{ index: 0, quote: "印を出す。", position: { start: 5, end: 10 } }] }),
+      structured({ uncovered: [] }),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: KEEP_SOURCE,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      quoteRepair: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(recording.structured.map((request) => request.schemaName)).toEqual([
+      "requirement-list",
+      "reverse-check",
+      "requirement-list",
+      "reverse-check",
+      "requirement-quote-repair",
+      "reverse-check",
+    ]);
+    // 戻していない（作り直しの値のまま）
+    expect(outcome.value.list.requirements[0]?.quote).toBe("印を出す。");
+    expect(outcome.value.repaired).toBe(true);
+    expect(outcome.value.redone).toBe(true);
+    // 往復の診断にも trace にも、`restored` の欄が増えない
+    for (const round of outcome.value.diagnosis.rounds) expect(round.restored).toBeUndefined();
+    for (const round of outcome.value.trace?.rounds ?? []) expect(round.restored).toBeUndefined();
   });
 });

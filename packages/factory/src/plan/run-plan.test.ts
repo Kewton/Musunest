@@ -7621,6 +7621,125 @@ interface ReadingOnlyRepair {
   readonly position: { readonly start: number; readonly end: number };
 }
 
+// ── Issue #942：Plan の経路で、作り直しが壊した引用と位置を前の値に戻す ────────────
+
+describe("Plan の経路で、作り直しが壊した引用と位置を前の値に戻す（Issue #942）", () => {
+  /**
+   * 4 文の原文。1・2 文目が同じ句で、**前後を含めた引用だけが 1 か所に決まる**。
+   *   1 文目（0-5）／2 文目（5-10）／3 文目（10-18）／4 文目（18-24）
+   */
+  const KEEP_SOURCE = "印を出す。印を出す。件数を合計する。印を数える。";
+  const sourceSpanOf = (quote: string, from = 0): { readonly start: number; readonly end: number } => {
+    const start = KEEP_SOURCE.indexOf(quote, from);
+    return { start, end: start + quote.length };
+  };
+  /** 作り直しの前の一覧（R-1 の引用は前後を含めて 1 か所に決まる。4 文目が覆われていない） */
+  const beforeList = {
+    requirements: [
+      { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: sourceSpanOf("印を出す。印を出す。") },
+      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: sourceSpanOf("件数を合計する。") },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+  /**
+   * 作り直しの後の一覧（4 文すべてを覆うが、R-1 の引用を 2 か所に決まらない短い語へ縮め、位置が引用と
+   * 合わない）。位置 1-20 は 4 文すべてに重なる。
+   */
+  const shrunkList = {
+    requirements: [
+      { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 20 } },
+      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: sourceSpanOf("件数を合計する。") },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+
+  it("作り直しが有効な引用を縮めた要件が、P2 に渡る一覧で前の引用と位置に戻り、呼び出しの列が 4 回になる", async () => {
+    const recording = createRecordingClient([
+      structured(beforeList),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(shrunkList),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE, { source: KEEP_SOURCE }),
+    );
+    // 偽の gateway の呼び出しの列（変更前は修復と 3 つ目の P2 が続いていた）
+    expect(recording.structured.map((request) => request.schemaName)).toEqual([
+      "requirement-list",
+      "reverse-check",
+      "requirement-list",
+      "reverse-check",
+    ]);
+    // 2 回目の P2（作り直しの後）に渡る一覧では、R-1 が前の引用と位置に戻っている
+    const p2Input = recording.structured[3]?.input ?? "";
+    expect(p2Input).toContain('"quote": "印を出す。印を出す。"');
+    expect(p2Input).toContain('"start": 0,\n        "end": 10');
+    // 往復は initial → whole-redo の 2 つで、作り直しは先の 1 回だけ
+    expect(result.requirementsDiagnosis.rounds.map((round) => round.fix)).toEqual(["initial", "whole-redo"]);
+    expect(result.requirementsDiagnosis.redone).toBe(true);
+    // 戻したことで 4 文目が覆われなくなり、落ちとして点検されて問いの前に止まる（門を強める側）
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons.map((reason) => reason.code)).toEqual(["uncovered-source"]);
+    // plan-record の診断には、戻した通し番号と件数が出て、ID・引用・原文の文字列は現れない
+    expect(result.requirementsDiagnosis.rounds[1]?.restored).toEqual({ count: 1, requirements: [1] });
+    const diagnosisText = JSON.stringify(result.requirementsDiagnosis);
+    expect(diagnosisText).not.toContain("印を出す");
+    expect(diagnosisText).not.toContain("R-1");
+    // trace には、戻した要件の ID と、戻す前の引用・位置が出る
+    expect(result.reverseCheckTrace?.rounds[1]?.restored).toEqual([
+      { id: "R-1", requirement: 1, quote: "印を出す。", position: { start: 1, end: 20 } },
+    ]);
+    // 戻さない往復（初回）には欄が無い
+    expect(result.reverseCheckTrace?.rounds[0]?.restored).toBeUndefined();
+  });
+
+  it("広げた引用（後の引用が前の部分文字列でない）では戻さず、呼び出しの列が変更前と同じになる", async () => {
+    // 作り直しが、原文に無い引用へ広げようとして写し損ねた（前の引用の部分文字列でもない）。
+    // 位置は 4 文すべてを覆うので、落ちは来歴だけになり、修復の経路へ進む
+    const widened = {
+      ...shrunkList,
+      requirements: shrunkList.requirements.map((requirement) =>
+        requirement.id === "R-1"
+          ? { ...requirement, quote: "印を出す。件数を数える。", position: { start: 0, end: 24 } }
+          : requirement,
+      ),
+    };
+    const recording = createRecordingClient([
+      structured(beforeList),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(widened),
+      structured(REVERSE_CHECK_OUTPUT),
+      // 作り直しの後の来歴だけの落ちは、今までどおり引用の修復へ進む（ここでも直らずに残る）
+      structured({ repairs: [{ index: 0, quote: "印を出す。件数を数える。", position: { start: 0, end: 24 } }] }),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE, { source: KEEP_SOURCE }),
+    );
+    expect(recording.structured.map((request) => request.schemaName)).toEqual([
+      "requirement-list",
+      "reverse-check",
+      "requirement-list",
+      "reverse-check",
+      "requirement-quote-repair",
+      "reverse-check",
+    ]);
+    expect(result.requirementsDiagnosis.rounds.map((round) => round.fix)).toEqual([
+      "initial",
+      "whole-redo",
+      "quote-repair",
+    ]);
+    // 戻していない（診断と trace に戻した件数が出ない）
+    for (const round of result.requirementsDiagnosis.rounds) expect(round.restored).toBeUndefined();
+    for (const round of result.reverseCheckTrace?.rounds ?? []) expect(round.restored).toBeUndefined();
+  });
+});
+
 // ── Issue #925：Plan の経路の P2 に、対応の意味の基準を足す ─────────────────
 
 /** 原文の開始位置から引用の範囲を作る（Issue #925 の試験で使う） */

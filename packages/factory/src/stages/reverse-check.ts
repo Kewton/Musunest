@@ -115,11 +115,42 @@ export interface ReverseCheckInput {
    * 有効にする。省けば（Plan を経ない Build の経路）送る規則は今までどおり 3 文だけである。
    */
   readonly meaningRule?: boolean;
+  /**
+   * この往復の一覧で、作り直しの前に有効だった引用と位置へ**戻した**要件（Issue #942）。**診断にだけ**写し、
+   * 要求のバイト列・判定・やり直しには使わない。省けば空である（戻さない往復）。
+   */
+  readonly restored?: readonly ReverseCheckRestoredRequirement[];
 }
 
 /** ①' の会話の答え */
 interface ReverseCheckAnswer {
   readonly uncovered: readonly SourceRange[];
+}
+
+/**
+ * 作り直しで、前の一覧の引用と位置へ戻した要件 1 つ（Issue #942）。
+ *
+ * `quote`・`position` は**戻す前**（作り直しが出した値）である。`requirement` は、その往復の一覧（戻した後の
+ * 一覧）での通し番号（1 始まり）——番号は ID ではなく検出時の位置から取る（ID の重複に依存しない）。
+ */
+export interface ReverseCheckRestoredRequirement {
+  readonly id: string;
+  /** その要件の、その往復の一覧での通し番号（1 始まり） */
+  readonly requirement: number;
+  /** 作り直しが出した引用（戻す前の値） */
+  readonly quote: string;
+  /** 作り直しが出した位置（戻す前の値） */
+  readonly position: SourceRange;
+}
+
+/**
+ * 作り直しで前の一覧の引用と位置へ戻した要件の、**件数と通し番号だけ**の記録（Issue #942）。
+ * ID・引用・原文の文字列は持たない（`02-failure-modes.md` §1）。
+ */
+export interface ReverseCheckRestoration {
+  readonly count: number;
+  /** 戻した要件の、その往復の一覧での通し番号（1 始まり） */
+  readonly requirements: readonly number[];
 }
 
 /** 原文を文に切り分けるときの区切り（文の終わりと改行） */
@@ -416,6 +447,9 @@ export interface ReverseCheckTraceList {
 /**
  * 1 往復の逆照合の診断（Issue #919）。その往復を照らした一覧の全体と、「要件の一覧」のデータの文の
  * SHA-256、会話が返した生の範囲（応答の順）、コードが見つけた落ち。
+ *
+ * `restored` は、作り直しで前の一覧の引用と位置へ戻した要件である（Issue #942。**戻した要件があるときだけ**
+ * 載せる——戻さない往復と、選択を省いた Build の経路は欄を持たない）。
  */
 export interface ReverseCheckTraceRound {
   readonly fix: ReverseCheckFix;
@@ -423,6 +457,8 @@ export interface ReverseCheckTraceRound {
   readonly listSha256: string;
   readonly reported: readonly ReverseCheckTraceReportedRange[];
   readonly codeMisses: readonly ReverseCheckTraceCodeMiss[];
+  /** 前の一覧の引用と位置へ戻した要件（戻す前の値を持つ。Issue #942） */
+  readonly restored?: readonly ReverseCheckRestoredRequirement[];
 }
 
 /**
@@ -574,6 +610,7 @@ export async function runReverseCheckWithDiagnosis(
     merged.droppedBlankMisses,
     merged.conversationFramingOverlaps,
     input.fix,
+    input.restored,
   );
   const trace: ReverseCheckTraceRound = {
     fix: input.fix ?? "initial",
@@ -598,6 +635,18 @@ export async function runReverseCheckWithDiagnosis(
           ? { start: entry.miss.range.start, end: entry.miss.range.end }
           : null,
     })),
+    // 戻した要件は、戻す前（作り直しが出した）引用と位置とともに残す（Issue #942）。
+    // 戻さない往復は欄を持たない（Build の経路の結果を変えない）
+    ...((input.restored ?? []).length === 0
+      ? {}
+      : {
+          restored: (input.restored ?? []).map((entry) => ({
+            id: entry.id,
+            requirement: entry.requirement,
+            quote: entry.quote,
+            position: { start: entry.position.start, end: entry.position.end },
+          })),
+        }),
   };
   return { ok: true, value: { result, round, trace } };
 }
@@ -685,6 +734,12 @@ export interface ReverseCheckRoundDiagnosis {
    * 値（引用・原文の断片・位置・要件 ID）は入れない。
    */
   readonly fix: ReverseCheckFix;
+  /**
+   * この往復の一覧で、作り直しの前に有効だった引用と位置へ**戻した**要件の件数と通し番号（Issue #942）。
+   * **戻した要件があるときだけ**載せる（無い往復と、選択を省いた Build の経路は欄を持たない——結果を
+   * 変えない）。**ID・引用・原文の文字列は入れない**——番号はこの往復の一覧に限って有効である。
+   */
+  readonly restored?: ReverseCheckRestoration;
 }
 
 /**
@@ -762,6 +817,9 @@ export function countReverseCheckMisses(
  * 通し番号は ID ではなく**検出時の位置**から取る。`misses` はコードの落ちと会話の申告を合わせた一覧である
  * （コードの落ちが先、会話の申告が後）。`conversationFramingOverlaps` は会話の断片ごとの、元の範囲が枠と
  * 重なっていたかである（`misses` の会話分と同じ並び。渡さなければ空として扱う）。
+ *
+ * `restored` は、この往復の一覧で作り直しの前に有効だった引用と位置へ戻した要件である（Issue #942。
+ * 渡さなければ戻していないとして扱う）。診断には**件数と通し番号だけ**を写し、ID・引用・原文は写さない。
  */
 export function diagnoseReverseCheckRound(
   source: string,
@@ -770,6 +828,7 @@ export function diagnoseReverseCheckRound(
   droppedBlankMisses: number,
   conversationFramingOverlaps: readonly boolean[] = [],
   fix: ReverseCheckFix = "initial",
+  restored: readonly ReverseCheckRestoredRequirement[] = [],
 ): ReverseCheckRoundDiagnosis {
   const sentences = splitSourceSentences(source);
   const overlaps = (left: SourceRange, right: SourceRange): boolean =>
@@ -832,6 +891,11 @@ export function diagnoseReverseCheckRound(
     sentences: coverage,
     missEntries: entries,
     fix,
+    // 戻した要件は、件数と通し番号だけを写す（ID・引用・原文は入れない。Issue #942）。
+    // 戻さない往復は欄を持たない（Build の経路の結果を変えない）
+    ...(restored.length === 0
+      ? {}
+      : { restored: { count: restored.length, requirements: restored.map((entry) => entry.requirement) } }),
   };
 }
 
@@ -852,6 +916,12 @@ export interface ReverseCheckLoopInput {
    * Build の経路）呼び出しの列・要求のバイト列・結果を変えない。`quoteRepair` には相乗りしない（別の直し）。
    */
   readonly meaningRule?: boolean;
+  /**
+   * 全体の作り直しの後、P2 を呼ぶ前に、**前の一覧で有効だった引用と位置へ戻す**か（Issue #942。
+   * **Plan の経路だけ**が明示の選択で有効にする）。省けば（Plan を経ない Build の経路）呼び出しの列・
+   * 要求のバイト列・結果を変えない。`quoteRepair` と同じ形の別の選択であり、相乗りしない。
+   */
+  readonly keepValidProvenance?: boolean;
 }
 
 /** ①' と ① のやり直しの結果 */
@@ -917,6 +987,62 @@ export function applyQuoteRepairs(
       };
     }),
   };
+}
+
+/**
+ * 引用と位置が、コードの来歴の検査（引用が原文に実在する・位置が引用と一致する）を通るか（Issue #942）。
+ * 検査の内容は P2 のコードの検査（`checkRequirementCoverageDetailed`）と同じにする——ここだけ別の門にしない。
+ */
+function provenanceValid(source: string, requirement: Requirement): boolean {
+  if (requirement.quote === "" || !source.includes(requirement.quote)) return false;
+  const { start, end } = requirement.position;
+  return start >= 0 && end <= source.length && start <= end && source.slice(start, end) === requirement.quote;
+}
+
+/** 一覧の中で、その ID の要件がいくつあるか（Issue #942。一意性は仮定しない） */
+function requirementCountOf(requirements: readonly Requirement[], id: string): number {
+  return requirements.filter((requirement) => requirement.id === id).length;
+}
+
+/**
+ * 全体の作り直しの後、**前の一覧の引用と位置へ戻す**要件だけを戻す（Issue #942。**Plan の経路だけ**が
+ * `keepValidProvenance` で有効にする）。次の 4 つをすべて満たす要件だけを戻す：
+ *
+ *   1. 同じ ID の要件が、前の一覧にも後の一覧にも**ちょうど 1 つ**あり、本文（`text`）がバイト列で同じ
+ *   2. 前の引用と位置が、コードの来歴の検査を通る
+ *   3. 後の引用と位置が、同じ検査で落ちる
+ *   4. 後の引用が、前の引用の**部分文字列**である（作り直しが引用を縮めた）
+ *
+ * 戻すのは引用と位置の 2 欄だけで、本文・ID・部分（`parts`）・並び・ほかの要件は変えない。4 つのどれかを
+ * 満たさない（本文が変わった・ID が重複する／前に無い・前も落ちていた・後が有効・広げた）要件は戻さず、
+ * 今までどおり引用の修復の経路に任せる。戻した要件は**戻す前**（作り直しが出した）引用と位置とともに返す。
+ * **純粋な関数**である。
+ */
+export function restoreValidProvenance(
+  source: string,
+  previous: RequirementList,
+  redone: RequirementList,
+): { readonly list: RequirementList; readonly restored: readonly ReverseCheckRestoredRequirement[] } {
+  const restored: ReverseCheckRestoredRequirement[] = [];
+  const requirements = redone.requirements.map((requirement, index) => {
+    if (requirementCountOf(previous.requirements, requirement.id) !== 1) return requirement;
+    if (requirementCountOf(redone.requirements, requirement.id) !== 1) return requirement;
+    const before = previous.requirements.find((candidate) => candidate.id === requirement.id);
+    if (before === undefined || before.text !== requirement.text) return requirement;
+    if (!provenanceValid(source, before)) return requirement;
+    if (provenanceValid(source, requirement)) return requirement;
+    // 後の引用が前の引用の部分文字列でなければ（広げた・別の所を指した・原文に無い）戻さない
+    if (!before.quote.includes(requirement.quote)) return requirement;
+    restored.push({
+      id: requirement.id,
+      requirement: index + 1,
+      quote: requirement.quote,
+      position: { start: requirement.position.start, end: requirement.position.end },
+    });
+    return { ...requirement, quote: before.quote, position: { start: before.position.start, end: before.position.end } };
+  });
+  if (restored.length === 0) return { list: redone, restored };
+  return { list: { ...redone, requirements }, restored };
 }
 
 /**
@@ -1088,18 +1214,25 @@ export async function runReverseCheckLoopWithOperation(
     if (!redone.ok) return stop(redone.failure, "requirements-redo");
     // ここから先は、① のやり直しが成功している（2 回目の逆照合で止まっても `redone` を true にする）
     redoCompleted = true;
+    // 作り直しが、落ちていなかった要件の有効な引用と位置まで置き換えたときは、**前の一覧の値に戻す**
+    // （Issue #942。Plan の経路の明示の選択だけ）。戻すのは引用と位置の 2 欄だけで、呼び出しは増やさない。
+    const kept =
+      input.keepValidProvenance === true
+        ? restoreValidProvenance(input.source, current, redone.value)
+        : { list: redone.value, restored: [] as readonly ReverseCheckRestoredRequirement[] };
     const second = await runReverseCheckWithDiagnosis({
       source: input.source,
-      list: redone.value,
+      list: kept.list,
       documents: input.documents,
       gateway: input.gateway,
       fix: "whole-redo",
       ...(input.meaningRule === true ? { meaningRule: true } : {}),
+      ...(kept.restored.length === 0 ? {} : { restored: kept.restored }),
     });
     if (!second.ok) return stop(second.failure, "reverse-check-redo");
     rounds.push(second.value.round);
     traces.push(second.value.trace);
-    current = redone.value;
+    current = kept.list;
     currentReport = second.value.result;
     return "ok";
   };
