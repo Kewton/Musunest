@@ -312,6 +312,13 @@ export const PLAN_SURFACE_CHECK_SCHEMA = "musunest-factory/plan-surface-check/v1
 export const PLAN_REVERSE_CHECK_TRACE_FILE = "plan-reverse-check-trace.json" as const;
 /** 逆照合の診断の版 */
 export const PLAN_REVERSE_CHECK_TRACE_SCHEMA = "musunest-factory/plan-reverse-check-trace/v1" as const;
+/**
+ * 差分の洗い出しが受理した行の、前の答えとの関係の記録を置くファイルの名前（`--out` の直下。
+ * `plan-record.json` とは**別**。Issue #938）。事項の文を含むので、`plan-record.json` には写さない。
+ */
+export const PLAN_SURFACE_RELATION_TRACE_FILE = "plan-surface-relation-trace.json" as const;
+/** 関係の trace の版 */
+export const PLAN_SURFACE_RELATION_TRACE_SCHEMA = "musunest-factory/plan-surface-relation-trace/v1" as const;
 
 /** 記録に入れる問い（安定した形に写す） */
 export interface PlanCliQuestionRecord {
@@ -706,6 +713,16 @@ export interface PlanCliIssueFlowRecord {
   readonly inherited_resolved: number;
   readonly end_open: PlanCliIssueFlowOpenCounts;
   readonly end: string;
+  /** 差分の洗い出しの関係ごとの件数（Issue #938） */
+  readonly relations: readonly PlanCliIssueFlowRelationCount[];
+  /** 系統の照合で落ちた件数（Issue #938） */
+  readonly relation_check_failed: number;
+}
+
+/** 関係ごとの、差分の洗い出しが受理した行の件数（Issue #938） */
+export interface PlanCliIssueFlowRelationCount {
+  readonly relation: string;
+  readonly count: number;
 }
 
 /**
@@ -983,6 +1000,51 @@ export function buildReverseCheckTraceDiagnostic(input: {
   };
 }
 
+/** 差分の洗い出しが受理した行 1 つ（事項の文を含む。Issue #938） */
+export interface PlanCliSurfaceRelationTraceRow {
+  readonly revision: number;
+  readonly issue_id: string;
+  readonly requirement_id: string;
+  readonly relation: string;
+  readonly answer_id: string | null;
+  /** 系統の照合の結果（`passed`・`failed`・`not-applicable`） */
+  readonly check: string;
+  readonly text: string;
+  readonly critical: boolean;
+}
+
+/** 差分の洗い出しの関係の trace（`--out` の `plan-surface-relation-trace.json`。Issue #938） */
+export interface PlanCliSurfaceRelationTraceDiagnostic {
+  readonly schema_version: string;
+  readonly plan_id: string;
+  readonly rows: readonly PlanCliSurfaceRelationTraceRow[];
+}
+
+/**
+ * 差分の洗い出しが受理した行の、前の答えとの関係の trace を、別ファイルに書く形（snake_case）に組む
+ * （Issue #938）。**受理した行が無ければ空の `rows`** である。事項の文はこのファイルにだけ載せ、
+ * `plan-record.json` には写さない。
+ */
+export function buildSurfaceRelationTraceDiagnostic(input: {
+  readonly result: PlanResult;
+  readonly planId: string;
+}): PlanCliSurfaceRelationTraceDiagnostic {
+  return {
+    schema_version: PLAN_SURFACE_RELATION_TRACE_SCHEMA,
+    plan_id: input.planId,
+    rows: input.result.surfaceRelationTrace.map((row) => ({
+      revision: row.revision,
+      issue_id: row.issueId,
+      requirement_id: row.requirementId,
+      relation: row.relation,
+      answer_id: row.answerId,
+      check: row.check,
+      text: row.text,
+      critical: row.critical,
+    })),
+  };
+}
+
 /**
  * 文字列（UTF-8）の SHA-256 を、小文字の 16 進 64 桁で返す（台本の内容の指紋。Issue #444）。
  * `crypto.subtle` を使うので依存を増やさない（`planDigest` と同じ手）。
@@ -1103,6 +1165,10 @@ export function buildPlanCliRecord(input: {
       inherited_resolved: row.inheritedResolved,
       end_open: { critical: row.endOpen.critical, non_critical: row.endOpen.nonCritical },
       end: row.end,
+      // 差分の洗い出しの関係ごとの件数と、系統の照合で落ちた件数（文は入れない。Issue #938）。
+      // 古い合成の結果（この欄を持たない録画）でも書けるように、無ければ 0 件として組む。
+      relations: (row.relations ?? []).map((entry) => ({ relation: entry.relation, count: entry.count })),
+      relation_check_failed: row.relationCheckFailed ?? 0,
     })),
     // 終わりに残った事項（ID を含む。文は入れない。Issue #488・#930）
     remaining_open_issues: input.result.remainingOpenIssues.map((issue) => ({
