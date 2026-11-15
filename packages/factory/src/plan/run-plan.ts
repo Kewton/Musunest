@@ -2206,6 +2206,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         // 全体の作り直しの後、落ちていなかった要件の有効な引用と位置を前の一覧の値に戻す（Issue #942。
         // **Plan の経路だけ**の明示の選択である。既定の Build の経路は呼び出しの列・要求・結果を変えない）
         keepValidProvenance: true,
+        // 条件の指摘の詳細（findingDetails）を求める派生 schema を、3 つの P2 すべてに使う（Issue #948。
+        // **Plan の経路だけ**の明示の選択である。既定の Build の経路は schema・要求・結果を変えない）
+        observeConditionFindings: true,
       });
       // 止まったときも、止まるまでに終えた往復の分を結果へ残す（Issue #430・#919）
       requirementsDiagnosis = outcome.ok ? outcome.value.diagnosis : outcome.diagnosis;
