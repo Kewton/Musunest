@@ -34,9 +34,12 @@ import {
 import { SCRIPT_MATCHER_VERSION, type PlanScriptMatch, type ScriptMatchState } from "./plan/script-responder.js";
 import { isRecord } from "./stages/prompt.js";
 import type {
+  ReverseCheckConditionFindingCounts,
+  ReverseCheckConditionFindingsDiagnosis,
   ReverseCheckDiagnosis,
   ReverseCheckMissCounts,
   ReverseCheckTrace,
+  ReverseCheckTraceConditionFindings,
   ReverseCheckTraceList,
 } from "./stages/reverse-check.js";
 
@@ -607,6 +610,31 @@ export interface PlanCliRoundDiagnosisRecord {
    * **戻した要件があるときだけ**載せる。**ID・引用・原文の文字列は入れない**。
    */
   readonly restored?: PlanCliRestoredRecord;
+  /**
+   * 条件の指摘の件数（Issue #948）。**Plan の経路だけ**が欄を持ち、**件数だけ**を載せる
+   * （ID・範囲・本文・引用は入れない）。
+   */
+  readonly condition_findings?: PlanCliConditionFindingsRecord;
+}
+
+/** 記録に入れる、条件の指摘の件数の内訳（全体・2 群。Issue #948） */
+export interface PlanCliConditionFindingCountsRecord {
+  /** 元の指摘の行数（分母） */
+  readonly raw_count: number;
+  readonly matched: number;
+  readonly unbound: number;
+  readonly missing: number;
+  readonly invalid: number;
+  /** 既知の種類の集計（和は `matched + unbound`） */
+  readonly kinds: Readonly<Record<string, number>>;
+}
+
+/** 記録に入れる、1 往復の条件の指摘の件数（全体・remaining 群・非 remaining 群・行き先の無い行。Issue #948） */
+export interface PlanCliConditionFindingsRecord {
+  readonly whole: PlanCliConditionFindingCountsRecord;
+  readonly remaining: PlanCliConditionFindingCountsRecord;
+  readonly other: PlanCliConditionFindingCountsRecord;
+  readonly orphans: number;
 }
 
 /** 記録に入れる、作り直しで戻した要件の件数と通し番号（値は入れない。Issue #942） */
@@ -861,6 +889,32 @@ function toMissCountsRecord(counts: ReverseCheckMissCounts): PlanCliMissCountsRe
   };
 }
 
+/** 条件の指摘の件数を、記録の形（snake_case）に写す（件数だけ。Issue #948） */
+function toConditionFindingCountsRecord(
+  counts: ReverseCheckConditionFindingCounts,
+): PlanCliConditionFindingCountsRecord {
+  return {
+    raw_count: counts.rawCount,
+    matched: counts.matched,
+    unbound: counts.unbound,
+    missing: counts.missing,
+    invalid: counts.invalid,
+    kinds: { ...counts.kinds },
+  };
+}
+
+/** 1 往復の条件の指摘の件数を、記録の形（snake_case）に写す（Issue #948） */
+function toConditionFindingsRecord(
+  findings: ReverseCheckConditionFindingsDiagnosis,
+): PlanCliConditionFindingsRecord {
+  return {
+    whole: toConditionFindingCountsRecord(findings.whole),
+    remaining: toConditionFindingCountsRecord(findings.remaining),
+    other: toConditionFindingCountsRecord(findings.other),
+    orphans: findings.orphans,
+  };
+}
+
 /** 往復ごとの逆照合の診断を、記録の形（snake_case）に写す（Issue #430・#488） */
 function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCliRequirementsDiagnosisRecord {
   return {
@@ -891,6 +945,10 @@ function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCl
               requirements: round.restored.requirements.slice(),
             },
           }),
+      // 条件の指摘の件数は、Plan の往復だけが持つ（件数だけ。Issue #948）
+      ...(round.conditionFindings === undefined
+        ? {}
+        : { condition_findings: toConditionFindingsRecord(round.conditionFindings) }),
     })),
     redone: diagnosis.redone,
     unmet: toMissCountsRecord(diagnosis.unmet),
@@ -974,6 +1032,31 @@ export interface PlanCliTraceRestoredRequirement {
   readonly position: PlanCliTraceRange;
 }
 
+/** 条件の指摘 1 件の記録（元の添字・範囲・行き先・種類・対象 ID・照合状態・理由。Issue #948） */
+export interface PlanCliTraceConditionFinding {
+  readonly index: number;
+  readonly range: PlanCliTraceRange;
+  readonly destination: string;
+  readonly kind: string | null;
+  readonly requirement_ids: readonly string[];
+  readonly match: string;
+  readonly failure: string | null;
+}
+
+/** 行き先を持たない条件の指摘の行（元の添字が不正・範囲外。Issue #948） */
+export interface PlanCliTraceConditionOrphan {
+  readonly uncovered_index: number;
+  readonly kind: string;
+  readonly requirement_ids: readonly string[];
+  readonly failure: string;
+}
+
+/** 1 往復の条件の指摘の記録（Issue #948） */
+export interface PlanCliTraceConditionFindings {
+  readonly rows: readonly PlanCliTraceConditionFinding[];
+  readonly orphans: readonly PlanCliTraceConditionOrphan[];
+}
+
 /** 1 往復の逆照合の診断（Issue #919）。一覧の全体とその SHA-256・会話の生の範囲・コードの落ち */
 export interface PlanCliReverseCheckTraceRound {
   readonly fix: string;
@@ -983,6 +1066,8 @@ export interface PlanCliReverseCheckTraceRound {
   readonly code_misses: readonly PlanCliTraceCodeMiss[];
   /** 前の一覧の引用と位置へ戻した要件（戻す前の値。戻さない往復は欄を持たない。Issue #942） */
   readonly restored?: readonly PlanCliTraceRestoredRequirement[];
+  /** 条件の指摘の詳細と照合状態（派生 schema を送った往復だけ。Issue #948） */
+  readonly condition_findings?: PlanCliTraceConditionFindings;
 }
 
 /** 逆照合の往復ごとの診断（`--out` の `plan-reverse-check-trace.json`。Issue #919） */
@@ -994,6 +1079,27 @@ export interface PlanCliReverseCheckTraceDiagnostic {
   /** 原文の長さ（文字数） */
   readonly source_length: number;
   readonly rounds: readonly PlanCliReverseCheckTraceRound[];
+}
+
+/** 1 往復の条件の指摘の記録を、別ファイルの形（snake_case）に写す（Issue #948） */
+function toTraceConditionFindings(findings: ReverseCheckTraceConditionFindings): PlanCliTraceConditionFindings {
+  return {
+    rows: findings.rows.map((row) => ({
+      index: row.index,
+      range: { start: row.range.start, end: row.range.end },
+      destination: row.destination,
+      kind: row.kind,
+      requirement_ids: row.requirementIds.slice(),
+      match: row.match,
+      failure: row.failure,
+    })),
+    orphans: findings.orphans.map((orphan) => ({
+      uncovered_index: orphan.uncoveredIndex,
+      kind: orphan.kind,
+      requirement_ids: orphan.requirementIds.slice(),
+      failure: orphan.failure,
+    })),
+  };
 }
 
 /**
@@ -1041,6 +1147,10 @@ export function buildReverseCheckTraceDiagnostic(input: {
               position: { start: entry.position.start, end: entry.position.end },
             })),
           }),
+      // 条件の指摘の詳細と照合状態は、派生 schema を送った往復だけが持つ（Issue #948）
+      ...(round.conditionFindings === undefined
+        ? {}
+        : { condition_findings: toTraceConditionFindings(round.conditionFindings) }),
     })),
   };
 }

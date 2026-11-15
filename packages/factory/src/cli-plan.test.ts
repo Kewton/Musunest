@@ -481,6 +481,32 @@ interface PlanCliRecordShape {
         readonly count: number;
         readonly requirements: readonly number[];
       };
+      /** 条件の指摘の件数（Plan の往復だけ。件数だけ。Issue #948） */
+      readonly condition_findings?: {
+        readonly whole: {
+          readonly raw_count: number;
+          readonly matched: number;
+          readonly unbound: number;
+          readonly missing: number;
+          readonly invalid: number;
+          readonly kinds: Readonly<Record<string, number>>;
+        };
+        readonly remaining: {
+          readonly raw_count: number;
+          readonly matched: number;
+          readonly unbound: number;
+          readonly missing: number;
+          readonly invalid: number;
+        };
+        readonly other: {
+          readonly raw_count: number;
+          readonly matched: number;
+          readonly unbound: number;
+          readonly missing: number;
+          readonly invalid: number;
+        };
+        readonly orphans: number;
+      };
     }[];
     readonly redone: boolean;
     readonly unmet: {
@@ -1621,6 +1647,27 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
       position_mismatch: 0,
       uncovered_source: { code: 1, conversation: 1 },
     };
+    // 条件の指摘の件数（Issue #948）。会話の指摘 1 件には詳細が無く、missing として数える
+    const zeroKinds = {
+      target: 0,
+      negation: 0,
+      exception: 0,
+      time: 0,
+      deadline: 0,
+      quantity: 0,
+      scope: 0,
+      wording: 0,
+      "shared-modifier": 0,
+      "reference-source": 0,
+      other: 0,
+      unclear: 0,
+    };
+    const conditionFindings = {
+      whole: { raw_count: 1, matched: 0, unbound: 0, missing: 1, invalid: 0, kinds: zeroKinds },
+      remaining: { raw_count: 1, matched: 0, unbound: 0, missing: 1, invalid: 0, kinds: zeroKinds },
+      other: { raw_count: 0, matched: 0, unbound: 0, missing: 0, invalid: 0, kinds: zeroKinds },
+      orphans: 0,
+    };
     // 文ごとの覆いと指摘の行（番号と有限の分類だけ。Issue #488）
     const expectedRound = {
       misses: expected,
@@ -1636,6 +1683,7 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
         { kind: "uncovered-source", found_by: "code", sentences: [2], requirements: [], framing_overlap: false },
         { kind: "uncovered-source", found_by: "conversation", sentences: [1], requirements: [1], framing_overlap: false },
       ],
+      condition_findings: conditionFindings,
     };
     expect(record.requirements_diagnosis).toEqual({
       rounds: [
@@ -5131,5 +5179,104 @@ describe("差分の洗い出しの関係を、別ファイルの trace と plan-
     expect(recordText).not.toContain("A:Q1-1");
     expect(record).not.toHaveProperty("surface_relation_trace");
     expect(record).not.toHaveProperty("surfaceRelationTrace");
+  });
+});
+
+// ── Issue #948：条件の指摘の記録を trace にだけ置き、plan-record には件数だけを写す ──────────
+
+describe("T2条件指摘の記録", () => {
+  it("条件の指摘の詳細を trace に残し、plan-record には件数だけを写す（ID・引用・本文の目印は出ない）", async () => {
+    const source = "MARKSRC1を記録する。MARKSRC2を合計する。";
+    const spanOf = (quote: string): { readonly start: number; readonly end: number } => {
+      const start = source.indexOf(quote);
+      return { start, end: start + quote.length };
+    };
+    const list = {
+      requirements: [
+        {
+          id: "MARKID1",
+          text: "MARKTEXT1を記録できる",
+          quote: "MARKSRC1を記録する。",
+          position: spanOf("MARKSRC1を記録する。"),
+        },
+        {
+          id: "MARKID2",
+          text: "MARKTEXT2を合計できる",
+          quote: "MARKSRC2を合計する。",
+          position: spanOf("MARKSRC2を合計する。"),
+        },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const answer = {
+      uncovered: [{ start: 0, end: 3 }],
+      findingDetails: [{ uncoveredIndex: 0, missingKind: "time", requirementIds: ["MARKID1"] }],
+    };
+    // 初回の P2 が覆いを含む（会話の指摘）→ 作り直し → 作り直しの P2 も覆いを含み、問いの前に止まる
+    const recording = createRecordingClient([
+      structured(list),
+      structured(answer),
+      structured(list),
+      structured(answer),
+    ]);
+    const dir = `${directory}/condition-findings-record`;
+    const answersPath = "condition-findings-answers.json";
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan-only", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : source),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => createFakeJudge({}),
+      now: () => 0,
+      log: () => {},
+    });
+    expect(code).toBe(EXIT_RUN_FAILED);
+
+    // trace には、元の添字・範囲・行き先・種類・対象 ID・照合状態が残る
+    const trace = JSON.parse(await fs.readFile(`${dir}/${PLAN_REVERSE_CHECK_TRACE_FILE}`, "utf8"));
+    expect(trace.rounds[0].condition_findings).toEqual({
+      rows: [
+        {
+          index: 0,
+          range: { start: 0, end: 3 },
+          destination: "remaining",
+          kind: "time",
+          requirement_ids: ["MARKID1"],
+          match: "matched",
+          failure: null,
+        },
+      ],
+      orphans: [],
+    });
+    // 2 つの往復（初回・作り直し）のどちらにも記録がある
+    expect(trace.rounds.map((round: { readonly fix: string }) => round.fix)).toEqual(["initial", "whole-redo"]);
+    for (const round of trace.rounds) expect(round.condition_findings).toBeDefined();
+
+    // plan-record には件数だけが写り、ID・引用・本文・原文の目印は現れない
+    const record = await readPlanRecord(dir);
+    const counts = record.requirements_diagnosis.rounds[0]?.condition_findings;
+    expect(counts).toBeDefined();
+    expect(counts?.whole).toMatchObject({ raw_count: 1, matched: 1, unbound: 0, missing: 0, invalid: 0 });
+    expect(counts?.whole.kinds["time"]).toBe(1);
+    expect(counts?.remaining).toMatchObject({ raw_count: 1, matched: 1 });
+    expect(counts?.other).toMatchObject({ raw_count: 0, matched: 0 });
+    expect(counts?.orphans).toBe(0);
+    const recordText = JSON.stringify(record);
+    for (const marker of ["MARKSRC1", "MARKSRC2", "MARKID1", "MARKID2", "MARKTEXT1", "MARKTEXT2"]) {
+      expect(recordText).not.toContain(marker);
+    }
+    // 既存の plan-record の形は変えない（別ファイルのまま）
+    expect(record).not.toHaveProperty("reverse_check_trace");
+    expect(record).not.toHaveProperty("reverseCheckTrace");
   });
 });

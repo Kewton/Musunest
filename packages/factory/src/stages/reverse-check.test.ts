@@ -18,20 +18,27 @@ import type {
 } from "../llm.js";
 import type { RequirementList } from "../pipeline.js";
 import {
+  REVERSE_CHECK_CONDITION_KINDS,
+  REVERSE_CHECK_FINDING_DETAILS_KEY,
   REVERSE_CHECK_MEANING_RULE_DEFINITIONS,
   REVERSE_CHECK_RULES,
   REVERSE_CHECK_SCHEMA,
   REVERSE_CHECK_SCHEMA_NAME,
   checkRequirementCoverage,
+  checkReverseCheckOutputWithConditionFindings,
+  classifyConditionFindings,
   isBlankRange,
+  isKnownConditionKind,
   overlappingSentences,
   reverseCheckRulesOf,
+  reverseCheckSchemaOf,
   restoreValidProvenance,
   runReverseCheck,
   runReverseCheckLoop,
   runReverseCheckLoopWithOperation,
   runReverseCheckWithDiagnosis,
   splitSourceSentences,
+  summarizeConditionFindings,
 } from "./reverse-check.js";
 import { ruleDefinitionDefects } from "./prompt.js";
 import {
@@ -2410,5 +2417,618 @@ describe("作り直しで、落ちていなかった要件の有効な引用と�
     // 往復の診断にも trace にも、`restored` の欄が増えない
     for (const round of outcome.value.diagnosis.rounds) expect(round.restored).toBeUndefined();
     for (const round of outcome.value.trace?.rounds ?? []) expect(round.restored).toBeUndefined();
+  });
+});
+
+// ── Issue #948：Plan の逆照合に条件の指摘の契約と記録を足す（段 1・行き先は変えない）──
+
+/** 3 文の原文。最初の 2 文だけを覆う一覧（3 文目が覆われず、作り直しが走る） */
+const CONDITION_SOURCE = "記録する。合計する。印を出す。";
+const CONDITION_LIST: RequirementList = {
+  requirements: [
+    { id: "R-1", text: "記録できる", quote: "記録する。", position: { start: 0, end: 5 } },
+    { id: "R-2", text: "合計できる", quote: "合計する。", position: { start: 5, end: 10 } },
+  ],
+  framing: [],
+  decisions: [],
+  unresolved: [],
+};
+/** 作り直しの後の一覧（3 文すべてを覆う） */
+const CONDITION_REDONE: RequirementList = {
+  requirements: [
+    ...CONDITION_LIST.requirements,
+    { id: "R-3", text: "印を出せる", quote: "印を出す。", position: { start: 10, end: 15 } },
+  ],
+  framing: [],
+  decisions: [],
+  unresolved: [],
+};
+
+/** 条件の指摘の件数の集計の、種類の和（Issue #948 の試験で使う） */
+const conditionKindSum = (value: { readonly kinds: Readonly<Record<string, number>> }): number =>
+  Object.values(value.kinds).reduce((sum, count) => sum + count, 0);
+
+/** 追加の記録を除いた、逆照合のループの結果（Issue #948 の前後比較に使う） */
+const conditionCoreOf = (value: {
+  readonly list: unknown;
+  readonly report: unknown;
+  readonly redone: boolean;
+  readonly repaired: boolean;
+  readonly unmet: unknown;
+}) => ({
+  list: value.list,
+  report: value.report,
+  redone: value.redone,
+  repaired: value.repaired,
+  unmet: value.unmet,
+});
+
+/** 条件の指摘の記録を試す 1 往復（派生 schema の選択を明示する） */
+async function conditionOnce(
+  list: RequirementList,
+  uncovered: readonly { readonly start: number; readonly end: number }[],
+  findingDetails: readonly unknown[] | undefined,
+) {
+  const output =
+    findingDetails === undefined ? { uncovered } : { uncovered, findingDetails };
+  const recording = createRecordingClient([structured(output)]);
+  const outcome = await runReverseCheckWithDiagnosis({
+    source: CONDITION_SOURCE,
+    list,
+    documents: [],
+    gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    observeConditionFindings: true,
+  });
+  expect(outcome.ok).toBe(true);
+  if (!outcome.ok) return undefined;
+  return { ...outcome.value, recording };
+}
+
+/** 条件の指摘の記録を試すループ（初回 → 作り直し。詳細だけを差し替える） */
+async function conditionLoop(
+  initialUncovered: readonly { readonly start: number; readonly end: number }[],
+  initialDetails: readonly unknown[],
+  redoneUncovered: readonly { readonly start: number; readonly end: number }[] = [],
+  redoneDetails: readonly unknown[] = [],
+) {
+  const recording = createRecordingClient([
+    structured(CONDITION_LIST),
+    structured({ uncovered: initialUncovered, findingDetails: initialDetails }),
+    structured(CONDITION_REDONE),
+    structured({ uncovered: redoneUncovered, findingDetails: redoneDetails }),
+  ]);
+  const outcome = await runReverseCheckLoopWithOperation({
+    source: CONDITION_SOURCE,
+    documents: [],
+    gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    observeConditionFindings: true,
+  });
+  return { recording, outcome };
+}
+
+describe("T2条件指摘の記録", () => {
+  it("種類と本文上の対象を、元の添字・範囲・行き先とともに trace へ残す（前は欄が無い）", async () => {
+    const once = await conditionOnce(CONDITION_LIST, [{ start: 8, end: 12 }], [
+      { uncoveredIndex: 0, missingKind: "negation", requirementIds: ["R-2"] },
+    ]);
+    expect(once).toBeDefined();
+    if (once === undefined) return;
+    // 元の範囲は会話ではなくコードが元の uncovered から取る（8-12 は枠が無いので 8-12 のまま残る）
+    expect(once.trace.conditionFindings).toEqual({
+      rows: [
+        {
+          index: 0,
+          range: { start: 8, end: 12 },
+          destination: "remaining",
+          kind: "negation",
+          requirementIds: ["R-2"],
+          match: "matched",
+          failure: null,
+        },
+      ],
+      orphans: [],
+    });
+    // 行き先は 5 つのまま（照合状態とは別の軸）
+    expect(once.trace.reported[0]?.destination).toBe("remaining");
+  });
+
+  it("通常診断は件数だけで、全体＝2 群の和・種類の和＝matched＋unbound になる", async () => {
+    // 5 つの行き先を 1 往復に並べる（remaining・duplicate・blank・framing・outside）＋行き先の無い行
+    const source = "記録する。合計する。印を出す。";
+    const list: RequirementList = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "記録する。", position: { start: 0, end: 5 } },
+        { id: "R-2", text: "合計できる", quote: "合計する。", position: { start: 5, end: 10 } },
+      ],
+      framing: [{ quote: "印を出す。", position: { start: 10, end: 15 } }],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured({
+        uncovered: [
+          { start: 8, end: 12 },
+          { start: 8, end: 12 },
+          { start: 4, end: 5 },
+          { start: 10, end: 15 },
+          { start: 5, end: 5 },
+        ],
+        findingDetails: [
+          { uncoveredIndex: 0, missingKind: "time", requirementIds: ["R-1"] },
+          { uncoveredIndex: 1, missingKind: "scope", requirementIds: [] },
+          { uncoveredIndex: 2, missingKind: "deadline", requirementIds: ["R-2"] },
+          { uncoveredIndex: 3, missingKind: "quantity", requirementIds: ["R-1", "R-2"] },
+          { uncoveredIndex: 4, missingKind: "target", requirementIds: ["R-1"] },
+          { uncoveredIndex: 9, missingKind: "other", requirementIds: [] },
+        ],
+      }),
+    ]);
+    const outcome = await runReverseCheckWithDiagnosis({
+      source,
+      list,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      observeConditionFindings: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 5 つの行き先と照合状態を別々に検査する
+    expect(outcome.value.trace.reported.map((entry) => entry.destination)).toEqual([
+      "remaining",
+      "duplicate",
+      "blank",
+      "framing",
+      "outside",
+    ]);
+    expect(outcome.value.trace.conditionFindings?.rows.map((row) => row.match)).toEqual([
+      "matched",
+      "unbound",
+      "matched",
+      "matched",
+      "invalid",
+    ]);
+    expect(outcome.value.trace.conditionFindings?.rows[4]?.failure).toBe("outside");
+    expect(outcome.value.trace.conditionFindings?.orphans).toEqual([
+      { uncoveredIndex: 9, kind: "other", requirementIds: [], failure: "index-out-of-range" },
+    ]);
+
+    const counts = outcome.value.round.conditionFindings;
+    expect(counts).toBeDefined();
+    if (counts === undefined) return;
+    // 全体：raw 5 = matched 3 + unbound 1 + missing 0 + invalid 1
+    expect(counts.whole.rawCount).toBe(5);
+    expect(counts.whole).toMatchObject({ matched: 3, unbound: 1, missing: 0, invalid: 1 });
+    // remaining 群（1）＋ 非 remaining 群（4）＝全体
+    expect(counts.remaining.rawCount).toBe(1);
+    expect(counts.other.rawCount).toBe(4);
+    expect(counts.remaining.rawCount + counts.other.rawCount).toBe(counts.whole.rawCount);
+    expect(counts.remaining.matched).toBe(1);
+    expect(counts.other).toMatchObject({ matched: 2, unbound: 1, missing: 0, invalid: 1 });
+    // framing・duplicate の matched と blank は非 remaining 群に入る
+    expect(counts.other.matched).toBe(2);
+    expect(counts.remaining.matched).toBe(1);
+    // orphan は分母に入れない
+    expect(counts.orphans).toBe(1);
+    // 種類の和は matched＋unbound（既知の種類だけ）
+    expect(conditionKindSum(counts.whole)).toBe(counts.whole.matched + counts.whole.unbound);
+    expect(conditionKindSum(counts.remaining)).toBe(counts.remaining.matched + counts.remaining.unbound);
+    expect(conditionKindSum(counts.other)).toBe(counts.other.matched + counts.other.unbound);
+    expect(conditionKindSum(counts.whole)).toBe(
+      conditionKindSum(counts.remaining) + conditionKindSum(counts.other),
+    );
+    // 通常診断に ID・原文範囲・本文・引用は出さない
+    const text = JSON.stringify(counts);
+    expect(text).not.toContain("R-1");
+    expect(text).not.toContain("印を出す");
+    expect(text).not.toContain("start");
+  });
+
+  it("元指摘 1 件から断片 2 件が残っても、分母は 1 である", async () => {
+    const source = "ABCDEFGHIJ";
+    const list: RequirementList = {
+      requirements: [{ id: "R-1", text: "全体", quote: "ABCDEFGHIJ", position: { start: 0, end: 10 } }],
+      // 2 か所を枠にすると、1 つの範囲が 2 つの断片になる
+      framing: [{ quote: "CD", position: { start: 2, end: 4 } }],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured({
+        uncovered: [{ start: 1, end: 5 }],
+        findingDetails: [{ uncoveredIndex: 0, missingKind: "wording", requirementIds: ["R-1"] }],
+      }),
+    ]);
+    const outcome = await runReverseCheckWithDiagnosis({
+      source,
+      list,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      observeConditionFindings: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.trace.reported[0]?.fragments).toEqual([
+      { start: 1, end: 2 },
+      { start: 4, end: 5 },
+    ]);
+    expect(outcome.value.round.conditionFindings?.whole.rawCount).toBe(1);
+    expect(outcome.value.round.conditionFindings?.whole.matched).toBe(1);
+  });
+
+  it("Plan だけが派生 schema を選び、ほかの要求の欄は 1 つも変えない", async () => {
+    const build = createRecordingClient([structured({ uncovered: [] })]);
+    await runReverseCheckWithDiagnosis({
+      source: CONDITION_SOURCE,
+      list: CONDITION_LIST,
+      documents: [],
+      gateway: makeGateway(build.client, { maxAttempts: 1 }),
+    });
+    const plan = createRecordingClient([structured({ uncovered: [], findingDetails: [] })]);
+    await runReverseCheckWithDiagnosis({
+      source: CONDITION_SOURCE,
+      list: CONDITION_LIST,
+      documents: [],
+      gateway: makeGateway(plan.client, { maxAttempts: 1 }),
+      observeConditionFindings: true,
+    });
+    const buildRequest = build.structured[0];
+    const planRequest = plan.structured[0];
+    const planProperties = (planRequest?.schema as { properties?: Record<string, unknown> } | undefined)?.properties;
+    expect(buildRequest?.schema).toBe(REVERSE_CHECK_SCHEMA);
+    expect(planProperties).toHaveProperty("findingDetails");
+    // 派生 schema は既存の uncovered の定義を変えない
+    expect(planProperties?.["uncovered"]).toBe(REVERSE_CHECK_SCHEMA.properties.uncovered);
+    // instructions・documents・rules・input・schemaName・maxOutputTokens は同じで、schema だけが違う
+    // （記録には共通の口が足す `signal` があるので、段が渡した欄だけを比べる）
+    expect(planRequest?.instructions).toBe(buildRequest?.instructions);
+    expect(planRequest?.documents).toEqual(buildRequest?.documents);
+    expect(planRequest?.rules).toEqual(buildRequest?.rules);
+    expect(planRequest?.input).toBe(buildRequest?.input);
+    expect(planRequest?.schemaName).toBe(buildRequest?.schemaName);
+    expect(planRequest?.maxOutputTokens).toBe(buildRequest?.maxOutputTokens);
+  });
+
+  it("詳細を欠落・全種類・未知値・空の対象・未知ID・重複ID・重複行・順序入替・orphan にしても、経路と結果は同じ", async () => {
+    // 元の指摘は 2 件（1 件目は残りの断片、2 件目は重複）
+    const initial = [{ start: 8, end: 12 }, { start: 8, end: 12 }];
+    const variants: readonly (readonly unknown[])[] = [
+      [],
+      [{ uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1"] }],
+      ...REVERSE_CHECK_CONDITION_KINDS.map((kind) => [
+        { uncoveredIndex: 0, missingKind: kind, requirementIds: ["R-1"] },
+        { uncoveredIndex: 1, missingKind: kind, requirementIds: [] },
+      ]),
+      [{ uncoveredIndex: 0, missingKind: "未知の種類", requirementIds: ["R-1"] }],
+      [{ uncoveredIndex: 0, missingKind: "target", requirementIds: [] }],
+      [{ uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-9"] }],
+      [{ uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1", "R-1"] }],
+      [
+        { uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1"] },
+        { uncoveredIndex: 0, missingKind: "time", requirementIds: ["R-2"] },
+      ],
+      [
+        { uncoveredIndex: 1, missingKind: "time", requirementIds: ["R-2"] },
+        { uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1"] },
+      ],
+      [{ uncoveredIndex: 5, missingKind: "target", requirementIds: ["R-1"] }],
+    ];
+    const baseline = await conditionLoop(initial, []);
+    expect(baseline.outcome.ok).toBe(true);
+    if (!baseline.outcome.ok) return;
+    const expected = conditionCoreOf(baseline.outcome.value);
+    const expectedCalls = baseline.recording.structured.map((request) => JSON.stringify(request));
+    for (const details of variants) {
+      const variant = await conditionLoop(initial, details);
+      expect(variant.outcome.ok).toBe(true);
+      if (!variant.outcome.ok) return;
+      expect(conditionCoreOf(variant.outcome.value)).toEqual(expected);
+      expect(variant.recording.structured.map((request) => JSON.stringify(request))).toEqual(expectedCalls);
+    }
+  });
+
+  it("合成例（否定・期限・共通修飾・同名の対象・未登録の参照元・新要件）でも、会話の不足指摘を保ち確定へ進めない", async () => {
+    const source = "必ず記録する。3件まで合計する。印を出す。";
+    const base: RequirementList = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "必ず記録する。", position: { start: 0, end: 7 } },
+        { id: "R-2", text: "合計できる", quote: "3件まで合計する。", position: { start: 7, end: 16 } },
+        { id: "R-3", text: "印を出せる", quote: "印を出す。", position: { start: 16, end: 21 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    /** 同名の 2 対象（同じ ID が 2 つ）を持つ一覧 */
+    const duplicated: RequirementList = {
+      ...base,
+      requirements: [
+        { ...base.requirements[0]!, quote: "必ず記録する。" },
+        { ...base.requirements[0]!, quote: "記録する。" , position: { start: 2, end: 9 } },
+        ...base.requirements.slice(1),
+      ],
+    };
+    const cases: readonly {
+      readonly label: string;
+      readonly list: RequirementList;
+      readonly range: { readonly start: number; readonly end: number };
+      readonly detail: { readonly uncoveredIndex: number; readonly missingKind: string; readonly requirementIds: readonly string[] };
+      readonly match: string;
+    }[] = [
+      { label: "引用内の本当の否定", list: base, range: { start: 0, end: 7 }, detail: { uncoveredIndex: 0, missingKind: "negation", requirementIds: ["R-1"] }, match: "matched" },
+      { label: "期限の欠落", list: base, range: { start: 7, end: 16 }, detail: { uncoveredIndex: 0, missingKind: "deadline", requirementIds: ["R-2"] }, match: "matched" },
+      { label: "共通修飾の一部欠落", list: base, range: { start: 0, end: 16 }, detail: { uncoveredIndex: 0, missingKind: "shared-modifier", requirementIds: ["R-1", "R-2"] }, match: "matched" },
+      { label: "同名の 2 対象", list: duplicated, range: { start: 0, end: 7 }, detail: { uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1"] }, match: "invalid" },
+      { label: "未登録の参照元", list: base, range: { start: 0, end: 7 }, detail: { uncoveredIndex: 0, missingKind: "reference-source", requirementIds: ["R-9"] }, match: "invalid" },
+      { label: "新要件で対象 ID なし", list: base, range: { start: 0, end: 7 }, detail: { uncoveredIndex: 0, missingKind: "target", requirementIds: [] }, match: "unbound" },
+    ];
+    for (const testCase of cases) {
+      const withDetail = await conditionOnceFor(source, testCase.list, testCase.range, [testCase.detail]);
+      const withoutDetail = await conditionOnceFor(source, testCase.list, testCase.range, []);
+      expect(withDetail).toBeDefined();
+      expect(withoutDetail).toBeDefined();
+      if (withDetail === undefined || withoutDetail === undefined) return;
+      // 会話の不足指摘は消えない（詳細の有無で結果が変わらない）
+      expect(withDetail.result.misses).toEqual(withoutDetail.result.misses);
+      expect(withDetail.result.misses.length).toBeGreaterThan(0);
+      expect(withDetail.round.conditionFindings?.whole.rawCount).toBe(1);
+      expect(withDetail.trace.conditionFindings?.rows[0]?.match).toBe(testCase.match);
+    }
+  });
+
+  it("初回・引用の修復の後・全体の作り直し後の 3 つの往復に記録する", async () => {
+    const source = "印を出す。印を出す。件数を合計する。";
+    const initialList = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 19 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const redone = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: { start: 0, end: 10 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 19 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(initialList),
+      structured({ uncovered: [], findingDetails: [] }),
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      structured({
+        uncovered: [{ start: 0, end: 3 }],
+        findingDetails: [{ uncoveredIndex: 0, missingKind: "time", requirementIds: ["R-1"] }],
+      }),
+      structured(redone),
+      structured({ uncovered: [], findingDetails: [] }),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      quoteRepair: true,
+      observeConditionFindings: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.diagnosis.rounds.map((round) => round.fix)).toEqual([
+      "initial",
+      "quote-repair",
+      "whole-redo",
+    ]);
+    // 3 つの往復すべてに、件数の診断と trace の記録が付く
+    for (const round of outcome.value.diagnosis.rounds) expect(round.conditionFindings).toBeDefined();
+    for (const round of outcome.value.trace?.rounds ?? []) expect(round.conditionFindings).toBeDefined();
+    // 修復の後の往復に、種類と対象が残る
+    expect(outcome.value.trace?.rounds[1]?.conditionFindings?.rows[0]).toMatchObject({
+      kind: "time",
+      requirementIds: ["R-1"],
+      match: "matched",
+    });
+    // 記録のない（指摘 0 件の）往復は 0 件であって、欄が無いのとは違う
+    expect(outcome.value.diagnosis.rounds[0]?.conditionFindings?.whole.rawCount).toBe(0);
+    expect(outcome.value.diagnosis.rounds[2]?.conditionFindings?.whole.rawCount).toBe(0);
+  });
+
+  it("途中で止まったときは、完了した往復の記録だけを残す", async () => {
+    const recording = createRecordingClient([
+      structured(CONDITION_LIST),
+      structured({
+        uncovered: [{ start: 8, end: 12 }],
+        findingDetails: [{ uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1"] }],
+      }),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: CONDITION_SOURCE,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      observeConditionFindings: true,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.diagnosis.rounds).toHaveLength(1);
+    expect(outcome.trace?.rounds).toHaveLength(1);
+    expect(outcome.diagnosis.rounds[0]?.conditionFindings?.whole.matched).toBe(1);
+    expect(outcome.trace?.rounds[0]?.conditionFindings?.rows[0]?.match).toBe("matched");
+  });
+
+  it("記録のない旧形式（選択を省いた Build の経路）は、trace にも診断にも欄を足さない", async () => {
+    const recording = createRecordingClient([
+      structured({ uncovered: [{ start: 8, end: 12 }] }),
+    ]);
+    const outcome = await runReverseCheckWithDiagnosis({
+      source: CONDITION_SOURCE,
+      list: CONDITION_LIST,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.trace.conditionFindings).toBeUndefined();
+    expect(outcome.value.round.conditionFindings).toBeUndefined();
+  });
+});
+
+/** 合成例の 1 往復（原文と一覧をその場で与える） */
+async function conditionOnceFor(
+  source: string,
+  list: RequirementList,
+  range: { readonly start: number; readonly end: number },
+  findingDetails: readonly unknown[],
+) {
+  const recording = createRecordingClient([structured({ uncovered: [range], findingDetails })]);
+  const outcome = await runReverseCheckWithDiagnosis({
+    source,
+    list,
+    documents: [],
+    gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    observeConditionFindings: true,
+  });
+  expect(outcome.ok).toBe(true);
+  if (!outcome.ok) return undefined;
+  return outcome.value;
+}
+
+describe("T2条件指摘の記録（純粋な関数）", () => {
+  it("matched・unbound・missing・invalid を参照の構造だけで決める", () => {
+    const list: RequirementList = {
+      requirements: [
+        { id: "R-1", text: "a", quote: "a", position: { start: 0, end: 1 } },
+        { id: "R-2", text: "b", quote: "b", position: { start: 1, end: 2 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const reported = [{ range: { start: 0, end: 1 }, destination: "remaining" as const, fragments: [] }];
+    const noDetails = classifyConditionFindings("ab", list, reported, []);
+    expect(noDetails.rows).toEqual([
+      {
+        index: 0,
+        range: { start: 0, end: 1 },
+        destination: "remaining",
+        kind: null,
+        requirementIds: [],
+        match: "missing",
+        failure: null,
+      },
+    ]);
+    const matched = classifyConditionFindings("ab", list, reported, [
+      { uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1"] },
+    ]);
+    expect(matched.rows[0]).toMatchObject({ match: "matched", failure: null });
+    const unbound = classifyConditionFindings("ab", list, reported, [
+      { uncoveredIndex: 0, missingKind: "target", requirementIds: [] },
+    ]);
+    expect(unbound.rows[0]).toMatchObject({ match: "unbound", failure: null });
+    const unknownKind = classifyConditionFindings("ab", list, reported, [
+      { uncoveredIndex: 0, missingKind: "no-such-kind", requirementIds: ["R-1"] },
+    ]);
+    expect(unknownKind.rows[0]).toMatchObject({ match: "invalid", failure: "unknown-kind" });
+    const unknownId = classifyConditionFindings("ab", list, reported, [
+      { uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-9"] },
+    ]);
+    expect(unknownId.rows[0]).toMatchObject({ match: "invalid", failure: "unknown-requirement" });
+    const duplicateId = classifyConditionFindings("ab", list, reported, [
+      { uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1", "R-1"] },
+    ]);
+    expect(duplicateId.rows[0]).toMatchObject({ match: "invalid", failure: "duplicate-requirement" });
+    // 同じ添字への複数行は、先頭を選ばずに両方を invalid として残す
+    const duplicateIndex = classifyConditionFindings("ab", list, reported, [
+      { uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1"] },
+      { uncoveredIndex: 0, missingKind: "time", requirementIds: ["R-2"] },
+    ]);
+    expect(duplicateIndex.rows.map((row) => row.failure)).toEqual(["duplicate-index", "duplicate-index"]);
+    // 不正な添字は、行き先を持たない orphan になる
+    const orphan = classifyConditionFindings("ab", list, reported, [
+      { uncoveredIndex: 3, missingKind: "target", requirementIds: ["R-1"] },
+    ]);
+    expect(orphan.rows).toHaveLength(1);
+    expect(orphan.orphans).toEqual([
+      { uncoveredIndex: 3, kind: "target", requirementIds: ["R-1"], failure: "index-out-of-range" },
+    ]);
+  });
+
+  it("outside は詳細の有無によらず invalid を優先する", () => {
+    const list: RequirementList = { requirements: [], decisions: [], unresolved: [] };
+    const reported = [{ range: { start: 5, end: 5 }, destination: "outside" as const, fragments: [] }];
+    // 詳細がある行
+    const withDetail = classifyConditionFindings("ab", list, reported, [
+      { uncoveredIndex: 0, missingKind: "target", requirementIds: [] },
+    ]);
+    expect(withDetail.rows[0]).toMatchObject({ match: "invalid", failure: "outside" });
+    // 詳細の行が無い行も、missing ではなく invalid（outside を優先する）
+    const withoutDetail = classifyConditionFindings("ab", list, reported, []);
+    expect(withoutDetail.rows[0]).toMatchObject({
+      destination: "outside",
+      kind: null,
+      requirementIds: [],
+      match: "invalid",
+      failure: "outside",
+    });
+    // 件数の集計でも missing ではなく invalid に数える
+    expect(summarizeConditionFindings(withoutDetail).whole).toMatchObject({ missing: 0, invalid: 1 });
+  });
+
+  it("件数の集計は、元の添字ごとに 1 件で、全体＝2 群の和・種類の和＝matched＋unbound になる", () => {
+    const findings = classifyConditionFindings(
+      "abcd",
+      {
+        requirements: [{ id: "R-1", text: "a", quote: "a", position: { start: 0, end: 1 } }],
+        decisions: [],
+        unresolved: [],
+      },
+      [
+        { range: { start: 0, end: 1 }, destination: "remaining", fragments: [] },
+        { range: { start: 1, end: 2 }, destination: "framing", fragments: [] },
+      ],
+      [
+        { uncoveredIndex: 0, missingKind: "time", requirementIds: ["R-1"] },
+        { uncoveredIndex: 1, missingKind: "scope", requirementIds: [] },
+      ],
+    );
+    const summary = summarizeConditionFindings(findings);
+    expect(summary.whole).toMatchObject({ rawCount: 2, matched: 1, unbound: 1, missing: 0, invalid: 0 });
+    expect(summary.remaining).toMatchObject({ rawCount: 1, matched: 1 });
+    expect(summary.other).toMatchObject({ rawCount: 1, unbound: 1 });
+    expect(summary.whole.kinds["time"]).toBe(1);
+    expect(summary.whole.kinds["scope"]).toBe(1);
+    for (const counts of [summary.whole, summary.remaining, summary.other]) {
+      expect(counts.rawCount).toBe(counts.matched + counts.unbound + counts.missing + counts.invalid);
+      expect(Object.values(counts.kinds).reduce((sum, count) => sum + count, 0)).toBe(
+        counts.matched + counts.unbound,
+      );
+    }
+  });
+
+  it("既知の種類と派生 schema は、既存の schema の実体を変えない", () => {
+    expect(isKnownConditionKind("negation")).toBe(true);
+    expect(isKnownConditionKind("no-such-kind")).toBe(false);
+    expect(reverseCheckSchemaOf()).toBe(REVERSE_CHECK_SCHEMA);
+    expect(reverseCheckSchemaOf(false)).toBe(REVERSE_CHECK_SCHEMA);
+    const derived = reverseCheckSchemaOf(true) as { required: readonly string[]; properties: Record<string, unknown> };
+    expect(derived.required).toEqual(["uncovered", REVERSE_CHECK_FINDING_DETAILS_KEY]);
+    expect(derived.properties["uncovered"]).toBe(REVERSE_CHECK_SCHEMA.properties.uncovered);
+    expect(REVERSE_CHECK_SCHEMA.required).toEqual(["uncovered"]);
+    expect(REVERSE_CHECK_SCHEMA.properties).not.toHaveProperty("findingDetails");
+  });
+
+  it("派生 schema の応答は、既存の uncovered の検査をそのまま通し、詳細だけを読む", () => {
+    const checked = checkReverseCheckOutputWithConditionFindings({
+      uncovered: [{ start: 0, end: 1 }],
+      findingDetails: [
+        { uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1"] },
+        { uncoveredIndex: "x", missingKind: "target", requirementIds: [] },
+      ],
+    });
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.uncovered).toEqual([{ start: 0, end: 1 }]);
+    expect(checked.value.findingDetails).toEqual([
+      { uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1"] },
+    ]);
   });
 });
