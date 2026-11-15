@@ -19,6 +19,8 @@ import type {
 import type { RequirementList } from "../pipeline.js";
 import {
   REVERSE_CHECK_CONDITION_KINDS,
+  REVERSE_CHECK_CONDITION_LEDGER_KEY,
+  REVERSE_CHECK_CONDITION_LEDGER_SCHEMA,
   REVERSE_CHECK_FINDING_DETAILS_KEY,
   REVERSE_CHECK_MEANING_RULE_DEFINITIONS,
   REVERSE_CHECK_RULES,
@@ -26,10 +28,13 @@ import {
   REVERSE_CHECK_SCHEMA_NAME,
   checkRequirementCoverage,
   checkReverseCheckOutputWithConditionFindings,
+  checkReverseCheckOutputWithConditionLedger,
   classifyConditionFindings,
+  classifyConditionLedger,
   isBlankRange,
   isKnownConditionKind,
   overlappingSentences,
+  parseConditionLedger,
   reverseCheckRulesOf,
   reverseCheckSchemaOf,
   restoreValidProvenance,
@@ -39,6 +44,7 @@ import {
   runReverseCheckWithDiagnosis,
   splitSourceSentences,
   summarizeConditionFindings,
+  summarizeConditionLedger,
 } from "./reverse-check.js";
 import { ruleDefinitionDefects } from "./prompt.js";
 import {
@@ -3030,5 +3036,802 @@ describe("T2条件指摘の記録（純粋な関数）", () => {
     expect(checked.value.findingDetails).toEqual([
       { uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1"] },
     ]);
+  });
+});
+
+// ── Issue #951：Plan の逆照合に条件と適用先の台帳を記録する（段 1・行き先は変えない）──
+//
+// 受入の題材の語・値は使わない。**意味の正解**（条件の抽出・適用先の網羅）ではなく、参照の構造
+// （範囲・ID・行の欠け・重複・孤立・証拠）だけを固定する。
+
+/** 台帳を試す原文（3 文。適用先の範囲は文の範囲で与える） */
+const LEDGER_SOURCE = "印を出す。件数を合計する。記録する。";
+/** 台帳を試す一覧（R-1・R-2 の要件。本文は証拠の逐語を含む） */
+const LEDGER_LIST: RequirementList = {
+  requirements: [
+    { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 0, end: 5 } },
+    { id: "R-2", text: "件数を合計できる", quote: "件数を合計する。", position: { start: 5, end: 13 } },
+    { id: "R-3", text: "記録できる", quote: "記録する。", position: { start: 13, end: 18 } },
+  ],
+  framing: [],
+  decisions: [],
+  unresolved: [],
+};
+
+/** 台帳の条件 1 つを作る補助（範囲は原文の添字で与える） */
+const ledgerCondition = (
+  conditionId: string,
+  kind: string,
+  start: number,
+  end: number,
+  targets: readonly { readonly targetId: string; readonly start: number; readonly end: number; readonly requirementIds: readonly string[] }[],
+) => ({
+  conditionId,
+  range: { start, end },
+  kind,
+  targets: targets.map((target) => ({
+    targetId: target.targetId,
+    range: { start: target.start, end: target.end },
+    requirementIds: target.requirementIds,
+  })),
+});
+
+/** 台帳の行 1 つを作る補助 */
+const ledgerRow = (
+  conditionId: string,
+  targetId: string,
+  status: string,
+  evidence: readonly { readonly requirementId: string; readonly text: string }[] = [],
+) => ({ conditionId, targetId, status, evidence });
+
+/** 追加診断（台帳の欄）を除いた、逆照合ループの結果（Issue #951 の試験で使う） */
+const ledgerLoopCoreOf = (value: {
+  readonly list: unknown;
+  readonly report: unknown;
+  readonly redone: boolean;
+  readonly repaired: boolean;
+  readonly unmet: unknown;
+}) => ({
+  list: value.list,
+  report: value.report,
+  redone: value.redone,
+  repaired: value.repaired,
+  unmet: value.unmet,
+});
+
+describe("T5条件台帳の記録（Issue #951）", () => {
+  it("派生 schema は 4 つの組を区別し、既存の uncovered・findingDetails の定義と並びを変えない", () => {
+    // どちらも省く＝既存の基本 schema（実体が同じ）
+    expect(reverseCheckSchemaOf()).toBe(REVERSE_CHECK_SCHEMA);
+    expect(reverseCheckSchemaOf(false, false)).toBe(REVERSE_CHECK_SCHEMA);
+    // findings だけ＝既存の派生 schema（#948 と同じ並び）
+    const findingsOnly = reverseCheckSchemaOf(true, false) as {
+      readonly required: readonly string[];
+      readonly properties: Record<string, unknown>;
+    };
+    expect(findingsOnly.required).toEqual(["uncovered", REVERSE_CHECK_FINDING_DETAILS_KEY]);
+    // ledger だけ＝基本＋台帳
+    const ledgerOnly = reverseCheckSchemaOf(false, true) as {
+      readonly required: readonly string[];
+      readonly properties: Record<string, unknown>;
+    };
+    expect(ledgerOnly.required).toEqual(["uncovered", REVERSE_CHECK_CONDITION_LEDGER_KEY]);
+    expect(ledgerOnly.properties["uncovered"]).toBe(REVERSE_CHECK_SCHEMA.properties.uncovered);
+    // 両方＝基本＋詳細＋台帳（**欄順を固定する**）
+    const both = reverseCheckSchemaOf(true, true) as {
+      readonly required: readonly string[];
+      readonly properties: Record<string, unknown>;
+    };
+    expect(both.required).toEqual([
+      "uncovered",
+      REVERSE_CHECK_FINDING_DETAILS_KEY,
+      REVERSE_CHECK_CONDITION_LEDGER_KEY,
+    ]);
+    expect(Object.keys(both.properties)).toEqual([
+      "uncovered",
+      REVERSE_CHECK_FINDING_DETAILS_KEY,
+      REVERSE_CHECK_CONDITION_LEDGER_KEY,
+    ]);
+    // 既存の欄の定義は同じ実体（見た目も変えない）
+    expect(both.properties["uncovered"]).toBe(REVERSE_CHECK_SCHEMA.properties.uncovered);
+    expect(both.properties[REVERSE_CHECK_FINDING_DETAILS_KEY]).toBe(
+      findingsOnly.properties[REVERSE_CHECK_FINDING_DETAILS_KEY],
+    );
+    // 台帳の欄の定義は、台帳だけの組と同じ実体
+    expect(both.properties[REVERSE_CHECK_CONDITION_LEDGER_KEY]).toBe(
+      ledgerOnly.properties[REVERSE_CHECK_CONDITION_LEDGER_KEY],
+    );
+    // 既存の schema は書き換えていない
+    expect(REVERSE_CHECK_SCHEMA.required).toEqual(["uncovered"]);
+    expect(REVERSE_CHECK_SCHEMA.properties).not.toHaveProperty(REVERSE_CHECK_CONDITION_LEDGER_KEY);
+    // 台帳の欄は conditions・rows の 2 つだけ（scanned のような網羅の欄を置かない）
+    expect(Object.keys(REVERSE_CHECK_CONDITION_LEDGER_SCHEMA.properties)).toEqual(["conditions", "rows"]);
+    expect(REVERSE_CHECK_CONDITION_LEDGER_SCHEMA.required).toEqual(["conditions", "rows"]);
+  });
+
+  it("台帳の欄を送った往復だけが trace と診断に記録し、送らなければ欄が増えない", async () => {
+    const withLedger = createRecordingClient([
+      structured({
+        uncovered: [],
+        conditionLedger: {
+          conditions: [
+            ledgerCondition("C-1", "scope", 0, 13, [
+              { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+              { targetId: "T-2", start: 5, end: 13, requirementIds: ["R-2"] },
+            ]),
+          ],
+          rows: [
+            ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-1", text: "印を出せ" }]),
+            ledgerRow("C-1", "T-2", "missing"),
+          ],
+        },
+      }),
+    ]);
+    const on = await runReverseCheckWithDiagnosis({
+      source: LEDGER_SOURCE,
+      list: LEDGER_LIST,
+      documents: [],
+      gateway: makeGateway(withLedger.client, { maxAttempts: 1 }),
+      observeConditionLedger: true,
+    });
+    expect(on.ok).toBe(true);
+    if (!on.ok) return;
+    const ledger = on.value.trace.conditionLedger;
+    expect(ledger).toBeDefined();
+    if (ledger === undefined) return;
+    expect(ledger.observation).toBe("observed");
+    expect(ledger.conditions[0]?.targets.map((target) => target.failure)).toEqual([null, null]);
+    expect(ledger.rows.map((row) => row.status)).toEqual(["retained", "missing"]);
+    // 算出範囲はコードが要件の本文から求める（本文の添字）
+    expect(ledger.rows[0]?.evidence[0]?.range).toEqual({ start: 0, end: 4 });
+    // 通常の診断は件数だけ
+    const diagnosis = on.value.round.conditionLedger;
+    expect(diagnosis?.counts).toMatchObject({
+      rawConditionRows: 1,
+      consistentConditionRows: 1,
+      unknownConditionRows: 0,
+      rawCorrespondenceRows: 2,
+      retained: 1,
+      missing: 1,
+      unknown: 0,
+    });
+    // 送らない往復（Build の経路）は、trace にも診断にも欄を持たない
+    const offRecording = createRecordingClient([structured({ uncovered: [] })]);
+    const off = await runReverseCheckWithDiagnosis({
+      source: LEDGER_SOURCE,
+      list: LEDGER_LIST,
+      documents: [],
+      gateway: makeGateway(offRecording.client, { maxAttempts: 1 }),
+    });
+    expect(off.ok).toBe(true);
+    if (!off.ok) return;
+    expect(off.value.trace.conditionLedger).toBeUndefined();
+    expect(off.value.round.conditionLedger).toBeUndefined();
+    // 送る schema は台帳の欄を持つ（要求のバイト列の schema だけが違う）
+    const offSchema = offRecording.structured[0]?.schema as { required?: readonly string[] } | undefined;
+    const onSchema = withLedger.structured[0]?.schema as { required?: readonly string[] } | undefined;
+    expect(offSchema?.required).toEqual(["uncovered"]);
+    expect(onSchema?.required).toEqual(["uncovered", REVERSE_CHECK_CONDITION_LEDGER_KEY]);
+    // 台帳以外の要求の欄は変えない
+    expect(withLedger.structured[0]?.instructions).toBe(offRecording.structured[0]?.instructions);
+    expect(withLedger.structured[0]?.input).toBe(offRecording.structured[0]?.input);
+    expect(withLedger.structured[0]?.rules).toEqual(offRecording.structured[0]?.rules);
+  });
+
+  it("期限の3適用先・共有否定の2適用先・別要件の補完・対象要件なしを記録できる", () => {
+    // 3 つの範囲に掛かる期限の条件
+    const deadline = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "deadline", 0, 13, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+          { targetId: "T-2", start: 5, end: 13, requirementIds: ["R-2"] },
+          { targetId: "T-3", start: 13, end: 18, requirementIds: ["R-3"] },
+        ]),
+      ],
+      rows: [
+        ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-1", text: "印を出せ" }]),
+        ledgerRow("C-1", "T-2", "retained", [{ requirementId: "R-2", text: "件数を合計できる" }]),
+        ledgerRow("C-1", "T-3", "missing"),
+      ],
+    });
+    expect(deadline.conditions[0]?.targets).toHaveLength(3);
+    expect(deadline.observation).toBe("observed");
+    // 共有否定を 2 つの適用先へ掛ける
+    const negation = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "negation", 0, 13, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+          { targetId: "T-2", start: 5, end: 13, requirementIds: ["R-2"] },
+        ]),
+      ],
+      rows: [ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-1", text: "印を出せ" }]), ledgerRow("C-1", "T-2", "missing")],
+    });
+    expect(negation.conditions[0]?.targets).toHaveLength(2);
+    // 別要件による補完（適用先が 2 つの要件 ID を持つ）
+    const complemented = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "exception", 0, 13, [
+          { targetId: "T-1", start: 0, end: 13, requirementIds: ["R-1", "R-2"] },
+        ]),
+      ],
+      rows: [
+        ledgerRow("C-1", "T-1", "retained", [
+          { requirementId: "R-1", text: "印を出せ" },
+          { requirementId: "R-2", text: "件数を合計できる" },
+        ]),
+      ],
+    });
+    expect(complemented.conditions[0]?.targets[0]?.requirementIds).toEqual(["R-1", "R-2"]);
+    expect(complemented.rows[0]?.status).toBe("retained");
+    // 対象要件なし（要件自体が無い。空の適用先を許す）
+    const noTarget = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "target", 0, 5, [{ targetId: "T-1", start: 0, end: 5, requirementIds: [] }]),
+      ],
+      rows: [ledgerRow("C-1", "T-1", "missing")],
+    });
+    expect(noTarget.conditions[0]?.targets[0]?.failure).toBeNull();
+    expect(noTarget.rows[0]?.status).toBe("missing");
+    expect(summarizeConditionLedger(noTarget).observation).toBe("observed");
+  });
+
+  it("種類・範囲・ID 不正、行抜け・重複・孤立、retained 証拠なし、部分文字列の不存在・複数出現を unknown と理由へ分ける", () => {
+    const broken = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        // 範囲が原文の外
+        ledgerCondition("C-range", "target", 100, 120, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+        ]),
+        // 未知の種類
+        ledgerCondition("C-kind", "no-such-kind", 0, 5, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+        ]),
+        // 未知の要件 ID
+        ledgerCondition("C-req", "target", 0, 5, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-9"] },
+        ]),
+      ],
+      rows: [
+        // retained なのに証拠が空
+        ledgerRow("C-kind", "T-1", "retained"),
+        // 証拠の逐語が本文に無い
+        ledgerRow("C-range", "T-1", "retained", [{ requirementId: "R-1", text: "本文に無い逐語" }]),
+        // 証拠の逐語が本文に 2 か所以上（「件数」を 2 回含む本文を用意する）
+        ledgerRow("C-req", "T-1", "missing"),
+      ],
+    });
+    const failures = broken.conditions.map((condition) => condition.failure);
+    expect(failures).toEqual(["range", "unknown-kind", "unknown-requirement"]);
+    // 条件の不整合は、行の側でも理由を持つ（condition-invalid）
+    expect(broken.rows.map((row) => row.failure)).toEqual(["condition-invalid", "condition-invalid", "condition-invalid"]);
+    expect(broken.observation).toBe("indeterminate");
+
+    // 逐語の複数出現は evidence-ambiguous、無い逐語は evidence-not-found
+    const ambiguousList: RequirementList = {
+      requirements: [{ id: "R-1", text: "印を印として出す", quote: "印を出す。", position: { start: 0, end: 5 } }],
+      decisions: [],
+      unresolved: [],
+    };
+    const evidence = classifyConditionLedger("印を出す。", ambiguousList, {
+      conditions: [
+        ledgerCondition("C-1", "target", 0, 5, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] }]),
+      ],
+      rows: [ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-1", text: "印" }])],
+    });
+    expect(evidence.rows[0]?.failure).toBe("evidence-ambiguous");
+    const notFound = classifyConditionLedger("印を出す。", ambiguousList, {
+      conditions: [
+        ledgerCondition("C-1", "target", 0, 5, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] }]),
+      ],
+      rows: [ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-1", text: "無い逐語" }])],
+    });
+    expect(notFound.rows[0]?.failure).toBe("evidence-not-found");
+
+    // 行抜け（宣言した組に行が無い）と孤立（宣言していない組の行）を分ける
+    const gaps = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "scope", 0, 13, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+          { targetId: "T-2", start: 5, end: 13, requirementIds: ["R-2"] },
+        ]),
+      ],
+      rows: [
+        // T-1 の行が無い（行抜け）
+        ledgerRow("C-1", "T-9", "missing"),
+      ],
+    });
+    expect(gaps.rowMissing).toEqual([
+      { conditionId: "C-1", targetId: "T-1" },
+      { conditionId: "C-1", targetId: "T-2" },
+    ]);
+    expect(gaps.rows[0]?.failure).toBe("orphan-target");
+    expect(gaps.observation).toBe("indeterminate");
+    // 宣言していない条件の行は orphan-row
+    const orphan = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "scope", 0, 5, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] }]),
+      ],
+      rows: [
+        ledgerRow("C-1", "T-1", "missing"),
+        ledgerRow("C-9", "T-1", "missing"),
+      ],
+    });
+    expect(orphan.rows[1]?.failure).toBe("orphan-row");
+    // 同じ組の重複行は両方 unknown（先頭を選ばない）
+    const duplicated = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "scope", 0, 5, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] }]),
+      ],
+      rows: [ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-1", text: "印を出せ" }]), ledgerRow("C-1", "T-1", "missing")],
+    });
+    expect(duplicated.rows.map((row) => row.failure)).toEqual(["duplicate-row", "duplicate-row"]);
+  });
+
+  it("収支が一致する（条件＝整合＋不明・対応＝retained＋missing＋unknown・組＝1 行＋0 行＋複数行）", () => {
+    const ledger = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "scope", 0, 13, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+          { targetId: "T-2", start: 5, end: 13, requirementIds: ["R-2"] },
+        ]),
+        ledgerCondition("C-2", "time", 0, 5, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-9"] }]),
+      ],
+      rows: [
+        ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-1", text: "印を出せ" }]),
+        ledgerRow("C-1", "T-2", "missing"),
+        ledgerRow("C-1", "T-2", "missing"),
+        ledgerRow("C-2", "T-1", "retained", [{ requirementId: "R-9", text: "何か" }]),
+      ],
+    });
+    const diagnosis = summarizeConditionLedger(ledger);
+    const counts = diagnosis.counts;
+    expect(counts.rawConditionRows).toBe(2);
+    expect(counts.consistentConditionRows! + counts.unknownConditionRows!).toBe(counts.rawConditionRows);
+    expect(counts.rawCorrespondenceRows).toBe(counts.retained! + counts.missing! + counts.unknown!);
+    expect(counts.declaredPairs).toBe(
+      counts.singleRowPairs! + counts.noRowPairs! + counts.multipleRowPairs!,
+    );
+    // 理由の重複を分母に加算しない（行 1 つは理由 1 つ）
+    const rowFailures = Object.values(counts.unknownRows).reduce((sum, value) => sum + value, 0);
+    expect(rowFailures).toBe(counts.unknown);
+    // 条件の不明は、条件の数以下
+    const conditionFailures = Object.values(counts.unknownConditions).reduce((sum, value) => sum + value, 0);
+    expect(conditionFailures).toBe(counts.unknownConditionRows);
+  });
+
+  it("算出範囲は本文に一致し、意味の正解とは扱わない", () => {
+    // 本文の途中に逐語がある。範囲はコードが本文の添字で求める
+    const list: RequirementList = {
+      requirements: [{ id: "R-1", text: "前文・対象の印・後文", quote: "印を出す。", position: { start: 0, end: 5 } }],
+      decisions: [],
+      unresolved: [],
+    };
+    const ledger = classifyConditionLedger("印を出す。", list, {
+      conditions: [
+        ledgerCondition("C-1", "target", 0, 5, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] }]),
+      ],
+      rows: [ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-1", text: "対象の印" }])],
+    });
+    const evidence = ledger.rows[0]?.evidence[0];
+    expect(evidence?.range).toEqual({ start: 3, end: 7 });
+    // 申告された本文の添字は使わない（要求に添字の欄が無い）
+    expect(new Set(Object.keys(ledger.rows[0]!))).toEqual(new Set(["conditionId", "evidence", "failure", "status", "targetId"]));
+    expect(new Set(Object.keys(evidence!))).toEqual(new Set(["range", "requirementId", "text"]));
+  });
+
+  it("観測不明・未観測・0 件申告を区別する", () => {
+    // 0 件申告（完了し、両配列が空）
+    const empty = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, { conditions: [], rows: [] });
+    expect(empty.observation).toBe("empty");
+    const emptyCounts = summarizeConditionLedger(empty);
+    expect(emptyCounts.observation).toBe("empty");
+    expect(emptyCounts.counts.rawConditionRows).toBe(0);
+    // 0 件を網羅済みと認定しない（欄が無い＝未観測とは別の値）
+    // 構造不整合（観測不明）
+    const broken = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [ledgerCondition("C-1", "no-such-kind", 0, 5, [{ targetId: "T-1", start: 0, end: 5, requirementIds: [] }])],
+      rows: [],
+    });
+    expect(broken.observation).toBe("indeterminate");
+    // 読めない値があれば、分母は null（0 にしない）
+    const unreadable = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [],
+      rows: [],
+      dropped: [{ source: "conditions", index: 0, field: "kind" }],
+    });
+    const unreadableCounts = summarizeConditionLedger(unreadable);
+    expect(unreadable.observation).toBe("indeterminate");
+    expect(unreadableCounts.counts.rawConditionRows).toBeNull();
+    expect(unreadableCounts.counts.retained).toBeNull();
+    expect(unreadableCounts.counts.declaredPairs).toBeNull();
+  });
+
+  it("台帳を替えても、既存の指摘・redo 入力・呼び出し列は同じ（追加診断だけが変わる）", async () => {
+    const variants: readonly unknown[] = [
+      // 台帳の欄が無い
+      undefined,
+      // 0 件申告
+      { conditions: [], rows: [] },
+      // 保持（retained）
+      {
+        conditions: [ledgerCondition("C-1", "scope", 0, 13, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] }])],
+        rows: [ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-1", text: "印を出せ" }])],
+      },
+      // 不足（missing）
+      {
+        conditions: [ledgerCondition("C-1", "scope", 0, 13, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] }])],
+        rows: [ledgerRow("C-1", "T-1", "missing")],
+      },
+      // 不明（unknown）
+      {
+        conditions: [ledgerCondition("C-1", "scope", 0, 13, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] }])],
+        rows: [ledgerRow("C-1", "T-1", "unknown")],
+      },
+      // 行抜け
+      {
+        conditions: [ledgerCondition("C-1", "scope", 0, 13, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] }])],
+        rows: [],
+      },
+      // 重複行
+      {
+        conditions: [ledgerCondition("C-1", "scope", 0, 13, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] }])],
+        rows: [ledgerRow("C-1", "T-1", "missing"), ledgerRow("C-1", "T-1", "retained")],
+      },
+      // 順序入替
+      {
+        conditions: [ledgerCondition("C-1", "scope", 0, 13, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] }])],
+        rows: [ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-1", text: "印を出せ" }])],
+      },
+      // 不正な行（孤立）
+      {
+        conditions: [ledgerCondition("C-1", "scope", 0, 13, [{ targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] }])],
+        rows: [
+          ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-1", text: "印を出せ" }]),
+          ledgerRow("C-9", "T-9", "retained"),
+        ],
+      },
+    ];
+    /** 固定の 3 文の原文で、初回に覆いの落ちを 1 件出し、作り直しの P2 は落ちなしにする */
+    const run = async (conditionLedger: unknown) => {
+      const recording = createRecordingClient([
+        structured(LEDGER_LIST),
+        structured(conditionLedger === undefined ? { uncovered: [{ start: 13, end: 18 }] } : { uncovered: [{ start: 13, end: 18 }], conditionLedger }),
+        structured(LEDGER_LIST),
+        structured(conditionLedger === undefined ? { uncovered: [] } : { uncovered: [], conditionLedger }),
+      ]);
+      const outcome = await runReverseCheckLoopWithOperation({
+        source: LEDGER_SOURCE,
+        documents: [],
+        gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+        observeConditionLedger: true,
+      });
+      return { recording, outcome };
+    };
+    const baseline = await run(undefined);
+    expect(baseline.outcome.ok).toBe(true);
+    if (!baseline.outcome.ok) return;
+    const expectedCore = ledgerLoopCoreOf(baseline.outcome.value);
+    const expectedCalls = baseline.recording.structured.map((request) => JSON.stringify(request));
+    const expectedRounds = baseline.outcome.value.diagnosis.rounds.map((round) => {
+      const { conditionLedger: _ledger, ...rest } = round;
+      return rest;
+    });
+    for (const conditionLedger of variants) {
+      const variant = await run(conditionLedger);
+      expect(variant.outcome.ok).toBe(true);
+      if (!variant.outcome.ok) return;
+      // 結果・redo 入力・呼び出し列は同じ
+      expect(ledgerLoopCoreOf(variant.outcome.value)).toEqual(expectedCore);
+      expect(variant.recording.structured.map((request) => JSON.stringify(request))).toEqual(expectedCalls);
+      // 追加診断（台帳の件数）以外の診断は同じ
+      const rounds = variant.outcome.value.diagnosis.rounds.map((round) => {
+        const { conditionLedger: _ledger, ...rest } = round;
+        return rest;
+      });
+      expect(rounds).toEqual(expectedRounds);
+    }
+  });
+
+  it("合成例（期限の3適用先・共有否定の2適用先・別要件の補完・対象要件なし）でも、会話の不足指摘を保ち確定へ進めない", async () => {
+    // 初回の P2 が覆いの落ちを出し、台帳も返す。作り直しの P2 も覆いが残る（止まる）
+    const cover = { uncovered: [{ start: 13, end: 18 }] };
+    const ledger = {
+      conditions: [
+        ledgerCondition("C-1", "deadline", 0, 13, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+          { targetId: "T-2", start: 5, end: 13, requirementIds: ["R-2"] },
+        ]),
+      ],
+      rows: [
+        ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-1", text: "印を出せ" }]),
+        ledgerRow("C-1", "T-2", "missing"),
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(LEDGER_LIST),
+      structured({ ...cover, conditionLedger: ledger }),
+    ]);
+    const outcome = await runReverseCheckWithDiagnosis({
+      source: LEDGER_SOURCE,
+      list: LEDGER_LIST,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      observeConditionLedger: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 会話の指摘（覆い）は消えない（台帳の有無で結果が変わらない）
+    expect(outcome.value.result.misses.length).toBeGreaterThan(0);
+    expect(outcome.value.trace.conditionLedger?.observation).toBe("observed");
+    expect(outcome.value.trace.conditionLedger?.rows.map((row) => row.status)).toEqual(["retained", "missing"]);
+  });
+
+  it("既存の覆い・矛盾の拒否と、従来の条件指摘・来歴保存は前後とも緑", async () => {
+    // 台帳の欄を足しても、既存の指摘の詳細は同じ（両方 on の組でも、findingDetails の記録は変わらない）
+    const answer = {
+      uncovered: [{ start: 13, end: 18 }],
+      findingDetails: [{ uncoveredIndex: 0, missingKind: "time", requirementIds: ["R-3"] }],
+      conditionLedger: {
+        conditions: [ledgerCondition("C-1", "time", 13, 18, [{ targetId: "T-1", start: 13, end: 18, requirementIds: ["R-3"] }])],
+        rows: [ledgerRow("C-1", "T-1", "missing")],
+      },
+    };
+    const both = createRecordingClient([structured(answer)]);
+    const withLedger = await runReverseCheckWithDiagnosis({
+      source: LEDGER_SOURCE,
+      list: LEDGER_LIST,
+      documents: [],
+      gateway: makeGateway(both.client, { maxAttempts: 1 }),
+      observeConditionFindings: true,
+      observeConditionLedger: true,
+    });
+    const onlyFindings = createRecordingClient([structured({ uncovered: answer.uncovered, findingDetails: answer.findingDetails })]);
+    const withoutLedger = await runReverseCheckWithDiagnosis({
+      source: LEDGER_SOURCE,
+      list: LEDGER_LIST,
+      documents: [],
+      gateway: makeGateway(onlyFindings.client, { maxAttempts: 1 }),
+      observeConditionFindings: true,
+    });
+    expect(withLedger.ok).toBe(true);
+    expect(withoutLedger.ok).toBe(true);
+    if (!withLedger.ok || !withoutLedger.ok) return;
+    // 条件の指摘の記録は同じ
+    expect(withLedger.value.trace.conditionFindings).toEqual(withoutLedger.value.trace.conditionFindings);
+    expect(withLedger.value.round.conditionFindings).toEqual(withoutLedger.value.round.conditionFindings);
+    // 既存の結果も同じ（台帳は判定に効かない）
+    expect(withLedger.value.result).toEqual(withoutLedger.value.result);
+    // 台帳は追加の記録としてだけ載る
+    expect(withoutLedger.value.trace.conditionLedger).toBeUndefined();
+    expect(withLedger.value.trace.conditionLedger?.observation).toBe("observed");
+  });
+
+  it("wire の欄欠落・型違反は段の失敗にせず、読めた行だけを読み、読めない行は添字と欄だけを残す", () => {
+    // 行の型が合うものだけを読む（parseConditionLedger）
+    const parsed = parseConditionLedger({
+      conditions: [
+        { conditionId: "C-1", range: { start: 0, end: 5 }, kind: "target", targets: [] },
+        { conditionId: "C-2", range: { start: 0, end: 5 }, kind: 7, targets: [] },
+      ],
+      rows: [
+        { conditionId: "C-1", targetId: "T-1", status: "missing", evidence: [] },
+        { conditionId: "C-2", targetId: "T-1", status: "missing" },
+      ],
+    });
+    expect(parsed.conditions).toHaveLength(1);
+    expect(parsed.rows).toHaveLength(1);
+    expect(parsed.dropped).toEqual([
+      { source: "conditions", index: 1, field: "kind" },
+      { source: "rows", index: 1, field: "evidence" },
+    ]);
+    // 読めない値は元の並びの添字と既知の欄だけ（余剰のデータを複写しない）
+    const withExtras = parseConditionLedger({
+      conditions: [{ conditionId: "C-1", range: "no", kind: "target", targets: [], secret: "MARK_LEAK" }],
+      rows: [],
+    });
+    expect(withExtras.dropped).toEqual([{ source: "conditions", index: 0, field: "range" }]);
+    expect(JSON.stringify(withExtras)).not.toContain("MARK_LEAK");
+    // 台帳の欄を送った往復の形の検査は、既存の uncovered の検査をそのまま通す
+    const checked = checkReverseCheckOutputWithConditionLedger(
+      { uncovered: [{ start: 0, end: 1 }], conditionLedger: { conditions: [], rows: [] } },
+      false,
+    );
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.uncovered).toEqual([{ start: 0, end: 1 }]);
+    expect(checked.value.conditionLedger).toEqual({ conditions: [], rows: [], dropped: [] });
+  });
+
+  it("通常記録の追加部分に ID・範囲・本文・引用・余剰データの目印文字列がなく、trace に許可した行・参照だけが残る", async () => {
+    const source = "MARKSRCを印として出す。MARKTEXTを合計する。";
+    const list: RequirementList = {
+      requirements: [
+        { id: "MARKID1", text: "MARKTEXT1を出せる", quote: "MARKSRCを印として出す。", position: { start: 0, end: 11 } },
+        { id: "MARKID2", text: "MARKTEXT2を合計できる", quote: "MARKTEXTを合計する。", position: { start: 11, end: 22 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured({
+        uncovered: [],
+        conditionLedger: {
+          conditions: [
+            ledgerCondition("MARKC1", "scope", 0, 11, [
+              { targetId: "MARKT1", start: 0, end: 11, requirementIds: ["MARKID1"] },
+            ]),
+          ],
+          rows: [ledgerRow("MARKC1", "MARKT1", "retained", [{ requirementId: "MARKID1", text: "MARKTEXT1" }])],
+        },
+      }),
+    ]);
+    const outcome = await runReverseCheckWithDiagnosis({
+      source,
+      list,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      observeConditionLedger: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 通常の診断（件数）には目印が出ない
+    const counts = JSON.stringify(outcome.value.round.conditionLedger);
+    for (const marker of ["MARKSRC", "MARKTEXT", "MARKID", "MARKC", "MARKT"]) expect(counts).not.toContain(marker);
+    // trace には条件・適用先・申告判定・証拠・算出範囲が残る
+    const trace = outcome.value.trace.conditionLedger;
+    expect(trace?.conditions[0]?.conditionId).toBe("MARKC1");
+    expect(trace?.conditions[0]?.targets[0]?.targetId).toBe("MARKT1");
+    expect(trace?.conditions[0]?.targets[0]?.requirementIds).toEqual(["MARKID1"]);
+    expect(trace?.rows[0]?.status).toBe("retained");
+    expect(trace?.rows[0]?.evidence[0]?.range).toEqual({ start: 0, end: 9 });
+    // trace に、許可していない欄（生の余剰データ）が無い
+    expect(new Set(Object.keys(trace!))).toEqual(
+      new Set(["conditions", "declaredPairs", "dropped", "observation", "rowMissing", "rows"]),
+    );
+    expect(new Set(Object.keys(trace!.rows[0]!))).toEqual(new Set(["conditionId", "evidence", "failure", "status", "targetId"]));
+    // 原文・一覧の SHA は同じ往復の trace が持つ（台帳は持たない）
+    expect(trace).not.toHaveProperty("sourceSha256");
+    expect(trace).not.toHaveProperty("listSha256");
+  });
+
+  it("欄順と説明文の許可差分を固定する（台帳の有無は別の欄で、既存の欄の文は変えない）", () => {
+    // 台帳だけの組の欄を、通しで固定する（説明は台帳の欄の意味だけ）
+    const ledgerOnly = reverseCheckSchemaOf(false, true) as {
+      readonly properties: Record<string, { readonly description: string; readonly required: readonly string[] }>;
+    };
+    const field = ledgerOnly.properties[REVERSE_CHECK_CONDITION_LEDGER_KEY];
+    expect(field?.required).toEqual(["conditions", "rows"]);
+    expect(field?.description).toBe(
+      "原文が運ぶ条件と、その条件が掛かる適用先（対象）の台帳。条件ごとに、本文がその条件を保っているかを行で示す。",
+    );
+    // 台帳の欄の説明は、uncovered の意味・指摘の基準に触れない
+    expect(field?.description).not.toContain("uncovered");
+    expect(field?.description).not.toContain("指摘");
+    // 既存の欄の説明は、#948 の派生 schema と同じ（1 文字も変えない）
+    const findingsOnly = reverseCheckSchemaOf(true, false) as {
+      readonly properties: Record<string, { readonly description: string }>;
+    };
+    const both = reverseCheckSchemaOf(true, true) as {
+      readonly properties: Record<string, { readonly description: string }>;
+    };
+    expect(both.properties[REVERSE_CHECK_FINDING_DETAILS_KEY]?.description).toBe(
+      findingsOnly.properties[REVERSE_CHECK_FINDING_DETAILS_KEY]?.description,
+    );
+    expect(both.properties["uncovered"]).toBe(REVERSE_CHECK_SCHEMA.properties.uncovered);
+  });
+
+  it("欄を持たない旧記録は読める（台帳の欄は任意で、無ければ台帳を足さない）", () => {
+    // 台帳の欄を持たない旧形式の応答を、台帳つきの検査に通しても読める（台帳は 0 件申告になる）
+    const checked = checkReverseCheckOutputWithConditionLedger({ uncovered: [{ start: 0, end: 1 }] }, true);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.uncovered).toEqual([{ start: 0, end: 1 }]);
+    expect(checked.value.conditionLedger).toEqual({ conditions: [], rows: [], dropped: [] });
+    // 旧形式のパース結果はそのまま（欠けている欄を捏造しない）
+    expect(parseConditionLedger(undefined)).toEqual({ conditions: [], rows: [], dropped: [] });
+    // 台帳の件数は、欄の無い往復で 0 件申告として扱える（未観測とは別の値）
+    const empty = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, { conditions: [], rows: [] });
+    expect(summarizeConditionLedger(empty).observation).toBe("empty");
+  });
+
+  it("台帳の構造不整合から再試行を起こさず、形の再試行の前回応答の中の台帳差分だけを許す", async () => {
+    // 台帳の値が構造の照合で使えなくても、段の形は通り、再試行しない（1 回の呼び出しで終わる）
+    const brokenLedger = {
+      conditions: [{ conditionId: "C-1", range: { start: 0, end: 5 }, kind: "no-such-kind", targets: [] }],
+      rows: [{ conditionId: "C-1", targetId: "T-9", status: "retained", evidence: [] }],
+    };
+    const recording = createRecordingClient([structured({ uncovered: [], conditionLedger: brokenLedger })]);
+    const outcome = await runReverseCheckWithDiagnosis({
+      source: LEDGER_SOURCE,
+      list: LEDGER_LIST,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      observeConditionLedger: true,
+    });
+    expect(outcome.ok).toBe(true);
+    expect(recording.structured).toHaveLength(1);
+    if (!outcome.ok) return;
+    // 段の結果は変わらない（台帳は判定に効かない）。ただし観測は indeterminate
+    expect(outcome.value.result.misses).toEqual([]);
+    expect(outcome.value.trace.conditionLedger?.observation).toBe("indeterminate");
+
+    // 形の再試行（uncovered の型違い）では、2 回目の input に前回の応答の塊だけが足される。
+    // その塊の中の台帳の差分は許すが、**要求の schema・rules・instructions は 1 文字も変えない**
+    const retryRecording = createRecordingClient([
+      structured({ uncovered: "no", conditionLedger: brokenLedger }),
+      structured({ uncovered: [], conditionLedger: { conditions: [], rows: [] } }),
+    ]);
+    const retried = await runReverseCheckWithDiagnosis({
+      source: LEDGER_SOURCE,
+      list: LEDGER_LIST,
+      documents: [],
+      gateway: makeGateway(retryRecording.client, { maxAttempts: 1 }),
+      observeConditionLedger: true,
+    });
+    expect(retried.ok).toBe(true);
+    expect(retryRecording.structured).toHaveLength(2);
+    const first = retryRecording.structured[0];
+    const second = retryRecording.structured[1];
+    // 前置き（schema・rules・instructions）は同じ
+    expect(second?.schema).toBe(first?.schema);
+    expect(second?.rules).toEqual(first?.rules);
+    expect(second?.instructions).toBe(first?.instructions);
+    expect(second?.schemaName).toBe(first?.schemaName);
+    // 2 回目の input は、1 回目の input に前回の応答と問題の塊を足したもの（前回応答に台帳の差分が入る）
+    expect(second?.input.startsWith(first?.input ?? "")).toBe(true);
+    expect(second?.input).toContain("conditionLedger");
+  });
+
+  it("初回・作り直し後・引用修復後の保存の 3 つの往復に記録する", async () => {
+    // 初回が来歴だけ → 修復 → 修復の後が覆いを含む → 作り直し → P2 も覆いを含む
+    const source = "印を出す。印を出す。件数を合計する。";
+    const initialList = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 19 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const redone = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: { start: 0, end: 10 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 19 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const ledgerFor = (kind: string) => ({
+      conditions: [ledgerCondition("C-1", kind, 0, 10, [{ targetId: "T-1", start: 1, end: 6, requirementIds: ["R-1"] }])],
+      rows: [ledgerRow("C-1", "T-1", "missing")],
+    });
+    const recording = createRecordingClient([
+      structured(initialList),
+      structured({ uncovered: [], conditionLedger: ledgerFor("initial-kind") }),
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      structured({ uncovered: [{ start: 0, end: 3 }], conditionLedger: ledgerFor("time") }),
+      structured(redone),
+      structured({ uncovered: [{ start: 0, end: 3 }], conditionLedger: ledgerFor("negation") }),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      quoteRepair: true,
+      observeConditionLedger: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.diagnosis.rounds.map((round) => round.fix)).toEqual(["initial", "quote-repair", "whole-redo"]);
+    // 3 つの往復すべてに、台帳の件数と trace の記録が付く
+    for (const round of outcome.value.diagnosis.rounds) expect(round.conditionLedger).toBeDefined();
+    for (const round of outcome.value.trace?.rounds ?? []) expect(round.conditionLedger).toBeDefined();
+    // 修復の後・作り直しの後の往復に、種類が残る
+    expect(outcome.value.trace?.rounds[1]?.conditionLedger?.conditions[0]?.kind).toBe("time");
+    expect(outcome.value.trace?.rounds[2]?.conditionLedger?.conditions[0]?.kind).toBe("negation");
+    // 記録のない往復（台帳の欄を返さない）は 0 件申告であって、欄が無いのとは違う
+    expect(outcome.value.diagnosis.rounds[0]?.conditionLedger?.counts.rawConditionRows).toBe(1);
   });
 });

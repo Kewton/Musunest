@@ -2209,6 +2209,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         // 条件の指摘の詳細（findingDetails）を求める派生 schema を、3 つの P2 すべてに使う（Issue #948。
         // **Plan の経路だけ**の明示の選択である。既定の Build の経路は schema・要求・結果を変えない）
         observeConditionFindings: true,
+        // 条件と適用先の台帳（conditionLedger）を求める派生 schema を、3 つの P2 すべてに使う（Issue #951。
+        // **Plan の経路だけ**の明示の選択である。台帳は記録だけで、misses・unmet・redo・P3 以降へ渡さない）
+        observeConditionLedger: true,
       });
       // 止まったときも、止まるまでに終えた往復の分を結果へ残す（Issue #430・#919）
       requirementsDiagnosis = outcome.ok ? outcome.value.diagnosis : outcome.diagnosis;

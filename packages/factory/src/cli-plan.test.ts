@@ -92,6 +92,7 @@ import {
   SOURCE_TEXT,
 } from "./stages/__tests__/prompt.js";
 import { ATTEMPT_KEYS, RETRY_KEYS } from "./record.js";
+import { REVERSE_CHECK_LEDGER_FAILURES } from "./stages/reverse-check.js";
 import {
   CONFIRMED_PLAN,
   CONFIRMED_PLAN_ACCEPTED,
@@ -506,6 +507,26 @@ interface PlanCliRecordShape {
           readonly invalid: number;
         };
         readonly orphans: number;
+      };
+      /** 条件と適用先の台帳の件数（Plan の往復だけ。件数だけ。Issue #951） */
+      readonly condition_ledger?: {
+        readonly observation: string;
+        readonly counts: {
+          readonly raw_condition_rows: number | null;
+          readonly consistent_condition_rows: number | null;
+          readonly unknown_condition_rows: number | null;
+          readonly raw_correspondence_rows: number | null;
+          readonly retained: number | null;
+          readonly missing: number | null;
+          readonly unknown: number | null;
+          readonly declared_pairs: number | null;
+          readonly single_row_pairs: number | null;
+          readonly no_row_pairs: number | null;
+          readonly multiple_row_pairs: number | null;
+          readonly unknown_rows: Readonly<Record<string, number>>;
+          readonly unknown_conditions: Readonly<Record<string, number>>;
+          readonly orphan_rows: number;
+        };
       };
     }[];
     readonly redone: boolean;
@@ -1669,6 +1690,27 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
       orphans: 0,
     };
     // 文ごとの覆いと指摘の行（番号と有限の分類だけ。Issue #488）
+    // 台帳の件数（Issue #951）。会話は台帳の欄を返さない（欄の無い応答）ので、0 件申告になる
+    const zeroLedgerFailures = Object.fromEntries(REVERSE_CHECK_LEDGER_FAILURES.map((failure) => [failure, 0]));
+    const conditionLedger = {
+      observation: "empty",
+      counts: {
+        raw_condition_rows: 0,
+        consistent_condition_rows: 0,
+        unknown_condition_rows: 0,
+        raw_correspondence_rows: 0,
+        retained: 0,
+        missing: 0,
+        unknown: 0,
+        declared_pairs: 0,
+        single_row_pairs: 0,
+        no_row_pairs: 0,
+        multiple_row_pairs: 0,
+        unknown_rows: zeroLedgerFailures,
+        unknown_conditions: zeroLedgerFailures,
+        orphan_rows: 0,
+      },
+    };
     const expectedRound = {
       misses: expected,
       dropped_blank_misses: 0,
@@ -1684,6 +1726,7 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
         { kind: "uncovered-source", found_by: "conversation", sentences: [1], requirements: [1], framing_overlap: false },
       ],
       condition_findings: conditionFindings,
+      condition_ledger: conditionLedger,
     };
     expect(record.requirements_diagnosis).toEqual({
       rounds: [
@@ -5278,5 +5321,126 @@ describe("T2条件指摘の記録", () => {
     // 既存の plan-record の形は変えない（別ファイルのまま）
     expect(record).not.toHaveProperty("reverse_check_trace");
     expect(record).not.toHaveProperty("reverseCheckTrace");
+  });
+});
+
+// ── Issue #951：条件と適用先の台帳を trace に残し、plan-record には件数だけを写す ──
+
+describe("T5条件台帳の記録（Issue #951）", () => {
+  it("台帳を trace に残し、plan-record には件数だけを写す（ID・範囲・本文の目印は出ない）", async () => {
+    const source = "MARKLED1を印として出す。MARKLED2を合計する。MARKLED3を記録する。";
+    const spanOf = (quote: string): { readonly start: number; readonly end: number } => {
+      const start = source.indexOf(quote);
+      return { start, end: start + quote.length };
+    };
+    const list = {
+      requirements: [
+        { id: "MARKID1", text: "MARKBODY1を出せる", quote: "MARKLED1を印として出す。", position: spanOf("MARKLED1を印として出す。") },
+        { id: "MARKID2", text: "MARKBODY2を合計できる", quote: "MARKLED2を合計する。", position: spanOf("MARKLED2を合計する。") },
+        { id: "MARKID3", text: "MARKBODY3を記録できる", quote: "MARKLED3を記録する。", position: spanOf("MARKLED3を記録する。") },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    // 期限の条件を 3 つの適用先へ掛け、1 つは保持・2 つは不足にする
+    const conditionLedger = {
+      conditions: [
+        {
+          conditionId: "MARKC1",
+          range: { start: 0, end: spanOf("MARKLED2を合計する。").end },
+          kind: "deadline",
+          targets: [
+            { targetId: "MARKT1", range: spanOf("MARKLED1を印として出す。"), requirementIds: ["MARKID1"] },
+            { targetId: "MARKT2", range: spanOf("MARKLED2を合計する。"), requirementIds: ["MARKID2"] },
+            { targetId: "MARKT3", range: spanOf("MARKLED3を記録する。"), requirementIds: ["MARKID3"] },
+          ],
+        },
+      ],
+      rows: [
+        { conditionId: "MARKC1", targetId: "MARKT1", status: "retained", evidence: [{ requirementId: "MARKID1", text: "MARKBODY1" }] },
+        { conditionId: "MARKC1", targetId: "MARKT2", status: "missing", evidence: [] },
+        { conditionId: "MARKC1", targetId: "MARKT3", status: "missing", evidence: [] },
+      ],
+    };
+    // 初回の P2 が覆いを含む（会話の指摘）→ 作り直し → 作り直しの P2 も覆いを含み、問いの前に止まる
+    const recording = createRecordingClient([
+      structured(list),
+      structured({ uncovered: [{ start: 0, end: 3 }], findingDetails: [], conditionLedger }),
+      structured(list),
+      structured({ uncovered: [{ start: 0, end: 3 }], findingDetails: [], conditionLedger }),
+    ]);
+    const dir = `${directory}/condition-ledger-record`;
+    const answersPath = "condition-ledger-answers.json";
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan-only", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : source),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => createFakeJudge({}),
+      now: () => 0,
+      log: () => {},
+    });
+    expect(code).toBe(EXIT_RUN_FAILED);
+
+    // trace には、条件・適用先・申告の状態・証拠・算出範囲・構造の照合の結果が残る
+    const trace = JSON.parse(await fs.readFile(`${dir}/${PLAN_REVERSE_CHECK_TRACE_FILE}`, "utf8"));
+    const ledger = trace.rounds[0].condition_ledger;
+    expect(ledger).toBeDefined();
+    expect(ledger.observation).toBe("observed");
+    expect(ledger.conditions[0].condition_id).toBe("MARKC1");
+    expect(ledger.conditions[0].targets).toHaveLength(3);
+    expect(ledger.conditions[0].targets.map((target: { readonly failure: unknown }) => target.failure)).toEqual([
+      null,
+      null,
+      null,
+    ]);
+    expect(ledger.rows.map((row: { readonly status: string }) => row.status)).toEqual([
+      "retained",
+      "missing",
+      "missing",
+    ]);
+    // 算出範囲はコードが要件の本文から求める（本文の添字）
+    expect(ledger.rows[0].evidence[0].range).toEqual({ start: 0, end: 9 });
+    expect(ledger.declared_pairs).toHaveLength(3);
+    // 2 つの往復（初回・作り直し）のどちらにも記録がある
+    expect(trace.rounds.map((round: { readonly fix: string }) => round.fix)).toEqual(["initial", "whole-redo"]);
+    for (const round of trace.rounds) expect(round.condition_ledger).toBeDefined();
+
+    // plan-record には件数だけが写り、ID・範囲・本文・引用の目印は現れない
+    const record = await readPlanRecord(dir);
+    const counts = record.requirements_diagnosis.rounds[0]?.condition_ledger;
+    expect(counts).toBeDefined();
+    expect(counts?.observation).toBe("observed");
+    expect(counts?.counts).toMatchObject({
+      raw_condition_rows: 1,
+      consistent_condition_rows: 1,
+      unknown_condition_rows: 0,
+      raw_correspondence_rows: 3,
+      retained: 1,
+      missing: 2,
+      unknown: 0,
+      declared_pairs: 3,
+      single_row_pairs: 3,
+      no_row_pairs: 0,
+      multiple_row_pairs: 0,
+      orphan_rows: 0,
+    });
+    const recordText = JSON.stringify(record);
+    for (const marker of ["MARKLED", "MARKID", "MARKBODY", "MARKC", "MARKT"]) {
+      expect(recordText).not.toContain(marker);
+    }
+    // 台帳の理由の内訳は件数のまま（0 を含む）
+    expect(counts?.counts.unknown_rows["duplicate-row"]).toBe(0);
+    // 既存の plan-record の形は変えない（別ファイルのまま）
+    expect(record).not.toHaveProperty("condition_ledger_trace");
   });
 });

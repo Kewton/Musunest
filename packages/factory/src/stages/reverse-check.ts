@@ -158,49 +158,259 @@ export interface ReverseCheckConditionDetail {
 }
 
 /**
- * Plan の経路だけが送る**派生 schema**（Issue #948）。既存の `reverse-check` の schema は変えず、
- * `uncovered` の定義をそのまま残したまま `findingDetails` を足す。strict の構造化出力のため、
- * 追加の欄と行の中の 3 欄を `required` にする。`observeConditionFindings` を省いた（Build の）経路は
- * **既存の schema の実体をそのまま返す**——送るバイト列を変えない。
+ * 条件の指摘の詳細（`findingDetails`）の欄の schema（Issue #948）。既存の `uncovered` の定義は変えず、
+ * この欄を足した schema を Plan の経路だけが送る。strict の構造化出力のため、行の中の 3 欄を `required` にする。
  */
-export function reverseCheckSchemaOf(observeConditionFindings?: boolean): unknown {
-  if (observeConditionFindings !== true) return REVERSE_CHECK_SCHEMA;
-  return {
+const REVERSE_CHECK_FINDING_DETAILS_SCHEMA = {
+  type: "array",
+  description:
+    "uncovered の各指摘に付ける、不足する条件の種類と本文上の対象。詳細を付けられない指摘は行を省略してよい（0 件でもよい）。",
+  items: {
     type: "object",
     additionalProperties: false,
-    required: ["uncovered", REVERSE_CHECK_FINDING_DETAILS_KEY],
+    required: ["uncoveredIndex", "missingKind", "requirementIds"],
     properties: {
-      uncovered: REVERSE_CHECK_SCHEMA.properties.uncovered,
-      [REVERSE_CHECK_FINDING_DETAILS_KEY]: {
-        type: "array",
+      uncoveredIndex: {
+        type: "integer",
+        minimum: 0,
+        description: "元の uncovered の添字（0 始まり）",
+      },
+      missingKind: {
+        type: "string",
         description:
-          "uncovered の各指摘に付ける、不足する条件の種類と本文上の対象。詳細を付けられない指摘は行を省略してよい（0 件でもよい）。",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["uncoveredIndex", "missingKind", "requirementIds"],
-          properties: {
-            uncoveredIndex: {
-              type: "integer",
-              minimum: 0,
-              description: "元の uncovered の添字（0 始まり）",
+          "不足する条件の種類（target・negation・exception・time・deadline・quantity・scope・wording・shared-modifier・reference-source・other・unclear のいずれか）",
+      },
+      requirementIds: {
+        type: "array",
+        items: { type: "string" },
+        description: "本文上の対象の要件 ID（対象を特定できなければ空の配列）",
+      },
+    },
+  },
+} as const;
+
+/**
+ * Plan の経路だけが送る**派生 schema**（Issue #948・#951）。既存の `reverse-check` の schema は変えず、
+ * `uncovered` の定義をそのまま残したまま、求めた欄を**この順**で足す——`findingDetails`（Issue #948）の後ろに
+ * `conditionLedger`（Issue #951）。strict の構造化出力のため、追加の欄と行の中の欄を `required` にする。
+ * どちらも省いた（Build の）経路は**既存の schema の実体をそのまま返す**——送るバイト列を変えない。
+ *
+ * 4 つの組を区別する（Issue #951 の「やること」1）：どちらも省く＝既存の基本 schema、`findingDetails` だけ＝
+ * 既存の派生 schema、`conditionLedger` だけ＝基本＋台帳、両方＝基本＋詳細＋台帳。既存の `uncovered`・
+ * `findingDetails` の定義と並びは変えない。
+ */
+export function reverseCheckSchemaOf(
+  observeConditionFindings?: boolean,
+  observeConditionLedger?: boolean,
+): unknown {
+  if (observeConditionFindings !== true && observeConditionLedger !== true) return REVERSE_CHECK_SCHEMA;
+  const properties: Record<string, unknown> = { uncovered: REVERSE_CHECK_SCHEMA.properties.uncovered };
+  const required: string[] = ["uncovered"];
+  if (observeConditionFindings === true) {
+    properties[REVERSE_CHECK_FINDING_DETAILS_KEY] = REVERSE_CHECK_FINDING_DETAILS_SCHEMA;
+    required.push(REVERSE_CHECK_FINDING_DETAILS_KEY);
+  }
+  if (observeConditionLedger === true) {
+    properties[REVERSE_CHECK_CONDITION_LEDGER_KEY] = REVERSE_CHECK_CONDITION_LEDGER_SCHEMA;
+    required.push(REVERSE_CHECK_CONDITION_LEDGER_KEY);
+  }
+  return { type: "object", additionalProperties: false, required, properties };
+}
+
+// ── 条件と適用先の台帳（Issue #951。段 1・行き先は変えない）──────────────────────────
+//
+// P1 は原文の条件を本文に残す持ち主、P2 は原文から独立に条件と**全適用先**を点検する持ち主である。
+// 段 1 で足すのは**記録**だけ——P2 の返り値の欄を増やし、コードが参照の構造（範囲・ID・行の欠け・重複・
+// 孤立・証拠）を照合して記録する。台帳は misses・unmet・redo・P3 以降・最終 Plan へ**渡さない**。
+// 意味の正しさ（条件の抽出・適用先の網羅）は、この形では証明しない。
+
+/** 派生 schema に足す、条件と適用先の台帳の欄の名前（Issue #951） */
+export const REVERSE_CHECK_CONDITION_LEDGER_KEY = "conditionLedger";
+
+/**
+ * 台帳の 1 つの適用先の行の状態（**有限の 3 つ**。Issue #951）。`retained` は本文に条件が残った、
+ * `missing` は残っていない、`unknown` は構造の照合で判定できなかった（意味の判定ではない）。
+ */
+export const REVERSE_CHECK_LEDGER_STATUSES = ["retained", "missing", "unknown"] as const;
+export type ReverseCheckLedgerStatus = (typeof REVERSE_CHECK_LEDGER_STATUSES)[number];
+
+/**
+ * 申告された適用先・行が使えない理由（**有限の値**。Issue #951）。意味の誤りではなく参照の構造の印である。
+ */
+export const REVERSE_CHECK_LEDGER_FAILURES = [
+  /** 原文の範囲が 0 <= start < end <= length を満たさない */
+  "range",
+  /** 種類が既知の集合に無い */
+  "unknown-kind",
+  /** 条件 ID が往復内で一意でない */
+  "duplicate-condition",
+  /** 対象 ID が条件内で一意でない */
+  "duplicate-target",
+  /** 要件 ID が一覧に一意に実在しない */
+  "unknown-requirement",
+  /** 同じ対象が同じ要件 ID を 2 回以上挙げた */
+  "duplicate-requirement",
+  /** 申告された状態が retained・missing・unknown のいずれでもない */
+  "unknown-status",
+  /** 同じ条件×適用先の行が 2 行以上ある */
+  "duplicate-row",
+  /** 宣言されていない条件・適用先を指す行がある */
+  "orphan-row",
+  /** 行の適用先 ID が、その条件の適用先に無い */
+  "orphan-target",
+  /** 行の属する条件そのものが構造の照合で使えない */
+  "condition-invalid",
+  /** 行の属する適用先そのものが構造の照合で使えない */
+  "target-invalid",
+  /** retained なのに証拠が空 */
+  "no-evidence",
+  /** 証拠の要件 ID が一覧に一意に実在しない */
+  "evidence-unknown-requirement",
+  /** 証拠の要件 ID が、その適用先の要件 ID に含まれない */
+  "evidence-target-mismatch",
+  /** 証拠の逐語が、その要件の本文に一意に現れない */
+  "evidence-not-found",
+  /** 証拠の逐語が、その要件の本文に 2 か所以上現れる */
+  "evidence-ambiguous",
+] as const;
+export type ReverseCheckLedgerFailure = (typeof REVERSE_CHECK_LEDGER_FAILURES)[number];
+
+/** 会話の宣言した適用先 1 つ（wire の `conditionLedger.conditions[].targets[]`。Issue #951） */
+export interface ReverseCheckLedgerTarget {
+  /** 条件の中で一意の対象 ID */
+  readonly targetId: string;
+  /** 適用先の原文の範囲 */
+  readonly range: SourceRange;
+  /** 本文上の要件の ID（補完先を含む。要件自体が無ければ空） */
+  readonly requirementIds: readonly string[];
+}
+
+/** 会話の宣言した条件 1 つ（wire の `conditionLedger.conditions[]`。Issue #951） */
+export interface ReverseCheckLedgerCondition {
+  /** 往復の中で一意の条件 ID */
+  readonly conditionId: string;
+  /** 原文の非空の範囲 */
+  readonly range: SourceRange;
+  /** 条件の種類（wire では文字列のまま。未知値も保存する） */
+  readonly kind: string;
+  readonly targets: readonly ReverseCheckLedgerTarget[];
+}
+
+/**
+ * 会話の申告した対応 1 行（wire の `conditionLedger.rows[]`。Issue #951）。`evidence` は要件 ID と、
+ * その要件の `text` に**一意に現れる逐語の部分文字列**の組である（引用を証拠にしない）。
+ */
+export interface ReverseCheckLedgerRow {
+  readonly conditionId: string;
+  readonly targetId: string;
+  readonly status: string;
+  readonly evidence: readonly { readonly requirementId: string; readonly text: string }[];
+}
+
+/** 会話の返した台帳（wire の `conditionLedger`。Issue #951） */
+export interface ReverseCheckLedgerAnswer {
+  readonly conditions: readonly ReverseCheckLedgerCondition[];
+  readonly rows: readonly ReverseCheckLedgerRow[];
+}
+
+/**
+ * 台帳の欄の schema（Issue #951）。**説明は台帳の欄の意味だけ**とし、`uncovered` の意味や指摘の基準には
+ * 触れない（既存の `uncovered`・`findingDetails` の意味を変えない）。strict の構造化出力のため、追加の欄と
+ * 行の中の欄を `required` にする。`scanned` のような「網羅したか」の欄は置かない——0 件を網羅済みと
+ * 認定しないためである。
+ */
+export const REVERSE_CHECK_CONDITION_LEDGER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  description:
+    "原文が運ぶ条件と、その条件が掛かる適用先（対象）の台帳。条件ごとに、本文がその条件を保っているかを行で示す。",
+  required: ["conditions", "rows"],
+  properties: {
+    conditions: {
+      type: "array",
+      description: "原文が運ぶ条件。条件ごとに、掛かる適用先のすべてを持つ。",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["conditionId", "range", "kind", "targets"],
+        properties: {
+          conditionId: { type: "string", description: "往復の中で一意の条件 ID" },
+          range: {
+            type: "object",
+            additionalProperties: false,
+            required: ["start", "end"],
+            properties: {
+              start: { type: "integer", minimum: 0, description: "条件の原文の範囲の始まり（0 始まり）" },
+              end: { type: "integer", minimum: 0, description: "条件の原文の範囲の終わり（開始より大きい）" },
             },
-            missingKind: {
-              type: "string",
-              description:
-                "不足する条件の種類（target・negation・exception・time・deadline・quantity・scope・wording・shared-modifier・reference-source・other・unclear のいずれか）",
-            },
-            requirementIds: {
-              type: "array",
-              items: { type: "string" },
-              description: "本文上の対象の要件 ID（対象を特定できなければ空の配列）",
+          },
+          kind: {
+            type: "string",
+            description:
+              "条件の種類（target・negation・exception・time・deadline・quantity・scope・wording・shared-modifier・reference-source・other・unclear）",
+          },
+          targets: {
+            type: "array",
+            description: "この条件が掛かる適用先のすべて（要件の本文上の ID を持つ。要件自体が無ければ空でよい）",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["targetId", "range", "requirementIds"],
+              properties: {
+                targetId: { type: "string", description: "条件の中で一意の対象 ID" },
+                range: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["start", "end"],
+                  properties: {
+                    start: { type: "integer", minimum: 0, description: "適用先の原文の範囲の始まり（0 始まり）" },
+                    end: { type: "integer", minimum: 0, description: "適用先の原文の範囲の終わり（開始より大きい）" },
+                  },
+                },
+                requirementIds: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "適用先の本文上の要件の ID（補完先を含む。要件自体が無ければ空の配列）",
+                },
+              },
             },
           },
         },
       },
     },
-  };
-}
+    rows: {
+      type: "array",
+      description: "条件×適用先ごとに、本文がその条件を保っているかを示す行。宣言したすべての組に 1 行ずつ。",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["conditionId", "targetId", "status", "evidence"],
+        properties: {
+          conditionId: { type: "string", description: "条件の ID（conditions の conditionId）" },
+          targetId: { type: "string", description: "適用先の ID（その条件の targets の targetId）" },
+          status: {
+            type: "string",
+            description: "本文がその条件を保っているか（retained・missing・unknown）",
+          },
+          evidence: {
+            type: "array",
+            description:
+              "retained のときの証拠。要件 ID と、その要件の本文に一意に現れる逐語の部分文字列の組。引用は証拠にしない。",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["requirementId", "text"],
+              properties: {
+                requirementId: { type: "string", description: "本文上の要件の ID" },
+                text: { type: "string", description: "その要件の本文に一意に現れる逐語の部分文字列" },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+} as const;
 
 /** ①' が受け取るもの（原文と一覧だけ） */
 export interface ReverseCheckInput {
@@ -228,6 +438,12 @@ export interface ReverseCheckInput {
    * 変えない。
    */
   readonly observeConditionFindings?: boolean;
+  /**
+   * 条件と適用先の台帳（`conditionLedger`）を求める派生 schema を送るか（Issue #951）。**Plan の経路だけ**が
+   * 明示の選択で有効にする。省けば送る schema・要求のバイト列・結果・診断を変えない。`observeConditionFindings`
+   * とは独立の選択であり、相乗りしない（別の記録）。
+   */
+  readonly observeConditionLedger?: boolean;
 }
 
 /** ①' の会話の答え */
@@ -235,6 +451,8 @@ interface ReverseCheckAnswer {
   readonly uncovered: readonly SourceRange[];
   /** 条件の指摘の詳細（派生 schema を送ったときだけ。Issue #948） */
   readonly findingDetails?: readonly ReverseCheckConditionDetail[];
+  /** 条件と適用先の台帳（台帳の欄を送ったときだけ。Issue #951） */
+  readonly conditionLedger?: ReverseCheckLedgerParsed;
 }
 
 /**
@@ -542,6 +760,128 @@ export function isKnownConditionKind(kind: string): kind is ReverseCheckConditio
 }
 
 /**
+ * 台帳の欄を送った往復の応答の形を確かめる（Issue #951）。既存の検査（`uncovered` と、送ったなら
+ * `findingDetails`）はそのまま使い、`conditionLedger` は**読めた行だけ**を読む。読めなかった行は、
+ * 元の並びの添字と欄の名前だけを残す（**任意の余剰データを複写しない**）。wire の欄欠落・型違反は
+ * adapter の schema 検査が段の失敗にするので、ここで形のやり直しへは回さない。
+ */
+export function checkReverseCheckOutputWithConditionLedger(
+  output: unknown,
+  withFindings: boolean,
+): ShapeCheck<ReverseCheckAnswer & { readonly conditionLedger?: ReverseCheckLedgerParsed }> {
+  const base = withFindings ? checkReverseCheckOutputWithConditionFindings(output) : checkReverseCheckOutput(output);
+  if (!base.ok) return base;
+  const raw = isRecord(output) ? output[REVERSE_CHECK_CONDITION_LEDGER_KEY] : undefined;
+  return { ok: true, value: { ...base.value, conditionLedger: parseConditionLedger(raw) } };
+}
+
+/** 読めた台帳と、読めなかった値の印（Issue #951） */
+export interface ReverseCheckLedgerParsed {
+  readonly conditions: readonly ReverseCheckLedgerCondition[];
+  readonly rows: readonly ReverseCheckLedgerRow[];
+  readonly dropped: readonly ReverseCheckTraceLedgerDropped[];
+}
+
+/** 文字列の並びか（Issue #951） */
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+/** 原文の上の範囲として読めるか（型だけ。意味の妥当性は照合が見る。Issue #951） */
+function readLedgerRange(value: unknown): SourceRange | undefined {
+  if (!isRecord(value)) return undefined;
+  const start = value["start"];
+  const end = value["end"];
+  if (typeof start !== "number" || typeof end !== "number") return undefined;
+  return { start, end };
+}
+
+/** 適用先 1 つを読む（読めなければ欄の名前を返す。Issue #951） */
+function readLedgerTarget(value: unknown): { readonly target?: ReverseCheckLedgerTarget; readonly field?: string } {
+  if (!isRecord(value)) return { field: "targets" };
+  const targetId = value["targetId"];
+  const range = readLedgerRange(value["range"]);
+  const requirementIds = value["requirementIds"];
+  if (typeof targetId !== "string") return { field: "targetId" };
+  if (range === undefined) return { field: "range" };
+  if (!isStringArray(requirementIds)) return { field: "requirementIds" };
+  return { target: { targetId, range, requirementIds: requirementIds.slice() } };
+}
+
+/** 条件 1 つを読む（読めなければ欄の名前を返す。Issue #951） */
+function readLedgerCondition(
+  value: unknown,
+): { readonly condition?: ReverseCheckLedgerCondition; readonly field?: string } {
+  if (!isRecord(value)) return { field: "conditions" };
+  const conditionId = value["conditionId"];
+  const range = readLedgerRange(value["range"]);
+  const kind = value["kind"];
+  const targets = value["targets"];
+  if (typeof conditionId !== "string") return { field: "conditionId" };
+  if (range === undefined) return { field: "range" };
+  if (typeof kind !== "string") return { field: "kind" };
+  if (!Array.isArray(targets)) return { field: "targets" };
+  const read: ReverseCheckLedgerTarget[] = [];
+  for (const entry of targets) {
+    const target = readLedgerTarget(entry);
+    if (target.target === undefined) return { field: `targets.${target.field ?? ""}` };
+    read.push(target.target);
+  }
+  return { condition: { conditionId, range, kind, targets: read } };
+}
+
+/** 対応 1 行を読む（読めなければ欄の名前を返す。Issue #951） */
+function readLedgerRow(value: unknown): { readonly row?: ReverseCheckLedgerRow; readonly field?: string } {
+  if (!isRecord(value)) return { field: "rows" };
+  const conditionId = value["conditionId"];
+  const targetId = value["targetId"];
+  const status = value["status"];
+  const evidence = value["evidence"];
+  if (typeof conditionId !== "string") return { field: "conditionId" };
+  if (typeof targetId !== "string") return { field: "targetId" };
+  if (typeof status !== "string") return { field: "status" };
+  if (!Array.isArray(evidence)) return { field: "evidence" };
+  const read: { readonly requirementId: string; readonly text: string }[] = [];
+  for (const entry of evidence) {
+    if (!isRecord(entry)) return { field: "evidence" };
+    const requirementId = entry["requirementId"];
+    const text = entry["text"];
+    if (typeof requirementId !== "string") return { field: "evidence.requirementId" };
+    if (typeof text !== "string") return { field: "evidence.text" };
+    read.push({ requirementId, text });
+  }
+  return { row: { conditionId, targetId, status, evidence: read } };
+}
+
+/**
+ * 台帳の欄を読む（Issue #951）。読めた行だけを残し、読めなかった行は**元の並びの添字と欄の名前**だけを
+ * `dropped` に残す。欄そのものが配列でなければ、すべて読めなかったものとして扱う（値を複写しない）。
+ */
+export function parseConditionLedger(raw: unknown): ReverseCheckLedgerParsed {
+  const conditions: ReverseCheckLedgerCondition[] = [];
+  const rows: ReverseCheckLedgerRow[] = [];
+  const dropped: ReverseCheckTraceLedgerDropped[] = [];
+  if (!isRecord(raw)) return { conditions, rows, dropped };
+  const rawConditions = raw["conditions"];
+  const rawRows = raw["rows"];
+  if (Array.isArray(rawConditions)) {
+    rawConditions.forEach((value, index) => {
+      const read = readLedgerCondition(value);
+      if (read.condition === undefined) dropped.push({ source: "conditions", index, field: read.field ?? "conditions" });
+      else conditions.push(read.condition);
+    });
+  }
+  if (Array.isArray(rawRows)) {
+    rawRows.forEach((value, index) => {
+      const read = readLedgerRow(value);
+      if (read.row === undefined) dropped.push({ source: "rows", index, field: read.field ?? "rows" });
+      else rows.push(read.row);
+    });
+  }
+  return { conditions, rows, dropped };
+}
+
+/**
  * 条件の指摘 1 件の記録（Issue #948）。**元の `uncovered` の添字・範囲・行き先**、申告された**種類**と
  * **本文上の対象 ID**、照合状態と、その理由を持つ。照合状態は**参照の構造の印**であって、意味の正しさや
  * 未解決の印ではない。同じ元の添字に複数行が付いたときは、**先頭を選ばず**行ごとに残す。
@@ -752,6 +1092,439 @@ export function summarizeConditionFindings(
   return { whole, remaining, other, orphans: findings.orphans.length };
 }
 
+// ── 条件と適用先の台帳の照合（Issue #951。記録だけ・行き先は変えない）────────────────────
+
+/** 台帳の観測の状態（**有限の 3 つ**。Issue #951）。未観測は往復そのものが無い（欄が無い）ことで表す */
+export const REVERSE_CHECK_LEDGER_OBSERVATIONS = [
+  /** 完了し、構造の照合で判定できた */
+  "observed",
+  /** 完了し、条件も行も 0 件だった（**網羅済みとは認定しない**） */
+  "empty",
+  /** 完了したが、構造の照合で判定できない値があった */
+  "indeterminate",
+] as const;
+export type ReverseCheckLedgerObservation = (typeof REVERSE_CHECK_LEDGER_OBSERVATIONS)[number];
+
+/** 台帳の適用先 1 つの記録（構造の照合の結果つき。Issue #951） */
+export interface ReverseCheckTraceLedgerTarget {
+  readonly targetId: string;
+  readonly range: SourceRange;
+  readonly requirementIds: readonly string[];
+  /** 適用先そのものが使えない理由（無ければ `null`） */
+  readonly failure: ReverseCheckLedgerFailure | null;
+}
+
+/** 台帳の条件 1 つの記録（構造の照合の結果つき。Issue #951） */
+export interface ReverseCheckTraceLedgerCondition {
+  readonly conditionId: string;
+  readonly range: SourceRange;
+  readonly kind: string;
+  readonly targets: readonly ReverseCheckTraceLedgerTarget[];
+  /** 条件そのものが使えない理由（無ければ `null`） */
+  readonly failure: ReverseCheckLedgerFailure | null;
+}
+
+/** 台帳の証拠 1 つ（要件 ID・逐語と、コードが要件の本文から求めた範囲。Issue #951） */
+export interface ReverseCheckTraceLedgerEvidence {
+  readonly requirementId: string;
+  readonly text: string;
+  /** 一意に求まった範囲（要件の本文の中）。無い・複数なら `null` */
+  readonly range: SourceRange | null;
+}
+
+/** 台帳の対応 1 行（申告の状態と、構造の照合で決まった状態・理由・算出範囲。Issue #951） */
+export interface ReverseCheckTraceLedgerRow {
+  readonly conditionId: string;
+  readonly targetId: string;
+  /** 申告された状態（不正な文字列は `unknown` に寄せる） */
+  readonly status: ReverseCheckLedgerStatus;
+  readonly evidence: readonly ReverseCheckTraceLedgerEvidence[];
+  /** 構造の照合で判定できなかった理由（無ければ `null`） */
+  readonly failure: ReverseCheckLedgerFailure | null;
+}
+
+/** 宣言された条件×適用先の組（Issue #951） */
+export interface ReverseCheckTraceLedgerPair {
+  readonly conditionId: string;
+  readonly targetId: string;
+}
+
+/** 読めなかった値の印（元の行番号・既知の欄。余剰のデータは写さない。Issue #951） */
+export interface ReverseCheckTraceLedgerDropped {
+  readonly source: "conditions" | "rows";
+  /** 元の並びの添字（0 始まり） */
+  readonly index: number;
+  /** 読めなかった欄の名前 */
+  readonly field: string;
+}
+
+/**
+ * 1 往復の条件と適用先の台帳の記録（Issue #951）。**Plan の経路だけ**が持ち、原文 SHA・一覧 SHA は
+ * 同じ往復の trace が持つ。条件・適用先・申告の状態・証拠・算出範囲・構造の照合の結果を残す。
+ * 判定・やり直し・持ち越し・P3 以降の入力には使わない。
+ */
+export interface ReverseCheckTraceConditionLedger {
+  readonly conditions: readonly ReverseCheckTraceLedgerCondition[];
+  readonly rows: readonly ReverseCheckTraceLedgerRow[];
+  /** 宣言された一意な条件×適用先の組（分母。行の無い組もここから数える） */
+  readonly declaredPairs: readonly ReverseCheckTraceLedgerPair[];
+  /** 行の無い、宣言された組（行を捏造しない。Issue #951） */
+  readonly rowMissing: readonly ReverseCheckTraceLedgerPair[];
+  /** 読めなかった値（あれば観測は `indeterminate`） */
+  readonly dropped: readonly ReverseCheckTraceLedgerDropped[];
+  readonly observation: ReverseCheckLedgerObservation;
+}
+
+/**
+ * 1 往復の台帳の件数の内訳（**件数だけ**。Issue #951）。分母を読めないとき（読めない値があったとき）は
+ * 数を `null` にし、**0 にしない**。`unknown` は、申告が `unknown` の行と、構造の照合で判定できなかった行の
+ * 両方を含む——`unknownRows` は後者だけを理由別に数える。
+ */
+export interface ReverseCheckConditionLedgerCounts {
+  /** 宣言された条件の行数（分母） */
+  readonly rawConditionRows: number | null;
+  readonly consistentConditionRows: number | null;
+  readonly unknownConditionRows: number | null;
+  /** 宣言された対応の行数（分母） */
+  readonly rawCorrespondenceRows: number | null;
+  readonly retained: number | null;
+  readonly missing: number | null;
+  readonly unknown: number | null;
+  /** 宣言された一意な条件×適用先の組数 */
+  readonly declaredPairs: number | null;
+  readonly singleRowPairs: number | null;
+  readonly noRowPairs: number | null;
+  readonly multipleRowPairs: number | null;
+  /** 対応の行が構造の照合で判定できなかった理由の内訳（和は `unknown` 以下） */
+  readonly unknownRows: Readonly<Record<ReverseCheckLedgerFailure, number>>;
+  /** 条件の行が構造の照合で判定できなかった理由の内訳（和は `unknownConditionRows`） */
+  readonly unknownConditions: Readonly<Record<ReverseCheckLedgerFailure, number>>;
+  /** 宣言されていない条件・適用先を指す行の数（`unknownRows` にも数える） */
+  readonly orphanRows: number;
+}
+
+/** 1 往復の台帳の診断（観測の状態と件数の内訳。Issue #951） */
+export interface ReverseCheckConditionLedgerDiagnosis {
+  readonly observation: ReverseCheckLedgerObservation;
+  readonly counts: ReverseCheckConditionLedgerCounts;
+}
+
+/** 台帳の理由の空の集計を作る（Issue #951） */
+function emptyLedgerFailures(): Record<ReverseCheckLedgerFailure, number> {
+  const counts = {} as Record<ReverseCheckLedgerFailure, number>;
+  for (const failure of REVERSE_CHECK_LEDGER_FAILURES) counts[failure] = 0;
+  return counts;
+}
+
+/** 原文の範囲が 0 <= start < end <= length を満たすか（Issue #951） */
+function isValidLedgerRange(source: string, range: SourceRange): boolean {
+  return (
+    Number.isInteger(range.start) &&
+    Number.isInteger(range.end) &&
+    range.start >= 0 &&
+    range.start < range.end &&
+    range.end <= source.length
+  );
+}
+
+/** 一覧の要件 ID の数と本文（一意性は仮定しない。Issue #951） */
+interface LedgerRequirementIndex {
+  readonly counts: ReadonlyMap<string, number>;
+  readonly texts: ReadonlyMap<string, string>;
+}
+
+function ledgerRequirementIndexOf(list: RequirementList): LedgerRequirementIndex {
+  const counts = new Map<string, number>();
+  const texts = new Map<string, string>();
+  for (const requirement of list.requirements) {
+    counts.set(requirement.id, (counts.get(requirement.id) ?? 0) + 1);
+    if (!texts.has(requirement.id)) texts.set(requirement.id, requirement.text);
+  }
+  return { counts, texts };
+}
+
+/** 逐語が本文に一意に現れる範囲（無い・2 か所以上なら `null`。Issue #951） */
+function uniqueTextRange(haystack: string, needle: string): SourceRange | null {
+  if (needle === "") return null;
+  const first = haystack.indexOf(needle);
+  if (first < 0) return null;
+  if (haystack.indexOf(needle, first + 1) !== -1) return null;
+  return { start: first, end: first + needle.length };
+}
+
+/**
+ * 適用先 1 つを、参照の構造だけで照合する（Issue #951。**意味の正しさは見ない**）。範囲と、要件 ID の
+ * 実在と一意性（同じ ID を 2 回以上挙げたら不正）だけを見る。要件自体が無い（空）は正しい。
+ */
+function reconcileLedgerTarget(
+  source: string,
+  target: ReverseCheckLedgerTarget,
+  index: LedgerRequirementIndex,
+  duplicateTargetId: boolean,
+): ReverseCheckTraceLedgerTarget {
+  const base = {
+    targetId: target.targetId,
+    range: { start: target.range.start, end: target.range.end },
+    requirementIds: target.requirementIds.slice(),
+  };
+  if (duplicateTargetId) return { ...base, failure: "duplicate-target" };
+  if (!isValidLedgerRange(source, target.range)) return { ...base, failure: "range" };
+  const seen = new Set<string>();
+  for (const id of target.requirementIds) {
+    if (seen.has(id)) return { ...base, failure: "duplicate-requirement" };
+    seen.add(id);
+    if ((index.counts.get(id) ?? 0) !== 1) return { ...base, failure: "unknown-requirement" };
+  }
+  return { ...base, failure: null };
+}
+
+/** 条件 1 つを、参照の構造だけで照合する（Issue #951） */
+function reconcileLedgerCondition(
+  source: string,
+  condition: ReverseCheckLedgerCondition,
+  index: LedgerRequirementIndex,
+  duplicateConditionId: boolean,
+): ReverseCheckTraceLedgerCondition {
+  const targetCounts = new Map<string, number>();
+  for (const target of condition.targets) {
+    targetCounts.set(target.targetId, (targetCounts.get(target.targetId) ?? 0) + 1);
+  }
+  const targets = condition.targets.map((target) =>
+    reconcileLedgerTarget(source, target, index, (targetCounts.get(target.targetId) ?? 0) > 1),
+  );
+  const base = {
+    conditionId: condition.conditionId,
+    range: { start: condition.range.start, end: condition.range.end },
+    kind: condition.kind,
+    targets,
+  };
+  if (duplicateConditionId) return { ...base, failure: "duplicate-condition" };
+  if (!isValidLedgerRange(source, condition.range)) return { ...base, failure: "range" };
+  if (!isKnownConditionKind(condition.kind)) return { ...base, failure: "unknown-kind" };
+  const targetFailure = targets.find((target) => target.failure !== null)?.failure ?? null;
+  return { ...base, failure: targetFailure };
+}
+
+/**
+ * 対応 1 行を、参照の構造だけで照合する（Issue #951）。申告の状態が `retained` なら非空の証拠を要求し、
+ * 証拠の要件 ID の実在・提示先との対応・逐語の一意な出現を見る。`missing` の証拠は空でよい。
+ * 判定できなければ `unknown` に寄せ、理由を 1 つだけ残す（先頭行や近い ID で補正しない）。
+ */
+function reconcileLedgerRow(
+  row: ReverseCheckLedgerRow,
+  index: LedgerRequirementIndex,
+  context: {
+    readonly duplicateConditionId: boolean;
+    readonly condition: ReverseCheckTraceLedgerCondition | undefined;
+    readonly target: ReverseCheckTraceLedgerTarget | undefined;
+    readonly duplicateRow: boolean;
+  },
+): ReverseCheckTraceLedgerRow {
+  const declared = (REVERSE_CHECK_LEDGER_STATUSES as readonly string[]).includes(row.status)
+    ? (row.status as ReverseCheckLedgerStatus)
+    : "unknown";
+  const evidence: ReverseCheckTraceLedgerEvidence[] = row.evidence.map((entry) => {
+    const text = index.texts.get(entry.requirementId);
+    return {
+      requirementId: entry.requirementId,
+      text: entry.text,
+      range: text === undefined ? null : uniqueTextRange(text, entry.text),
+    };
+  });
+  const base = {
+    conditionId: row.conditionId,
+    targetId: row.targetId,
+    status: declared,
+    evidence,
+  };
+  if (!(REVERSE_CHECK_LEDGER_STATUSES as readonly string[]).includes(row.status)) {
+    return { ...base, status: "unknown", failure: "unknown-status" };
+  }
+  if (context.duplicateRow) return { ...base, status: "unknown", failure: "duplicate-row" };
+  if (context.duplicateConditionId) return { ...base, status: "unknown", failure: "duplicate-condition" };
+  if (context.condition === undefined) return { ...base, status: "unknown", failure: "orphan-row" };
+  if (context.condition.failure !== null) return { ...base, status: "unknown", failure: "condition-invalid" };
+  if (context.target === undefined) return { ...base, status: "unknown", failure: "orphan-target" };
+  if (context.target.failure !== null) return { ...base, status: "unknown", failure: "target-invalid" };
+  if (declared === "retained" && row.evidence.length === 0) {
+    return { ...base, status: "unknown", failure: "no-evidence" };
+  }
+  for (const [position, entry] of row.evidence.entries()) {
+    if ((index.counts.get(entry.requirementId) ?? 0) !== 1) {
+      return { ...base, status: "unknown", failure: "evidence-unknown-requirement" };
+    }
+    // 証拠の ID は、その適用先が挙げた要件のどれかでなければならない（補完先も含む）。
+    // ただし適用先が要件を 1 つも挙げていない（要件自体が無い）ときは、証拠の ID をそのまま受ける
+    if (context.target.requirementIds.length > 0 && !context.target.requirementIds.includes(entry.requirementId)) {
+      return { ...base, status: "unknown", failure: "evidence-target-mismatch" };
+    }
+    if (entry.text === "") return { ...base, status: "unknown", failure: "no-evidence" };
+    const computed = evidence[position]?.range ?? null;
+    if (computed === null) {
+      const text = index.texts.get(entry.requirementId) ?? "";
+      return {
+        ...base,
+        status: "unknown",
+        failure: text.includes(entry.text) ? "evidence-ambiguous" : "evidence-not-found",
+      };
+    }
+  }
+  return { ...base, status: declared, failure: null };
+}
+
+/** 台帳の組の鍵（条件 ID と適用先 ID を区切る。Issue #951） */
+function ledgerPairKey(conditionId: string, targetId: string): string {
+  return `${conditionId}\u0000${targetId}`;
+}
+
+/**
+ * 台帳の応答を、既存の `uncovered` の記録とコードで結ぶ（Issue #951。**純粋な関数**）。
+ *
+ * 条件・適用先・行を、参照の構造だけで照合する——範囲・既知の種類・ID の実在と一意性・行の欠け・重複・
+ * 孤立・証拠。`schema` に適合した応答の中の不整合は `unknown` と**有限の理由**へ分け、近い ID や先頭行で
+ * 補正しない。**全条件・全適用先の抽出や、証拠の意味の正しさは証明しない**（この形では測れない）。
+ */
+export function classifyConditionLedger(
+  source: string,
+  list: RequirementList,
+  ledgers: {
+    readonly conditions: readonly ReverseCheckLedgerCondition[];
+    readonly rows: readonly ReverseCheckLedgerRow[];
+    readonly dropped?: readonly ReverseCheckTraceLedgerDropped[];
+  },
+): ReverseCheckTraceConditionLedger {
+  const index = ledgerRequirementIndexOf(list);
+  const conditionCounts = new Map<string, number>();
+  for (const condition of ledgers.conditions) {
+    conditionCounts.set(condition.conditionId, (conditionCounts.get(condition.conditionId) ?? 0) + 1);
+  }
+  const conditions = ledgers.conditions.map((condition) =>
+    reconcileLedgerCondition(
+      source,
+      condition,
+      index,
+      (conditionCounts.get(condition.conditionId) ?? 0) > 1,
+    ),
+  );
+  const byCondition = new Map<string, ReverseCheckTraceLedgerCondition>();
+  for (const condition of conditions) {
+    if ((conditionCounts.get(condition.conditionId) ?? 0) === 1) byCondition.set(condition.conditionId, condition);
+  }
+  // 宣言された組を、**申告された条件のすべて**から数える（構造の整合は問わない）。こうすると
+  // 「宣言された組数＝1 行＋0 行＋複数行」の収支が、条件の不整合によらずに一致する。
+  const declaredPairs: ReverseCheckTraceLedgerPair[] = [];
+  const declaredKeys = new Set<string>();
+  for (const condition of conditions) {
+    for (const target of condition.targets) {
+      const key = ledgerPairKey(condition.conditionId, target.targetId);
+      if (declaredKeys.has(key)) continue;
+      declaredKeys.add(key);
+      declaredPairs.push({ conditionId: condition.conditionId, targetId: target.targetId });
+    }
+  }
+  // 組ごとの行数（宣言されていない組も数え、孤立の判定に使う）
+  const allPairRows = new Map<string, number>();
+  for (const row of ledgers.rows) {
+    const key = ledgerPairKey(row.conditionId, row.targetId);
+    allPairRows.set(key, (allPairRows.get(key) ?? 0) + 1);
+  }
+  const rowMissing: ReverseCheckTraceLedgerPair[] = declaredPairs.filter(
+    (pair) => (allPairRows.get(ledgerPairKey(pair.conditionId, pair.targetId)) ?? 0) === 0,
+  );
+  const rows = ledgers.rows.map((row) => {
+    const condition = byCondition.get(row.conditionId);
+    const target = condition?.targets.find((candidate) => candidate.targetId === row.targetId);
+    return reconcileLedgerRow(row, index, {
+      duplicateConditionId: (conditionCounts.get(row.conditionId) ?? 0) > 1,
+      condition,
+      target,
+      duplicateRow: (allPairRows.get(ledgerPairKey(row.conditionId, row.targetId)) ?? 0) > 1,
+    });
+  });
+  const dropped = (ledgers.dropped ?? []).map((entry) => ({ ...entry }));
+  const observation = ledgerObservationOf(conditions, rows, rowMissing, dropped);
+  return { conditions, rows, declaredPairs, rowMissing, dropped, observation };
+}
+
+/** 台帳の観測の状態を決める（0 件申告・構造不整合・観測を区別する。Issue #951） */
+function ledgerObservationOf(
+  conditions: readonly ReverseCheckTraceLedgerCondition[],
+  rows: readonly ReverseCheckTraceLedgerRow[],
+  rowMissing: readonly ReverseCheckTraceLedgerPair[],
+  dropped: readonly ReverseCheckTraceLedgerDropped[],
+): ReverseCheckLedgerObservation {
+  if (conditions.length === 0 && rows.length === 0 && dropped.length === 0) return "empty";
+  if (
+    dropped.length > 0 ||
+    conditions.some((condition) => condition.failure !== null) ||
+    rows.some((row) => row.failure !== null) ||
+    rowMissing.length > 0
+  ) {
+    return "indeterminate";
+  }
+  return "observed";
+}
+
+/**
+ * 台帳の記録を、**件数だけ**の診断に畳む（Issue #951。**純粋な関数**）。収支は次の 3 つで、それぞれ
+ * 左辺と右辺が一致する：条件の行数＝構造整合＋不明、対応の行数＝retained＋missing＋unknown、
+ * 宣言された組数＝1 行＋0 行＋複数行。**読めない値があれば数は `null`**（0 にしない）。
+ */
+export function summarizeConditionLedger(
+  ledger: ReverseCheckTraceConditionLedger,
+): ReverseCheckConditionLedgerDiagnosis {
+  const unknownRows = emptyLedgerFailures();
+  const unknownConditions = emptyLedgerFailures();
+  const unreadable = ledger.dropped.length > 0;
+  const count = (value: number): number | null => (unreadable ? null : value);
+  let retained = 0;
+  let missing = 0;
+  let unknown = 0;
+  let orphanRows = 0;
+  for (const condition of ledger.conditions) {
+    if (condition.failure !== null) unknownConditions[condition.failure] += 1;
+  }
+  for (const row of ledger.rows) {
+    if (row.status === "retained") retained += 1;
+    else if (row.status === "missing") missing += 1;
+    else unknown += 1;
+    if (row.failure !== null) {
+      unknownRows[row.failure] += 1;
+      if (row.failure === "orphan-row" || row.failure === "orphan-target") orphanRows += 1;
+    }
+  }
+  // 行の無い組は**別計上**する（`noRowPairs`）。対応の行ではないので、reason 別の内訳にも 3 つの和にも
+  // 加えない——正常行を捏造しない（Issue #951）。
+  const unknownConditionRows = ledger.conditions.filter((condition) => condition.failure !== null).length;
+  let singleRowPairs = 0;
+  let noRowPairs = 0;
+  let multipleRowPairs = 0;
+  const declaredKeys = new Set(ledger.declaredPairs.map((pair) => ledgerPairKey(pair.conditionId, pair.targetId)));
+  for (const key of declaredKeys) {
+    const rows = ledger.rows.filter((row) => ledgerPairKey(row.conditionId, row.targetId) === key).length;
+    if (rows === 0) noRowPairs += 1;
+    else if (rows === 1) singleRowPairs += 1;
+    else multipleRowPairs += 1;
+  }
+  const counts: ReverseCheckConditionLedgerCounts = {
+    rawConditionRows: count(ledger.conditions.length),
+    consistentConditionRows: count(ledger.conditions.length - unknownConditionRows),
+    unknownConditionRows: count(unknownConditionRows),
+    rawCorrespondenceRows: count(ledger.rows.length),
+    retained: count(retained),
+    missing: count(missing),
+    unknown: count(unknown),
+    declaredPairs: count(declaredKeys.size),
+    singleRowPairs: count(singleRowPairs),
+    noRowPairs: count(noRowPairs),
+    multipleRowPairs: count(multipleRowPairs),
+    unknownRows,
+    unknownConditions,
+    orphanRows,
+  };
+  return { observation: ledger.observation, counts };
+}
+
 /**
  * 会話が返した生の範囲 1 つの行き先（**有限の 5 つ**。Issue #919）。
  *
@@ -819,6 +1592,11 @@ export interface ReverseCheckTraceRound {
    * この trace にだけ載せ、通常の診断（件数）と plan-record には写さない。
    */
   readonly conditionFindings?: ReverseCheckTraceConditionFindings;
+  /**
+   * 条件と適用先の台帳（Issue #951）。**台帳の欄を送った往復だけ**が持つ。条件・適用先・申告の状態・
+   * 証拠・算出範囲・構造の照合の結果を残し、通常の診断（件数）と plan-record には写さない。
+   */
+  readonly conditionLedger?: ReverseCheckTraceConditionLedger;
 }
 
 /**
@@ -940,17 +1718,22 @@ export async function runReverseCheckWithDiagnosis(
     { name: "要件の一覧", text: listText },
   ];
   const observeConditionFindings = input.observeConditionFindings === true;
+  const observeConditionLedger = input.observeConditionLedger === true;
   const request = buildStructuredRequest({
     rules: reverseCheckRulesOf(input.meaningRule),
     documents: input.documents,
     data,
     schemaName: REVERSE_CHECK_SCHEMA_NAME,
-    schema: reverseCheckSchemaOf(observeConditionFindings),
+    schema: reverseCheckSchemaOf(observeConditionFindings, observeConditionLedger),
     maxOutputTokens: input.gateway.maxOutputTokens("reverse-check"),
   });
   const answer = await callStructuredChecked(input.gateway, {
     request,
-    check: observeConditionFindings ? checkReverseCheckOutputWithConditionFindings : checkReverseCheckOutput,
+    check: observeConditionLedger
+      ? (output: unknown) => checkReverseCheckOutputWithConditionLedger(output, observeConditionFindings)
+      : observeConditionFindings
+        ? checkReverseCheckOutputWithConditionFindings
+        : checkReverseCheckOutput,
   });
   if (!answer.ok) return answer;
   // コードの落ちは 1 回だけ求め、覆いの数え上げと診断の両方に使う（Issue #919）
@@ -972,6 +1755,15 @@ export async function runReverseCheckWithDiagnosis(
   const conditionFindings = observeConditionFindings
     ? classifyConditionFindings(input.source, input.list, merged.reported, answer.value.findingDetails ?? [])
     : undefined;
+  // 条件と適用先の台帳も、既存の検査・統合の**後**に、コードが参照の構造だけを照合する（Issue #951）。
+  // この記録も判定・やり直し・停止・P3 以降の入力に使わない
+  const conditionLedger = observeConditionLedger
+    ? classifyConditionLedger(input.source, input.list, {
+        conditions: answer.value.conditionLedger?.conditions ?? [],
+        rows: answer.value.conditionLedger?.rows ?? [],
+        dropped: answer.value.conditionLedger?.dropped ?? [],
+      })
+    : undefined;
   const diagnosed = diagnoseReverseCheckRound(
     input.source,
     input.list,
@@ -981,10 +1773,11 @@ export async function runReverseCheckWithDiagnosis(
     input.fix,
     input.restored,
   );
-  const round =
-    conditionFindings === undefined
-      ? diagnosed
-      : { ...diagnosed, conditionFindings: summarizeConditionFindings(conditionFindings) };
+  const round: ReverseCheckRoundDiagnosis = {
+    ...diagnosed,
+    ...(conditionFindings === undefined ? {} : { conditionFindings: summarizeConditionFindings(conditionFindings) }),
+    ...(conditionLedger === undefined ? {} : { conditionLedger: summarizeConditionLedger(conditionLedger) }),
+  };
   const trace: ReverseCheckTraceRound = {
     fix: input.fix ?? "initial",
     list: {
@@ -1022,6 +1815,8 @@ export async function runReverseCheckWithDiagnosis(
         }),
     // 条件の指摘の詳細と照合状態は、派生 schema を送った往復だけが持つ（Issue #948）
     ...(conditionFindings === undefined ? {} : { conditionFindings }),
+    // 条件と適用先の台帳は、台帳の欄を送った往復だけが持つ（Issue #951）
+    ...(conditionLedger === undefined ? {} : { conditionLedger }),
   };
   return { ok: true, value: { result, round, trace } };
 }
@@ -1120,6 +1915,11 @@ export interface ReverseCheckRoundDiagnosis {
    * ID・範囲・本文・引用は入れない。
    */
   readonly conditionFindings?: ReverseCheckConditionFindingsDiagnosis;
+  /**
+   * 条件と適用先の台帳の件数（Issue #951）。**台帳の欄を送った往復だけ**が持つ。**件数だけ**を載せ、
+   * ID・範囲・本文・引用は入れない。分母を読めないときは数が `null`（0 にしない）。
+   */
+  readonly conditionLedger?: ReverseCheckConditionLedgerDiagnosis;
 }
 
 /**
@@ -1309,6 +2109,12 @@ export interface ReverseCheckLoopInput {
    * 相乗りしない（別の記録）。
    */
   readonly observeConditionFindings?: boolean;
+  /**
+   * 条件と適用先の台帳（`conditionLedger`）を求める派生 schema を、**3 つの P2 の要求すべて**に使うか
+   * （Issue #951）。**Plan の経路だけ**が明示の選択で有効にする。省けば呼び出しの列・要求のバイト列・結果・
+   * 診断を変えない。`observeConditionFindings` とは独立の選択であり、相乗りしない（別の記録）。
+   */
+  readonly observeConditionLedger?: boolean;
 }
 
 /** ①' と ① のやり直しの結果 */
@@ -1522,6 +2328,7 @@ export async function runReverseCheckLoopWithOperation(
     fix: "initial",
     ...(input.meaningRule === true ? { meaningRule: true } : {}),
     ...(input.observeConditionFindings === true ? { observeConditionFindings: true } : {}),
+    ...(input.observeConditionLedger === true ? { observeConditionLedger: true } : {}),
   });
   if (!initial.ok) return stop(initial.failure, "reverse-check");
   // 往復の診断は、①' の実行の中で組んだものを使う（会話の断片の枠の重なりまで持つ。Issue #488）
@@ -1583,6 +2390,7 @@ export async function runReverseCheckLoopWithOperation(
       fix: "quote-repair",
       ...(input.meaningRule === true ? { meaningRule: true } : {}),
       ...(input.observeConditionFindings === true ? { observeConditionFindings: true } : {}),
+      ...(input.observeConditionLedger === true ? { observeConditionLedger: true } : {}),
     });
     if (!after.ok) return stop(after.failure, "reverse-check-repair");
     rounds.push(after.value.round);
@@ -1617,6 +2425,7 @@ export async function runReverseCheckLoopWithOperation(
       fix: "whole-redo",
       ...(input.meaningRule === true ? { meaningRule: true } : {}),
       ...(input.observeConditionFindings === true ? { observeConditionFindings: true } : {}),
+      ...(input.observeConditionLedger === true ? { observeConditionLedger: true } : {}),
       ...(kept.restored.length === 0 ? {} : { restored: kept.restored }),
     });
     if (!second.ok) return stop(second.failure, "reverse-check-redo");
