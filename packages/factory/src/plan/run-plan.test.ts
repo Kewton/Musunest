@@ -9,7 +9,7 @@
 //   6. 段ごとの記録が結果に入る
 //   7. 判定の包みが、共有の門を Jev の内部の再送へ届ける（Issue #469）
 import { describe, expect, it } from "vitest";
-import { checkConfirmedPlan, isConfirmationValid, planDigest, type ConfirmedPlan, type PlanAcceptedUnwritable, type PlanOpenIssue, type PlanPart, type PlanRequirement } from "@musunest/appspec-schema";
+import { checkConfirmedPlan, HOST_CAPABILITIES, isConfirmationValid, planDigest, type ConfirmedPlan, type PlanAcceptedUnwritable, type PlanOpenIssue, type PlanPart, type PlanRequirement } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { planStopReasonLine } from "../cli-plan.js";
 import { createFakeJudge } from "../judge-fake.js";
@@ -61,6 +61,7 @@ import {
   type PlanScript,
   type PlanScriptMatch,
 } from "./script-responder.js";
+import { createCallHash } from "./claim-recorded-judge.js";
 import {
   SURFACE_RECHECK_NO_EVIDENCE,
   surfaceRecheckEvidenceQuestionName,
@@ -110,6 +111,13 @@ function withSurfaceRelations(output: unknown): unknown {
 
 function structured(output: unknown, usage: LlmUsage | undefined = USAGE): RecordedCall {
   return rawStructured(withSurfaceRelations(output), usage);
+}
+
+/** 申告の独立点検の要求か（問いの名前の頭で見分ける。Issue #953） */
+function isClaimCheckRequest(request: JudgeRequest): boolean {
+  return Object.keys(request.questions).some(
+    (name) => name.startsWith("plan-triage:") || name.startsWith("plan-support:") || name.startsWith("plan-recheck-"),
+  );
 }
 
 const RATES = { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 };
@@ -7522,12 +7530,105 @@ describe("申告の独立点検の材料（Issue #910）", () => {
       expect(material).not.toContain("accepted_removal");
       // 過去の判断（代わりの案の文）は材料に載らない
       expect(material).not.toContain("代案");
-      expect(Object.keys(request.state)).toEqual(["documents", "requirements"]);
+      expect(Object.keys(request.state)).toEqual(["documents", "requirements", "host_capabilities"]);
+      // 能力の定義は 1 件だけ（Issue #953。v3 の材料）
+      expect((request.state as { host_capabilities?: unknown }).host_capabilities).toEqual(HOST_CAPABILITIES);
     }
     // 要件の文は id と text だけ（出典・部分は載せない）
     const diffState = (checks[2]?.state ?? {}) as { requirements?: readonly Record<string, unknown>[] };
     const firstRequirement = diffState.requirements?.[0];
     expect(Object.keys(firstRequirement ?? {})).toEqual(["id", "text"]);
+  });
+
+  it("実行環境の能力と申告の点検：v3 は生成の段の要求を変えず、申告の点検の材料だけを 1 件変える", async () => {
+    // 変更前（main）の、同じ台本・同じ偽物・同じ入力で流した要求のハッシュ。生成の段（P1・P2・洗い出し・
+    // 問い）の要求は byte で変わらず、申告の点検の要求だけが材料の 1 件の分だけ違う（Issue #953）。
+    const GENERATION_BASELINE_HASHES = [
+      "60f2aaefcd7efbb4e27a1a48d6517ec17034e68a13991fb45528d54cae464209",
+      "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
+      "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
+      "78670ff27a5ea04437f65452b148a79106455ed69625832c734beb914d282906",
+      "5596044f077180528319c6ce5b23978e018bce8ae37335043b2844603ba56bca",
+      "996a02511bdce29ec82f95eddae789222dba99544516fa38f8ad3734feb6e7b1",
+      "d342964d46d3d1d50a78af0e4e9078b18618dcd5a2f716900da3d72f225a1231",
+    ];
+    const OTHER_JUDGE_BASELINE_HASHES = [
+      "4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709",
+      "e89caa55d556cdb3d1c49f12ff915b2d41b32bff7983165615708a342001f438",
+      "232abd47429151ff6d392cc3ec8427a15158ca83d1e77693e0112dfa12dced91",
+      "b07b48e154b29a96761744237b03cf7be93443bfd5b8f12785f07b00e1b73651",
+    ];
+    const CLAIM_BASELINE_HASHES = [
+      "110973c913f84fe692787584ee278d0d4db4885c31d35cb588e91d60c77176e2",
+      "9432020ae011f60ddb616329f67aaa991c9d68b916ebbcc9c2182fd89c2bd6dd",
+      "5ab11643fda8d46eeba52e7b373aa8b9ba3f0126c5f742829f75cbac9e4b371b",
+      "25457faa212129e5e9a48f654ffea3195194bd51decb7778042550d0f4f6940b",
+    ];
+
+    const inScope = { id: "U-9", requirementId: "R:A:Q1-1", part: "差分の部分", constraintIds: ["記録"], reason: "差分の理由", alternative: "差分の代案" };
+    const mixed = {
+      ambiguities: [{ id: "OI-new", requirementId: "R:A:Q1-1", text: "新しい曖昧", critical: true }],
+      unwritable: [inScope],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(BASE_SURFACE),
+      structured(questionsFor("OI-1")),
+      structured(mixed),
+      structured(questionsFor("OI-new")),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const fake = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const requests: JudgeRequest[] = [];
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        requests.push(request);
+        return fake.judge(request);
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED));
+
+    // 生成の段の要求（P1・P2・初回と差分の洗い出し・問い）は、byte で変更前と同じ
+    const generationHashes = await Promise.all(
+      recording.structured.map((request) => sha256Hex(JSON.stringify(request))),
+    );
+    expect(generationHashes).toEqual(GENERATION_BASELINE_HASHES);
+
+    const checks = requests.filter(isClaimCheckRequest);
+    // 初回の点検（仕分け・裏付け）と差分の点検（仕分け・裏付け）の 4 要求
+    expect(checks.map((request) => Object.keys(request.questions))).toEqual([
+      ["plan-triage:0"],
+      ["plan-support:0"],
+      ["plan-triage:0"],
+      ["plan-support:0"],
+    ]);
+    // 申告の点検以外の判定の要求（目録・覆い）は、byte で変更前と同じ
+    expect(await Promise.all(requests.filter((request) => !isClaimCheckRequest(request)).map((request) => createCallHash(request)))).toEqual(
+      OTHER_JUDGE_BASELINE_HASHES,
+    );
+    // 点検の要求は、材料から能力の定義を外すと変更前のハッシュに戻る（差は 1 件の材料だけ）
+    const stripped = await Promise.all(
+      checks.map((request) => {
+        const state = request.state as { documents: unknown; requirements: unknown };
+        // 能力の定義の欄だけを外す（残る材料は v2 と同じ形・同じ順）
+        return createCallHash({ state: { documents: state.documents, requirements: state.requirements }, questions: request.questions });
+      }),
+    );
+    expect(stripped).toEqual(CLAIM_BASELINE_HASHES);
+    for (const request of checks) {
+      expect(Object.keys(request.state)).toEqual(["documents", "requirements", "host_capabilities"]);
+      expect((request.state as { host_capabilities?: unknown }).host_capabilities).toEqual(HOST_CAPABILITIES);
+    }
+    // 申告は偽の判定の下で今までどおり受理される（点検の結論は変わらない）
+    expect(result.kind).toBe("confirmed");
   });
 });
 

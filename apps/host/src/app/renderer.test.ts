@@ -2501,3 +2501,98 @@ describe("直す：`set` を持たない `kind: update` のフォーム（M1.5�
     expect(screen.getAllByRole("button", { name: "finish" })).toHaveLength(1);
   });
 });
+
+// ── 先頭の一覧を初めに開く保証の固定（Issue #953）──────────────────────────────
+//
+// 実行環境の能力の定義（appspec-schema の host-capabilities.ts）の ID を、**文字列で**試験の名前に置く。
+// **画面のパッケージは言語の契約のパッケージを import できない**（依存の向きの検査に落ちる）ため、
+// 定数では結ばない。ここで固定するのは**今の挙動**である——画面の本体は変えない。
+//
+//   ① 先頭が集計の画面なら、初めにそれを開く
+//   ② 先頭が別の種類なら、集計の画面が後ろにあっても先頭を開く
+//   ③ 一覧が 0 個なら、一覧が無い状態を出す
+//   ④ 先頭の一覧の読み込みが拒まれたら、理由を出し、2 番目を読まない
+
+/** 集計の画面（dashboard）を先頭に置き、一覧（list）を後ろに置いた宣言 */
+const DASHBOARD_THEN_LIST: ApiSpecBody = {
+  ...DASHBOARD_SPEC,
+  spec: {
+    ...DASHBOARD_SPEC.spec,
+    views: [
+      DASHBOARD_SPEC.spec.views[0] ?? { name: "dashboard", type: "dashboard", widgets: [] },
+      { name: "expenseList", entity: "expense" },
+    ],
+  },
+};
+
+/** 一覧（list）を先頭に置き、集計の画面（dashboard）を後ろに置いた宣言 */
+const LIST_THEN_DASHBOARD: ApiSpecBody = {
+  ...DASHBOARD_SPEC,
+  spec: {
+    ...DASHBOARD_SPEC.spec,
+    views: [
+      { name: "expenseList", entity: "expense" },
+      DASHBOARD_SPEC.spec.views[0] ?? { name: "dashboard", type: "dashboard", widgets: [] },
+    ],
+  },
+};
+
+describe("実行環境の能力と申告の点検：先頭の一覧を初めに開く（first-view-declaration-order）", () => {
+  it("先頭が集計の画面なら、初めにそれを開く（first-view-declaration-order）", async () => {
+    const getView = vi.fn((_instanceId: string, name: string) =>
+      Promise.resolve(okResult(name === "dashboard" ? DASHBOARD_VIEW : VIEW)),
+    );
+    const { container } = await renderScreen(
+      makeClient({ spec: () => Promise.resolve(okResult(DASHBOARD_THEN_LIST)), view: getView }),
+    );
+
+    await screen.findByText("今月の活動");
+    // **宣言の順の先頭**を読む（種類で一覧を選ばない）
+    expect(getView.mock.calls).toEqual([["inst-1", "dashboard"]]);
+    expect(container.querySelector(".dashboard")).not.toBeNull();
+    // 後ろの一覧は開かない
+    expect(container.querySelector(".instant-table")).toBeNull();
+  });
+
+  it("先頭が別の種類なら、集計の画面が後ろにあっても先頭を開く（first-view-declaration-order）", async () => {
+    const getView = vi.fn((_instanceId: string, name: string) =>
+      Promise.resolve(okResult(name === "expenseList" ? VIEW : DASHBOARD_VIEW)),
+    );
+    const { container } = await renderScreen(
+      makeClient({ spec: () => Promise.resolve(okResult(LIST_THEN_DASHBOARD)), view: getView }),
+    );
+
+    await screen.findByText("夕食");
+    expect(getView.mock.calls).toEqual([["inst-1", "expenseList"]]);
+    expect(rowTexts(container)).toHaveLength(2);
+    expect(container.querySelector(".dashboard")).toBeNull();
+  });
+
+  it("一覧が 0 個なら、一覧が無い状態を出す（first-view-declaration-order）", async () => {
+    const getView = vi.fn(() => Promise.resolve(okResult(VIEW)));
+    const { container } = await renderScreen(makeClient({ spec: () => Promise.resolve(okResult(specWith([]))), view: getView }));
+
+    await screen.findByText("表示できる一覧がありません");
+    expect(container.querySelector('[data-state="noview"]')).not.toBeNull();
+    // 開く一覧が無いので、一覧の読み込みもしない
+    expect(getView).not.toHaveBeenCalled();
+  });
+
+  it("先頭の一覧の読み込みが拒まれたら、理由を出し、2 番目を読まない（first-view-declaration-order）", async () => {
+    const getView = vi.fn((_instanceId: string, name: string) =>
+      name === "expenseList"
+        ? Promise.resolve(errResult("PERMISSION_DENIED", 403))
+        : Promise.resolve(okResult(VIEW)),
+    );
+    const spec = specWith([
+      { name: "expenseList", entity: "expense" },
+      { name: "byPayer", entity: "expense" },
+    ]);
+    const { container } = await renderScreen(makeClient({ spec: () => Promise.resolve(okResult(spec)), view: getView }));
+
+    await screen.findByText("このアプリを表示する権限がありません");
+    expect(container.querySelector('[data-state="forbidden"]')).not.toBeNull();
+    // ほかの一覧へ移らない（2 番目を読まない）
+    expect(getView.mock.calls).toEqual([["inst-1", "expenseList"]]);
+  });
+});

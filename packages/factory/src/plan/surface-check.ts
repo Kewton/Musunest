@@ -13,15 +13,15 @@
 //   2. **裏付け**（Choice 1 問／語彙の穴の申告）… **申告の全部の制約 ID** の節の抜粋（`constraintExcerpt`）
 //      と主張を渡し、「裏付ける／反する／書いていない」を聞く。
 //
-// **点検の版（Issue #910）**：v1 は、主の 2 問へ申告の自己申告の材料（申告の制約の節）だけを渡し、「抜粋が
-// 主張を裏付けるか」を問うていた——対象の要件も文書の全体も無く、「1 つの実現方法が使えない」という申告を、
-// 要件全体を照らす材料を持たないまま判定していた。**v2（本番）** は、主の 2 問と再点検の**全部の要求**に、
+// **点検の版（Issue #910・#953）**：v1 は、主の 2 問へ申告の自己申告の材料（申告の制約の節）だけを渡し、
+// 「抜粋が主張を裏付けるか」を問うていた——対象の要件も文書の全体も無く、「1 つの実現方法が使えない」という
+// 申告を、要件全体を照らす材料を持たないまま判定していた。**v2** は、主の 2 問と再点検の**全部の要求**に、
 // 呼ぶ側が渡した**文書の全体と全要件の id・text**を同じ形で載せ（`surfaceCheckMaterial`）、問いを「対象の
 // 要件が、渡した文書の許す表現の**どれでも**書けないか」に直す。材料は申告の制約 ID・題材名・要件 ID・
-// P 番号で選ばない（呼ぶ側が P3 に渡したのと同じ正本をそのまま載せる）。答えの有限の集合（仕分け 3 値・
-// 裏付け 3 値・再点検 4 値）・根拠の候補（申告の制約 ID と none）・受理の条件は v1 と同じである。v1 の
-// 組み立て（`surfaceTriageQuestion`・`surfaceSupportQuestion` と v1 の再点検）は、比較の道具が過去の
-// 要求を再生できるよう**そのまま残す**。
+// P 番号で選ばない（呼ぶ側が P3 に渡したのと同じ正本をそのまま載せる）。**v3（本番）** は、その材料に実行環境の
+// 能力の定義を 1 件だけ足す（`surfaceCheckMaterialV3`）——文書の並びにも問いの文にも足さない。答えの有限の
+// 集合（仕分け 3 値・裏付け 3 値・再点検 4 値）・根拠の候補（申告の制約 ID と none）・受理の条件は v1 と
+// 同じである。v1・v2 の組み立ては、比較の道具が過去の要求を再生できるよう**そのまま残す**。
 //   3. **再点検**（Choice 2 問／未確定の申告。**Luna の別の会話**）… 主の点検で**確信度が閾値未満・
 //      確信度が返らない（不明）・裏付けが「書いていない」**だった申告を、独立の会話で点検し直す
 //      （05 §3「確信度が低いものは Luna の別の会話に回す」「『書いていない』なら Luna に回す」）。
@@ -36,6 +36,7 @@
 // **実 API は呼ばない。** 判定は差し込まれた `Judge`（試験は偽物）だけを使う。再点検の宛先（Luna）は、
 // 呼ぶ側が**明示的に渡した口**（`recheckJudge`）だけを使う——合成した口をもう一度呼ぶと主（Jev）が
 // 答え直すだけなので、落とし先が無ければ再点検せず未点検に残す。鍵もファイルも環境変数も扱わない。
+import { HOST_CAPABILITIES } from "@musunest/appspec-schema";
 import type { Judge, JudgeAnswer, JudgeChoiceQuestion, JudgeQuestion, JudgeResponse } from "../judge.js";
 import {
   JudgeBudgetExceededError,
@@ -66,14 +67,15 @@ const SUPPORT_VERDICTS: ReadonlySet<string> = new Set(SURFACE_SUPPORT_VERDICTS);
 const RECHECK_KINDS: ReadonlySet<string> = new Set(SURFACE_RECHECK_KINDS);
 
 /**
- * 点検の要求の版（Issue #910）。**v1** は今までの要求（state は空・主の 2 問に要件も文書の全体も無い）で、
- * 比較の道具が過去の記録を再生するためにだけ残す。**v2** は本番の要求（全部の要求に文書の全体と全要件を
- * 載せ、要件が書けるかを問う）。版が違えば要求の中身が違うので、記録のハッシュも当たらない。
+ * 点検の要求の版（Issue #910・#953）。**v1** は今までの要求（state は空・主の 2 問に要件も文書の全体も無い）で、
+ * 比較の道具が過去の記録を再生するためにだけ残す。**v2** は、全部の要求に文書の全体と全要件を載せ、要件が
+ * 書けるかを問う。**v3（本番）** は v2 の材料に、実行環境の能力の定義（`HOST_CAPABILITIES`）を 1 件足す。
+ * 版が違えば要求の中身が違うので、記録のハッシュも当たらない。v1・v2 の要求は今までどおりである。
  */
-export const SURFACE_CHECK_VERSIONS = ["v1", "v2"] as const;
+export const SURFACE_CHECK_VERSIONS = ["v1", "v2", "v3"] as const;
 export type SurfaceCheckVersion = (typeof SURFACE_CHECK_VERSIONS)[number];
-/** 本番の点検が使う版（Issue #910） */
-export const SURFACE_CHECK_VERSION: SurfaceCheckVersion = "v2";
+/** 本番の点検が使う版（Issue #953） */
+export const SURFACE_CHECK_VERSION: SurfaceCheckVersion = "v3";
 
 /** 点検の材料に載せる要件 1 件（id と text だけ。了承除外の印・代わりの案・出典は載せない。Issue #910） */
 export interface SurfaceCheckRequirement {
@@ -98,6 +100,22 @@ export function surfaceCheckMaterial(
   return {
     documents: documents.map((document) => ({ name: document.name, text: document.text })),
     requirements: requirements.map((requirement) => ({ id: requirement.id, text: requirement.text })),
+  };
+}
+
+/**
+ * v3 の要求の `state`（点検の材料）を組み立てる（Issue #953）。v2 の材料（文書の全体と全要件）に、実行環境の
+ * 能力の定義を **1 件だけ**足す。**文書の並びには足さない**——抜粋と根拠の候補は文書から取り出すので、能力を
+ * 文書に混ぜると、申告が挙げていない節として候補や抜粋に現れてしまう。能力は事実の材料（データ）であり、
+ * 判定への指示を含めない。定義は版つきのまま写す（文を選ばない・要件や申告で変えない）。
+ */
+export function surfaceCheckMaterialV3(
+  documents: readonly PromptDocument[],
+  requirements: readonly SurfaceCheckRequirement[],
+): Readonly<Record<string, unknown>> {
+  return {
+    ...surfaceCheckMaterial(documents, requirements),
+    host_capabilities: HOST_CAPABILITIES,
   };
 }
 
@@ -153,7 +171,7 @@ export function surfaceSupportQuestionName(index: number): string {
 
 /**
  * 仕分けの問い（T1）。**v1 の点検の問い**をそのまま組み立てる——比較の道具（`claim-forms.ts`）は、
- * この関数を呼ぶ（文・criteria・順を変えない。Issue #459）。本番の点検は v2（`surfaceTriageQuestionV2`）
+ * この関数を呼ぶ（文・criteria・順を変えない。Issue #459）。本番の点検（v2・v3）は `surfaceTriageQuestionV2`
  * を使う（Issue #910）。
  */
 export function surfaceTriageQuestion(claim: PlanUnwritable): JudgeChoiceQuestion {
@@ -176,8 +194,8 @@ export function surfaceTriageQuestion(claim: PlanUnwritable): JudgeChoiceQuestio
 
 /**
  * 裏付けの問い（S1）。**v1 の点検の問い**をそのまま組み立てる——比較の道具は、この関数を呼ぶ
- * （文・criteria・順を変えない。Issue #459）。抜粋は申告の制約 ID の節から取り出す。本番の点検は v2
- * （`surfaceSupportQuestionV2`）を使う（Issue #910）。
+ * （文・criteria・順を変えない。Issue #459）。抜粋は申告の制約 ID の節から取り出す。本番の点検（v2・v3）は
+ * `surfaceSupportQuestionV2` を使う（Issue #910）。
  */
 export function surfaceSupportQuestion(
   claim: PlanUnwritable,
@@ -564,14 +582,19 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
 
   if (claims.length === 0) return snapshot();
 
-  // 要求の版と材料（Issue #910）。v1 は今までどおり state を空にする（過去の要求を再生するため）。v2 は、
+  // 要求の版と材料（Issue #910・#953）。v1 は今までどおり state を空にする（過去の要求を再生するため）。v2 は、
   // 呼ぶ側が渡した文書の全体と要件の一覧を、**全部の要求に同じ形で**載せる（初回・差分の点検とも、呼ぶ
-  // たびに今の入力から組み立てる。過去の判断・代わりの案の採否・Build の合否・外の採点は載せない）。
+  // たびに今の入力から組み立てる。過去の判断・代わりの案の採否・Build の合否・外の採点は載せない）。v3 は、
+  // その材料に実行環境の能力の定義を 1 件足す（文書の並びには足さない）。
   const version: SurfaceCheckVersion = input.checkVersion ?? SURFACE_CHECK_VERSION;
   const materialRequirements: readonly SurfaceCheckRequirement[] =
     input.materialRequirements ?? [...input.requirements].map(([id, text]) => ({ id, text }));
   const state: Readonly<Record<string, unknown>> =
-    version === "v1" ? {} : surfaceCheckMaterial(input.documents, materialRequirements);
+    version === "v1"
+      ? {}
+      : version === "v2"
+        ? surfaceCheckMaterial(input.documents, materialRequirements)
+        : surfaceCheckMaterialV3(input.documents, materialRequirements);
   const requirementOf = (claim: PlanUnwritable): string => input.requirements.get(claim.requirementId) ?? "";
 
   // **最初の判定を呼ぶ前に**、全申告の最小データと「未実行」の印を登録して報告する（Issue #432）。最初の

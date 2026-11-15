@@ -2,6 +2,7 @@
 //
 // **偽物の判定・時計・ファイル・環境値で閉じ、通信を拒否する。実 API は呼ばない。**
 import { describe, expect, it } from "vitest";
+import { HOST_CAPABILITIES, HOST_CAPABILITIES_VERSION } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import type { Judge, JudgeAnswer, JudgeRequest } from "./judge.js";
 import { createJevJudge, type JevFetch } from "./judge-jev.js";
@@ -839,29 +840,52 @@ describe("基準の経路の点検の版（Issue #910）", () => {
     expect(calls.every((call) => call.check_version === "v1")).toBe(true);
   });
 
-  it("既定は本番の版（v2）。要求のハッシュは過去の記録に当たらず、版を出力と各呼び出しに残す", async () => {
+  it("既定は本番の版（v3）。材料に能力の定義が 1 件載り、出力に点検の版と能力の定義の版を残す", async () => {
     const harness = await run(BASE_ARGS);
 
     expect(harness.code).toBe(JUDGE_CLAIMS_EXIT_OK);
-    expect(harness.output.surface_check_version).toBe("v2");
+    expect(harness.output.surface_check_version).toBe("v3");
+    expect(harness.output.host_capabilities_version).toBe(HOST_CAPABILITIES_VERSION);
     const calls = harness.output.baseline_calls as Record<string, unknown>[];
     expect(calls).toHaveLength(3);
     for (const call of calls) {
       expect(V1_BASELINE_HASHES).not.toContain(call.request_hash);
-      expect(call.check_version).toBe("v2");
+      expect(call.check_version).toBe("v3");
     }
-    // v2 の基準の要求には、文書の全体と要件が材料として載る
+    // v3 の基準の要求には、文書の全体と要件に加えて能力の定義が材料として載る
     const baseline = harness.requests.filter((request) =>
       Object.keys(request.questions).some((name) => name.startsWith("plan-")),
     );
     expect(baseline.length).toBeGreaterThan(0);
+    for (const request of baseline) {
+      expect(Object.keys(request.state)).toEqual(["documents", "requirements", "host_capabilities"]);
+      expect((request.state as { host_capabilities?: unknown }).host_capabilities).toEqual(HOST_CAPABILITIES);
+    }
+  });
+
+  it("実行環境の能力と申告の点検：--check-version v2 は、変更前の v2 の要求をそのまま再生する", async () => {
+    const harness = await run([...BASE_ARGS, "--check-version", "v2"]);
+
+    expect(harness.code).toBe(JUDGE_CLAIMS_EXIT_OK);
+    expect(harness.output.surface_check_version).toBe("v2");
+    const calls = harness.output.baseline_calls as Record<string, unknown>[];
+    // 変更前（main）の同じ組で流した v2 の要求のハッシュ
+    expect(calls.map((call) => call.request_hash)).toEqual([
+      "1d0f36112c71329ffe589bc75282c5a851e4ba399d9c590a61d834e926eed423",
+      "608475d51ffe11ec41bcbe238624f2db9d85349ea83e96a933db05d12b1ffcb5",
+      "1bb5279cbd2d0943f38a6602af06b8cfc797b34aae10617445871ac34d4e6430",
+    ]);
+    expect(calls.every((call) => call.check_version === "v2")).toBe(true);
+    const baseline = harness.requests.filter((request) =>
+      Object.keys(request.questions).some((name) => name.startsWith("plan-")),
+    );
     for (const request of baseline) expect(Object.keys(request.state)).toEqual(["documents", "requirements"]);
   });
 
   it("知らない版は使い方の誤り", () => {
     expect(parseJudgeClaimsArguments([...BASE_ARGS, "--check-version", "v9"])).toEqual({
-      error: "--check-version は v1 か v2 です",
+      error: "--check-version は v1 か v2 か v3 です",
     });
-    expect(parseJudgeClaimsArguments(BASE_ARGS)).toMatchObject({ checkVersion: "v2" });
+    expect(parseJudgeClaimsArguments(BASE_ARGS)).toMatchObject({ checkVersion: "v3" });
   });
 });
