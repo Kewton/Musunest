@@ -620,3 +620,42 @@ describe("ダッシュボード（dashboard）と数値の部品の正規化（M
     });
   });
 });
+
+// ── 先頭の一覧を初めに開く保証（正規化）の固定（Issue #953）──────────────────────
+//
+// 実行環境の能力の定義（host-capabilities.ts）の ① は、画面の 1 例目と**この例**に当たる。画面は
+// `spec.views[0]` を初めに開くので、正規化が宣言の順（名前の順ではない）を保つことが保証の前提である。
+// 能力の ID を**文字列で**試験の名前に置く（spec-engine は画面のパッケージに依存しない）。
+
+describe("実行環境の能力と申告の点検：先頭の一覧を初めに開く（first-view-declaration-order）", () => {
+  it("名前の順と違う順に宣言した一覧も、宣言の順のまま JSON に出る（first-view-declaration-order）", async () => {
+    const source = [
+      "entities:",
+      "  - name: task",
+      "    fields:",
+      "      title: string",
+      "views:",
+      "  - name: zList",
+      "    entity: task",
+      "  - name: aList",
+      "    entity: task",
+      "actions:",
+      "  - name: addTask",
+      "    entity: task",
+      "validations: []",
+      "computed: []",
+      "permissions:",
+      "  - name: read",
+      "    subject: minIdentity",
+      "  - name: write",
+      "    subject: minIdentity",
+      "minIdentity:",
+      "  mode: anonymous",
+    ].join("\n");
+    const result = await normalized(source);
+
+    // 名前の順（aList → zList）に並べ替えない。**宣言の順**がそのまま残る
+    expect(result.app.spec.views.map((view) => view.name)).toEqual(["zList", "aList"]);
+    expect(result.json.indexOf('"zList"')).toBeLessThan(result.json.indexOf('"aList"'));
+  });
+});
