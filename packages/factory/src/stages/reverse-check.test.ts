@@ -3834,4 +3834,105 @@ describe("T5条件台帳の記録（Issue #951）", () => {
     // 記録のない往復（台帳の欄を返さない）は 0 件申告であって、欄が無いのとは違う
     expect(outcome.value.diagnosis.rounds[0]?.conditionLedger?.counts.rawConditionRows).toBe(1);
   });
+
+  it("有効な条件・適用先・要件の行で status=retained かつ証拠が空なら unknown + no-evidence になる", () => {
+    // 条件・適用先・要件のどれも構造の照合を通る（先に落ちる枝が無い）行だけを置く
+    const ledger = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "scope", 0, 13, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+        ]),
+      ],
+      rows: [ledgerRow("C-1", "T-1", "retained", [])],
+    });
+    // 条件・適用先は整合しているので、行だけが unknown になる
+    expect(ledger.conditions[0]?.failure).toBeNull();
+    expect(ledger.conditions[0]?.targets[0]?.failure).toBeNull();
+    expect(ledger.rows[0]).toMatchObject({ status: "unknown", failure: "no-evidence", evidence: [] });
+    expect(ledger.observation).toBe("indeterminate");
+    const counts = summarizeConditionLedger(ledger).counts;
+    expect(counts.unknownRows["no-evidence"]).toBe(1);
+    expect(counts.retained).toBe(0);
+    expect(counts.unknown).toBe(1);
+  });
+
+  it("未被覆の有限な理由（duplicate-condition・duplicate-target・duplicate-requirement・evidence-target-mismatch・unknown-status）を 1 本ずつ発火する", () => {
+    // duplicate-condition：同じ conditionId の条件を 2 つ置く。行も両方に付ける
+    const duplicateCondition = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "scope", 0, 5, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+        ]),
+        ledgerCondition("C-1", "time", 5, 13, [
+          { targetId: "T-2", start: 5, end: 13, requirementIds: ["R-2"] },
+        ]),
+      ],
+      rows: [
+        ledgerRow("C-1", "T-1", "missing"),
+        ledgerRow("C-1", "T-2", "missing"),
+      ],
+    });
+    expect(duplicateCondition.conditions.map((condition) => condition.failure)).toEqual([
+      "duplicate-condition",
+      "duplicate-condition",
+    ]);
+    expect(duplicateCondition.rows.map((row) => row.failure)).toEqual([
+      "duplicate-condition",
+      "duplicate-condition",
+    ]);
+
+    // duplicate-target：同じ条件の中で同じ targetId の適用先を 2 つ置く
+    const duplicateTarget = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "scope", 0, 13, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+          { targetId: "T-1", start: 5, end: 13, requirementIds: ["R-2"] },
+        ]),
+      ],
+      rows: [ledgerRow("C-1", "T-1", "missing")],
+    });
+    expect(duplicateTarget.conditions[0]?.targets.map((target) => target.failure)).toEqual([
+      "duplicate-target",
+      "duplicate-target",
+    ]);
+
+    // duplicate-requirement：1 つの適用先で同じ要件 ID を 2 回挙げる
+    const duplicateRequirement = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "scope", 0, 5, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1", "R-1"] },
+        ]),
+      ],
+      rows: [ledgerRow("C-1", "T-1", "missing")],
+    });
+    expect(duplicateRequirement.conditions[0]?.targets[0]?.failure).toBe("duplicate-requirement");
+
+    // evidence-target-mismatch：適用先が挙げていない（が一覧に実在する）要件 ID の証拠
+    const evidenceMismatch = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "scope", 0, 5, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+        ]),
+      ],
+      rows: [ledgerRow("C-1", "T-1", "retained", [{ requirementId: "R-2", text: "件数を合計できる" }])],
+    });
+    // 要件 R-2 は一覧に一意に実在するが、この適用先は R-1 しか挙げていない
+    expect(evidenceMismatch.rows[0]).toMatchObject({ status: "unknown", failure: "evidence-target-mismatch" });
+
+    // unknown-status：retained・missing・unknown 以外の状態
+    const unknownStatus = classifyConditionLedger(LEDGER_SOURCE, LEDGER_LIST, {
+      conditions: [
+        ledgerCondition("C-1", "scope", 0, 5, [
+          { targetId: "T-1", start: 0, end: 5, requirementIds: ["R-1"] },
+        ]),
+      ],
+      rows: [ledgerRow("C-1", "T-1", "maybe")],
+    });
+    expect(unknownStatus.rows[0]).toMatchObject({ status: "unknown", failure: "unknown-status" });
+
+    // どの組も、条件・適用先が整合していれば、行の理由だけが立つ（no-evidence と取り違えない）
+    expect(summarizeConditionLedger(evidenceMismatch).counts.unknownRows["evidence-target-mismatch"]).toBe(1);
+    expect(summarizeConditionLedger(unknownStatus).counts.unknownRows["unknown-status"]).toBe(1);
+    expect(summarizeConditionLedger(duplicateRequirement).counts.unknownConditions["duplicate-requirement"]).toBe(1);
+  });
 });
