@@ -10,6 +10,7 @@
 //   4. 仕分けが未確定の申告を、裏付けだけで通さない
 //   5. 診断に、申告の添字・要件 ID・部分・理由・制約 ID・文書の版・段階・分類・adapter・確信度・根拠 ID を残す
 import { describe, expect, it } from "vitest";
+import { HOST_CAPABILITIES, HOST_CAPABILITY_FIRST_VIEW } from "@musunest/appspec-schema";
 import { createFakeJudge } from "../judge-fake.js";
 import { JudgeBudgetExceededError } from "../judge-budget.js";
 import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest } from "../judge.js";
@@ -25,6 +26,7 @@ import type { PlanSurface, PlanUnwritable } from "./surface.js";
 import { createCallHash } from "./claim-recorded-judge.js";
 import {
   SURFACE_CHECK_VERSION,
+  SURFACE_CHECK_VERSIONS,
   SURFACE_RECHECK_EVIDENCE_ASK_V2,
   SURFACE_RECHECK_KIND_ASK_V2,
   SURFACE_RECHECK_NO_EVIDENCE,
@@ -216,7 +218,7 @@ describe("判定への渡し方（05 §3・§4・Issue #376・#432）", () => {
     const { run, requests } = check(surface(HOLE), {
       [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
       [surfaceSupportQuestionName(0)]: choice("supports", 0.9),
-    });
+    }, { checkVersion: "v2" });
     await run;
 
     expect(Object.keys(requests[0]?.questions ?? {})).toEqual(["plan-triage:0"]);
@@ -231,7 +233,7 @@ describe("判定への渡し方（05 §3・§4・Issue #376・#432）", () => {
     expect(String(instructions?.excerpt)).toContain("アプリ自体の名前や説明を置く欄は無い。");
     expect(String(instructionsOf(triageQuestion)?.ask)).toMatch(/^[\x20-\x7E]+$/);
     expect(String(instructions?.ask)).toMatch(/^[\x20-\x7E]+$/);
-    // state には依頼文（原文）を入れない。載るのは文書と要件の一覧（点検の材料）だけ（Issue #910）
+    // state には依頼文（原文）を入れない。v2 で載るのは文書と要件の一覧（点検の材料）だけ（Issue #910）
     expect(Object.keys(requests[0]?.state ?? {})).toEqual(["documents", "requirements"]);
     expect(Object.keys(requests[1]?.state ?? {})).toEqual(["documents", "requirements"]);
   });
@@ -615,7 +617,7 @@ const OUTSIDE_SECTION_TEXTS = [
 
 describe("v2：主の 2 問と再点検に、文書の全体と全要件を渡す（Issue #910）", () => {
   it("一般名の申告から組み立てた 3 要求に、申告の節の外の文書の本文と、全要件の id・text が含まれる", async () => {
-    const { run, requests } = check(surface(GENERIC), ALL_THREE);
+    const { run, requests } = check(surface(GENERIC), ALL_THREE, { checkVersion: "v2" });
     await run;
 
     expect(requests.map((request) => Object.keys(request.questions))).toEqual([
@@ -786,8 +788,9 @@ describe("v2：主の 2 問と再点検に、文書の全体と全要件を渡�
     expect(requests).toHaveLength(1);
   });
 
-  it("本番の版は v2", () => {
-    expect(SURFACE_CHECK_VERSION).toBe("v2");
+  it("本番の版は v3（v1・v2 は再生のために残る）", () => {
+    expect(SURFACE_CHECK_VERSION).toBe("v3");
+    expect(SURFACE_CHECK_VERSIONS).toEqual(["v1", "v2", "v3"]);
   });
 });
 
@@ -816,5 +819,132 @@ describe("v1 の要求は、過去の記録のハッシュが当たる形のま�
     const v2Hashes = await Promise.all(v2.requests.map((request) => createCallHash(request)));
     expect(v2Hashes).toHaveLength(3);
     for (const hash of v2Hashes) expect(v1Hashes).not.toContain(hash);
+  });
+});
+
+// ── v3：実行環境の能力の定義を、点検の材料にだけ 1 件足す（Issue #953）──────────────────────
+//
+// **変えるのは材料だけである。** 問いの文・答えの集合・根拠の候補・抜粋・受理の条件・閾値は v2 と同じ。
+// 能力の文は事実の材料（データ）で、判定への指示を含まない。
+
+/** 変更前（mainの v2 の材料）の、同じ申告・文書・要件から組んだ 3 要求のハッシュ */
+const V2_BASELINE_HASHES = [
+  "ef8ea9bcf14c8c13894be4ad4853c28695812537608ddc88f7f2a76dcd8ac35a",
+  "01582924145346db1cbc9edc4b60be31fa7311298e574ae8d670cd6a47782398",
+  "ae66f093f2f83763e90a7b54be6e344fc66f07c46fe64430a38ccd24880bef98",
+];
+
+/** 能力の文の一覧（事実と範囲） */
+const CAPABILITY_TEXTS = [
+  ...HOST_CAPABILITIES.capabilities.flatMap((capability) => capability.facts),
+  ...HOST_CAPABILITIES.capabilities.map((capability) => capability.scope),
+];
+
+describe("実行環境の能力と申告の点検：v3 の材料（Issue #953）", () => {
+  it("仕分け・裏付け・再点検（2 問）の全要求の材料に、能力の定義が 1 回ずつ載る", async () => {
+    const { run, requests } = check(surface(GENERIC), ALL_THREE);
+    await run;
+
+    expect(requests.map((request) => Object.keys(request.questions))).toEqual([
+      ["plan-triage:0"],
+      ["plan-support:0"],
+      ["plan-recheck-kind:0", "plan-recheck-evidence:0"],
+    ]);
+    for (const request of requests) {
+      // 材料そのものは v2 のまま（文書の全体と全要件）で、能力の定義が 1 件だけ増える
+      expect(request.state).toEqual({
+        documents: SAMPLE_DOCUMENTS.map((document) => ({ name: document.name, text: document.text })),
+        requirements: [
+          { id: "R-1", text: "要件 R-1 の文" },
+          { id: "R-2", text: "要件 R-2 の文" },
+        ],
+        host_capabilities: HOST_CAPABILITIES,
+      });
+      // 定義は 1 回だけ（問いの数だけ複製しない）
+      const sent = JSON.stringify(request.state);
+      for (const text of [HOST_CAPABILITY_FIRST_VIEW, ...CAPABILITY_TEXTS]) {
+        expect(sent.split(JSON.stringify(text).slice(1, -1)).length - 1).toBe(1);
+      }
+    }
+    // 文書の並びには足さない（抜粋と根拠の候補の取り出し元を汚さない）
+    for (const request of requests) {
+      const documents = (request.state as { documents?: readonly { name: string; text: string }[] }).documents ?? [];
+      const sent = JSON.stringify(documents);
+      for (const text of CAPABILITY_TEXTS) expect(sent).not.toContain(text);
+    }
+  });
+
+  it("v2 を選べば今までどおり（材料に能力が無く、要求のハッシュが変更前と同じ）", async () => {
+    const { run, requests } = check(surface(HOLE), ALL_THREE, { checkVersion: "v2" });
+    await run;
+
+    expect(await Promise.all(requests.map((request) => createCallHash(request)))).toEqual(V2_BASELINE_HASHES);
+    for (const request of requests) {
+      expect(Object.keys(request.state)).toEqual(["documents", "requirements"]);
+      expect(JSON.stringify(request.state)).not.toContain(HOST_CAPABILITY_FIRST_VIEW);
+    }
+  });
+
+  it("受理の条件は今までどおり（語彙の穴＋裏付けは受理、問題ではない・反するは落とす、根拠なし・答えなしは未点検）", async () => {
+    const accepted = check(surface(GENERIC), {
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.9),
+    }, { checkVersion: "v3" });
+    expect((await accepted.run).accepted).toEqual([GENERIC]);
+
+    const notAProblem = check(surface(GENERIC), {
+      [surfaceTriageQuestionName(0)]: choice("not-a-problem", 0.9),
+    }, { checkVersion: "v3" });
+    const droppedByTriage = await notAProblem.run;
+    expect(droppedByTriage.accepted).toEqual([]);
+    expect(droppedByTriage.dropped.map((entry) => [entry.code, entry.requirementId])).toEqual([
+      ["not-a-problem", "R-1"],
+    ]);
+
+    const contradicting = check(surface(GENERIC), {
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("contradicts", 0.9),
+    }, { checkVersion: "v3" });
+    const droppedBySupport = await contradicting.run;
+    expect(droppedBySupport.accepted).toEqual([]);
+    expect(droppedBySupport.dropped.map((entry) => [entry.code, entry.requirementId])).toEqual([
+      ["contradicts", "R-1"],
+    ]);
+
+    const noEvidence = check(surface(GENERIC), {
+      ...ALL_THREE,
+      [surfaceRecheckEvidenceQuestionName(0)]: choice(SURFACE_RECHECK_NO_EVIDENCE, 0.9),
+    }, { checkVersion: "v3" });
+    const uncheckedByEvidence = await noEvidence.run;
+    expect(uncheckedByEvidence.accepted).toEqual([]);
+    expect(uncheckedByEvidence.unchecked.map((entry) => entry.code)).toEqual(["not-stated"]);
+
+    const unanswered = check(surface(GENERIC), {}, { checkVersion: "v3" });
+    const uncheckedByAnswer = await unanswered.run;
+    expect(uncheckedByAnswer.accepted).toEqual([]);
+    expect(uncheckedByAnswer.unchecked.map((entry) => entry.code)).toEqual(["unknown"]);
+  });
+
+  it("裏付けの抜粋と再点検の根拠の候補に、能力が現れない（文書の名前が能力と同じ合成の例でも）", async () => {
+    // 文書の名前を能力の ID と同じにしても、抜粋と候補は**制約 ID の節**から取り出す
+    const documents = [{ name: HOST_CAPABILITY_FIRST_VIEW, text: "### 記録\n記録の節の説明。" }];
+    const { run, requests } = check(surface(GENERIC), ALL_THREE, { checkVersion: "v3", documents });
+    await run;
+
+    const support = instructionsOf(requests[1]?.questions[surfaceSupportQuestionName(0)]);
+    expect(String(support?.excerpt)).toContain("記録の節の説明");
+    for (const text of CAPABILITY_TEXTS) expect(String(support?.excerpt)).not.toContain(text);
+
+    const evidence = requests[2]?.questions[surfaceRecheckEvidenceQuestionName(0)];
+    expect(new Set(criteriaKeys(evidence))).toEqual(new Set(["記録", SURFACE_RECHECK_NO_EVIDENCE]));
+    const candidates = (instructionsOf(evidence)?.candidates ?? []) as readonly { id: string; section: string }[];
+    expect(candidates.map((candidate) => candidate.id)).toEqual(["記録"]);
+    for (const text of CAPABILITY_TEXTS) expect(JSON.stringify(candidates)).not.toContain(text);
+
+    // それでも材料には、能力の定義が 1 回だけ載る（同名の文書とは別の欄である）
+    expect((requests[0]?.state as { host_capabilities?: unknown } | undefined)?.host_capabilities).toEqual(
+      HOST_CAPABILITIES,
+    );
+    expect(JSON.stringify(requests[0]?.state)).toContain(JSON.stringify(HOST_CAPABILITY_FIRST_VIEW).slice(1, -1));
   });
 });

@@ -11,6 +11,7 @@ export const PACKAGE_NAME = "@musunest/appspec-schema" as const;
 
 export * from "./api.js";
 export * from "./delivery.js";
+export * from "./host-capabilities.js";
 export * from "./plan.js";
 export * from "./spec.js";
 // 契約のハッシュは**純粋な計算だけ**を根から出す。ファイルから読む側（contractDirectory・

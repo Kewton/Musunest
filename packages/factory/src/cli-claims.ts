@@ -4,14 +4,16 @@
 // **正解付けと本物の Jev での比較は窓口が別に行う。** ここは API を呼ばず、試験は偽物の判定で閉じる。
 // Plan の確定経路・既定の点検・v1 の問い（T1・S1）の文と criteria・Build 側の仕分けは変えない。
 //
-// **基準の経路の点検の版（Issue #910）**：基準の 2 経路は、`--check-version` で選んだ版の要求で点検を流す
-// （既定は本番の版 `SURFACE_CHECK_VERSION`）。**v1 を選べば過去の版の要求を同じ形で再生できる**（要求の
-// 中身が同じなので、過去の記録のハッシュが当たる）。v2 の要求は文書の全体と要件を載せるので中身が違い、
-// 過去の記録のハッシュには当たらない。出力の `surface_check_version` と、基準の呼び出しの `check_version`
-// に版を残し、版の違う記録を取り違えない。
+// **基準の経路の点検の版（Issue #910・#953）**：基準の 2 経路は、`--check-version` で選んだ版の要求で点検を
+// 流す（既定は本番の版 `SURFACE_CHECK_VERSION`＝v3）。**v1・v2 を選べば過去の版の要求を同じ形で再生できる**
+// （v1 は要求の中身が同じなので、過去の記録のハッシュが当たる。v2 は文書の全体と要件を載せるが、能力の定義は
+// 載せないので v2 の記録に当たる。v3 は能力の定義を 1 件足すので、v1・v2 の記録には当たらない）。出力の
+// `surface_check_version`・`host_capabilities_version` と、基準の呼び出しの `check_version` に版を残し、
+// 版の違う記録を取り違えない。
 //
 // 端末もファイルも扱うのは、この入口（と cli.ts）だけである。文書の読み込みと判定の口の組み立ては
 // `factory:run`（cli.ts）と共有する（`loadDocumentsFromFiles`・`assembleJudge`）。
+import { HOST_CAPABILITIES_VERSION } from "@musunest/appspec-schema";
 import type { CallGate } from "./call.js";
 import { createCallGate } from "./call.js";
 import { JobBudget, type TokenRates } from "./budget.js";
@@ -95,7 +97,7 @@ export const DEFAULT_TALLY_RULE = "majority" as const;
 
 /** 使い方の文 */
 export const JUDGE_CLAIMS_USAGE =
-  "使い方: factory:judge-claims -- (--claims <ファイル> | --diagnostic <ファイル>) --out <ファイル> [--doc-version <版> --doc-hash <ハッシュ>] [--judge jev|fallback] [--repeat <回>] [--reverse-options] [--labels <ファイル>] [--model <名前>] [--rule unanimous|majority] [--forms <T1,T2,...>] [--budget <USD>] [--deadline <分>] [--max-calls <回>] [--check-version v1|v2]";
+  `使い方: factory:judge-claims -- (--claims <ファイル> | --diagnostic <ファイル>) --out <ファイル> [--doc-version <版> --doc-hash <ハッシュ>] [--judge jev|fallback] [--repeat <回>] [--reverse-options] [--labels <ファイル>] [--model <名前>] [--rule unanimous|majority] [--forms <T1,T2,...>] [--budget <USD>] [--deadline <分>] [--max-calls <回>] [--check-version ${SURFACE_CHECK_VERSIONS.join("|")}]`;
 
 /** 引数 */
 export interface JudgeClaimsArguments {
@@ -934,8 +936,10 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
   const output = {
     schema_version: JUDGE_CLAIMS_SCHEMA,
     forms_version: CLAIM_FORMS_VERSION,
-    // 基準の経路の点検の版（Issue #910）
+    // 基準の経路の点検の版（Issue #910・#953）
     surface_check_version: parsed.checkVersion,
+    // 材料に載せた実行環境の能力の定義の版（Issue #953）。点検の版と取り違えない
+    host_capabilities_version: HOST_CAPABILITIES_VERSION,
     doc_version: loaded.docVersion,
     doc_hash: actualHash,
     source: loaded.source,
