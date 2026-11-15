@@ -37,8 +37,14 @@ import {
   SHARED_TOOL_REQUEST,
   withoutSchemaBlock as stripSharedSchemaBlock,
 } from "./__tests__/openai.js";
-import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
-import { buildStageBranch, envelopeStageFor } from "./schema-envelope.js";
+import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME, reverseCheckSchemaOf } from "./stages/reverse-check.js";
+import {
+  ENVELOPE_SCHEMA,
+  STAGE_ENVELOPE_ENTRIES,
+  buildEnvelopeSchema,
+  buildStageBranch,
+  envelopeStageFor,
+} from "./schema-envelope.js";
 
 interface Captured {
   readonly url: string;
@@ -766,5 +772,141 @@ describe("adapter は環境変数を読まない（Issue #771）", () => {
     }
     // 宛先は固定（環境変数から読まない）
     expect(source).toContain("https://ollama.com/v1/responses");
+  });
+});
+
+// ── Issue #948：条件の指摘の詳細を求める派生 schema の wire（段 1・行き先は変えない）──
+
+/** Build の P2 の要求（Issue #948 の試験で使う） */
+const conditionBaseRequest = (): LlmStructuredRequest => ({
+  ...STRUCTURED_REQUEST,
+  schemaName: REVERSE_CHECK_SCHEMA_NAME,
+  schema: REVERSE_CHECK_SCHEMA,
+});
+/** Plan の P2 の要求（派生 schema。Issue #948 の試験で使う） */
+const conditionPlanRequest = (): LlmStructuredRequest => ({
+  ...STRUCTURED_REQUEST,
+  schemaName: REVERSE_CHECK_SCHEMA_NAME,
+  schema: reverseCheckSchemaOf(true),
+});
+/** その段だけの封筒全体（Ollama が文で示す schema の塊と同じ形。Issue #948 の試験で使う） */
+const conditionPresented = (schema: unknown): Record<string, unknown> => ({
+  type: "object",
+  additionalProperties: false,
+  required: ["result"],
+  properties: { result: buildStageBranch({ stage: REVERSE_CHECK_SCHEMA_NAME, schema }) },
+});
+/** body から `text.format.schema` を除いた写し（Issue #948 の試験で使う） */
+const conditionWithoutFormatSchema = (body: Record<string, unknown>): Record<string, unknown> => {
+  const copy = JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
+  const format = (copy["text"] as { format: Record<string, unknown> }).format;
+  delete format["schema"];
+  return copy;
+};
+/** 条件の指摘の詳細の有無だけを変えた、完了した封筒の応答（Issue #948 の試験で使う） */
+const conditionAnswered = (withDetails: boolean): Response =>
+  jsonResponse(
+    completed(
+      outputText(
+        JSON.stringify({
+          result: {
+            stage: REVERSE_CHECK_SCHEMA_NAME,
+            uncovered: [],
+            ...(withDetails ? { findingDetails: [] } : {}),
+          },
+        }),
+      ),
+    ),
+  );
+/** Ollama の client で 1 回呼び、送った body を返す（Issue #948 の試験で使う） */
+async function conditionOllamaBody(
+  request: LlmStructuredRequest,
+  withDetails: boolean,
+): Promise<Record<string, unknown>> {
+  const { fetch, captured } = recordingFetch(() => conditionAnswered(withDetails));
+  await ollamaClient(fetch, { model: "same-model" }).callStructured(request);
+  return captured[0]!.body;
+}
+/** OpenAI の client で 1 回呼び、送った body を返す（Issue #948 の試験で使う） */
+async function conditionOpenAiBody(
+  request: LlmStructuredRequest,
+  withDetails: boolean,
+): Promise<Record<string, unknown>> {
+  const { fetch, captured } = recordingFetch(() => conditionAnswered(withDetails));
+  await createOpenAiLlmClient({ apiKey: "sk-FAKE", model: "same-model", fetch }).callStructured(request);
+  return captured[0]!.body;
+}
+
+describe("T2条件指摘の記録（wire）", () => {
+
+  it("Build は完全一致のまま。Plan は schema の枝と schema の提示の塊だけが違い、ほかは OpenAI と同じ", async () => {
+    const baseOllama = await conditionOllamaBody(conditionBaseRequest(), false);
+    const planOllama = await conditionOllamaBody(conditionPlanRequest(), true);
+    const baseOpenai = await conditionOpenAiBody(conditionBaseRequest(), false);
+    const planOpenai = await conditionOpenAiBody(conditionPlanRequest(), true);
+
+    // Build の封筒は今までの実体のまま
+    expect((baseOllama["text"] as { format: { schema: unknown } }).format.schema).toEqual(ENVELOPE_SCHEMA);
+    expect((baseOpenai["text"] as { format: { schema: unknown } }).format.schema).toEqual(ENVELOPE_SCHEMA);
+    // Plan の封筒は、reverse-check の枝だけを派生 schema に差し替えたもの
+    const expectedEnvelope = buildEnvelopeSchema(
+      STAGE_ENVELOPE_ENTRIES.map((entry) =>
+        entry.stage === REVERSE_CHECK_SCHEMA_NAME
+          ? { stage: entry.stage, schema: reverseCheckSchemaOf(true) }
+          : entry,
+      ),
+    );
+    expect((planOllama["text"] as { format: { schema: unknown } }).format.schema).toEqual(expectedEnvelope);
+    expect((planOpenai["text"] as { format: { schema: unknown } }).format.schema).toEqual(expectedEnvelope);
+
+    // schema の提示の塊は、Plan では findingDetails を含む派生 schema の塊になる
+    const baseStripped = conditionWithoutFormatSchema(withoutSchemaBlock(baseOllama, conditionPresented(REVERSE_CHECK_SCHEMA)));
+    const planStripped = conditionWithoutFormatSchema(
+      withoutSchemaBlock(planOllama, conditionPresented(reverseCheckSchemaOf(true))),
+    );
+    // 塊と schema の枝を除けば、Ollama の body は OpenAI の body と同じ
+    expect(baseStripped).toEqual(conditionWithoutFormatSchema(baseOpenai));
+    expect(planStripped).toEqual(conditionWithoutFormatSchema(planOpenai));
+    // Build と Plan の違いは、schema の枝と提示の塊だけ（ほかの欄は同じ）
+    expect(baseStripped).toEqual(planStripped);
+    // モデル・token 上限・入力を保つ
+    expect(planStripped["model"]).toBe(baseStripped["model"]);
+    expect(planStripped["max_output_tokens"]).toBe(baseStripped["max_output_tokens"]);
+    expect(planStripped["input"]).toEqual(baseStripped["input"]);
+  });
+
+  it("findingDetails の欠落・型違いは wire の schema 違反で、段の検査のやり直しへ進まない", async () => {
+    for (const output of [
+      { uncovered: [] },
+      { uncovered: [], findingDetails: "no" },
+      { uncovered: [], findingDetails: [{ uncoveredIndex: 0, missingKind: "target" }] },
+    ]) {
+      const { fetch, captured } = recordingFetch(() =>
+        jsonResponse(
+          completed(
+            outputText(JSON.stringify({ result: { stage: REVERSE_CHECK_SCHEMA_NAME, ...output } })),
+          ),
+        ),
+      );
+      const error = await captureError(() => ollamaClient(fetch).callStructured(conditionPlanRequest()));
+      expect(error.kind).toBe("malformed");
+      expect(captured).toHaveLength(1);
+    }
+  });
+
+  it("出力が未完了なら、JSON として読めても成功にせず incomplete で止まる", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse({
+        id: "resp_1",
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output: outputText(
+          JSON.stringify({
+            result: { stage: REVERSE_CHECK_SCHEMA_NAME, uncovered: [], findingDetails: [] },
+          }),
+        ),
+      }),
+    );
+    await expect(ollamaClient(fetch).callStructured(conditionPlanRequest())).rejects.toBeInstanceOf(OpenAiIncompleteError);
   });
 });

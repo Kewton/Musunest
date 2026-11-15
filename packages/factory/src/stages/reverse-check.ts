@@ -100,6 +100,108 @@ export const REVERSE_CHECK_SCHEMA = {
   },
 } as const;
 
+/**
+ * Plan の派生 schema だけが持つ、条件の指摘の詳細の欄の名前（Issue #948）。既存の `uncovered` の
+ * 定義は変えず、**この欄を足した schema を Plan の経路だけ**が送る。
+ */
+export const REVERSE_CHECK_FINDING_DETAILS_KEY = "findingDetails";
+
+/**
+ * 条件の指摘で「原文のどの条件が要件の本文に足りないか」の既知の種類（Issue #948）。
+ * **wire では文字列のまま**送り、既知の集合に無い値は照合で `invalid` として記録する。
+ */
+export const REVERSE_CHECK_CONDITION_KINDS = [
+  "target",
+  "negation",
+  "exception",
+  "time",
+  "deadline",
+  "quantity",
+  "scope",
+  "wording",
+  "shared-modifier",
+  "reference-source",
+  "other",
+  "unclear",
+] as const;
+export type ReverseCheckConditionKind = (typeof REVERSE_CHECK_CONDITION_KINDS)[number];
+
+/** 条件の指摘 1 件の照合状態（**有限の 4 つ**。Issue #948）。意味の正しさではなく、参照の構造の印である */
+export const REVERSE_CHECK_CONDITION_MATCHES = ["matched", "unbound", "missing", "invalid"] as const;
+export type ReverseCheckConditionMatch = (typeof REVERSE_CHECK_CONDITION_MATCHES)[number];
+
+/** 照合状態が `matched`・`unbound` にならない理由（**有限の値**。Issue #948） */
+export const REVERSE_CHECK_CONDITION_FAILURES = [
+  /** 行き先が `outside`（原文の外か空の範囲） */
+  "outside",
+  /** 範囲が原文の中の非空でない */
+  "range",
+  /** 種類が既知の集合に無い */
+  "unknown-kind",
+  /** 申告された対象 ID が、その一覧に一意に実在しない */
+  "unknown-requirement",
+  /** 同じ対象 ID を 2 回以上申告した */
+  "duplicate-requirement",
+  /** 同じ元の添字へ複数行を付けた */
+  "duplicate-index",
+] as const;
+export type ReverseCheckConditionFailure = (typeof REVERSE_CHECK_CONDITION_FAILURES)[number];
+
+/** 条件の指摘の詳細 1 行（wire の `findingDetails` の行。Issue #948） */
+export interface ReverseCheckConditionDetail {
+  /** 元の `uncovered` の添字（0 始まり） */
+  readonly uncoveredIndex: number;
+  /** 申告された不足の種類（wire では文字列のまま） */
+  readonly missingKind: string;
+  /** 本文上の対象の申告（要件の ID。空は対象未特定） */
+  readonly requirementIds: readonly string[];
+}
+
+/**
+ * Plan の経路だけが送る**派生 schema**（Issue #948）。既存の `reverse-check` の schema は変えず、
+ * `uncovered` の定義をそのまま残したまま `findingDetails` を足す。strict の構造化出力のため、
+ * 追加の欄と行の中の 3 欄を `required` にする。`observeConditionFindings` を省いた（Build の）経路は
+ * **既存の schema の実体をそのまま返す**——送るバイト列を変えない。
+ */
+export function reverseCheckSchemaOf(observeConditionFindings?: boolean): unknown {
+  if (observeConditionFindings !== true) return REVERSE_CHECK_SCHEMA;
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["uncovered", REVERSE_CHECK_FINDING_DETAILS_KEY],
+    properties: {
+      uncovered: REVERSE_CHECK_SCHEMA.properties.uncovered,
+      [REVERSE_CHECK_FINDING_DETAILS_KEY]: {
+        type: "array",
+        description:
+          "uncovered の各指摘に付ける、不足する条件の種類と本文上の対象。詳細を付けられない指摘は行を省略してよい（0 件でもよい）。",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["uncoveredIndex", "missingKind", "requirementIds"],
+          properties: {
+            uncoveredIndex: {
+              type: "integer",
+              minimum: 0,
+              description: "元の uncovered の添字（0 始まり）",
+            },
+            missingKind: {
+              type: "string",
+              description:
+                "不足する条件の種類（target・negation・exception・time・deadline・quantity・scope・wording・shared-modifier・reference-source・other・unclear のいずれか）",
+            },
+            requirementIds: {
+              type: "array",
+              items: { type: "string" },
+              description: "本文上の対象の要件 ID（対象を特定できなければ空の配列）",
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
 /** ①' が受け取るもの（原文と一覧だけ） */
 export interface ReverseCheckInput {
   readonly source: string;
@@ -120,11 +222,19 @@ export interface ReverseCheckInput {
    * 要求のバイト列・判定・やり直しには使わない。省けば空である（戻さない往復）。
    */
   readonly restored?: readonly ReverseCheckRestoredRequirement[];
+  /**
+   * 条件の指摘の詳細（`findingDetails`）を求める派生 schema を送るか（Issue #948）。**Plan の経路だけ**が
+   * 明示の選択で有効にする。省けば（Plan を経ない Build の経路）送る schema・要求のバイト列・結果・診断を
+   * 変えない。
+   */
+  readonly observeConditionFindings?: boolean;
 }
 
 /** ①' の会話の答え */
 interface ReverseCheckAnswer {
   readonly uncovered: readonly SourceRange[];
+  /** 条件の指摘の詳細（派生 schema を送ったときだけ。Issue #948） */
+  readonly findingDetails?: readonly ReverseCheckConditionDetail[];
 }
 
 /**
@@ -398,6 +508,251 @@ export function checkReverseCheckOutput(output: unknown): ShapeCheck<ReverseChec
 }
 
 /**
+ * 派生 schema を送った往復の応答の形を確かめる（Issue #948）。既存の `uncovered` の検査はそのまま使い、
+ * `findingDetails` は**行の型が合うものだけ**を読む。wire の型違反（欄の欠落・型違い）は adapter の
+ * schema 検査が段の失敗にするので、ここで形のやり直しへは回さない。
+ */
+export function checkReverseCheckOutputWithConditionFindings(output: unknown): ShapeCheck<ReverseCheckAnswer> {
+  const base = checkReverseCheckOutput(output);
+  if (!base.ok) return base;
+  const raw = isRecord(output) ? output[REVERSE_CHECK_FINDING_DETAILS_KEY] : undefined;
+  return { ok: true, value: { ...base.value, findingDetails: parseConditionFindingDetails(raw) } };
+}
+
+/** 条件の指摘の詳細の行を、型の合うものだけ読む（Issue #948） */
+function parseConditionFindingDetails(raw: unknown): readonly ReverseCheckConditionDetail[] {
+  if (!Array.isArray(raw)) return [];
+  const details: ReverseCheckConditionDetail[] = [];
+  for (const item of raw) {
+    if (!isRecord(item)) continue;
+    const uncoveredIndex = item["uncoveredIndex"];
+    const missingKind = item["missingKind"];
+    const requirementIds = item["requirementIds"];
+    if (typeof uncoveredIndex !== "number" || !Number.isFinite(uncoveredIndex)) continue;
+    if (typeof missingKind !== "string") continue;
+    if (!Array.isArray(requirementIds) || !requirementIds.every((id) => typeof id === "string")) continue;
+    details.push({ uncoveredIndex, missingKind, requirementIds: requirementIds.slice() });
+  }
+  return details;
+}
+
+/** 種類が既知の集合にあるか（Issue #948） */
+export function isKnownConditionKind(kind: string): kind is ReverseCheckConditionKind {
+  return (REVERSE_CHECK_CONDITION_KINDS as readonly string[]).includes(kind);
+}
+
+/**
+ * 条件の指摘 1 件の記録（Issue #948）。**元の `uncovered` の添字・範囲・行き先**、申告された**種類**と
+ * **本文上の対象 ID**、照合状態と、その理由を持つ。照合状態は**参照の構造の印**であって、意味の正しさや
+ * 未解決の印ではない。同じ元の添字に複数行が付いたときは、**先頭を選ばず**行ごとに残す。
+ */
+export interface ReverseCheckTraceConditionFinding {
+  /** 元の `uncovered` の添字（0 始まり） */
+  readonly index: number;
+  /** 元の範囲（原文の上の位置） */
+  readonly range: SourceRange;
+  /** 元の範囲の行き先（`remaining`・`framing`・`duplicate`・`blank`・`outside`） */
+  readonly destination: ReverseCheckRangeDestination;
+  /** 申告された種類（詳細の行が無ければ `null`） */
+  readonly kind: string | null;
+  /** 申告された本文上の対象の ID（無ければ空） */
+  readonly requirementIds: readonly string[];
+  readonly match: ReverseCheckConditionMatch;
+  readonly failure: ReverseCheckConditionFailure | null;
+}
+
+/**
+ * 行き先を持たない詳細の行（Issue #948）。元の `uncovered` の添字が不正・範囲外なので、**元の指摘を
+ * 新しく作らず**、別に計上する。範囲・行き先・照合状態は持たない。
+ */
+export interface ReverseCheckTraceConditionOrphan {
+  readonly uncoveredIndex: number;
+  readonly kind: string;
+  readonly requirementIds: readonly string[];
+  readonly failure: "index-out-of-range";
+}
+
+/** 1 往復の条件の指摘の記録（Issue #948）。詳細の行と、行き先を持たない行を分けて持つ */
+export interface ReverseCheckTraceConditionFindings {
+  readonly rows: readonly ReverseCheckTraceConditionFinding[];
+  readonly orphans: readonly ReverseCheckTraceConditionOrphan[];
+}
+
+/**
+ * 条件の指摘の詳細を、既存の `uncovered` の行とコードで結ぶ（Issue #948。**純粋な関数**）。
+ *
+ * 元の範囲は**コードが元の `uncovered` から取り**、元の添字で結ぶ——会話に範囲を書かせない。各元の指摘を
+ * `matched`（範囲が原文の中の非空・種類が既知・対象 ID が非空でその一覧に一意に実在）・`unbound`（範囲と
+ * 種類は同じで対象が空）・`missing`（詳細の行が無い）・`invalid`（それ以外）に分ける。`outside` の行き先は
+ * 詳細の有無によらず `invalid` を優先する。**意味の正しさは見ない**（参照の構造だけを見る）。
+ */
+export function classifyConditionFindings(
+  source: string,
+  list: RequirementList,
+  reported: readonly ReverseCheckTraceReportedRange[],
+  details: readonly ReverseCheckConditionDetail[],
+): ReverseCheckTraceConditionFindings {
+  const rows: ReverseCheckTraceConditionFinding[] = [];
+  const orphans: ReverseCheckTraceConditionOrphan[] = [];
+  const byIndex = new Map<number, ReverseCheckConditionDetail[]>();
+  for (const detail of details) {
+    if (
+      !Number.isInteger(detail.uncoveredIndex) ||
+      detail.uncoveredIndex < 0 ||
+      detail.uncoveredIndex >= reported.length
+    ) {
+      orphans.push({
+        uncoveredIndex: detail.uncoveredIndex,
+        kind: detail.missingKind,
+        requirementIds: detail.requirementIds.slice(),
+        failure: "index-out-of-range",
+      });
+      continue;
+    }
+    const bucket = byIndex.get(detail.uncoveredIndex) ?? [];
+    bucket.push(detail);
+    byIndex.set(detail.uncoveredIndex, bucket);
+  }
+  const idCounts = new Map<string, number>();
+  for (const requirement of list.requirements) {
+    idCounts.set(requirement.id, (idCounts.get(requirement.id) ?? 0) + 1);
+  }
+  reported.forEach((entry, index) => {
+    const bucket = byIndex.get(index) ?? [];
+    const range = { start: entry.range.start, end: entry.range.end };
+    if (bucket.length === 0) {
+      // 詳細の行が無くても、`outside` は invalid を優先する（Issue #948 の「やること」5）
+      const outside = entry.destination === "outside";
+      rows.push({
+        index,
+        range,
+        destination: entry.destination,
+        kind: null,
+        requirementIds: [],
+        match: outside ? "invalid" : "missing",
+        failure: outside ? "outside" : null,
+      });
+      return;
+    }
+    for (const detail of bucket) {
+      const base = {
+        index,
+        range,
+        destination: entry.destination,
+        kind: detail.missingKind,
+        requirementIds: detail.requirementIds.slice(),
+      };
+      if (bucket.length > 1) {
+        rows.push({ ...base, match: "invalid", failure: "duplicate-index" });
+        continue;
+      }
+      rows.push({ ...base, ...classifyConditionDetail(source, entry, detail, idCounts) });
+    }
+  });
+  return { rows, orphans };
+}
+
+/** 1 行の照合状態を、参照の構造だけで決める（Issue #948） */
+function classifyConditionDetail(
+  source: string,
+  entry: ReverseCheckTraceReportedRange,
+  detail: ReverseCheckConditionDetail,
+  idCounts: ReadonlyMap<string, number>,
+): { readonly match: ReverseCheckConditionMatch; readonly failure: ReverseCheckConditionFailure | null } {
+  if (entry.destination === "outside") return { match: "invalid", failure: "outside" };
+  if (entry.range.start < 0 || entry.range.end > source.length || entry.range.start >= entry.range.end) {
+    return { match: "invalid", failure: "range" };
+  }
+  if (!isKnownConditionKind(detail.missingKind)) return { match: "invalid", failure: "unknown-kind" };
+  if (detail.requirementIds.length === 0) return { match: "unbound", failure: null };
+  const seen = new Set<string>();
+  for (const id of detail.requirementIds) {
+    if (seen.has(id)) return { match: "invalid", failure: "duplicate-requirement" };
+    seen.add(id);
+  }
+  if (!detail.requirementIds.every((id) => (idCounts.get(id) ?? 0) === 1)) {
+    return { match: "invalid", failure: "unknown-requirement" };
+  }
+  return { match: "matched", failure: null };
+}
+
+/** 既知の種類ごとの件数（Issue #948） */
+export type ReverseCheckConditionKindCounts = Readonly<Record<ReverseCheckConditionKind, number>>;
+
+/** 条件の指摘の件数の内訳（**件数だけ**。Issue #948）。`rawCount` は元の指摘の行数（分母）である */
+export interface ReverseCheckConditionFindingCounts {
+  readonly rawCount: number;
+  readonly matched: number;
+  readonly unbound: number;
+  readonly missing: number;
+  readonly invalid: number;
+  /** 既知の種類の集計（和は `matched + unbound`） */
+  readonly kinds: ReverseCheckConditionKindCounts;
+}
+
+/**
+ * 1 往復の条件の指摘の件数（Issue #948）。全体に加え、`destination=remaining` とそれ以外の 2 群でも同じ
+ * 集計を持つ（**全体は 2 群の和**）。`orphans` は行き先を割り当てず、**分母に入れない**。
+ */
+export interface ReverseCheckConditionFindingsDiagnosis {
+  readonly whole: ReverseCheckConditionFindingCounts;
+  readonly remaining: ReverseCheckConditionFindingCounts;
+  readonly other: ReverseCheckConditionFindingCounts;
+  readonly orphans: number;
+}
+
+/** 集計の途中の形（件数を足すためだけの可変の器。Issue #948） */
+interface MutableConditionFindingCounts {
+  rawCount: number;
+  matched: number;
+  unbound: number;
+  missing: number;
+  invalid: number;
+  kinds: Record<ReverseCheckConditionKind, number>;
+}
+
+/**
+ * 条件の指摘の記録を、**件数だけ**の診断に畳む（Issue #948。**純粋な関数**）。元の指摘 1 行を 1 と数える
+ * （残った断片が複数でも分母は 1）。同じ元の添字に複数行が付いた行は `invalid` として 1 件に数える。
+ * ID・範囲・本文・引用は出さない。
+ */
+export function summarizeConditionFindings(
+  findings: ReverseCheckTraceConditionFindings,
+): ReverseCheckConditionFindingsDiagnosis {
+  const make = (): MutableConditionFindingCounts => {
+    const kinds = {} as Record<ReverseCheckConditionKind, number>;
+    for (const kind of REVERSE_CHECK_CONDITION_KINDS) kinds[kind] = 0;
+    return { rawCount: 0, matched: 0, unbound: 0, missing: 0, invalid: 0, kinds };
+  };
+  const whole = make();
+  const remaining = make();
+  const other = make();
+  const byIndex = new Map<number, ReverseCheckTraceConditionFinding[]>();
+  for (const row of findings.rows) {
+    const rows = byIndex.get(row.index) ?? [];
+    rows.push(row);
+    byIndex.set(row.index, rows);
+  }
+  for (const rows of byIndex.values()) {
+    const first = rows[0];
+    if (first === undefined) continue;
+    const match: ReverseCheckConditionMatch = rows.length > 1 ? "invalid" : first.match;
+    const group = first.destination === "remaining" ? remaining : other;
+    for (const counts of [whole, group]) {
+      counts.rawCount += 1;
+      if (match === "matched") counts.matched += 1;
+      else if (match === "unbound") counts.unbound += 1;
+      else if (match === "missing") counts.missing += 1;
+      else counts.invalid += 1;
+      if ((match === "matched" || match === "unbound") && first.kind !== null && isKnownConditionKind(first.kind)) {
+        counts.kinds[first.kind] += 1;
+      }
+    }
+  }
+  return { whole, remaining, other, orphans: findings.orphans.length };
+}
+
+/**
  * 会話が返した生の範囲 1 つの行き先（**有限の 5 つ**。Issue #919）。
  *
  *   - `remaining` … 枠を差し引いたあとに中身のある断片が残った（一部が残る）
@@ -459,6 +814,11 @@ export interface ReverseCheckTraceRound {
   readonly codeMisses: readonly ReverseCheckTraceCodeMiss[];
   /** 前の一覧の引用と位置へ戻した要件（戻す前の値を持つ。Issue #942） */
   readonly restored?: readonly ReverseCheckRestoredRequirement[];
+  /**
+   * 条件の指摘の詳細と照合状態（Issue #948）。**Plan の派生 schema を送った往復だけ**が持つ。ID・範囲は
+   * この trace にだけ載せ、通常の診断（件数）と plan-record には写さない。
+   */
+  readonly conditionFindings?: ReverseCheckTraceConditionFindings;
 }
 
 /**
@@ -579,15 +939,19 @@ export async function runReverseCheckWithDiagnosis(
     // 枠の文（要件にしない文）も一覧に含めて渡す（無いときは空の配列。Issue #372）
     { name: "要件の一覧", text: listText },
   ];
+  const observeConditionFindings = input.observeConditionFindings === true;
   const request = buildStructuredRequest({
     rules: reverseCheckRulesOf(input.meaningRule),
     documents: input.documents,
     data,
     schemaName: REVERSE_CHECK_SCHEMA_NAME,
-    schema: REVERSE_CHECK_SCHEMA,
+    schema: reverseCheckSchemaOf(observeConditionFindings),
     maxOutputTokens: input.gateway.maxOutputTokens("reverse-check"),
   });
-  const answer = await callStructuredChecked(input.gateway, { request, check: checkReverseCheckOutput });
+  const answer = await callStructuredChecked(input.gateway, {
+    request,
+    check: observeConditionFindings ? checkReverseCheckOutputWithConditionFindings : checkReverseCheckOutput,
+  });
   if (!answer.ok) return answer;
   // コードの落ちは 1 回だけ求め、覆いの数え上げと診断の両方に使う（Issue #919）
   const codeMisses = checkRequirementCoverageDetailed(input.source, input.list);
@@ -603,7 +967,12 @@ export async function runReverseCheckWithDiagnosis(
     .map((miss) => miss.range);
   const quotesValid = !misses.some((miss) => miss.kind === "quote-not-found" || miss.kind === "position-mismatch");
   const result: ReverseCheckResult = { uncovered, quotesValid, misses, droppedBlankMisses: merged.droppedBlankMisses };
-  const round = diagnoseReverseCheckRound(
+  // 条件の指摘の詳細は、既存の検査・統合の**後**に、元の指摘とコードで結ぶ（Issue #948）。
+  // この記録は判定・やり直し・停止に使わない
+  const conditionFindings = observeConditionFindings
+    ? classifyConditionFindings(input.source, input.list, merged.reported, answer.value.findingDetails ?? [])
+    : undefined;
+  const diagnosed = diagnoseReverseCheckRound(
     input.source,
     input.list,
     misses,
@@ -612,6 +981,10 @@ export async function runReverseCheckWithDiagnosis(
     input.fix,
     input.restored,
   );
+  const round =
+    conditionFindings === undefined
+      ? diagnosed
+      : { ...diagnosed, conditionFindings: summarizeConditionFindings(conditionFindings) };
   const trace: ReverseCheckTraceRound = {
     fix: input.fix ?? "initial",
     list: {
@@ -647,6 +1020,8 @@ export async function runReverseCheckWithDiagnosis(
             position: { start: entry.position.start, end: entry.position.end },
           })),
         }),
+    // 条件の指摘の詳細と照合状態は、派生 schema を送った往復だけが持つ（Issue #948）
+    ...(conditionFindings === undefined ? {} : { conditionFindings }),
   };
   return { ok: true, value: { result, round, trace } };
 }
@@ -740,6 +1115,11 @@ export interface ReverseCheckRoundDiagnosis {
    * 変えない）。**ID・引用・原文の文字列は入れない**——番号はこの往復の一覧に限って有効である。
    */
   readonly restored?: ReverseCheckRestoration;
+  /**
+   * 条件の指摘の件数（Issue #948）。**Plan の派生 schema を送った往復だけ**が持つ。**件数だけ**を載せ、
+   * ID・範囲・本文・引用は入れない。
+   */
+  readonly conditionFindings?: ReverseCheckConditionFindingsDiagnosis;
 }
 
 /**
@@ -922,6 +1302,13 @@ export interface ReverseCheckLoopInput {
    * 要求のバイト列・結果を変えない。`quoteRepair` と同じ形の別の選択であり、相乗りしない。
    */
   readonly keepValidProvenance?: boolean;
+  /**
+   * 条件の指摘の詳細（`findingDetails`）を求める派生 schema を、初回・全体の作り直しの後・引用の修復の後の
+   * **3 つの P2 の要求すべて**に使うか（Issue #948）。**Plan の経路だけ**が明示の選択で有効にする。省けば
+   * （Plan を経ない Build の経路）呼び出しの列・要求のバイト列・結果・診断を変えない。ほかの選択には
+   * 相乗りしない（別の記録）。
+   */
+  readonly observeConditionFindings?: boolean;
 }
 
 /** ①' と ① のやり直しの結果 */
@@ -1134,6 +1521,7 @@ export async function runReverseCheckLoopWithOperation(
     gateway: input.gateway,
     fix: "initial",
     ...(input.meaningRule === true ? { meaningRule: true } : {}),
+    ...(input.observeConditionFindings === true ? { observeConditionFindings: true } : {}),
   });
   if (!initial.ok) return stop(initial.failure, "reverse-check");
   // 往復の診断は、①' の実行の中で組んだものを使う（会話の断片の枠の重なりまで持つ。Issue #488）
@@ -1194,6 +1582,7 @@ export async function runReverseCheckLoopWithOperation(
       gateway: input.gateway,
       fix: "quote-repair",
       ...(input.meaningRule === true ? { meaningRule: true } : {}),
+      ...(input.observeConditionFindings === true ? { observeConditionFindings: true } : {}),
     });
     if (!after.ok) return stop(after.failure, "reverse-check-repair");
     rounds.push(after.value.round);
@@ -1227,6 +1616,7 @@ export async function runReverseCheckLoopWithOperation(
       gateway: input.gateway,
       fix: "whole-redo",
       ...(input.meaningRule === true ? { meaningRule: true } : {}),
+      ...(input.observeConditionFindings === true ? { observeConditionFindings: true } : {}),
       ...(kept.restored.length === 0 ? {} : { restored: kept.restored }),
     });
     if (!second.ok) return stop(second.failure, "reverse-check-redo");

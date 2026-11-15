@@ -77,8 +77,10 @@ import {
   makeGateway,
 } from "../stages/__tests__/prompt.js";
 import {
+  REVERSE_CHECK_FINDING_DETAILS_KEY,
   REVERSE_CHECK_MEANING_RULE_DEFINITIONS,
   REVERSE_CHECK_RULES,
+  REVERSE_CHECK_SCHEMA,
   REVERSE_CHECK_SCHEMA_NAME,
   runReverseCheckLoop,
 } from "../stages/reverse-check.js";
@@ -2588,6 +2590,35 @@ describe("目録の点検を P3 の前に回し、点検の結果を P3 に渡�
 /** 落ち 0 件の内訳（Issue #430） */
 const ZERO_MISS_COUNTS = { quoteNotFound: 0, positionMismatch: 0, uncoveredSource: { code: 0, conversation: 0 } };
 
+/** 条件の指摘の件数が 0 のときの記録（Issue #948） */
+const ZERO_CONDITION_COUNTS = {
+  rawCount: 0,
+  matched: 0,
+  unbound: 0,
+  missing: 0,
+  invalid: 0,
+  kinds: {
+    target: 0,
+    negation: 0,
+    exception: 0,
+    time: 0,
+    deadline: 0,
+    quantity: 0,
+    scope: 0,
+    wording: 0,
+    "shared-modifier": 0,
+    "reference-source": 0,
+    other: 0,
+    unclear: 0,
+  },
+};
+const ZERO_CONDITION_FINDINGS = {
+  whole: ZERO_CONDITION_COUNTS,
+  remaining: ZERO_CONDITION_COUNTS,
+  other: ZERO_CONDITION_COUNTS,
+  orphans: 0,
+};
+
 describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430）", () => {
   it("確定した結果にも内訳があり、落ちが無ければ往復 1 つで全部 0 になる", async () => {
     const recording = createRecordingClient([
@@ -2628,6 +2659,7 @@ describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430
           ],
           missEntries: [],
           fix: "initial",
+          conditionFindings: ZERO_CONDITION_FINDINGS,
         },
       ],
       redone: false,
@@ -8167,5 +8199,157 @@ describe("差分の洗い出しの関係を、件数と trace に残す（04 §3
     ]);
     // 関係の trace には、断った行を載せない（受理していない）
     expect(result.surfaceRelationTrace).toEqual([]);
+  });
+});
+
+// ── Issue #948：Plan の逆照合に条件の指摘の契約と記録を足す（段 1・行き先は変えない）──
+
+/** 宣言した変更の記録を除いた、Plan の結果（Issue #948 の前後比較に使う） */
+const planConditionCoreOf = (result: Awaited<ReturnType<typeof runPlan>>) => ({
+  kind: result.kind,
+  stages: result.stages.map((stage) => stage.stage),
+  ...(result.kind === "cannot-confirm"
+    ? { reasons: result.reasons.map((reason) => reason.code) }
+    : {}),
+});
+
+/** 条件の指摘の詳細だけを差し替えて Plan を 1 回回す（Issue #948 の試験で使う） */
+async function runPlanConditionRecord(missingKind: string) {
+  const source = "印を出す。印を出す。件数を合計する。";
+  const list = {
+    requirements: [
+      { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 19 } },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+  const redone = {
+    requirements: [
+      { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: { start: 0, end: 10 } },
+      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 19 } },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+  const recording = createRecordingClient([
+    structured(list),
+    structured({ uncovered: [], findingDetails: [] }),
+    structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+    structured({
+      uncovered: [{ start: 0, end: 3 }],
+      findingDetails: [{ uncoveredIndex: 0, missingKind, requirementIds: ["R-1"] }],
+    }),
+    structured(redone),
+    // 作り直しの後も覆いが残り、問いの前に止まる（P3 以降へ進まない）
+    structured({ uncovered: [{ start: 0, end: 3 }], findingDetails: [] }),
+  ]);
+  const result = await runPlan(
+    makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE, { source }),
+  );
+  return { recording, result };
+}
+
+describe("T2条件指摘の記録", () => {
+  it("Plan の 3 つの P2 が派生 schema を選び、trace と診断に種類と対象を記録し、確定へ進めない", async () => {
+    // 初回が来歴だけ（引用が 2 か所）→ 修復 → 修復の後が覆いを含む → 作り直し → P2 も覆いを含む（止まる）
+    const source = "印を出す。印を出す。件数を合計する。";
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 19 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const redone = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: { start: 0, end: 10 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 10, end: 19 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured({ uncovered: [], findingDetails: [] }),
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      structured({
+        uncovered: [{ start: 0, end: 3 }],
+        findingDetails: [{ uncoveredIndex: 0, missingKind: "time", requirementIds: ["R-1"] }],
+      }),
+      structured(redone),
+      structured({
+        uncovered: [{ start: 0, end: 3 }],
+        findingDetails: [{ uncoveredIndex: 0, missingKind: "negation", requirementIds: ["R-1"] }],
+      }),
+    ]);
+
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE, { source }),
+    );
+
+    // 3 つの P2 はどれも派生 schema（findingDetails）を選び、既存の uncovered の定義は変えない
+    const reverseRequests = recording.structured.filter(
+      (request) => request.schemaName === REVERSE_CHECK_SCHEMA_NAME,
+    );
+    expect(reverseRequests).toHaveLength(3);
+    for (const request of reverseRequests) {
+      const schema = request.schema as {
+        readonly required: readonly string[];
+        readonly properties: Record<string, unknown>;
+      };
+      expect(schema.required).toContain(REVERSE_CHECK_FINDING_DETAILS_KEY);
+      expect(schema.properties["uncovered"]).toBe(REVERSE_CHECK_SCHEMA.properties.uncovered);
+      // 段が渡すほかの欄は、既存の P2 の要求のまま
+      expect(request.schemaName).toBe(REVERSE_CHECK_SCHEMA_NAME);
+      expect(request.rules?.slice(0, REVERSE_CHECK_RULES.length)).toEqual([...REVERSE_CHECK_RULES]);
+    }
+    // 既存の schema の実体は書き換えない
+    expect(REVERSE_CHECK_SCHEMA.required).toEqual(["uncovered"]);
+
+    // 3 つの往復（初回・引用の修復・全体の作り直し）に、件数の診断と trace の記録が付く
+    expect(result.requirementsDiagnosis.rounds.map((round) => round.fix)).toEqual([
+      "initial",
+      "quote-repair",
+      "whole-redo",
+    ]);
+    for (const round of result.requirementsDiagnosis.rounds) expect(round.conditionFindings).toBeDefined();
+    for (const round of result.reverseCheckTrace?.rounds ?? []) expect(round.conditionFindings).toBeDefined();
+    expect(result.requirementsDiagnosis.rounds[1]?.conditionFindings?.whole).toMatchObject({
+      rawCount: 1,
+      matched: 1,
+    });
+    expect(result.reverseCheckTrace?.rounds[1]?.conditionFindings?.rows[0]).toMatchObject({
+      index: 0,
+      kind: "time",
+      requirementIds: ["R-1"],
+      match: "matched",
+    });
+    expect(result.reverseCheckTrace?.rounds[2]?.conditionFindings?.rows[0]).toMatchObject({
+      kind: "negation",
+      requirementIds: ["R-1"],
+      match: "matched",
+    });
+
+    // 記録が matched でも、会話の不足指摘は残り、確定へ進まない
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons.map((reason) => reason.code)).toContain("uncovered-source");
+  });
+
+  it("詳細を変えても、P1 のやり直しのデータと結果は同じ（追加の記録だけが変わる）", async () => {
+    const first = await runPlanConditionRecord("time");
+    const second = await runPlanConditionRecord("unknown-kind-value");
+    // 呼び出しの列（要求のバイト列）は同じ
+    expect(first.recording.structured.map((request) => JSON.stringify(request))).toEqual(
+      second.recording.structured.map((request) => JSON.stringify(request)),
+    );
+    // 追加の記録を除く結果は同じ
+    expect(planConditionCoreOf(first.result)).toEqual(planConditionCoreOf(second.result));
   });
 });
