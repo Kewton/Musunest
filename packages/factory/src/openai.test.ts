@@ -58,9 +58,11 @@ import { MAPPING_SCHEMA_NAME, mappingSchemaOf } from "./v12/stages/mapping.js";
 import { VOCABULARY_SCHEMA_NAMES, vocabularySchemaOf } from "./v12/stages/vocabulary.js";
 import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME, buildSurfaceDiffSchema } from "./plan/surface.js";
 import { REQUIREMENT_LIST_SCHEMA, REQUIREMENTS_SCHEMA_NAME } from "./stages/requirements.js";
-import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
 import {
+  REVERSE_CHECK_CONDITION_LEDGER_KEY,
   REVERSE_CHECK_FINDING_DETAILS_KEY,
+  REVERSE_CHECK_SCHEMA,
+  REVERSE_CHECK_SCHEMA_NAME,
   reverseCheckSchemaOf,
 } from "./stages/reverse-check.js";
 import { TEST_SUITE_SCHEMA, TEST_SUITE_SCHEMA_NAME } from "./stages/test-suite.js";
@@ -1986,5 +1988,189 @@ describe("T2条件指摘の記録（wire）", () => {
       }),
     );
     await expect(clientWith(fetch).callStructured(conditionPlanRequest())).rejects.toBeInstanceOf(OpenAiIncompleteError);
+  });
+});
+
+// ── Issue #951：条件と適用先の台帳を求める派生 schema の wire（段 1・行き先は変えない）──
+
+/** 台帳の欄を足した reverse-check の枝を持つ封筒（Issue #951 の試験で使う） */
+const ledgerEnvelope = (): Record<string, unknown> =>
+  buildEnvelopeSchema(
+    STAGE_ENVELOPE_ENTRIES.map((entry) =>
+      entry.stage === REVERSE_CHECK_SCHEMA_NAME
+        ? { stage: entry.stage, schema: reverseCheckSchemaOf(true, true) }
+        : entry,
+    ),
+  );
+
+describe("T5条件台帳の記録（wire。Issue #951）", () => {
+  it("Build の要求は今までと完全に同じ。Plan の要求は schema の枝だけが違い、枝の並び・段名・ほかの欄は変わらない", async () => {
+    const reply = () =>
+      jsonResponse(completed(outputText(JSON.stringify(enveloped(REVERSE_CHECK_SCHEMA_NAME, REVERSE_OUTPUT))), USAGE_WIRE));
+    const build = recordingFetch(reply);
+    const plan = recordingFetch(() =>
+      jsonResponse(
+        completed(
+          outputText(
+            JSON.stringify(
+              enveloped(REVERSE_CHECK_SCHEMA_NAME, {
+                ...REVERSE_OUTPUT,
+                findingDetails: [],
+                conditionLedger: { conditions: [], rows: [] },
+              }),
+            ),
+          ),
+          USAGE_WIRE,
+        ),
+      ),
+    );
+    const ledgerRequest = stageRequest(REVERSE_CHECK_SCHEMA_NAME, reverseCheckSchemaOf(true, true));
+    await clientWith(build.fetch).callStructured(conditionBaseRequest());
+    await clientWith(plan.fetch).callStructured(ledgerRequest);
+
+    const buildBody = bodyOf(build.captured);
+    const planBody = bodyOf(plan.captured);
+    // Build は今までの封筒の実体のまま（バイト列で同じ）
+    expect(formatOf(buildBody).schema).toEqual(ENVELOPE_SCHEMA);
+    // Plan は、reverse-check の枝だけを派生 schema（台帳つき）に差し替えた封筒である
+    expect(formatOf(planBody).schema).toEqual(ledgerEnvelope());
+    expect(conditionBranchesOf(formatOf(planBody).schema)).toEqual(
+      conditionBranchesOf(formatOf(buildBody).schema),
+    );
+    expect(formatOf(planBody).name).toBe(ENVELOPE_SCHEMA_NAME);
+    expect(formatOf(planBody).name).toBe(formatOf(buildBody).name);
+    expect(formatOf(planBody).strict).toBe(true);
+
+    // schema 以外の body は完全に同じ（model・token 上限・入力・送信設定を保つ）
+    expect(conditionWithoutSchema(planBody)).toEqual(conditionWithoutSchema(buildBody));
+  });
+
+  it("封筒版を明示しても、段だけの封筒でも、枝は台帳つきの派生 schema になる（名前・段名は変えない）", async () => {
+    const reply = () =>
+      jsonResponse(
+        completed(
+          outputText(
+            JSON.stringify(
+              enveloped(REVERSE_CHECK_SCHEMA_NAME, {
+                ...REVERSE_OUTPUT,
+                findingDetails: [],
+                conditionLedger: { conditions: [], rows: [] },
+              }),
+            ),
+          ),
+          USAGE_WIRE,
+        ),
+      );
+    const ledgerRequest = stageRequest(REVERSE_CHECK_SCHEMA_NAME, reverseCheckSchemaOf(true, true));
+    const v1 = recordingFetch(reply);
+    await createOpenAiLlmClient({ apiKey: "test-key", fetch: v1.fetch, envelope: "v1" }).callStructured(ledgerRequest);
+    const stageOnly = recordingFetch(reply);
+    await createResponsesLlmClient({
+      apiKey: "test-key",
+      url: "https://example.invalid/v1/responses",
+      fetch: stageOnly.fetch,
+      stageOnlyEnvelope: true,
+    }).callStructured(ledgerRequest);
+    expect(formatOf(bodyOf(v1.captured)).name).toBe(ENVELOPE_SCHEMA_NAME);
+    expect(formatOf(bodyOf(v1.captured)).schema).toEqual(ledgerEnvelope());
+    const only = formatOf(bodyOf(stageOnly.captured));
+    expect(only.name).toBe(ENVELOPE_SCHEMA_NAME);
+    const branch = (only.schema as { properties: { result: { properties: Record<string, unknown> } } }).properties
+      .result;
+    expect(branch.properties["stage"]).toEqual({ type: "string", enum: [REVERSE_CHECK_SCHEMA_NAME], description: `この枝の段（${REVERSE_CHECK_SCHEMA_NAME}）` });
+    expect(branch.properties).toHaveProperty(REVERSE_CHECK_CONDITION_LEDGER_KEY);
+    expect(branch.properties).toHaveProperty(REVERSE_CHECK_FINDING_DETAILS_KEY);
+  });
+
+  it("台帳の欄欠落・型違反、既存欄の違反、JSON 不正・wrong-stage・incomplete の従来の失敗経路は前後とも緑", async () => {
+    for (const output of [
+      // 欄そのものが無い
+      { uncovered: [], findingDetails: [] },
+      // 型が違う
+      { uncovered: [], findingDetails: [], conditionLedger: "no" },
+      // conditions が配列でない
+      { uncovered: [], findingDetails: [], conditionLedger: { conditions: "no", rows: [] } },
+      // 行の欄が欠けている
+      { uncovered: [], findingDetails: [], conditionLedger: { conditions: [], rows: [{ conditionId: "C-1" }] } },
+      // target の range が無い
+      {
+        uncovered: [],
+        findingDetails: [],
+        conditionLedger: {
+          conditions: [{ conditionId: "C-1", range: { start: 0, end: 1 }, kind: "target", targets: [{ targetId: "T-1" }] }],
+          rows: [],
+        },
+      },
+    ]) {
+      const { fetch, captured } = recordingFetch(() =>
+        jsonResponse(completed(outputText(JSON.stringify(enveloped(REVERSE_CHECK_SCHEMA_NAME, output))), USAGE_WIRE)),
+      );
+      const error = await captureError(() =>
+        clientWith(fetch).callStructured(stageRequest(REVERSE_CHECK_SCHEMA_NAME, reverseCheckSchemaOf(true, true))),
+      );
+      expect(error.kind).toBe("malformed");
+      // wire の検査で止まるので、同じ要求を送り直さない
+      expect(captured).toHaveLength(1);
+    }
+    // 既存の欄の違反（uncovered の型違い）は前後とも止まる
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(
+        completed(
+          outputText(
+            JSON.stringify(
+              enveloped(REVERSE_CHECK_SCHEMA_NAME, {
+                uncovered: "no",
+                findingDetails: [],
+                conditionLedger: { conditions: [], rows: [] },
+              }),
+            ),
+          ),
+          USAGE_WIRE,
+        ),
+      ),
+    );
+    const existingError = await captureError(() =>
+      clientWith(fetch).callStructured(stageRequest(REVERSE_CHECK_SCHEMA_NAME, reverseCheckSchemaOf(true, true))),
+    );
+    expect(existingError.kind).toBe("malformed");
+    // JSON 不正は前後とも止まる
+    const invalidJson = recordingFetch(() => jsonResponse(completed(outputText("{"), USAGE_WIRE)));
+    const jsonError = await captureError(() =>
+      clientWith(invalidJson.fetch).callStructured(stageRequest(REVERSE_CHECK_SCHEMA_NAME, reverseCheckSchemaOf(true, true))),
+    );
+    expect(jsonError.kind).toBe("malformed");
+    // wrong-stage は前後とも止まる
+    const wrongStage = recordingFetch(() =>
+      jsonResponse(
+        completed(
+          outputText(JSON.stringify(enveloped(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_OUTPUT))),
+          USAGE_WIRE,
+        ),
+      ),
+    );
+    const stageError = await captureError(() =>
+      clientWith(wrongStage.fetch).callStructured(stageRequest(REVERSE_CHECK_SCHEMA_NAME, reverseCheckSchemaOf(true, true))),
+    );
+    expect(stageError.kind).toBe("malformed");
+    // incomplete は前後とも成功にしない
+    const incomplete = recordingFetch(() =>
+      jsonResponse({
+        id: "resp_1",
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output: outputText(
+          JSON.stringify(
+            enveloped(REVERSE_CHECK_SCHEMA_NAME, {
+              uncovered: [],
+              findingDetails: [],
+              conditionLedger: { conditions: [], rows: [] },
+            }),
+          ),
+        ),
+      }),
+    );
+    await expect(
+      clientWith(incomplete.fetch).callStructured(stageRequest(REVERSE_CHECK_SCHEMA_NAME, reverseCheckSchemaOf(true, true))),
+    ).rejects.toBeInstanceOf(OpenAiIncompleteError);
   });
 });

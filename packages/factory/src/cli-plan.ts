@@ -36,10 +36,12 @@ import { isRecord } from "./stages/prompt.js";
 import type {
   ReverseCheckConditionFindingCounts,
   ReverseCheckConditionFindingsDiagnosis,
+  ReverseCheckConditionLedgerDiagnosis,
   ReverseCheckDiagnosis,
   ReverseCheckMissCounts,
   ReverseCheckTrace,
   ReverseCheckTraceConditionFindings,
+  ReverseCheckTraceConditionLedger,
   ReverseCheckTraceList,
 } from "./stages/reverse-check.js";
 
@@ -615,6 +617,36 @@ export interface PlanCliRoundDiagnosisRecord {
    * （ID・範囲・本文・引用は入れない）。
    */
   readonly condition_findings?: PlanCliConditionFindingsRecord;
+  /**
+   * 条件と適用先の台帳の件数（Issue #951）。**Plan の経路だけ**が欄を持ち、**件数だけ**を載せる
+   * （ID・範囲・本文・引用は入れない）。
+   */
+  readonly condition_ledger?: PlanCliConditionLedgerRecord;
+}
+
+/** 記録に入れる、台帳の件数の内訳（Issue #951）。分母を読めないときは `null`（0 にしない） */
+export interface PlanCliConditionLedgerCountsRecord {
+  readonly raw_condition_rows: number | null;
+  readonly consistent_condition_rows: number | null;
+  readonly unknown_condition_rows: number | null;
+  readonly raw_correspondence_rows: number | null;
+  readonly retained: number | null;
+  readonly missing: number | null;
+  readonly unknown: number | null;
+  readonly declared_pairs: number | null;
+  readonly single_row_pairs: number | null;
+  readonly no_row_pairs: number | null;
+  readonly multiple_row_pairs: number | null;
+  readonly unknown_rows: Readonly<Record<string, number>>;
+  readonly unknown_conditions: Readonly<Record<string, number>>;
+  readonly orphan_rows: number;
+}
+
+/** 記録に入れる、1 往復の台帳の件数（観測の状態と件数の内訳。Issue #951） */
+export interface PlanCliConditionLedgerRecord {
+  /** 観測の状態（`observed`・`empty`・`indeterminate`） */
+  readonly observation: string;
+  readonly counts: PlanCliConditionLedgerCountsRecord;
 }
 
 /** 記録に入れる、条件の指摘の件数の内訳（全体・2 群。Issue #948） */
@@ -915,6 +947,30 @@ function toConditionFindingsRecord(
   };
 }
 
+/** 台帳の件数を、記録の形（snake_case）に写す（件数だけ。Issue #951） */
+function toConditionLedgerRecord(ledger: ReverseCheckConditionLedgerDiagnosis): PlanCliConditionLedgerRecord {
+  const counts = ledger.counts;
+  return {
+    observation: ledger.observation,
+    counts: {
+      raw_condition_rows: counts.rawConditionRows,
+      consistent_condition_rows: counts.consistentConditionRows,
+      unknown_condition_rows: counts.unknownConditionRows,
+      raw_correspondence_rows: counts.rawCorrespondenceRows,
+      retained: counts.retained,
+      missing: counts.missing,
+      unknown: counts.unknown,
+      declared_pairs: counts.declaredPairs,
+      single_row_pairs: counts.singleRowPairs,
+      no_row_pairs: counts.noRowPairs,
+      multiple_row_pairs: counts.multipleRowPairs,
+      unknown_rows: { ...counts.unknownRows },
+      unknown_conditions: { ...counts.unknownConditions },
+      orphan_rows: counts.orphanRows,
+    },
+  };
+}
+
 /** 往復ごとの逆照合の診断を、記録の形（snake_case）に写す（Issue #430・#488） */
 function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCliRequirementsDiagnosisRecord {
   return {
@@ -949,6 +1005,10 @@ function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCl
       ...(round.conditionFindings === undefined
         ? {}
         : { condition_findings: toConditionFindingsRecord(round.conditionFindings) }),
+      // 条件と適用先の台帳の件数も、Plan の往復だけが持つ（件数だけ。Issue #951）
+      ...(round.conditionLedger === undefined
+        ? {}
+        : { condition_ledger: toConditionLedgerRecord(round.conditionLedger) }),
     })),
     redone: diagnosis.redone,
     unmet: toMissCountsRecord(diagnosis.unmet),
@@ -1057,6 +1117,62 @@ export interface PlanCliTraceConditionFindings {
   readonly orphans: readonly PlanCliTraceConditionOrphan[];
 }
 
+/** 台帳の適用先 1 つ（trace にだけ置く。Issue #951） */
+export interface PlanCliTraceLedgerTarget {
+  readonly target_id: string;
+  readonly range: PlanCliTraceRange;
+  readonly requirement_ids: readonly string[];
+  readonly failure: string | null;
+}
+
+/** 台帳の条件 1 つ（trace にだけ置く。Issue #951） */
+export interface PlanCliTraceLedgerCondition {
+  readonly condition_id: string;
+  readonly range: PlanCliTraceRange;
+  readonly kind: string;
+  readonly targets: readonly PlanCliTraceLedgerTarget[];
+  readonly failure: string | null;
+}
+
+/** 台帳の証拠 1 つ（要件 ID・逐語・コードが求めた範囲。Issue #951） */
+export interface PlanCliTraceLedgerEvidence {
+  readonly requirement_id: string;
+  readonly text: string;
+  readonly range: PlanCliTraceRange | null;
+}
+
+/** 台帳の対応 1 行（申告の状態・証拠・構造の照合の理由。Issue #951） */
+export interface PlanCliTraceLedgerRow {
+  readonly condition_id: string;
+  readonly target_id: string;
+  readonly status: string;
+  readonly evidence: readonly PlanCliTraceLedgerEvidence[];
+  readonly failure: string | null;
+}
+
+/** 台帳の条件×適用先の組（Issue #951） */
+export interface PlanCliTraceLedgerPair {
+  readonly condition_id: string;
+  readonly target_id: string;
+}
+
+/** 読めなかった台帳の値（元の並びの添字と欄。Issue #951） */
+export interface PlanCliTraceLedgerDropped {
+  readonly source: string;
+  readonly index: number;
+  readonly field: string;
+}
+
+/** 1 往復の台帳の記録（Issue #951） */
+export interface PlanCliTraceConditionLedger {
+  readonly conditions: readonly PlanCliTraceLedgerCondition[];
+  readonly rows: readonly PlanCliTraceLedgerRow[];
+  readonly declared_pairs: readonly PlanCliTraceLedgerPair[];
+  readonly row_missing: readonly PlanCliTraceLedgerPair[];
+  readonly dropped: readonly PlanCliTraceLedgerDropped[];
+  readonly observation: string;
+}
+
 /** 1 往復の逆照合の診断（Issue #919）。一覧の全体とその SHA-256・会話の生の範囲・コードの落ち */
 export interface PlanCliReverseCheckTraceRound {
   readonly fix: string;
@@ -1068,6 +1184,8 @@ export interface PlanCliReverseCheckTraceRound {
   readonly restored?: readonly PlanCliTraceRestoredRequirement[];
   /** 条件の指摘の詳細と照合状態（派生 schema を送った往復だけ。Issue #948） */
   readonly condition_findings?: PlanCliTraceConditionFindings;
+  /** 条件と適用先の台帳（台帳の欄を送った往復だけ。Issue #951） */
+  readonly condition_ledger?: PlanCliTraceConditionLedger;
 }
 
 /** 逆照合の往復ごとの診断（`--out` の `plan-reverse-check-trace.json`。Issue #919） */
@@ -1099,6 +1217,50 @@ function toTraceConditionFindings(findings: ReverseCheckTraceConditionFindings):
       requirement_ids: orphan.requirementIds.slice(),
       failure: orphan.failure,
     })),
+  };
+}
+
+/** 原文の範囲を、trace の範囲の形に写す（Issue #951） */
+function toTraceLedgerRange(value: { readonly start: number; readonly end: number }): PlanCliTraceRange {
+  return { start: value.start, end: value.end };
+}
+
+/** 1 往復の台帳の記録を、別ファイルの形（snake_case）に写す（Issue #951） */
+function toTraceConditionLedger(ledger: ReverseCheckTraceConditionLedger): PlanCliTraceConditionLedger {
+  return {
+    conditions: ledger.conditions.map((condition) => ({
+      condition_id: condition.conditionId,
+      range: toTraceLedgerRange(condition.range),
+      kind: condition.kind,
+      targets: condition.targets.map((target) => ({
+        target_id: target.targetId,
+        range: toTraceLedgerRange(target.range),
+        requirement_ids: target.requirementIds.slice(),
+        failure: target.failure,
+      })),
+      failure: condition.failure,
+    })),
+    rows: ledger.rows.map((row) => ({
+      condition_id: row.conditionId,
+      target_id: row.targetId,
+      status: row.status,
+      evidence: row.evidence.map((entry) => ({
+        requirement_id: entry.requirementId,
+        text: entry.text,
+        range: entry.range === null ? null : toTraceLedgerRange(entry.range),
+      })),
+      failure: row.failure,
+    })),
+    declared_pairs: ledger.declaredPairs.map((pair) => ({
+      condition_id: pair.conditionId,
+      target_id: pair.targetId,
+    })),
+    row_missing: ledger.rowMissing.map((pair) => ({
+      condition_id: pair.conditionId,
+      target_id: pair.targetId,
+    })),
+    dropped: ledger.dropped.map((entry) => ({ source: entry.source, index: entry.index, field: entry.field })),
+    observation: ledger.observation,
   };
 }
 
@@ -1151,6 +1313,10 @@ export function buildReverseCheckTraceDiagnostic(input: {
       ...(round.conditionFindings === undefined
         ? {}
         : { condition_findings: toTraceConditionFindings(round.conditionFindings) }),
+      // 条件と適用先の台帳は、台帳の欄を送った往復だけが持つ（Issue #951）
+      ...(round.conditionLedger === undefined
+        ? {}
+        : { condition_ledger: toTraceConditionLedger(round.conditionLedger) }),
     })),
   };
 }
