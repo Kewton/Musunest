@@ -1220,20 +1220,21 @@ function toTraceConditionFindings(findings: ReverseCheckTraceConditionFindings):
   };
 }
 
+/** 原文の範囲を、trace の範囲の形に写す（Issue #951） */
+function toTraceLedgerRange(value: { readonly start: number; readonly end: number }): PlanCliTraceRange {
+  return { start: value.start, end: value.end };
+}
+
 /** 1 往復の台帳の記録を、別ファイルの形（snake_case）に写す（Issue #951） */
 function toTraceConditionLedger(ledger: ReverseCheckTraceConditionLedger): PlanCliTraceConditionLedger {
-  const range = (value: { readonly start: number; readonly end: number }): PlanCliTraceRange => ({
-    start: value.start,
-    end: value.end,
-  });
   return {
     conditions: ledger.conditions.map((condition) => ({
       condition_id: condition.conditionId,
-      range: range(condition.range),
+      range: toTraceLedgerRange(condition.range),
       kind: condition.kind,
       targets: condition.targets.map((target) => ({
         target_id: target.targetId,
-        range: range(target.range),
+        range: toTraceLedgerRange(target.range),
         requirement_ids: target.requirementIds.slice(),
         failure: target.failure,
       })),
@@ -1246,7 +1247,7 @@ function toTraceConditionLedger(ledger: ReverseCheckTraceConditionLedger): PlanC
       evidence: row.evidence.map((entry) => ({
         requirement_id: entry.requirementId,
         text: entry.text,
-        range: entry.range === null ? null : range(entry.range),
+        range: entry.range === null ? null : toTraceLedgerRange(entry.range),
       })),
       failure: row.failure,
     })),
