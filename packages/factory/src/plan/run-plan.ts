@@ -974,8 +974,10 @@ export interface PlanResultBase {
    */
   readonly shapeRetries: readonly PlanShapeRetryEntry[];
   /**
-   * 形の検査に**届かなかった**段（Issue #957）。形の誤りが 0 件だった段と区別する——段に届かなかった
-   * 走り（P1・P2 で止まったなど）はここに入る。
+   * 形の検査に**届かなかった**段（Issue #957）。段が ok で返ったか、形に落ちた応答を受け取った
+   * （`onShapeRejected` が 1 度でも呼ばれた）ときだけ「観測した」と数える——応答の前に門（予算・締切・
+   * 呼び出しの上限）や通信で終わった段は、形に落ちなかった 0 件ではなく未観測としてここに入る。
+   * 段に届かなかった走り（P1・P2 で止まったなど）もここに入る。
    */
   readonly shapeRetryUnobserved: readonly ("surface" | "questions")[];
   /**
@@ -2529,7 +2531,6 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       ...initialShownSources,
       existing: existingShownIssueIds(initialShownSources),
     };
-    shapeObserved.add("surface");
     const surface = await runStageOutcome("surface", () =>
       runSurface({
         list,
@@ -2538,10 +2539,16 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         catalog: catalogData,
         shownIssueIds: initialShownIds,
         onIdReuse: (rejection) => recordIdReuse(1, rejection),
-        // 形に落ちた試行を、点検 1・そのときの往復・試行の番号つきで残す（Issue #957）
-        onShapeRejected: (rejection) => recordShapeRetry("surface", 1, revision, rejection, initialShownIds),
+        // 形に落ちた試行を、点検 1・そのときの往復・試行の番号つきで残す（Issue #957）。形に落ちた応答を
+        // 受け取った段は観測済みである（応答の前に門・通信で終わった段と区別する）
+        onShapeRejected: (rejection) => {
+          shapeObserved.add("surface");
+          recordShapeRetry("surface", 1, revision, rejection, initialShownIds);
+        },
       }),
     );
+    // 段が ok で返った段も観測済みにする（応答の前に門・通信で終わった段は未観測のまま）
+    shapeObserved.add("surface");
     for (const ambiguity of surface.ambiguities) {
       addOpenIssue(
         {
@@ -3206,8 +3213,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           shownIssueIds: diffShownIds,
           onIdReuse: (rejection) => recordIdReuse(diffCheckNumber, rejection),
           // 形に落ちた試行を、この差分の点検の番号・往復・試行の番号つきで残す（Issue #957）
-          onShapeRejected: (rejection) =>
-            recordShapeRetry("surface", diffCheckNumber, revision, rejection, diffShownIds),
+          onShapeRejected: (rejection) => {
+            shapeObserved.add("surface");
+            recordShapeRetry("surface", diffCheckNumber, revision, rejection, diffShownIds);
+          },
         }),
       );
       // ── 前の答えとの関係を、コードが答えの系統と照らして記録する（Issue #938）────────────
@@ -3381,7 +3390,6 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       let questions: readonly PlanQuestion[] = [];
       if (willAsk) {
         questionCheck += 1;
-        shapeObserved.add("questions");
         const checkNumber = questionCheck;
         const generated = await runStageOutcome("questions", () =>
           runQuestions({
@@ -3391,12 +3399,18 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
             revision,
             documents: input.documents,
             gateway,
-            // 形に落ちた試行と網羅の検査に落ちた試行の中身を、点検・往復・試行の番号つきで残す（Issue #957）
-            onShapeRejected: (rejection) => recordShapeRetry("questions", checkNumber, revision, rejection),
+            // 形に落ちた試行と網羅の検査に落ちた試行の中身を、点検・往復・試行の番号つきで残す（Issue #957）。
+            // 形に落ちた応答を受け取った段は観測済みである
+            onShapeRejected: (rejection) => {
+              shapeObserved.add("questions");
+              recordShapeRetry("questions", checkNumber, revision, rejection);
+            },
             onCoverageRejected: (rejection) =>
               questionCoverageMisses.push({ round: revision, ...rejection }),
           }),
         );
+        // 段が ok で返った段も観測済みにする（応答の前に門・通信で終わった段は未観測のまま）
+        shapeObserved.add("questions");
         // 依頼文で決まっている事項は、**次の一歩を決める前に**反映する（聞かずに閉じる。04 §3 P4）
         for (const closure of generated.closedBySource) {
           closedBySource.push(closure);

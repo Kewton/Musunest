@@ -571,6 +571,8 @@ export function surfaceReusedAmbiguityIdsOf(
 /**
  * 1 つの応答の中で、`ambiguities[].id` が重複している ID を返す（Issue #957）。形の検査が
  * `issue-id-duplicated` で断る集合と同じである。**2 回目以降の出現で記録し、並びは最初に重複した順**。
+ * 返す ID は**応答の `id` の字面そのまま**である（長さ・形は確かめない——事項の ID として記録に載せて
+ * よい、という扱いである。Issue #957 の低-5）。
  */
 export function surfaceDuplicatedAmbiguityIdsOf(output: unknown): readonly string[] {
   const raw = isRecord(output) ? output["ambiguities"] : undefined;

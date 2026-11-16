@@ -37,6 +37,7 @@
 // 呼ぶ側が**明示的に渡した口**（`recheckJudge`）だけを使う——合成した口をもう一度呼ぶと主（Jev）が
 // 答え直すだけなので、落とし先が無ければ再点検せず未点検に残す。鍵もファイルも環境変数も扱わない。
 import { HOST_CAPABILITIES } from "@musunest/appspec-schema";
+import { categorizeCallError, isIncompleteResponseError } from "../call.js";
 import type { Judge, JudgeAnswer, JudgeChoiceQuestion, JudgeQuestion, JudgeResponse } from "../judge.js";
 import {
   JudgeBudgetExceededError,
@@ -388,8 +389,9 @@ export type SurfaceCheckStage = (typeof SURFACE_CHECK_STAGES)[number];
 
 /**
  * 判定の口が答えを返さなかったときの、例外の出どころ（有限の 3 値。Issue #957）。`jev` は Jev の
- * adapter の誤り、`llm` は LLM の判定の adapter の誤り、`other` はどちらでもない（種類を持たない）例外。
- * 予算・締切・呼び出しの上限・停止の印つきの例外は投げ直すので、ここには来ない。
+ * adapter の誤り、`llm` は LLM の判定の adapter（と、その呼び出し元の LLM の adapter）の誤り、`other` は
+ * どちらでもない（種類を持たない）例外。予算・締切・呼び出しの上限・停止の印つきの例外は投げ直すので、
+ * ここには来ない。
  */
 export const SURFACE_CHECK_EXCEPTION_ORIGINS = ["jev", "llm", "other"] as const;
 export type SurfaceCheckExceptionOrigin = (typeof SURFACE_CHECK_EXCEPTION_ORIGINS)[number];
@@ -403,12 +405,18 @@ export interface SurfaceCheckException {
 
 /**
  * 判定の口が投げた例外を、出どころと種類に分類する（Issue #957）。**文・状態コード・URL は写さない。**
- * Jev の adapter の誤りと LLM の判定の adapter の誤りは、既にある有限の `kind` をそのまま使う。それ以外の
- * 例外（種類を持たないものを含む）は `other` / `other` にする。
+ * Jev の adapter の誤りと LLM の判定の adapter の誤りは、既にある有限の `kind` をそのまま使う。LLM の
+ * 判定は `LlmClient` の例外を包まずに投げるので、LLM 側の時間切れ・通信・HTTP・形の不一致は、adapter に
+ * 依らない既存の分類（`categorizeCallError`）で種類を取り出す——未完了はその分類に無いので、既存の
+ * `isIncompleteResponseError` で先に見る。それ以外の例外（種類を持たないものを含む）は `other` / `other`
+ * にする。状態コードは写さない。
  */
 export function classifyJudgeException(error: unknown): SurfaceCheckException {
   if (error instanceof JevAdapterError) return { origin: "jev", kind: error.kind };
   if (error instanceof LlmJudgeError) return { origin: "llm", kind: error.kind };
+  if (isIncompleteResponseError(error)) return { origin: "llm", kind: "incomplete" };
+  const kind = categorizeCallError(error).kind;
+  if (kind !== "unknown") return { origin: "llm", kind };
   return { origin: "other", kind: "other" };
 }
 
