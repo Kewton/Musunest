@@ -747,23 +747,23 @@ export function checkQuestionCoverage(
     return problems;
   }
   if (analysis.askAll) {
-    for (const _issue of analysis.uncovered) {
+    analysis.uncovered.forEach(() => {
       problems.push({
         field: "questions",
         code: "question-coverage",
         message: `覆われていない事項が残っている（残りの問数 ${remaining} に開いている事項 ${analysis.needCover.length} 件が収まる）`,
       });
-    }
+    });
     return problems;
   }
   if (analysis.criticalTooMany) return problems;
-  for (const _issue of analysis.uncovered) {
+  analysis.uncovered.forEach(() => {
     problems.push({
       field: "questions",
       code: "question-coverage",
       message: `重大な事項への問いが無い（残りの問数 ${remaining} に重大な事項 ${analysis.needCover.filter((issue) => issue.critical).length} 件が収まる）`,
     });
-  }
+  });
   return problems;
 }
 

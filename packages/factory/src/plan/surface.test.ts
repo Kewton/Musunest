@@ -1418,6 +1418,8 @@ describe("差分の洗い出しに、前の答えとの関係と答えの ID を
 
 // ── Issue #957：使い回し・応答の中の重複した ID の中身を残す ─────────────────────
 
+const ambiguity = (id: string) => ({ id, requirementId: "R-1", text: "新しい事項", critical: true });
+
 describe("Plan の停止の記録（使い回しの中身。Issue #957）", () => {
   const SHOWN: SurfaceShownIssueIds = {
     catalog: ["OI:catalog:1"],
@@ -1426,8 +1428,6 @@ describe("Plan の停止の記録（使い回しの中身。Issue #957）", () =
     decisions: [],
     existing: ["OI:existing:1"],
   };
-
-  const ambiguity = (id: string) => ({ id, requirementId: "R-1", text: "新しい事項", critical: true });
 
   it("1 つの応答で 2 つの ID を使い回す例は、ID の集合と提示元の分類を返し、件数の記録と合う", () => {
     const output = { ambiguities: [ambiguity("OI:catalog:1"), ambiguity("OI:existing:1"), ambiguity("OI:new:1")], unwritable: [] };
