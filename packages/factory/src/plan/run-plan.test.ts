@@ -8454,3 +8454,42 @@ describe("T2条件指摘の記録", () => {
     expect(planConditionCoreOf(first.result)).toEqual(planConditionCoreOf(second.result));
   });
 });
+
+// ── Plan の要求は今までどおり（Issue #956）─────────────────────────────
+//
+// Plan だけが立てる逆照合の選択を 1 つの定数へまとめた。**要求・呼び出し列・結果は 1 文字も変えない**。
+// ここは、定数化の前の main（030d8f5）で同じ台本から取った要求の SHA-256 を固定する——定数の値が
+// 変われば、この試験が赤くなる。
+describe("Plan の要求は今までどおり（Issue #956）", () => {
+  it("requirements の段の要求の SHA-256 が、変更前の main と同じ", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const result = await runPlan(
+      makePlanInput(
+        recording.client,
+        createFakeJudge({}),
+        {
+          async answer() {
+            return { kind: "answers", answers: [] };
+          },
+          async confirm() {
+            return "build";
+          },
+        },
+        { source: `${SOURCE_TEXT}色を選ぶ。` },
+      ),
+    );
+    expect(result.kind).toBe("cannot-confirm");
+    const hashes = await Promise.all(recording.structured.map((request) => sha256Hex(JSON.stringify(request))));
+    expect(hashes).toEqual([
+      "c5a76bd24dda3fddc117a9ae3f96ec72a0e46de80cf08a85c2e5cb42f1ee6a3f",
+      "bf6918ddefa153205fce738f4701fe84777cb480b053b0c473ef846ee4dbcb59",
+      "8308c20dd46f2bc6c6648ae7b96debb5982c5b61160d56ac0073f24c233f16ec",
+      "bf6918ddefa153205fce738f4701fe84777cb480b053b0c473ef846ee4dbcb59",
+    ]);
+  });
+});

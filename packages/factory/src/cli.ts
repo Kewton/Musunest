@@ -874,6 +874,48 @@ export function assembleJudge(
   return { judge: llmJudge, recheckJudge: llmJudge };
 }
 
+/** LLM の adapter を作る関数の組（`makeLlmClient` の差し替え口。Issue #956） */
+export interface LlmClientFactories {
+  readonly openai: (options: { apiKey: string; model: string; effort: string; envelope?: EnvelopeId }) => LlmClient;
+  readonly ollama: (options: { apiKey: string; model: string; effort: string; envelope?: EnvelopeId }) => LlmClient;
+  readonly openrouter: (options: { apiKey: string; model: string; effort: string; envelope?: EnvelopeId }) => LlmClient;
+}
+
+/** 手元の入口と探針が共有する、provider ごとの client の組み立ての引数（Issue #956） */
+export interface LlmClientOptions {
+  readonly apiKey: string;
+  readonly model: string;
+  readonly effort: string;
+  /** v1.1α の走り（段の走りを含む）と v1.2 の走りだけ渡る封筒（Issue #511・#588） */
+  readonly envelope?: EnvelopeId;
+  /** 省けば openai（Issue #771） */
+  readonly provider?: Provider;
+}
+
+/**
+ * provider ごとの client を組み立てる（Issue #956）。**`factory:run` の `main` と探針が同じものを使う**
+ * ——provider の選び方と、adapter へ渡す設定を 1 か所にする。`provider` は adapter へ渡さない
+ * （adapter は provider を知らない）。
+ */
+export function makeLlmClient(
+  options: LlmClientOptions,
+  factories: LlmClientFactories = {
+    openai: createOpenAiLlmClient,
+    ollama: createOllamaLlmClient,
+    openrouter: createOpenRouterLlmClient,
+  },
+): LlmClient {
+  const adapterOptions = {
+    apiKey: options.apiKey,
+    model: options.model,
+    effort: options.effort,
+    ...(options.envelope === undefined ? {} : { envelope: options.envelope }),
+  };
+  if (options.provider === "ollama") return factories.ollama(adapterOptions);
+  if (options.provider === "openrouter") return factories.openrouter(adapterOptions);
+  return factories.openai(adapterOptions);
+}
+
 /** 生成の入力のうち、Plan の有無で変わらない部分（`--out` のディレクトリ・締切・上限） */
 interface BuildJob {
   readonly source: string;
@@ -1864,12 +1906,14 @@ export async function main(): Promise<void> {
       await fs.mkdir(path, { recursive: true });
     },
     loadDocuments: loadDocumentsFromFiles,
-    makeClient: ({ apiKey, model, effort, envelope, provider }) => {
-      const options = { apiKey, model, effort, ...(envelope === undefined ? {} : { envelope }) };
-      if (provider === "ollama") return createOllamaLlmClient(options);
-      if (provider === "openrouter") return createOpenRouterLlmClient(options);
-      return createOpenAiLlmClient(options);
-    },
+    makeClient: ({ apiKey, model, effort, envelope, provider }) =>
+      makeLlmClient({
+        apiKey,
+        model,
+        effort,
+        ...(envelope === undefined ? {} : { envelope }),
+        ...(provider === undefined ? {} : { provider }),
+      }),
     terminal: createNodeTerminal(proc),
     log: (line) => proc.stdout.write(`${line}\n`),
     logError: (line) => proc.stderr.write(`${line}\n`),
