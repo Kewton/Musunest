@@ -52,7 +52,7 @@ import { AGENT_LIMITS, type AgentLimits, type LimitName } from "../limits.js";
 import type { LlmClient } from "../llm.js";
 import { requirementTextWithQuestionContext, type RequirementList, type ReverseCheckMiss, type SourceRange } from "../pipeline.js";
 import { UsageMeter, usageDelta, type FailureKind, type StageStatus, type UsageSnapshot } from "../record.js";
-import type { PromptDocument, StageFailure, StageOutcome } from "../stages/prompt.js";
+import type { PromptDocument, ShapeRejection, StageFailure, StageOutcome } from "../stages/prompt.js";
 import { normalizeConstraintId } from "../stages/prompt.js";
 import {
   emptyReverseCheckDiagnosis,
@@ -80,7 +80,7 @@ import {
   type UnspecifiedFacet,
 } from "./catalog.js";
 import { runConfirm, type ConfirmProblem, type ConfirmSentenceCoverage } from "./confirm.js";
-import { alsoClosesOf, assignQuestionIds, runQuestions, type PlanQuestion, type PlanSourceClosure } from "./questions.js";
+import { alsoClosesOf, assignQuestionIds, runQuestions, type PlanQuestion, type PlanSourceClosure, type QuestionCoverageRejection } from "./questions.js";
 import {
   nextPlanStep,
   remainingPlanBudget,
@@ -88,7 +88,7 @@ import {
   type PlanRemaining,
   type PlanTurn,
 } from "./session.js";
-import { SURFACE_RELATIONS, SURFACE_SHOWN_ID_SOURCES, runSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceIdReuseRejection, type SurfaceOutOfScopeRef, type SurfaceRelation, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt, type SurfaceTargetAttemptResult } from "./surface.js";
+import { SURFACE_RELATIONS, SURFACE_SHOWN_ID_SOURCES, runSurface, surfaceDuplicatedAmbiguityIdsOf, surfaceReusedAmbiguityIdsOf, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceIdReuseRejection, type SurfaceOutOfScopeRef, type SurfaceRelation, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt, type SurfaceTargetAttemptResult } from "./surface.js";
 import {
   PLAN_OPEN_ISSUE_ORIGINS,
   PLAN_OPEN_ISSUE_SOURCES,
@@ -821,6 +821,62 @@ export interface PlanRemainingOpenIssue {
   readonly requirementId: string | null;
 }
 
+/** 形の検査に落ちた試行の問題 1 つ（欄と符号だけ。固定の文は残さない。Issue #957） */
+export interface PlanShapeRetryProblem {
+  readonly field: string;
+  readonly code: string;
+}
+
+/** 使い回した事項 ID と、その ID をデータで見せた提示元の分類（Issue #957） */
+export interface PlanShapeRetryReusedId {
+  readonly id: string;
+  readonly sources: readonly SurfaceShownIdSource[];
+}
+
+/**
+ * 形の検査に落ちた試行 1 つぶんの記録（Issue #957）。**形に落ちた応答を受け取る既存の口**
+ * （`onShapeRejected`）から組み、要求・試行の回数・結果は変えない。段・点検の番号（初回か、何回目の差分
+ * か）・往復の番号・試行の番号と、問題の欄と符号の並びを持つ。洗い出しでは、その試行で使い回した ID
+ * （提示元の分類つき）と、応答の中で重複した ID も添える。**本文・事項の文・要件の文は入れない。**
+ */
+export interface PlanShapeRetryEntry {
+  readonly stage: "surface" | "questions";
+  /** 点検の番号（洗い出しは初回 1・差分で増える。問いは呼び出しごとに 1 から） */
+  readonly check: number;
+  /** 往復の番号（そのときの仕様の版） */
+  readonly round: number;
+  /** 形の試行の番号（1 始まり。2 回まで） */
+  readonly attempt: number;
+  readonly problems: readonly PlanShapeRetryProblem[];
+  /** 使い回した事項 ID（洗い出しだけ。提示元の分類つき） */
+  readonly reusedIds?: readonly PlanShapeRetryReusedId[];
+  /** 1 つの応答の中で重複した事項 ID（洗い出しだけ） */
+  readonly duplicatedIds?: readonly string[];
+}
+
+/**
+ * 問いの段の網羅の検査に落ちた試行 1 つぶんの記録（Issue #957）。**覆われなかった事項の ID の集合と、
+ * そのときの件数**を持つ——問いが 0 問だったかは `questions` が 0 かで分かる。事項の文・要件の ID は
+ * 入れない。往復の番号（そのときの仕様の版）と試行の番号を添える。
+ */
+export interface PlanQuestionCoverageMiss extends QuestionCoverageRejection {
+  /** 往復の番号（そのときの仕様の版） */
+  readonly round: number;
+}
+
+/**
+ * 確定せずに終わった走りの、**止まった時点の一覧**（Issue #957）。要件の一覧（ID・本文・種類・出どころ・
+ * 変更・部分）・決定・了承除外・開いている事項を持つ。Plan だけの結果（`plan-result.json`）の新しい欄に
+ * だけ書き、`plan-record.json` には写さない。**要件の一覧が 1 度も組まれていない走り（P1・P2 で止まった）
+ * と確定した走りは `null`。**
+ */
+export interface PlanUnfinished {
+  readonly requirements: readonly PlanRequirement[];
+  readonly decisions: readonly PlanDecision[];
+  readonly acceptedUnwritable: readonly PlanAcceptedUnwritable[];
+  readonly openIssues: readonly PlanOpenIssue[];
+}
+
 /** 3 つの結果に共通する記録（使った額・残りの額・段ごとの記録・判定の呼び出し） */
 export interface PlanResultBase {
   /** 段ごとの記録（生成の段の記録と同じ形） */
@@ -911,6 +967,28 @@ export interface PlanResultBase {
    * 値（原文の文・引用・ID）は入れない。
    */
   readonly confirmCoverage: readonly ConfirmSentenceCoverage[];
+  /**
+   * 形の検査に落ちた試行 1 つずつの記録（段・点検・往復・試行の番号と、問題の欄・符号。Issue #957）。
+   * **形に 1 度も落ちなかった走りは空の並び**で、`shapeRetryUnobserved` と対で「未実行」と区別する。
+   * 洗い出しでは、使い回した・重複した事項 ID も添える（ID は Plan の記録に載せてよい）。
+   */
+  readonly shapeRetries: readonly PlanShapeRetryEntry[];
+  /**
+   * 形の検査に**届かなかった**段（Issue #957）。形の誤りが 0 件だった段と区別する——段に届かなかった
+   * 走り（P1・P2 で止まったなど）はここに入る。
+   */
+  readonly shapeRetryUnobserved: readonly ("surface" | "questions")[];
+  /**
+   * 問いの段の網羅の検査に落ちた試行 1 つずつの記録（覆われなかった ID と件数。Issue #957）。
+   * **覆いの検査に 1 度も落ちなかった走りは空の並び**である。
+   */
+  readonly questionCoverageMisses: readonly PlanQuestionCoverageMiss[];
+  /**
+   * 確定せずに終わった走りの、止まった時点の一覧（Issue #957）。要件の一覧が 1 度も組まれていない走り
+   * （P1・P2 で止まった）と確定した走りは `null`。**Plan だけの結果にだけ書き、`plan-record.json` には
+   * 写さない**（要件・事項の本文を持つ）。
+   */
+  readonly unfinished?: PlanUnfinished | null;
 }
 
 /** 依頼文で閉じた事項から作る `decisions` の ID の頭（確認の画面が「依頼文で決めたこと」を見分ける） */
@@ -1767,6 +1845,20 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const surfaceTargetAttempts: PlanSurfaceTargetAttempt[] = [];
   /** 差分の洗い出しが受理した行の、前の答えとの関係の記録（値（事項の文）を含む。Issue #938） */
   const surfaceRelationTrace: PlanSurfaceRelationTrace[] = [];
+  /** 形の検査に落ちた試行の記録（段・点検・往復・試行と、問題の欄・符号。Issue #957） */
+  const shapeRetries: PlanShapeRetryEntry[] = [];
+  /** 形の検査に届いた段（届かなかった段は「未観測」として残す。Issue #957） */
+  const shapeObserved = new Set<"surface" | "questions">();
+  /** 問いの段の網羅の検査に落ちた試行の記録（覆われなかった ID と件数。Issue #957） */
+  const questionCoverageMisses: PlanQuestionCoverageMiss[] = [];
+  /** 確定せずに終わった走りの、止まった時点の一覧の元（Issue #957）。P1/P2 の間は `null` */
+  let planStateForUnfinished:
+    | {
+        readonly requirements: readonly PlanRequirement[];
+        readonly decisions: readonly PlanDecision[];
+        readonly acceptedUnwritable: readonly PlanAcceptedUnwritable[];
+      }
+    | null = null;
 
   // ── 往復ごとの事項の流れの記録（件数と有限の分類だけ。Issue #488）────────────────
   const issueFlowRows: MutableIssueFlowRow[] = [];
@@ -1977,6 +2069,35 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       bySource: rejection.bySource.map((entry) => ({ source: entry.source, count: entry.count })),
     });
   };
+  /**
+   * 形の検査に落ちた試行を 1 行残す（Issue #957）。**既存の口（`onShapeRejected`）から受け取った raw の
+   * 応答と問題**だけを使い、要求・回数・結果には触れない。洗い出しでは、`shown` を渡されたときに限り、
+   * 使い回した ID（提示元の分類つき）と応答の中の重複 ID を添える——**件数の記録（`surface_id_reuse`）と
+   * 同じ集合**である。
+   */
+  const recordShapeRetry = (
+    stage: "surface" | "questions",
+    check: number,
+    round: number,
+    rejection: ShapeRejection,
+    shown?: SurfaceShownIssueIds,
+  ): void => {
+    const problems = rejection.problems.map((problem) => ({
+      field: problem.field,
+      code: problem.code ?? "shape",
+    }));
+    const reusedIds = shown === undefined ? [] : surfaceReusedAmbiguityIdsOf(rejection.output, shown);
+    const duplicatedIds = stage === "surface" ? surfaceDuplicatedAmbiguityIdsOf(rejection.output) : [];
+    shapeRetries.push({
+      stage,
+      check,
+      round,
+      attempt: rejection.attempt,
+      problems,
+      ...(reusedIds.length === 0 ? {} : { reusedIds }),
+      ...(duplicatedIds.length === 0 ? {} : { duplicatedIds }),
+    });
+  };
   /** 衝突の記録を、結果の形（組ごとの件数を組み直す）に写す（Issue #460・#464） */
   const buildOpenIssueConflicts = (): PlanOpenIssueConflicts => ({
     ids: conflictIds.size,
@@ -2175,9 +2296,20 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     }),
   });
 
-  const resultBase = (): PlanResultBase => {
+  const resultBase = (includeUnfinished = true): PlanResultBase => {
     // 途中で止まった行も観測済みの分を残す（判定まで進んだ行は既に閉じてある。Issue #488）
     endIssueFlow("stopped");
+    // 確定せずに終わった走りの、止まった時点の一覧（Issue #957）。要件の一覧が組まれる前（P1・P2）と
+    // 確定した走り（`includeUnfinished === false`）は `null` である。
+    const unfinished: PlanUnfinished | null =
+      includeUnfinished && planStateForUnfinished !== null
+        ? {
+            requirements: planStateForUnfinished.requirements.slice(),
+            decisions: planStateForUnfinished.decisions.slice(),
+            acceptedUnwritable: planStateForUnfinished.acceptedUnwritable.slice(),
+            openIssues: openIssues.filter((issue) => issue.status === "open").slice(),
+          }
+        : null;
     return {
       stages: stages.slice(),
       spentUsd: budget.spentUsd,
@@ -2198,6 +2330,11 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       remainingOpenIssues: buildRemainingOpenIssues(),
       answerClosures: answerClosures.slice(),
       confirmCoverage: confirmCoverage.slice(),
+      shapeRetries: shapeRetries.slice(),
+      // 形の検査に届かなかった段だけを、固定の段の順で残す（未実行と、落ちなかった 0 件を区別する）
+      shapeRetryUnobserved: (["surface", "questions"] as const).filter((stage) => !shapeObserved.has(stage)),
+      questionCoverageMisses: questionCoverageMisses.slice(),
+      unfinished,
     };
   };
 
@@ -2360,6 +2497,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       };
     }
 
+    // P1/P2 を抜けたので、要件の一覧・決定・了承除外が組まれた。以後に止まった走りは、この時点の一覧を
+    // 「確定しなかった走りの一覧」に残す（Issue #957）。P1/P2 で止まった走りは `null` のままである。
+    planStateForUnfinished = { requirements, decisions, acceptedUnwritable };
+
     // ── P3 目録の点検（語彙の決めどころ）。**P3 の洗い出しより先に回す**（Issue #419）────────
     const catalog = await runStage("catalog", () =>
       runCatalog({
@@ -2388,6 +2529,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       ...initialShownSources,
       existing: existingShownIssueIds(initialShownSources),
     };
+    shapeObserved.add("surface");
     const surface = await runStageOutcome("surface", () =>
       runSurface({
         list,
@@ -2396,6 +2538,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         catalog: catalogData,
         shownIssueIds: initialShownIds,
         onIdReuse: (rejection) => recordIdReuse(1, rejection),
+        // 形に落ちた試行を、点検 1・そのときの往復・試行の番号つきで残す（Issue #957）
+        onShapeRejected: (rejection) => recordShapeRetry("surface", 1, revision, rejection, initialShownIds),
       }),
     );
     for (const ambiguity of surface.ambiguities) {
@@ -3061,6 +3205,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           onTargetAttempt: recordTargetAttempt,
           shownIssueIds: diffShownIds,
           onIdReuse: (rejection) => recordIdReuse(diffCheckNumber, rejection),
+          // 形に落ちた試行を、この差分の点検の番号・往復・試行の番号つきで残す（Issue #957）
+          onShapeRejected: (rejection) =>
+            recordShapeRetry("surface", diffCheckNumber, revision, rejection, diffShownIds),
         }),
       );
       // ── 前の答えとの関係を、コードが答えの系統と照らして記録する（Issue #938）────────────
@@ -3217,6 +3364,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       alsoCloses: alsoClosesOf(question).map((id) => answerIssueContext(id)),
     });
 
+    // 問いの段の点検の番号（呼び出しごとに 1 から）。形のやり直しと網羅の中身を、この番号で残す（Issue #957）
+    let questionCheck = 0;
     for (;;) {
       // 同じ ID の行の衝突は、**既定の適用と P4 を行う前に**有限の理由で止める（Issue #460）。同じ ID の
       // 行が 2 つある仕様は確定に至らないので、早く止めても失うものは無い。
@@ -3231,6 +3380,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
 
       let questions: readonly PlanQuestion[] = [];
       if (willAsk) {
+        questionCheck += 1;
+        shapeObserved.add("questions");
+        const checkNumber = questionCheck;
         const generated = await runStageOutcome("questions", () =>
           runQuestions({
             source: input.source,
@@ -3239,6 +3391,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
             revision,
             documents: input.documents,
             gateway,
+            // 形に落ちた試行と網羅の検査に落ちた試行の中身を、点検・往復・試行の番号つきで残す（Issue #957）
+            onShapeRejected: (rejection) => recordShapeRetry("questions", checkNumber, revision, rejection),
+            onCoverageRejected: (rejection) =>
+              questionCoverageMisses.push({ round: revision, ...rejection }),
           }),
         );
         // 依頼文で決まっている事項は、**次の一歩を決める前に**反映する（聞かずに閉じる。04 §3 P4）
@@ -3421,7 +3577,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     // 総呼び出し数は「終わった時点で上限の内か」で見る（上限ちょうどで正常に終わった Plan を、上限の停止と
     // 誤って報告しない。次の試行を始めてよいかの判定とは別）。
     checkGateAtEnd("confirm");
-    return { kind: "confirmed", plan: confirmed.plan, ...resultBase() };
+    // 確定した走りは、確定しなかった一覧を残さない（`null`。Issue #957）
+    return { kind: "confirmed", plan: confirmed.plan, ...resultBase(false) };
   } catch (error) {
     // 同じ ID の open の行が 2 つ以上あるのに解決しようとした（不変条件の破れ。Issue #460）。
     // 問いを出す前の衝突の停止と同じ理由で止める。

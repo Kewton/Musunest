@@ -22,6 +22,7 @@ import {
   type PromptDocument,
   type PromptData,
   type ShapeCheck,
+  type ShapeRejection,
   type StageOutcome,
 } from "../stages/prompt.js";
 
@@ -384,6 +385,12 @@ export interface SurfaceInput {
    * 対象・衝突の停止）にそのまま掛かる。
    */
   readonly onIdReuse?: (rejection: SurfaceIdReuseRejection) => void;
+  /**
+   * 形の検査に落ちた応答を、落ちた時点で受け取る任意の口（Issue #957）。共通の口の既存の口
+   * （`StructuredPlan.onShapeRejected`）をそのまま渡す。**省けば何もしない**——口の有無で、送る要求・
+   * 試行の回数・結果は変わらない。
+   */
+  readonly onShapeRejected?: (rejection: ShapeRejection) => void;
 }
 
 /**
@@ -537,6 +544,47 @@ export function surfaceIdReuseOf(output: unknown, shown: SurfaceShownIssueIds): 
     return { source, count };
   });
   return { distinctIds: rejected.size, bySource };
+}
+
+/**
+ * 応答で使い回された ID を、**ID ごとに・提示元の分類つきで**返す（Issue #957）。`surfaceIdReuseOf` の
+ * 件数と同じ集合を、値（ID）つきで写したものである。**同じ ID が複数の提示元に当たれば、提示元をすべて
+ * 並べる**（件数の `bySource` と数が合う）。並びは応答での最初の出現の順である。
+ */
+export function surfaceReusedAmbiguityIdsOf(
+  output: unknown,
+  shown: SurfaceShownIssueIds,
+): readonly { readonly id: string; readonly sources: readonly SurfaceShownIdSource[] }[] {
+  const raw = isRecord(output) ? output["ambiguities"] : undefined;
+  if (!Array.isArray(raw)) return [];
+  const byId = new Map<string, readonly SurfaceShownIdSource[]>();
+  for (const item of raw) {
+    if (!isRecord(item)) continue;
+    const id = item["id"];
+    if (typeof id !== "string" || id === "" || byId.has(id)) continue;
+    const sources = SURFACE_SHOWN_ID_SOURCES.filter((source) => (shown[source] ?? []).includes(id));
+    if (sources.length > 0) byId.set(id, sources);
+  }
+  return [...byId.entries()].map(([id, sources]) => ({ id, sources }));
+}
+
+/**
+ * 1 つの応答の中で、`ambiguities[].id` が重複している ID を返す（Issue #957）。形の検査が
+ * `issue-id-duplicated` で断る集合と同じである。**2 回目以降の出現で記録し、並びは最初に重複した順**。
+ */
+export function surfaceDuplicatedAmbiguityIdsOf(output: unknown): readonly string[] {
+  const raw = isRecord(output) ? output["ambiguities"] : undefined;
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const duplicated = new Set<string>();
+  for (const item of raw) {
+    if (!isRecord(item)) continue;
+    const id = item["id"];
+    if (typeof id !== "string" || id === "") continue;
+    if (seen.has(id)) duplicated.add(id);
+    else seen.add(id);
+  }
+  return [...duplicated];
 }
 
 /**
@@ -855,6 +903,8 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
       input.onTargetAttempt?.({ attempt, result: "accepted", target });
       return { ok: true, value: accepted };
     },
+    // 形に落ちた応答を、既存の口へそのまま渡す（Issue #957。口の有無で要求・回数・結果は変わらない）
+    ...(input.onShapeRejected === undefined ? {} : { onShapeRejected: input.onShapeRejected }),
   });
   if (!answer.ok) {
     // **最後の試行の `check` が純粋な対象の照合で断られたときだけ**、終端を `unmet`・最後の試行の問題

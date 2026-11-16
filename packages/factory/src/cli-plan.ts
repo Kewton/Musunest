@@ -30,6 +30,7 @@ import {
   type PlanResult,
   type PlanStageRecord,
   type PlanSurfaceCheckSummary,
+  type PlanUnfinished,
 } from "./plan/run-plan.js";
 import { SCRIPT_MATCHER_VERSION, type PlanScriptMatch, type ScriptMatchState } from "./plan/script-responder.js";
 import { isRecord } from "./stages/prompt.js";
@@ -555,6 +556,50 @@ export interface PlanCliSurfaceTargetAttempt {
   readonly kinds: readonly PlanCliDiffOutOfScopeKindCount[];
 }
 
+/** 記録に入れる、形の検査に落ちた試行の問題 1 つ（欄と符号だけ。Issue #957） */
+export interface PlanCliShapeRetryProblem {
+  readonly field: string;
+  readonly code: string;
+}
+
+/** 記録に入れる、使い回した事項 ID と提示元の分類（Issue #957） */
+export interface PlanCliShapeRetryReusedId {
+  readonly id: string;
+  readonly sources: readonly string[];
+}
+
+/**
+ * 記録に入れる、形の検査に落ちた試行 1 つぶん（Issue #957）。段・点検・往復・試行の番号と、問題の欄・
+ * 符号の並びを持つ。洗い出しでは、使い回した ID（提示元の分類つき）と応答の中の重複 ID も添える。
+ * **本文・事項の文・要件の文・固定の文は入れない**（ID は Plan の記録に載せてよい）。
+ */
+export interface PlanCliShapeRetryRecord {
+  readonly stage: string;
+  readonly check: number;
+  readonly round: number;
+  readonly attempt: number;
+  readonly problems: readonly PlanCliShapeRetryProblem[];
+  readonly reused_ids?: readonly PlanCliShapeRetryReusedId[];
+  readonly duplicated_ids?: readonly string[];
+}
+
+/**
+ * 記録に入れる、問いの段の網羅の検査に落ちた試行 1 つぶん（Issue #957）。覆われなかった事項の ID の集合と、
+ * そのときの件数（開いている事項・うち重大・問い・一緒に閉じる事項・原文で閉じる事項・残りの問数）を
+ * 持つ。**事項の文・要件の ID は入れない。**
+ */
+export interface PlanCliQuestionCoverageMissRecord {
+  readonly round: number;
+  readonly attempt: number;
+  readonly uncovered_ids: readonly string[];
+  readonly open_issues: number;
+  readonly critical: number;
+  readonly questions: number;
+  readonly also_closes: number;
+  readonly closed_by_source: number;
+  readonly remaining: number;
+}
+
 /**
  * 記録に入れる落ちの件数の内訳（種類ごと・出どころごと。Issue #430）。**件数だけ**を持ち、落ちの文言・
  * 引用・原文の断片・位置は入れない（`02-failure-modes.md` §1）。
@@ -702,6 +747,10 @@ export interface PlanCliSurfaceClaimRecord {
   /** 確信度（不明は `null`） */
   readonly confidence: number | null;
   readonly evidence_id: string | null;
+  /** 判定の口が答えを返さず未点検にしたときの、例外の出どころ（Issue #957） */
+  readonly unchecked_origin?: string;
+  /** 同じく、例外の種類（adapter の有限の `kind` か `other`。文・状態コードは持たない。Issue #957） */
+  readonly unchecked_kind?: string;
 }
 
 /** 別ファイルの診断（`--out` の診断。Issue #432）。`plan-record.json` とは別に置く */
@@ -835,6 +884,15 @@ export interface PlanCliRecord {
   readonly surface_id_reuse: readonly PlanCliSurfaceIdReuseEntry[];
   /** 照合まで届いた試行 1 つずつの記録（版・試行・結果・件数・分類。値は入れない。Issue #484） */
   readonly surface_target_attempts: readonly PlanCliSurfaceTargetAttempt[];
+  /**
+   * 形の検査に落ちた試行 1 つずつの記録（段・点検・往復・試行の番号と、問題の欄・符号。Issue #957）。
+   * 洗い出しでは、使い回した・重複した事項の ID も添える。**本文・固定の文は入れない。**
+   */
+  readonly shape_retries: readonly PlanCliShapeRetryRecord[];
+  /** 形の検査に届かなかった段（未実行と、形に落ちなかった 0 件を区別する。Issue #957） */
+  readonly shape_retry_unobserved: readonly string[];
+  /** 問いの段の網羅の検査に落ちた試行（覆われなかった ID と件数。Issue #957） */
+  readonly question_coverage_misses: readonly PlanCliQuestionCoverageMissRecord[];
   /** 往復ごとの事項の流れ（件数と有限の分類だけ。Issue #488） */
   readonly issue_flow: readonly PlanCliIssueFlowRecord[];
   /** 終わりに残った（開いている）事項 1 つずつ（ID を含む。文は入れない。Issue #488・#930） */
@@ -995,6 +1053,9 @@ export function buildSurfaceCheckDiagnostic(input: {
       adapter: claim.adapter,
       confidence: claim.confidence,
       evidence_id: claim.evidenceId,
+      // 例外で未点検にしたときだけ、出どころと種類を添える（Issue #957）。例外でなければ欄を置かない。
+      ...(claim.uncheckedOrigin === undefined ? {} : { unchecked_origin: claim.uncheckedOrigin }),
+      ...(claim.uncheckedKind === undefined ? {} : { unchecked_kind: claim.uncheckedKind }),
     })),
   };
 }
@@ -1300,6 +1361,31 @@ export function buildPlanCliRecord(input: {
       rejected_ambiguities: entry.rejectedAmbiguities,
       kinds: entry.kinds.map((kind) => ({ kind: kind.kind, claims: kind.claims, ambiguities: kind.ambiguities })),
     })),
+    // 形の検査に落ちた試行（段・点検・往復・試行の番号と、問題の欄・符号。Issue #957）。古い結果（欄を
+    // 持たない録画）でも書けるように、無ければ空の並びとして組む。
+    shape_retries: (input.result.shapeRetries ?? []).map((entry) => ({
+      stage: entry.stage,
+      check: entry.check,
+      round: entry.round,
+      attempt: entry.attempt,
+      problems: entry.problems.map((problem) => ({ field: problem.field, code: problem.code })),
+      ...(entry.reusedIds === undefined
+        ? {}
+        : { reused_ids: entry.reusedIds.map((reused) => ({ id: reused.id, sources: reused.sources.slice() })) }),
+      ...(entry.duplicatedIds === undefined ? {} : { duplicated_ids: entry.duplicatedIds.slice() }),
+    })),
+    shape_retry_unobserved: (input.result.shapeRetryUnobserved ?? []).slice(),
+    question_coverage_misses: (input.result.questionCoverageMisses ?? []).map((miss) => ({
+      round: miss.round,
+      attempt: miss.attempt,
+      uncovered_ids: miss.uncoveredIds.slice(),
+      open_issues: miss.openIssues,
+      critical: miss.critical,
+      questions: miss.questions,
+      also_closes: miss.alsoCloses,
+      closed_by_source: miss.closedBySource,
+      remaining: miss.remaining,
+    })),
     // 往復ごとの事項の流れ（値ではなく件数と有限の分類だけ。Issue #488）
     issue_flow: input.result.issueFlow.map((row) => ({
       revision: row.revision,
@@ -1500,6 +1586,13 @@ export interface PlanOnlyResult {
   readonly conditions: PlanCliConditions;
   /** 止まり方の分類（確定したときは `null`） */
   readonly stop: PlanOnlyStopRecord | null;
+  /**
+   * 確定せずに終わった走りの、止まった時点の一覧（Issue #957）。確定した仕様の欄（`plan`）とは**別の欄**
+   * であり、Build の入口はこの欄を読まない。確定した走りと、要件の一覧が 1 度も組まれていない走り
+   * （P1・P2 で止まった）は `null`。**包みの版（`PLAN_ONLY_RESULT_SCHEMA`）は変えない**——この欄の無い
+   * 古い結果も今までどおり読める。
+   */
+  readonly unfinished: PlanUnfinished | null;
 }
 
 /** 符号の並びから重複を除く（順は保つ） */
@@ -1531,6 +1624,9 @@ export function buildPlanOnlyResult(input: {
     source_sha256: input.sourceSha256,
     conditions: input.conditions,
     stop: planOnlyStop(input.result),
+    // 確定せずに終わった走りにだけ、止まった時点の一覧を書く（Issue #957）。確定した走りと、要件の一覧が
+    // 組まれていない走り（P1・P2）は `null`。古い結果（欄を持たない録画）でも書ける。
+    unfinished: input.result.kind === "confirmed" ? null : (input.result.unfinished ?? null),
   };
 }
 

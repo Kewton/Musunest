@@ -22,6 +22,7 @@ import {
   type Problem,
   type PromptDocument,
   type ShapeCheck,
+  type ShapeRejection,
   type StageOutcome,
 } from "../stages/prompt.js";
 
@@ -624,6 +625,104 @@ export function openIssuesForQuestions(openIssues: readonly PlanOpenIssue[]): re
 }
 
 /**
+ * 網羅の検査が落ちたときの、その試行の中身（Issue #957）。**値は事項の ID と件数だけ**である——事項の文・
+ * 要件の ID・問いの文は入れない。`uncoveredIds` は、その応答で覆われなかった開いている事項の ID の集合で、
+ * 残りの件数が「開いている事項・うち重大・問い・一緒に閉じる事項・原文で閉じる事項・残りの問数」である。
+ * 問いが 0 問だったかは `questions` が 0 かで分かる（未実行ではない——検査は走っている）。
+ */
+export interface QuestionCoverageDetail {
+  /** 覆われなかった開いている事項の ID（重複なし・開いている事項の並び順） */
+  readonly uncoveredIds: readonly string[];
+  /** 開いている事項の件数 */
+  readonly openIssues: number;
+  /** 開いている事項のうち重大なものの件数 */
+  readonly critical: number;
+  /** 応答の問いの件数 */
+  readonly questions: number;
+  /** 応答の一緒に閉じる事項（`alsoCloses`）の件数 */
+  readonly alsoCloses: number;
+  /** 依頼文で閉じる事項（`closedBySource`）の件数 */
+  readonly closedBySource: number;
+  /** 残りの問数 */
+  readonly remaining: number;
+}
+
+/** 網羅の検査が落ちた試行（試行の番号つき。Issue #957） */
+export interface QuestionCoverageRejection extends QuestionCoverageDetail {
+  /** この呼び出しでの試行（1 始まり。2 回まで） */
+  readonly attempt: number;
+}
+
+interface CoverageAnalysis {
+  readonly open: readonly PlanOpenIssue[];
+  readonly needCover: readonly PlanOpenIssue[];
+  readonly uncovered: readonly PlanOpenIssue[];
+  readonly zeroQuestions: boolean;
+  /** 依頼文で閉じた事項を除いた開いている事項が、残りの問数に収まる */
+  readonly askAll: boolean;
+  /** 重大な事項の数が残りの問数を超えていて、覆いを求めない */
+  readonly criticalTooMany: boolean;
+}
+
+/**
+ * 網羅の判定を、**検査と中身の記録で同じ 1 つ**にする（Issue #957）。分岐と数え方をここにだけ置き、
+ * `checkQuestionCoverage` と `questionCoverageDetail` はこの結果を写すだけにする——2 か所に分けると、
+ * 記録の ID と実際に断った事項がずれる。
+ */
+function analyzeQuestionCoverage(
+  openIssues: readonly PlanOpenIssue[],
+  remaining: number,
+  questions: readonly PlanQuestion[],
+  closedBySource: readonly PlanSourceClosure[],
+): CoverageAnalysis | undefined {
+  const open = openIssues.filter((issue) => issue.status === "open");
+  if (open.length === 0 || remaining <= 0) return undefined;
+
+  const closedBySourceIds = new Set(closedBySource.map((closure) => closure.issueId));
+  const closed = new Set<string>();
+  for (const question of questions) {
+    closed.add(question.openIssueId);
+    for (const id of alsoClosesOf(question)) closed.add(id);
+  }
+  const isClosed = (id: string): boolean => closed.has(id) || closedBySourceIds.has(id);
+
+  // 依頼文で閉じた事項を除いた、まだ覆いの要る事項（依頼文で閉じた分は聞かなくてよい）
+  const needCover = open.filter((issue) => !closedBySourceIds.has(issue.id));
+  if (needCover.length === 0) {
+    return { open, needCover, uncovered: [], zeroQuestions: false, askAll: true, criticalTooMany: false };
+  }
+  if (questions.length === 0) {
+    return { open, needCover, uncovered: needCover, zeroQuestions: true, askAll: true, criticalTooMany: false };
+  }
+
+  // 全部が収まるなら、重大でない事項も含めて全部を覆う
+  if (needCover.length <= remaining) {
+    return {
+      open,
+      needCover,
+      uncovered: needCover.filter((issue) => !isClosed(issue.id)),
+      zeroQuestions: false,
+      askAll: true,
+      criticalTooMany: false,
+    };
+  }
+
+  // 収まらないときは、今までどおり重大な事項だけを求める
+  const critical = needCover.filter((issue) => issue.critical);
+  if (critical.length > remaining) {
+    return { open, needCover, uncovered: [], zeroQuestions: false, askAll: false, criticalTooMany: true };
+  }
+  return {
+    open,
+    needCover,
+    uncovered: critical.filter((issue) => !isClosed(issue.id)),
+    zeroQuestions: false,
+    askAll: false,
+    criticalTooMany: false,
+  };
+}
+
+/**
  * 残りの問数に照らして、**開いている事項が覆われている**かを確かめる（04 §3 P4・Issue #419）。
  *
  * 重大な事項は、**問い・一緒に閉じる事項（`alsoCloses`）・依頼文で閉じる事項（`closedBySource`）**の
@@ -641,50 +740,56 @@ export function checkQuestionCoverage(
   closedBySource: readonly PlanSourceClosure[] = [],
 ): readonly Problem[] {
   const problems: Problem[] = [];
-  const open = openIssues.filter((issue) => issue.status === "open");
-  if (open.length === 0 || remaining <= 0) return problems;
-
-  const closedBySourceIds = new Set(closedBySource.map((closure) => closure.issueId));
-  const closed = new Set<string>();
-  for (const question of questions) {
-    closed.add(question.openIssueId);
-    for (const id of alsoClosesOf(question)) closed.add(id);
-  }
-  const isClosed = (id: string): boolean => closed.has(id) || closedBySourceIds.has(id);
-
-  // 依頼文で閉じた事項を除いた、まだ覆いの要る事項（依頼文で閉じた分は聞かなくてよい）
-  const needCover = open.filter((issue) => !closedBySourceIds.has(issue.id));
-  if (needCover.length === 0) return problems;
-  if (questions.length === 0) {
+  const analysis = analyzeQuestionCoverage(openIssues, remaining, questions, closedBySource);
+  if (analysis === undefined || analysis.needCover.length === 0) return problems;
+  if (analysis.zeroQuestions) {
     problems.push({ field: "questions", code: "question-coverage", message: "開いている事項があるのに問いが 0 問である" });
     return problems;
   }
-
-  // 全部が収まるなら、重大でない事項も含めて全部を覆う
-  if (needCover.length <= remaining) {
-    for (const issue of needCover) {
-      if (isClosed(issue.id)) continue;
+  if (analysis.askAll) {
+    analysis.uncovered.forEach(() => {
       problems.push({
         field: "questions",
         code: "question-coverage",
-        message: `覆われていない事項が残っている（残りの問数 ${remaining} に開いている事項 ${needCover.length} 件が収まる）`,
+        message: `覆われていない事項が残っている（残りの問数 ${remaining} に開いている事項 ${analysis.needCover.length} 件が収まる）`,
       });
-    }
+    });
     return problems;
   }
-
-  // 収まらないときは、今までどおり重大な事項だけを求める
-  const critical = needCover.filter((issue) => issue.critical);
-  if (critical.length > remaining) return problems;
-  for (const issue of critical) {
-    if (isClosed(issue.id)) continue;
+  if (analysis.criticalTooMany) return problems;
+  analysis.uncovered.forEach(() => {
     problems.push({
       field: "questions",
       code: "question-coverage",
-      message: `重大な事項への問いが無い（残りの問数 ${remaining} に重大な事項 ${critical.length} 件が収まる）`,
+      message: `重大な事項への問いが無い（残りの問数 ${remaining} に重大な事項 ${analysis.needCover.filter((issue) => issue.critical).length} 件が収まる）`,
     });
-  }
+  });
   return problems;
+}
+
+/**
+ * 網羅の検査が落ちた試行の中身を組む（Issue #957）。**検査と同じ判定**（`analyzeQuestionCoverage`）から、
+ * 覆われなかった事項の ID と、そのときの件数を写す。**ID の字面や文の似さでは決めない**——覆いは問いの
+ * 主の事項・`alsoCloses`・`closedBySource` の ID の所属だけで決める。別の要件の似た文の事項は、覆われた
+ * 側にも覆われなかった側にも、所属のとおりにだけ数える。
+ */
+export function questionCoverageDetail(
+  openIssues: readonly PlanOpenIssue[],
+  remaining: number,
+  questions: readonly PlanQuestion[],
+  closedBySource: readonly PlanSourceClosure[] = [],
+): QuestionCoverageDetail {
+  const analysis = analyzeQuestionCoverage(openIssues, remaining, questions, closedBySource);
+  const open = openIssues.filter((issue) => issue.status === "open");
+  return {
+    uncoveredIds: (analysis?.uncovered ?? []).map((issue) => issue.id),
+    openIssues: open.length,
+    critical: open.filter((issue) => issue.critical).length,
+    questions: questions.length,
+    alsoCloses: questions.reduce((total, question) => total + alsoClosesOf(question).length, 0),
+    closedBySource: closedBySource.length,
+    remaining,
+  };
 }
 
 /**
@@ -720,6 +825,17 @@ export interface QuestionsInput {
   readonly revision: number;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
+  /**
+   * 形の検査に落ちた応答を、落ちた時点で受け取る任意の口（Issue #957）。共通の口の既存の口
+   * （`StructuredPlan.onShapeRejected`）をそのまま渡す。**省けば何もしない**——口の有無で、送る要求・
+   * 試行の回数・結果は変わらない。
+   */
+  readonly onShapeRejected?: (rejection: ShapeRejection) => void;
+  /**
+   * 網羅の検査に落ちた試行の中身を、落ちた時点で受け取る任意の口（Issue #957）。記録のためだけに呼び、
+   * **要求・試行の回数・結果は変えない**。省けば何もしない。
+   */
+  readonly onCoverageRejected?: (rejection: QuestionCoverageRejection) => void;
 }
 
 /**
@@ -745,9 +861,13 @@ export async function runQuestions(input: QuestionsInput): Promise<StageOutcome<
     schema: QUESTIONS_SCHEMA,
     maxOutputTokens: input.gateway.maxOutputTokens("questions"),
   });
+  // この呼び出しでの試行（1 始まり）。共通の口が `check` を呼ぶたびに 1 つ進む——網羅の中身を、落ちた
+  // 試行の番号つきで残すために使う（Issue #957）。
+  let attempt = 0;
   const answer = await callStructuredChecked(input.gateway, {
     request,
     check: (output) => {
+      attempt += 1;
       const shape = checkQuestionsOutput(output, input.revision, input.source);
       if (!shape.ok) return shape;
       const links = checkQuestionLinks(openIssueIds, shape.value.questions, shape.value.closedBySource);
@@ -767,7 +887,15 @@ export async function runQuestions(input: QuestionsInput): Promise<StageOutcome<
         shape.value.questions,
         shape.value.closedBySource,
       );
-      if (coverage.length > 0) return { ok: false, problems: coverage };
+      if (coverage.length > 0) {
+        // 覆われなかった事項の ID と、そのときの件数を、落ちた試行に添える（Issue #957）。記録のためだけに
+        // 呼び、形のやり直しの要求・回数・結果は変えない。
+        input.onCoverageRejected?.({
+          attempt,
+          ...questionCoverageDetail(openIssues, input.remaining, shape.value.questions, shape.value.closedBySource),
+        });
+        return { ok: false, problems: coverage };
+      }
       return {
         ok: true,
         value: {
@@ -776,6 +904,8 @@ export async function runQuestions(input: QuestionsInput): Promise<StageOutcome<
         },
       };
     },
+    // 形に落ちた応答を、既存の口へそのまま渡す（Issue #957。口の有無で要求・回数・結果は変わらない）
+    ...(input.onShapeRejected === undefined ? {} : { onShapeRejected: input.onShapeRejected }),
   });
   if (!answer.ok) return answer;
   const problems = checkQuestionSet(
