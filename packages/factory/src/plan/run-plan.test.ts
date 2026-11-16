@@ -8800,13 +8800,17 @@ describe("Plan の停止の記録（Issue #957）", () => {
 // 変更前の実装でもこの試験が緑になることを確かめた。**新しい欄は結果の比較に使わない**——追加の記録だけを
 // 別の試験群が確かめる。新しい export も import しない。
 
-/** base（main = 190f550）の別 worktree で実測した、要求の列と結果（Issue #957） */
+/** base（main = 190f550）の別 worktree で実測した、要求の列・結果・確定した仕様（Issue #957） */
 const BASE_190F550: Readonly<Record<string, {
   readonly requests: readonly string[];
   readonly kind: string;
   readonly stop: string | readonly string[] | null;
   readonly failure: { readonly stage: string; readonly kind: string; readonly problems: readonly string[] } | null;
   readonly judgeCalls: number;
+  /** 確定した走りだけが仕様を持つ（確定しなければ `null`） */
+  readonly plan: ConfirmedPlan | null;
+  /** 確定した仕様の SHA-256（`planDigest` の値。確定しなければ `null`） */
+  readonly planSha256: string | null;
 }>> = {
   "retry-pass": {
     requests: [
@@ -8819,6 +8823,62 @@ const BASE_190F550: Readonly<Record<string, {
     stop: null,
     failure: null,
     judgeCalls: 2,
+    plan: {
+      "schema_version": "musunest.plan-spec/v1",
+      "plan_id": "plan-1",
+      "revision": 1,
+      "vocabulary_version": "v1",
+      "inputs": [
+        {
+          "id": "S-1",
+          "kind": "source",
+          "text": "タスクを記録する。"
+        },
+        {
+          "id": "S-2",
+          "kind": "source",
+          "text": "件数を合計する。"
+        }
+      ],
+      "requirements": [
+        {
+          "id": "R-1",
+          "text": "タスクを記録できる",
+          "kind": "existence",
+          "origin": {
+            "input_id": "S-1",
+            "quote": "タスクを記録する"
+          },
+          "parts": []
+        },
+        {
+          "id": "R-2",
+          "text": "件数を合計できる",
+          "kind": "existence",
+          "origin": {
+            "input_id": "S-2",
+            "quote": "件数を合計する"
+          },
+          "parts": []
+        }
+      ],
+      "open_issues": [],
+      "decisions": [
+        {
+          "id": "D-1",
+          "subject": "既定で決めた",
+          "value": "記録の形は 1 行とした",
+          "reason": "Plan が既定で決めた（確認の画面で直せる）"
+        }
+      ],
+      "accepted_unwritable": [],
+      "confirmation": {
+        "sha256": "8618ab7f4fd38bad45a522cde43b56998bc42af7871f80d54580c26d776347c3",
+        "confirmed_at": "1970-01-01T00:00:00.000Z",
+        "confirmed_by": "tester"
+      }
+    },
+    planSha256: "8618ab7f4fd38bad45a522cde43b56998bc42af7871f80d54580c26d776347c3",
   },
   "retry-stop": {
     requests: [
@@ -8831,6 +8891,8 @@ const BASE_190F550: Readonly<Record<string, {
     stop: "malformed",
     failure: { stage: "surface", kind: "malformed", problems: ["unwritable:shape"] },
     judgeCalls: 1,
+    plan: null,
+    planSha256: null,
   },
   "codes-differ": {
     requests: [
@@ -8844,6 +8906,8 @@ const BASE_190F550: Readonly<Record<string, {
     stop: "malformed",
     failure: { stage: "questions", kind: "malformed", problems: ["questions:question-coverage"] },
     judgeCalls: 1,
+    plan: null,
+    planSha256: null,
   },
   "partial-coverage": {
     requests: [
@@ -8857,6 +8921,8 @@ const BASE_190F550: Readonly<Record<string, {
     stop: "malformed",
     failure: { stage: "questions", kind: "malformed", problems: ["questions:question-coverage"] },
     judgeCalls: 1,
+    plan: null,
+    planSha256: null,
   },
   "zero-questions": {
     requests: [
@@ -8870,6 +8936,8 @@ const BASE_190F550: Readonly<Record<string, {
     stop: "malformed",
     failure: { stage: "questions", kind: "malformed", problems: ["questions:question-coverage"] },
     judgeCalls: 1,
+    plan: null,
+    planSha256: null,
   },
   "id-reuse": {
     requests: [
@@ -8882,6 +8950,8 @@ const BASE_190F550: Readonly<Record<string, {
     stop: "malformed",
     failure: { stage: "surface", kind: "malformed", problems: ["ambiguities[0].id:issue-id-reused", "ambiguities[1].id:issue-id-reused"] },
     judgeCalls: 1,
+    plan: null,
+    planSha256: null,
   },
   "duplicate": {
     requests: [
@@ -8894,6 +8964,8 @@ const BASE_190F550: Readonly<Record<string, {
     stop: "malformed",
     failure: { stage: "surface", kind: "malformed", problems: ["ambiguities[1].id:issue-id-duplicated"] },
     judgeCalls: 1,
+    plan: null,
+    planSha256: null,
   },
   "surface-check-stop": {
     requests: [
@@ -8905,6 +8977,8 @@ const BASE_190F550: Readonly<Record<string, {
     stop: ["surface-check:unknown:unwritable[0]"],
     failure: null,
     judgeCalls: 2,
+    plan: null,
+    planSha256: null,
   },
   "p1p2-stop": {
     requests: [
@@ -8917,6 +8991,8 @@ const BASE_190F550: Readonly<Record<string, {
     stop: ["reverse-check:uncovered-source:source[*]"],
     failure: null,
     judgeCalls: 0,
+    plan: null,
+    planSha256: null,
   },
   "round-trip-limit": {
     requests: [
@@ -8931,9 +9007,10 @@ const BASE_190F550: Readonly<Record<string, {
     stop: ["session:round-trip-limit:open_issues"],
     failure: null,
     judgeCalls: 1,
+    plan: null,
+    planSha256: null,
   },
 };
-
 /** 結果の、変更前からある欄だけを取り出す（新しい欄は比べない。Issue #957） */
 const planStopOf = (result: PlanResult): string | readonly string[] | null =>
   result.kind === "stopped"
@@ -9199,6 +9276,18 @@ describe("行き先は今までどおり（Issue #957）", () => {
       expect(planFailureOf(result), c.name).toEqual(base.failure);
       expect(recording.structured.length, c.name).toBe(base.requests.length);
       expect(judgeCalls, c.name).toBe(base.judgeCalls);
+      // 確定した仕様と SHA（確定した走りだけ。確定しなければ仕様が無い）
+      if (result.kind === "confirmed") {
+        expect(base.plan, c.name).not.toBeNull();
+        expect(result.plan, c.name).toEqual(base.plan);
+        expect(await planDigest(result.plan), c.name).toBe(base.planSha256);
+        // 仕様の確認の SHA も、同じ値である
+        expect(result.plan.confirmation.sha256, c.name).toBe(base.planSha256);
+      } else {
+        expect(base.plan, c.name).toBeNull();
+        expect(base.planSha256, c.name).toBeNull();
+        expect((result as { readonly plan?: unknown }).plan, c.name).toBeUndefined();
+      }
     }
   });
 });
