@@ -18,7 +18,7 @@ import {
   createRecordingClient,
   makeGateway,
 } from "../stages/__tests__/prompt.js";
-import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_RELATIONS, SURFACE_RULES, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME, SURFACE_SHOWN_ID_SOURCES, buildSurfaceDiffSchema, checkSurfaceOutput, checkSurfaceTargets, runSurface, surfaceIdReuseOf, type PlanSurface, type SurfaceCatalogData, type SurfaceContext, type SurfaceInput, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt } from "./surface.js";
+import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_RELATIONS, SURFACE_RULES, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME, SURFACE_SHOWN_ID_SOURCES, buildSurfaceDiffSchema, checkSurfaceOutput, checkSurfaceTargets, runSurface, surfaceDuplicatedAmbiguityIdsOf, surfaceIdReuseOf, surfaceReusedAmbiguityIdsOf, type PlanSurface, type SurfaceCatalogData, type SurfaceContext, type SurfaceInput, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt } from "./surface.js";
 
 /** 正しい応答（未解決の事項 1 件・書けないこと 1 件） */
 const SURFACE_OUTPUT = {
@@ -1413,5 +1413,80 @@ describe("差分の洗い出しに、前の答えとの関係と答えの ID を
       "ambiguities[0].relation",
       "ambiguities[0].answerId",
     ]);
+  });
+});
+
+// ── Issue #957：使い回し・応答の中の重複した ID の中身を残す ─────────────────────
+
+const ambiguity = (id: string) => ({ id, requirementId: "R-1", text: "新しい事項", critical: true });
+
+describe("Plan の停止の記録（使い回しの中身。Issue #957）", () => {
+  const SHOWN: SurfaceShownIssueIds = {
+    catalog: ["OI:catalog:1"],
+    defaults: ["OI:default:1"],
+    inherited: [],
+    decisions: [],
+    existing: ["OI:existing:1"],
+  };
+
+  it("1 つの応答で 2 つの ID を使い回す例は、ID の集合と提示元の分類を返し、件数の記録と合う", () => {
+    const output = { ambiguities: [ambiguity("OI:catalog:1"), ambiguity("OI:existing:1"), ambiguity("OI:new:1")], unwritable: [] };
+    const detail = surfaceReusedAmbiguityIdsOf(output, SHOWN);
+    expect(detail).toEqual([
+      { id: "OI:catalog:1", sources: ["catalog"] },
+      { id: "OI:existing:1", sources: ["existing"] },
+    ]);
+    // 既存の件数の記録（異なる数・提示元ごとの数）と合う
+    const counts = surfaceIdReuseOf(output, SHOWN);
+    expect(counts.distinctIds).toBe(detail.length);
+    for (const source of SURFACE_SHOWN_ID_SOURCES) {
+      expect(counts.bySource.find((entry) => entry.source === source)?.count).toBe(
+        detail.filter((entry) => entry.sources.includes(source)).length,
+      );
+    }
+  });
+
+  it("同じ ID が複数の提示元に当たるときは、提示元をすべて並べる（件数の合計と合う）", () => {
+    const both = { ...SHOWN, defaults: ["OI:catalog:1"] };
+    const output = { ambiguities: [ambiguity("OI:catalog:1")], unwritable: [] };
+    const detail = surfaceReusedAmbiguityIdsOf(output, both);
+    expect(detail).toEqual([{ id: "OI:catalog:1", sources: ["catalog", "defaults"] }]);
+    const counts = surfaceIdReuseOf(output, both);
+    expect(counts.bySource.reduce((total, entry) => total + entry.count, 0)).toBe(2);
+  });
+
+  it("応答の中の重複の例は、重複した ID の集合を返す", () => {
+    const output = {
+      ambiguities: [ambiguity("OI:new:1"), ambiguity("OI:new:2"), ambiguity("OI:new:1"), ambiguity("OI:new:2")],
+      unwritable: [],
+    };
+    expect(surfaceDuplicatedAmbiguityIdsOf(output)).toEqual(["OI:new:1", "OI:new:2"]);
+    // 使い回し（見せた ID）とは別の集合である
+    expect(surfaceReusedAmbiguityIdsOf(output, SHOWN)).toEqual([]);
+  });
+
+  it("形に落ちた応答を、既存の口へそのまま渡す（口の有無で要求・回数・結果が変わらない）", async () => {
+    const reuse = {
+      ambiguities: [{ id: "OI:catalog:1", requirementId: "R-1", text: "使い回し", critical: true }],
+      unwritable: [],
+    };
+    const fresh = { ambiguities: [ambiguity("OI:new:1")], unwritable: [] };
+    const recording = createRecordingClient([
+      { kind: "structured" as const, output: reuse, usage: undefined },
+      { kind: "structured" as const, output: fresh, usage: undefined },
+    ]);
+    const rejections: { readonly attempt: number; readonly codes: readonly (string | undefined)[] }[] = [];
+    const result = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      shownIssueIds: SHOWN,
+      onShapeRejected: (rejection) =>
+        rejections.push({ attempt: rejection.attempt, codes: rejection.problems.map((problem) => problem.code) }),
+    });
+    expect(result.ok).toBe(true);
+    expect(rejections).toEqual([{ attempt: 1, codes: ["issue-id-reused"] }]);
+    // 要求は 2 回（1 回目のやり直し）で、口の有無では変わらない
+    expect(recording.structured).toHaveLength(2);
   });
 });

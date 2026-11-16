@@ -14,12 +14,14 @@ import {
   checkQuestionLinks,
   checkQuestionSet,
   checkQuestionsOutput,
+  questionCoverageDetail,
   runQuestions,
   trimQuestionsToRemaining,
   type PlanChoice,
   type PlanQuestion,
   type PlanRecommended,
   type PlanSourceClosure,
+  type QuestionCoverageRejection,
 } from "./questions.js";
 
 const OPEN_ISSUES: readonly PlanOpenIssue[] = [
@@ -792,5 +794,113 @@ describe("断る問題の path と message に、事項 ID・選択肢 ID の値
       expect(problems.length).toBeGreaterThan(0);
       expect(text(problems)).not.toContain(mark);
     }
+  });
+});
+
+// ── Issue #957：網羅の検査に落ちた試行の中身（覆われなかった ID と件数）を残す ────────────
+
+describe("Plan の停止の記録（網羅の中身。Issue #957）", () => {
+  const MIX: readonly PlanOpenIssue[] = [
+    { id: "OI-1", text: "重大", critical: true, status: "open" },
+    { id: "OI-2", text: "重大でない 1", critical: false, status: "open" },
+    { id: "OI-3", text: "重大でない 2", critical: false, status: "open" },
+  ];
+
+  it("一部が欠けた例は、覆われなかった ID の集合と件数を返す（別の対象の似た文の事項を覆われた側に数えない）", () => {
+    // 3 件とも同じ文（似た文）だが、覆いは ID の所属だけで決まる。OI-1 を問い、OI-2 を一緒に閉じる。
+    const issues: readonly PlanOpenIssue[] = [
+      { id: "OI-1", text: "対象は誰か", critical: true, status: "open" },
+      { id: "OI-2", text: "対象は誰か", critical: false, status: "open" },
+      { id: "OI-3", text: "対象は誰か", critical: false, status: "open" },
+    ];
+    const detail = questionCoverageDetail(issues, 5, [
+      question({ id: "Q-1", openIssueId: "OI-1", alsoCloses: ["OI-2"] }),
+    ]);
+    expect(detail.uncoveredIds).toEqual(["OI-3"]);
+    expect(detail.openIssues).toBe(3);
+    expect(detail.critical).toBe(1);
+    expect(detail.questions).toBe(1);
+    expect(detail.alsoCloses).toBe(1);
+    expect(detail.closedBySource).toBe(0);
+    expect(detail.remaining).toBe(5);
+    // 検査も同じ 1 件だけを覆いの誤りとして数える（記録と判定がずれない）
+    expect(
+      checkQuestionCoverage(issues, 5, [question({ id: "Q-1", openIssueId: "OI-1", alsoCloses: ["OI-2"] })]),
+    ).toHaveLength(1);
+  });
+
+  it("0 問の例は、覆われなかった ID に開いている事項を全部載せ、問い 0 を区別できる", () => {
+    const detail = questionCoverageDetail(MIX, 5, []);
+    expect(detail.uncoveredIds).toEqual(["OI-1", "OI-2", "OI-3"]);
+    expect(detail.questions).toBe(0);
+    expect(detail.openIssues).toBe(3);
+    expect(detail.critical).toBe(1);
+    expect(detail.alsoCloses).toBe(0);
+  });
+
+  it("一緒に閉じる事項で覆った例は、その ID を覆われた側に数え、覆われなかった ID だけを残す", () => {
+    const detail = questionCoverageDetail(MIX, 5, [
+      question({ id: "Q-1", openIssueId: "OI-1", alsoCloses: ["OI-2", "OI-3"] }),
+    ]);
+    expect(detail.uncoveredIds).toEqual([]);
+    expect(detail.alsoCloses).toBe(2);
+  });
+
+  it("依頼文で閉じた事項は覆われた側に数え、依頼文で閉じた件数も残す", () => {
+    const closed: readonly PlanSourceClosure[] = [{ issueId: "OI-2", quote: "タスクを記録する", value: "記録する" }];
+    const detail = questionCoverageDetail(MIX, 5, [question({ id: "Q-1" }, "OI-1")], closed);
+    expect(detail.uncoveredIds).toEqual(["OI-3"]);
+    expect(detail.closedBySource).toBe(1);
+  });
+
+  it("網羅の検査に落ちた試行ごとに、試行の番号つきで onCoverageRejected が中身を渡す（要求・結果は変えない）", async () => {
+    const records: QuestionCoverageRejection[] = [];
+    const asking = { questions: [question({ id: "Q-1" }, "OI-1")] };
+    const recording = createRecordingClient([
+      { kind: "structured", output: asking, usage: undefined },
+      { kind: "structured", output: asking, usage: undefined },
+    ]);
+    const outcome = await runQuestions({
+      source: "タスクを記録する。",
+      openIssues: [...MIX],
+      remaining: 5,
+      revision: 1,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      onCoverageRejected: (rejection) => records.push(rejection),
+    });
+    expect(outcome.ok).toBe(false);
+    // 2 回とも同じ応答なので、2 回とも覆われなかった OI-2・OI-3 を残す
+    expect(records.map((record) => record.attempt)).toEqual([1, 2]);
+    expect(records.map((record) => record.uncoveredIds)).toEqual([
+      ["OI-2", "OI-3"],
+      ["OI-2", "OI-3"],
+    ]);
+    // 形のやり直しの回数・結果は今までどおり（2 回で malformed）
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("malformed");
+    if (outcome.failure.kind !== "malformed") return;
+    expect(outcome.failure.attempts).toBe(2);
+  });
+
+  it("形の検査に落ちた応答を、既存の口へそのまま渡す（口の有無で結果が変わらない。Issue #957）", async () => {
+    const asking = { questions: [question({ id: "Q-1" }, "OI-1")] };
+    const attempts: number[] = [];
+    const recording = createRecordingClient([
+      { kind: "structured", output: asking, usage: undefined },
+      { kind: "structured", output: asking, usage: undefined },
+    ]);
+    const outcome = await runQuestions({
+      source: "タスクを記録する。",
+      openIssues: [...MIX],
+      remaining: 5,
+      revision: 1,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      onShapeRejected: (rejection) => attempts.push(rejection.attempt),
+    });
+    expect(attempts).toEqual([1, 2]);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("malformed");
   });
 });

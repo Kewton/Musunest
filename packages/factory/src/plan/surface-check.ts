@@ -37,12 +37,15 @@
 // 呼ぶ側が**明示的に渡した口**（`recheckJudge`）だけを使う——合成した口をもう一度呼ぶと主（Jev）が
 // 答え直すだけなので、落とし先が無ければ再点検せず未点検に残す。鍵もファイルも環境変数も扱わない。
 import { HOST_CAPABILITIES } from "@musunest/appspec-schema";
+import { categorizeCallError, isIncompleteResponseError } from "../call.js";
 import type { Judge, JudgeAnswer, JudgeChoiceQuestion, JudgeQuestion, JudgeResponse } from "../judge.js";
 import {
   JudgeBudgetExceededError,
   JudgeCallLimitExceededError,
   JudgeDeadlineExceededError,
 } from "../judge-budget.js";
+import { JevAdapterError } from "../judge-jev.js";
+import { LlmJudgeError } from "../judge-llm.js";
 import { constraintExcerpt, type PromptDocument } from "../stages/prompt.js";
 import type { PlanSurface, PlanUnwritable } from "./surface.js";
 
@@ -384,6 +387,39 @@ export type SurfaceUncheckedCode = (typeof SURFACE_UNCHECKED_CODES)[number];
 export const SURFACE_CHECK_STAGES = ["unexecuted", "triage", "support", "recheck"] as const;
 export type SurfaceCheckStage = (typeof SURFACE_CHECK_STAGES)[number];
 
+/**
+ * 判定の口が答えを返さなかったときの、例外の出どころ（有限の 3 値。Issue #957）。`jev` は Jev の
+ * adapter の誤り、`llm` は LLM の判定の adapter（と、その呼び出し元の LLM の adapter）の誤り、`other` は
+ * どちらでもない（種類を持たない）例外。予算・締切・呼び出しの上限・停止の印つきの例外は投げ直すので、
+ * ここには来ない。
+ */
+export const SURFACE_CHECK_EXCEPTION_ORIGINS = ["jev", "llm", "other"] as const;
+export type SurfaceCheckExceptionOrigin = (typeof SURFACE_CHECK_EXCEPTION_ORIGINS)[number];
+
+/** 判定の口が答えを返さなかった例外の分類（出どころと種類だけ。文・状態コードは持たない。Issue #957） */
+export interface SurfaceCheckException {
+  readonly origin: SurfaceCheckExceptionOrigin;
+  /** adapter の誤りが持つ有限の種類をそのまま写す。種類を持たない例外は `other` */
+  readonly kind: string;
+}
+
+/**
+ * 判定の口が投げた例外を、出どころと種類に分類する（Issue #957）。**文・状態コード・URL は写さない。**
+ * Jev の adapter の誤りと LLM の判定の adapter の誤りは、既にある有限の `kind` をそのまま使う。LLM の
+ * 判定は `LlmClient` の例外を包まずに投げるので、LLM 側の時間切れ・通信・HTTP・形の不一致は、adapter に
+ * 依らない既存の分類（`categorizeCallError`）で種類を取り出す——未完了はその分類に無いので、既存の
+ * `isIncompleteResponseError` で先に見る。それ以外の例外（種類を持たないものを含む）は `other` / `other`
+ * にする。状態コードは写さない。
+ */
+export function classifyJudgeException(error: unknown): SurfaceCheckException {
+  if (error instanceof JevAdapterError) return { origin: "jev", kind: error.kind };
+  if (error instanceof LlmJudgeError) return { origin: "llm", kind: error.kind };
+  if (isIncompleteResponseError(error)) return { origin: "llm", kind: "incomplete" };
+  const kind = categorizeCallError(error).kind;
+  if (kind !== "unknown") return { origin: "llm", kind };
+  return { origin: "other", kind: "other" };
+}
+
 /** 判定 1 件の記録（問いの ID・答え・確信度・答えたモデルの版・adapter。依頼文の全文は残さない。§4） */
 export interface SurfaceJudgment {
   /** 問いの ID */
@@ -451,6 +487,13 @@ export interface SurfaceClaimDiagnostic {
   readonly confidence: number | null;
   /** 根拠の ID（受理のときだけ。無ければ `null`） */
   readonly evidenceId: string | null;
+  /**
+   * 判定の口が答えを返さず未点検にしたときの、例外の出どころ（Issue #957）。例外で未点検にしたときだけ
+   * 入る。答えは読めたが未知だった・閾値未満だった等では入らない（未実行の印とも区別する）。
+   */
+  readonly uncheckedOrigin?: SurfaceCheckExceptionOrigin;
+  /** 同じく、例外の種類（adapter の有限の `kind` か `other`。文・状態コードは持たない。Issue #957） */
+  readonly uncheckedKind?: string;
 }
 
 /** 点検の結果（受理・落とした・曖昧さへ・未点検と、判定の記録と診断） */
@@ -561,8 +604,18 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
     adapter: string,
     confidence: number | null,
     evidenceId: string | null,
+    exception?: SurfaceCheckException,
   ): void => {
-    diagnostics.set(index, { ...baseOf(claim, index), stage, classification, adapter, confidence, evidenceId });
+    diagnostics.set(index, {
+      ...baseOf(claim, index),
+      stage,
+      classification,
+      adapter,
+      confidence,
+      evidenceId,
+      // 例外で未点検にしたときだけ、出どころと種類を添える（Issue #957）。例外でなければ欄を持たない。
+      ...(exception === undefined ? {} : { uncheckedOrigin: exception.origin, uncheckedKind: exception.kind }),
+    });
   };
 
   const snapshot = (): SurfaceCheckResult => ({
@@ -611,40 +664,44 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
       version === "v1" ? surfaceTriageQuestion(claim) : surfaceTriageQuestionV2(claim, requirementOf(claim));
   });
   const classify = await safeJudge(input.judge, { state, questions: triageQuestions });
+  // 例外で答えが返らなかったときの分類（出どころと種類）。返ったときは `undefined`（Issue #957）
+  const classifyException = classify.ok ? undefined : classifyJudgeException(classify.error);
 
   const holes: { readonly claim: PlanUnwritable; readonly index: number }[] = [];
   const pending: PendingClaim[] = [];
   claims.forEach((claim, index) => {
-    if (classify === null) {
-      // 判定の口が使えない（両方の adapter の失敗）。申告は未確定のまま残す（確認へ進ませない）
+    if (!classify.ok) {
+      // 判定の口が使えない（両方の adapter の失敗）。申告は未確定のまま残す（確認へ進ませない）。
+      // 最後に受け取った例外の出どころと種類を、申告ごとの診断に残す（Issue #957）。
       unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
-      setDiagnostic(claim, index, "triage", "unknown", "none", null, null);
+      setDiagnostic(claim, index, "triage", "unknown", "none", null, null, classifyException);
       return;
     }
+    const response = classify.response;
     const name = surfaceTriageQuestionName(index);
-    const answer = classify.answers[name];
+    const answer = response.answers[name];
     const label = choiceOf(answer);
     const confidence = confidenceOf(answer);
     judgments.push({
       questionId: name,
       answer: label ?? "unknown",
       confidence,
-      model: classify.model,
-      answeredBy: classify.answeredBy,
+      model: response.model,
+      answeredBy: response.answeredBy,
     });
     if (label === undefined || !TRIAGE_LABELS.has(label)) {
       // **未知の答えは、確信度にかかわらず**未点検として残す（拒否が確信度で変わらないように。Issue #432）
       unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
-      setDiagnostic(claim, index, "triage", "unknown", classify.answeredBy, confidence ?? null, null);
+      setDiagnostic(claim, index, "triage", "unknown", response.answeredBy, confidence ?? null, null);
     } else if (confidence === undefined || confidence < input.threshold) {
       // **独立の仕分けが成立していない**（確信度が閾値未満・不明）。分類先へ流す前に、再点検へ回す印にする
       // （E：不明を低い確信度と同じにせず、別の印にする。Issue #432）。
       const mark = confidence === undefined ? "unknown-confidence" : "low-confidence";
-      pending.push({ claim, index, stage: "triage", classification: mark, adapter: classify.answeredBy, confidence: confidence ?? null });
-      setDiagnostic(claim, index, "triage", mark, classify.answeredBy, confidence ?? null, null);
+      pending.push({ claim, index, stage: "triage", classification: mark, adapter: response.answeredBy, confidence: confidence ?? null });
+      setDiagnostic(claim, index, "triage", mark, response.answeredBy, confidence ?? null, null);
     } else if (label === "ambiguity") {
       ambiguities.push({ index, requirementId: claim.requirementId, part: claim.part, reason: claim.reason });
-      setDiagnostic(claim, index, "triage", "ambiguity", classify.answeredBy, confidence, null);
+      setDiagnostic(claim, index, "triage", "ambiguity", response.answeredBy, confidence, null);
     } else if (label === "not-a-problem") {
       dropped.push({
         index,
@@ -653,12 +710,12 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
         reason: claim.reason,
         code: "not-a-problem",
       });
-      setDiagnostic(claim, index, "triage", "not-a-problem", classify.answeredBy, confidence, null);
+      setDiagnostic(claim, index, "triage", "not-a-problem", response.answeredBy, confidence, null);
     } else {
       // vocabulary-hole（有限のラベルは上で確かめ済み）。裏付けはこれから。途中で止まっても診断に残るよう、
       // 仕分けの結果を先に置く（Issue #432）
       holes.push({ claim, index });
-      setDiagnostic(claim, index, "triage", "vocabulary-hole", classify.answeredBy, confidence, null);
+      setDiagnostic(claim, index, "triage", "vocabulary-hole", response.answeredBy, confidence, null);
     }
   });
   report();
@@ -674,40 +731,43 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
           : surfaceSupportQuestionV2(claim, requirementOf(claim), input.documents);
     }
     const support = await safeJudge(input.judge, { state, questions: supportQuestions });
+    // 例外で答えが返らなかったときの分類（出どころと種類）。Issue #957
+    const supportException = support.ok ? undefined : classifyJudgeException(support.error);
 
     for (const { claim, index } of holes) {
-      if (support === null) {
+      if (!support.ok) {
         unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
-        setDiagnostic(claim, index, "support", "unknown", "none", null, null);
+        setDiagnostic(claim, index, "support", "unknown", "none", null, null, supportException);
         continue;
       }
+      const response = support.response;
       const name = surfaceSupportQuestionName(index);
-      const answer = support.answers[name];
+      const answer = response.answers[name];
       const verdict = choiceOf(answer);
       const confidence = confidenceOf(answer);
       judgments.push({
         questionId: name,
         answer: verdict ?? "unknown",
         confidence,
-        model: support.model,
-        answeredBy: support.answeredBy,
+        model: response.model,
+        answeredBy: response.answeredBy,
       });
       if (verdict === undefined || !SUPPORT_VERDICTS.has(verdict)) {
         // **未知の答えは、確信度にかかわらず**未点検として残す（Issue #432）
         unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
-        setDiagnostic(claim, index, "support", "unknown", support.answeredBy, confidence ?? null, null);
+        setDiagnostic(claim, index, "support", "unknown", response.answeredBy, confidence ?? null, null);
       } else if (verdict === "not-stated") {
         // 裏付けが「書いていない」→ 再点検へ（05 §3）
-        pending.push({ claim, index, stage: "support", classification: "not-stated", adapter: support.answeredBy, confidence: confidence ?? null });
-        setDiagnostic(claim, index, "support", "not-stated", support.answeredBy, confidence ?? null, null);
+        pending.push({ claim, index, stage: "support", classification: "not-stated", adapter: response.answeredBy, confidence: confidence ?? null });
+        setDiagnostic(claim, index, "support", "not-stated", response.answeredBy, confidence ?? null, null);
       } else if (confidence === undefined || confidence < input.threshold) {
         // 確信度が閾値未満・不明 → 再点検へ（E）
         const mark = confidence === undefined ? "unknown-confidence" : "low-confidence";
-        pending.push({ claim, index, stage: "support", classification: mark, adapter: support.answeredBy, confidence: confidence ?? null });
-        setDiagnostic(claim, index, "support", mark, support.answeredBy, confidence ?? null, null);
+        pending.push({ claim, index, stage: "support", classification: mark, adapter: response.answeredBy, confidence: confidence ?? null });
+        setDiagnostic(claim, index, "support", mark, response.answeredBy, confidence ?? null, null);
       } else if (verdict === "supports") {
         accepted.push(claim);
-        setDiagnostic(claim, index, "support", "supports", support.answeredBy, confidence, null);
+        setDiagnostic(claim, index, "support", "supports", response.answeredBy, confidence, null);
       } else {
         // contradicts（有限の判定は上で確かめ済み）
         dropped.push({
@@ -717,7 +777,7 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
           reason: claim.reason,
           code: "contradicts",
         });
-        setDiagnostic(claim, index, "support", "contradicts", support.answeredBy, confidence, null);
+        setDiagnostic(claim, index, "support", "contradicts", response.answeredBy, confidence, null);
       }
     }
     report();
@@ -751,58 +811,62 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
       );
     }
     const recheck = await safeJudge(luna, { state, questions: { ...kindQuestions, ...evidenceQuestions } });
+    // 落とし先（Luna）が投げた、最後の例外の分類（出どころと種類）。Issue #957
+    const recheckException = recheck.ok ? undefined : classifyJudgeException(recheck.error);
 
     for (const entry of pending) {
       const { claim, index } = entry;
-      if (recheck === null) {
-        // 落とし先も使えない → 未確定のまま残す（確認へ進ませない）
+      if (!recheck.ok) {
+        // 落とし先も使えない → 未確定のまま残す（確認へ進ませない）。主が失敗して落とし先も失敗した束では、
+        // **落とし先の例外**を残す（Issue #957）。
         unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
-        setDiagnostic(claim, index, "recheck", "unknown", "none", null, null);
+        setDiagnostic(claim, index, "recheck", "unknown", "none", null, null, recheckException);
         continue;
       }
+      const response = recheck.response;
       const kindName = surfaceRecheckKindQuestionName(index);
       const evidenceName = surfaceRecheckEvidenceQuestionName(index);
-      const kind = choiceOf(recheck.answers[kindName]);
-      const kindConfidence = confidenceOf(recheck.answers[kindName]);
-      const evidence = choiceOf(recheck.answers[evidenceName]);
+      const kind = choiceOf(response.answers[kindName]);
+      const kindConfidence = confidenceOf(response.answers[kindName]);
+      const evidence = choiceOf(response.answers[evidenceName]);
       judgments.push({
         questionId: kindName,
         answer: kind ?? "unknown",
         confidence: kindConfidence,
-        model: recheck.model,
-        answeredBy: recheck.answeredBy,
+        model: response.model,
+        answeredBy: response.answeredBy,
       });
       judgments.push({
         questionId: evidenceName,
         answer: evidence ?? "unknown",
-        confidence: confidenceOf(recheck.answers[evidenceName]),
-        model: recheck.model,
-        answeredBy: recheck.answeredBy,
+        confidence: confidenceOf(response.answers[evidenceName]),
+        model: response.model,
+        answeredBy: response.answeredBy,
       });
       const evidenceId =
         evidence !== undefined && claim.constraintIds.includes(evidence) ? evidence : null;
       if (kind === undefined || !RECHECK_KINDS.has(kind)) {
         // 未知の判定・読めない答えは、確信度にかかわらず未点検（Issue #432）
         unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
-        setDiagnostic(claim, index, "recheck", "unknown", recheck.answeredBy, kindConfidence ?? null, null);
+        setDiagnostic(claim, index, "recheck", "unknown", response.answeredBy, kindConfidence ?? null, null);
       } else if (kind === "not-a-problem") {
         dropped.push({ index, requirementId: claim.requirementId, part: claim.part, reason: claim.reason, code: "not-a-problem" });
-        setDiagnostic(claim, index, "recheck", "not-a-problem", recheck.answeredBy, kindConfidence ?? null, null);
+        setDiagnostic(claim, index, "recheck", "not-a-problem", response.answeredBy, kindConfidence ?? null, null);
       } else if (kind === "ambiguity") {
         ambiguities.push({ index, requirementId: claim.requirementId, part: claim.part, reason: claim.reason });
-        setDiagnostic(claim, index, "recheck", "ambiguity", recheck.answeredBy, kindConfidence ?? null, null);
+        setDiagnostic(claim, index, "recheck", "ambiguity", response.answeredBy, kindConfidence ?? null, null);
       } else if (kind === "undecidable") {
         // 判定不能 → 未点検
         unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
-        setDiagnostic(claim, index, "recheck", "unknown", recheck.answeredBy, kindConfidence ?? null, null);
+        setDiagnostic(claim, index, "recheck", "unknown", response.answeredBy, kindConfidence ?? null, null);
       } else if (evidenceId !== null) {
         // vocabulary-hole かつ根拠（節）が取れたときだけ受理する（分類と根拠の両方）
         accepted.push(claim);
-        setDiagnostic(claim, index, "recheck", "vocabulary-hole", recheck.answeredBy, kindConfidence ?? null, evidenceId);
+        setDiagnostic(claim, index, "recheck", "vocabulary-hole", response.answeredBy, kindConfidence ?? null, evidenceId);
       } else {
         // 語彙の穴だが根拠が取れない → 未点検（根拠不足）
         unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "not-stated" });
-        setDiagnostic(claim, index, "recheck", "not-stated", recheck.answeredBy, kindConfidence ?? null, null);
+        setDiagnostic(claim, index, "recheck", "not-stated", response.answeredBy, kindConfidence ?? null, null);
       }
     }
     report();
@@ -814,12 +878,16 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
 /**
  * 判定の口を 1 回呼ぶ。**判定が失敗しても工場は止めない**（05 §6「Jev が止まっても工場は止まらない」）
  * ——ただし**予算・締切・総呼び出し数の門で止まったときは投げ直す**（呼ぶ側が段の失敗（`budget`・
- * `deadline`・`call-limit`）として記録し、申告を通さない。Issue #432）。それ以外の失敗は `null` にして、
- * 呼び側が「未確定」として扱う（確認へ進ませない）。
+ * `deadline`・`call-limit`）として記録し、申告を通さない。Issue #432）。それ以外の失敗は例外つきの不成立
+ * にして、呼び側が「未確定」として扱う（確認へ進ませない）。例外は、診断の出どころと種類にだけ写す
+ * （Issue #957）。
  */
-async function safeJudge(judge: Judge, request: Parameters<Judge["judge"]>[0]): Promise<JudgeResponse | null> {
+async function safeJudge(
+  judge: Judge,
+  request: Parameters<Judge["judge"]>[0],
+): Promise<{ readonly ok: true; readonly response: JudgeResponse } | { readonly ok: false; readonly error: unknown }> {
   try {
-    return await judge.judge(request);
+    return { ok: true, response: await judge.judge(request) };
   } catch (error) {
     if (
       error instanceof JudgeBudgetExceededError ||
@@ -833,6 +901,8 @@ async function safeJudge(judge: Judge, request: Parameters<Judge["judge"]>[0]): 
     if (typeof error === "object" && error !== null && (error as { readonly stop?: unknown }).stop === true) {
       throw error;
     }
-    return null;
+    // 握った例外は、未点検の分類（出どころと種類）を診断に残すために呼び側へ渡す（Issue #957）。
+    // **投げ直す動きは変えない**——ここへ来るのは、既存どおり未確定に落とす例外だけである。
+    return { ok: false, error };
   }
 }

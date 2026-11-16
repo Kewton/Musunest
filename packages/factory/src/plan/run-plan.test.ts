@@ -11,10 +11,11 @@
 import { describe, expect, it } from "vitest";
 import { checkConfirmedPlan, HOST_CAPABILITIES, isConfirmationValid, planDigest, type ConfirmedPlan, type PlanAcceptedUnwritable, type PlanOpenIssue, type PlanPart, type PlanRequirement } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
-import { planStopReasonLine } from "../cli-plan.js";
+import { buildPlanCliRecord, createPlanTranscript, planStopReasonLine } from "../cli-plan.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.js";
 import { createJevJudge, type JevFetch } from "../judge-jev.js";
+import { OpenAiAdapterError } from "../openai.js";
 import { AGENT_LIMITS } from "../limits.js";
 import type {
   LlmClient,
@@ -8491,5 +8492,924 @@ describe("Plan の要求は今までどおり（Issue #956）", () => {
       "8308c20dd46f2bc6c6648ae7b96debb5982c5b61160d56ac0073f24c233f16ec",
       "bf6918ddefa153205fce738f4701fe84777cb480b053b0c473ef846ee4dbcb59",
     ]);
+  });
+});
+
+// ── Issue #957：Plan が止まった・やり直した理由を、記録だけで追えるようにする ──────────────
+//
+// ここで固定するのは**記録**である——要求・やり直しの回数・停止・確定は変えない。値の差で前（新しい欄の無い
+// 実装）が赤・後が緑になる。既存の「今までどおり」は別の試験群が担保する。
+
+describe("Plan の停止の記録（Issue #957）", () => {
+  const CONFIRM: PlanResponder = {
+    async answer() {
+      return { kind: "answers", answers: [] };
+    },
+    async confirm() {
+      return "build";
+    },
+  };
+
+  it("形のやり直しを残す：初回で落ちてやり直しで通る例は、試行ごとの行が段・点検・往復・試行の番号つきで残る", async () => {
+    // 1 回目は形が合わない（unwritable が並びでない）。2 回目は通る
+    const bad = { ambiguities: [], unwritable: "並びでない" };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(bad),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor([]) }), CONFIRM),
+    );
+    expect(result.kind).toBe("confirmed");
+    expect(result.shapeRetries).toEqual([
+      { stage: "surface", check: 1, round: 1, attempt: 1, problems: [{ field: "unwritable", code: "shape" }] },
+    ]);
+    // 形に届かなかった段（問いは 1 度も呼ばれていない）は未観測として区別する
+    expect(result.shapeRetryUnobserved).toEqual(["questions"]);
+    // 確定した走りは、確定しなかった一覧を残さない
+    expect(result.unfinished).toBeNull();
+    // 要求は 4 回（形のやり直しを含む）で、記録を足しても変わらない
+    expect(recording.structured).toHaveLength(4);
+
+    // Plan の記録にも、同じ行が番号つきで載る
+    const record = buildPlanCliRecord({
+      result,
+      transcript: createPlanTranscript(),
+      budgetUsd: 10,
+      planId: "plan-1",
+    });
+    expect(record.shape_retries).toEqual([
+      {
+        stage: "surface",
+        check: 1,
+        round: 1,
+        attempt: 1,
+        problems: [{ field: "unwritable", code: "shape" }],
+      },
+    ]);
+    expect(record.shape_retry_unobserved).toEqual(["questions"]);
+  });
+
+  it("形のやり直しを残す：2 回とも落ちて止まる例は、2 試行とも残り、確定しなかった一覧を持つ", async () => {
+    const bad = { ambiguities: [], unwritable: "並びでない" };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(bad),
+      structured(bad),
+    ]);
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface");
+    expect(result.failure?.kind).toBe("malformed");
+    expect(result.shapeRetries.map((entry) => entry.attempt)).toEqual([1, 2]);
+    expect(result.shapeRetries.every((entry) => entry.stage === "surface")).toBe(true);
+    // 止まった時点の要件・決定・了承除外・開いている事項（Issue #957）
+    expect(result.unfinished).not.toBeNull();
+    expect(result.unfinished?.requirements.map((requirement) => requirement.id)).toEqual(["R-1", "R-2"]);
+    expect(result.unfinished?.decisions.map((decision) => decision.id)).toEqual(["D-1"]);
+    expect(result.unfinished?.acceptedUnwritable).toEqual([]);
+    expect(result.unfinished?.openIssues).toEqual([]);
+  });
+
+  it("形のやり直しを残す：初回とやり直しで符号が違う例（形 → 網羅）も、試行ごとに残る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured({ questions: "並びでない" }),
+      structured(ZERO_QUESTIONS),
+    ]);
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("questions");
+    expect(result.shapeRetries.map((entry) => [entry.stage, entry.attempt, entry.problems.map((problem) => problem.code)])).toEqual([
+      ["questions", 1, ["shape"]],
+      ["questions", 2, ["question-coverage"]],
+    ]);
+    // 2 回目の要求は、前回の応答と前回の問題をデータとして受け取る（今までどおり。Issue #447・#479）
+    const retry = recording.structured.at(-1);
+    expect(retry?.input).toContain("前回の応答");
+    expect(retry?.input).toContain("前回の形の問題");
+  });
+
+  it("網羅の中身：一部が欠けた例は、覆われなかった ID の集合と件数を残す", async () => {
+    const surface = {
+      ambiguities: [
+        { id: "OI-a", requirementId: "R-1", text: "問い a", critical: true },
+        { id: "OI-b", requirementId: "R-1", text: "問い b", critical: false },
+      ],
+      unwritable: [],
+    };
+    // 重大な OI-a だけを聞き、残り 10 問に収まる重大でない OI-b を聞かない（覆いの誤り）
+    const partial = {
+      questions: [
+        {
+          id: "Q-a",
+          openIssueId: "OI-a",
+          text: "問い a",
+          choices: [
+            { id: "c1", text: "こちら" },
+            { id: "c2", text: "あちら" },
+          ],
+          recommended: { choiceId: "c1", reason: "依頼に沿う" },
+          allowFreeText: true,
+        },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured(partial),
+      structured(partial),
+    ]);
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+    expect(result.kind).toBe("stopped");
+    expect(result.questionCoverageMisses).toHaveLength(2);
+    expect(result.questionCoverageMisses[0]).toEqual({
+      round: 1,
+      attempt: 1,
+      uncoveredIds: ["OI-b"],
+      openIssues: 2,
+      critical: 1,
+      questions: 1,
+      alsoCloses: 0,
+      closedBySource: 0,
+      remaining: 10,
+    });
+    expect(result.questionCoverageMisses[1]?.attempt).toBe(2);
+  });
+
+  it("網羅の中身：0 問の例を、一部が欠けた例と区別できる（questions が 0）", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(ZERO_QUESTIONS),
+      structured(ZERO_QUESTIONS),
+    ]);
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+    expect(result.kind).toBe("stopped");
+    const miss = result.questionCoverageMisses[0];
+    expect(miss?.uncoveredIds).toEqual(["OI-extra"]);
+    expect(miss?.questions).toBe(0);
+    expect(miss?.openIssues).toBe(1);
+    expect(miss?.critical).toBe(1);
+  });
+
+  it("使い回しの中身：1 つの応答で 2 つの ID を使い回す例は、ID の集合と提示元の分類が残り、件数の記録と合う", async () => {
+    const [first, second] = CATALOG_FACETS;
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    if (first === undefined || second === undefined) return;
+    const shownIds = [`OI:catalog:R-1:${first.id}`, `OI:catalog:R-1:${second.id}`];
+    const reuse = {
+      ambiguities: shownIds.map((id) => ({ id, requirementId: "R-1", text: "使い回し", critical: true })),
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(reuse),
+      structured(reuse),
+    ]);
+    const judge = createFakeJudge(catalogUnspecifiedFor({ "R-1": [first.id, second.id] }));
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+    expect(result.kind).toBe("stopped");
+    // 試行ごとの行に、使い回した ID と提示元の分類が入る
+    expect(result.shapeRetries).toHaveLength(2);
+    // 既定を持つ観点（period）は、catalog と defaults の両方で見せているので、提示元を 2 つ並べる
+    expect(result.shapeRetries[0]?.reusedIds).toEqual([
+      { id: shownIds[0], sources: ["catalog"] },
+      { id: shownIds[1], sources: ["catalog", "defaults"] },
+    ]);
+    // 既存の件数の記録と合う（異なる数 2・提示元 catalog に 2・defaults に 1）
+    expect(result.surfaceIdReuse.map((entry) => entry.distinctIds)).toEqual([2, 2]);
+    for (const entry of result.surfaceIdReuse) {
+      expect(entry.bySource.find((source) => source.source === "catalog")?.count).toBe(2);
+      expect(entry.bySource.find((source) => source.source === "defaults")?.count).toBe(1);
+    }
+  });
+
+  it("使い回しの中身：応答の中の重複の例は、重複した ID の集合が残る", async () => {
+    const duplicate = {
+      ambiguities: [
+        { id: "OI:dup", requirementId: "R-1", text: "重複 1", critical: true },
+        { id: "OI:dup", requirementId: "R-1", text: "重複 2", critical: true },
+      ],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(duplicate),
+      structured(duplicate),
+    ]);
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+    expect(result.kind).toBe("stopped");
+    expect(result.shapeRetries[0]?.duplicatedIds).toEqual(["OI:dup"]);
+    expect(result.shapeRetries[0]?.problems.some((problem) => problem.code === "issue-id-duplicated")).toBe(true);
+  });
+
+  it("確定しなかった一覧：申告の点検の停止では、止まった時点の要件・決定・了承除外・開いている事項を持つ", async () => {
+    const surface = {
+      ambiguities: [{ id: "OI-open", requirementId: "R-1", text: "開いた事項", critical: true }],
+      unwritable: [
+        {
+          id: "U-1",
+          requirementId: "R-1",
+          part: "部分",
+          constraintIds: ["記録"],
+          reason: "理由",
+          alternative: "代案",
+        },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+    ]);
+    // 目録には当てはまる・決まっていると答え、申告の点検（仕分け）には答えを返さない——申告は未点検に残る
+    const judge: Judge = {
+      async judge(request: JudgeRequest) {
+        const answers: Record<string, JudgeAnswer> = {};
+        for (const name of Object.keys(request.questions)) {
+          if (name.startsWith("plan-triage:") || name.startsWith("plan-support:") || name.startsWith("plan-recheck-")) {
+            continue;
+          }
+          answers[name] = noul(1);
+        }
+        return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+      },
+    };
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons.some((reason) => reason.source === "surface-check")).toBe(true);
+    expect(result.unfinished).not.toBeNull();
+    expect(result.unfinished?.requirements.map((requirement) => requirement.id)).toEqual(["R-1", "R-2"]);
+    expect(result.unfinished?.decisions.map((decision) => decision.id)).toEqual(["D-1"]);
+    expect(result.unfinished?.acceptedUnwritable).toEqual([]);
+    expect(result.unfinished?.openIssues.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it("確定しなかった一覧：P1・P2 で止まった例は null で、形の段は未観測になる", async () => {
+    const recording = createRecordingClient([
+      structured(THREE_REQUIREMENTS),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(THREE_REQUIREMENTS),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE, { source: THREE_SOURCE }),
+    );
+    expect(result.kind).toBe("cannot-confirm");
+    expect(result.unfinished).toBeNull();
+    expect(result.shapeRetries).toEqual([]);
+    expect(result.shapeRetryUnobserved).toEqual(["surface", "questions"]);
+  });
+
+  it("確定しなかった一覧：答えの後の上限（往復の上限）でも、止まった時点の一覧を持つ", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+    ]);
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons).toEqual([{ source: "session", code: "round-trip-limit", path: "open_issues" }]);
+    expect(result.unfinished).not.toBeNull();
+    expect(result.unfinished?.requirements.map((requirement) => requirement.id)).toEqual(["R-1", "R-2"]);
+    expect(result.unfinished?.openIssues.map((issue) => issue.id)).toContain("OI-extra");
+  });
+});
+
+// ── Issue #957（直し）：未観測の線と、止まった時点の一覧 ─────────────────────────
+
+describe("Plan の停止の記録（直し）", () => {
+  it("応答の前に通信で終わった段は、形に落ちなかった 0 件ではなく未観測として残す", async () => {
+    // 洗い出しの最初の呼び出し（3 回目）から通信で失敗する。段は応答を 1 つも受け取らない
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+    ]);
+    let calls = 0;
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        if (calls >= 3) throw new OpenAiAdapterError("network", "通信で終わった");
+        return recording.client.callStructured<T>(request);
+      },
+      async callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
+        return recording.client.callWithTools(request);
+      },
+    };
+    const result = await runPlan(makePlanInput(client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface");
+    expect(result.shapeRetries).toEqual([]);
+    // 応答を受け取っていないので、形に落ちなかった 0 件ではなく未観測である
+    expect(result.shapeRetryUnobserved).toEqual(["surface", "questions"]);
+  });
+
+  it("確定しなかった一覧は、答えで要件が増えた後の止まった時点を写す（P2 の時点ではない）", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      // その往復で増えた要件だけの差分点検（Issue #434）
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const responder: PlanResponder = {
+      async answer(request) {
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
+      },
+      async confirm() {
+        return "stop";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("declined");
+    // 答えから増えた要件（R:A:Q1-1）も、止まった時点の一覧に入る
+    expect(result.unfinished?.requirements.map((requirement) => requirement.id)).toEqual([
+      "R-1",
+      "R-2",
+      "R:A:Q1-1",
+    ]);
+  });
+});
+
+// ── Issue #957：行き先は今までどおり ───────────────────────────────────────────
+//
+// 新しい記録（形のやり直し・例外の分類・確定しなかった一覧）を足しても、**送る要求・呼び出し列・結果・
+// 停止**は変わらない。base（main = 190f550）の別 worktree で実測した要求の列（SHA-256）と結果を固定し、
+// 変更前の実装でもこの試験が緑になることを確かめた。**新しい欄は結果の比較に使わない**——追加の記録だけを
+// 別の試験群が確かめる。新しい export も import しない。
+
+/** base（main = 190f550）の別 worktree で実測した、要求の列・結果・確定した仕様（Issue #957） */
+const BASE_190F550: Readonly<Record<string, {
+  readonly requests: readonly string[];
+  /** 判定の口が受け取った要求（state・questions）を直列化した SHA-256 の列（Issue #957 の低-6） */
+  readonly judgeRequests: readonly string[];
+  readonly kind: string;
+  readonly stop: string | readonly string[] | null;
+  readonly failure: { readonly stage: string; readonly kind: string; readonly problems: readonly string[] } | null;
+  readonly judgeCalls: number;
+  /** 確定した走りだけが仕様を持つ（確定しなければ `null`） */
+  readonly plan: ConfirmedPlan | null;
+  /** 確定した仕様の SHA-256（`planDigest` の値。確定しなければ `null`） */
+  readonly planSha256: string | null;
+}>> = {
+  "retry-pass": {
+    requests: [
+      "60f2aaefcd7efbb4e27a1a48d6517ec17034e68a13991fb45528d54cae464209",
+      "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
+      "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
+      "d318520ef12389e288ee80ddf40b85eb417812cbda8868757db8f1e386c012a3",
+    ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709","af100b2b8fc4021a21aa7a7627d3241e868ff418709449a29c3ec74ab8edd584"],
+    kind: "confirmed",
+    stop: null,
+    failure: null,
+    judgeCalls: 2,
+    plan: {
+      "schema_version": "musunest.plan-spec/v1",
+      "plan_id": "plan-1",
+      "revision": 1,
+      "vocabulary_version": "v1",
+      "inputs": [
+        {
+          "id": "S-1",
+          "kind": "source",
+          "text": "タスクを記録する。"
+        },
+        {
+          "id": "S-2",
+          "kind": "source",
+          "text": "件数を合計する。"
+        }
+      ],
+      "requirements": [
+        {
+          "id": "R-1",
+          "text": "タスクを記録できる",
+          "kind": "existence",
+          "origin": {
+            "input_id": "S-1",
+            "quote": "タスクを記録する"
+          },
+          "parts": []
+        },
+        {
+          "id": "R-2",
+          "text": "件数を合計できる",
+          "kind": "existence",
+          "origin": {
+            "input_id": "S-2",
+            "quote": "件数を合計する"
+          },
+          "parts": []
+        }
+      ],
+      "open_issues": [],
+      "decisions": [
+        {
+          "id": "D-1",
+          "subject": "既定で決めた",
+          "value": "記録の形は 1 行とした",
+          "reason": "Plan が既定で決めた（確認の画面で直せる）"
+        }
+      ],
+      "accepted_unwritable": [],
+      "confirmation": {
+        "sha256": "8618ab7f4fd38bad45a522cde43b56998bc42af7871f80d54580c26d776347c3",
+        "confirmed_at": "1970-01-01T00:00:00.000Z",
+        "confirmed_by": "tester"
+      }
+    },
+    planSha256: "8618ab7f4fd38bad45a522cde43b56998bc42af7871f80d54580c26d776347c3",
+  },
+  "retry-stop": {
+    requests: [
+      "60f2aaefcd7efbb4e27a1a48d6517ec17034e68a13991fb45528d54cae464209",
+      "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
+      "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
+      "d318520ef12389e288ee80ddf40b85eb417812cbda8868757db8f1e386c012a3",
+    ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
+    kind: "stopped",
+    stop: "malformed",
+    failure: { stage: "surface", kind: "malformed", problems: ["unwritable:shape"] },
+    judgeCalls: 1,
+    plan: null,
+    planSha256: null,
+  },
+  "codes-differ": {
+    requests: [
+      "60f2aaefcd7efbb4e27a1a48d6517ec17034e68a13991fb45528d54cae464209",
+      "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
+      "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
+      "46fe0f5e7dc9d95502abbaa9a76512b25930dd1309b2c9b7e923baf7dd25fe0e",
+      "767bb16491a7803798109575cb59e057dd4b5619092a20e7663bbe2fc6a41f95",
+    ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
+    kind: "stopped",
+    stop: "malformed",
+    failure: { stage: "questions", kind: "malformed", problems: ["questions:question-coverage"] },
+    judgeCalls: 1,
+    plan: null,
+    planSha256: null,
+  },
+  "partial-coverage": {
+    requests: [
+      "60f2aaefcd7efbb4e27a1a48d6517ec17034e68a13991fb45528d54cae464209",
+      "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
+      "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
+      "48932294ba40ac3570d387bf157e806ad3dc5ffa661db7015c547a1cfb948e4f",
+      "3ee36267a3ef3119dd1df203d44167c2936612d1d178a1b6e6e23a2fffb85605",
+    ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
+    kind: "stopped",
+    stop: "malformed",
+    failure: { stage: "questions", kind: "malformed", problems: ["questions:question-coverage"] },
+    judgeCalls: 1,
+    plan: null,
+    planSha256: null,
+  },
+  "zero-questions": {
+    requests: [
+      "60f2aaefcd7efbb4e27a1a48d6517ec17034e68a13991fb45528d54cae464209",
+      "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
+      "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
+      "46fe0f5e7dc9d95502abbaa9a76512b25930dd1309b2c9b7e923baf7dd25fe0e",
+      "8df7c60b131d2fe46a655fc70b0c0ad0cbc04dafdd1bc3b88553ec77beae653d",
+    ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
+    kind: "stopped",
+    stop: "malformed",
+    failure: { stage: "questions", kind: "malformed", problems: ["questions:question-coverage"] },
+    judgeCalls: 1,
+    plan: null,
+    planSha256: null,
+  },
+  "id-reuse": {
+    requests: [
+      "60f2aaefcd7efbb4e27a1a48d6517ec17034e68a13991fb45528d54cae464209",
+      "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
+      "028762f4c545a599ad768afa9b00f4996f3b1925ea254ade35889867485403f2",
+      "e318eddd9e8d45777764253afa3395488a5c20257cb1f38e8f21a435e287f5c7",
+    ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
+    kind: "stopped",
+    stop: "malformed",
+    failure: { stage: "surface", kind: "malformed", problems: ["ambiguities[0].id:issue-id-reused", "ambiguities[1].id:issue-id-reused"] },
+    judgeCalls: 1,
+    plan: null,
+    planSha256: null,
+  },
+  "duplicate": {
+    requests: [
+      "60f2aaefcd7efbb4e27a1a48d6517ec17034e68a13991fb45528d54cae464209",
+      "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
+      "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
+      "04fe1816b08c0aaee8a66bf97089f3f130b232571949020a147a56bf0a15a200",
+    ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
+    kind: "stopped",
+    stop: "malformed",
+    failure: { stage: "surface", kind: "malformed", problems: ["ambiguities[1].id:issue-id-duplicated"] },
+    judgeCalls: 1,
+    plan: null,
+    planSha256: null,
+  },
+  "surface-check-stop": {
+    requests: [
+      "60f2aaefcd7efbb4e27a1a48d6517ec17034e68a13991fb45528d54cae464209",
+      "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
+      "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
+    ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709","ba6320ab7e9ba530250fd780268893302dfcf8e12e0bfaf831ea9e055a948f1d"],
+    kind: "cannot-confirm",
+    stop: ["surface-check:unknown:unwritable[0]"],
+    failure: null,
+    judgeCalls: 2,
+    plan: null,
+    planSha256: null,
+  },
+  "p1p2-stop": {
+    requests: [
+      "d3c965aa3564db009fa70a825e81530cbb0e65a2bed501b84fb6c9103c0ec86d",
+      "3fdef92fb5189226ffe014fe0d8793c79b8074b574f24d143ecfcb7a9e93e852",
+      "5a59db0024255f5094e7b82ceb0b0e16de5086f1d003804934bd8493749927d5",
+      "3fdef92fb5189226ffe014fe0d8793c79b8074b574f24d143ecfcb7a9e93e852",
+    ],
+    judgeRequests: [],
+    kind: "cannot-confirm",
+    stop: ["reverse-check:uncovered-source:source[*]"],
+    failure: null,
+    judgeCalls: 0,
+    plan: null,
+    planSha256: null,
+  },
+  "round-trip-limit": {
+    requests: [
+      "60f2aaefcd7efbb4e27a1a48d6517ec17034e68a13991fb45528d54cae464209",
+      "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
+      "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
+      "46fe0f5e7dc9d95502abbaa9a76512b25930dd1309b2c9b7e923baf7dd25fe0e",
+      "098a4c938e9a0cd6b7f6586e9394078151c3c7c7e34e3137087a7730ce29c1f4",
+      "ac1ead87efda4883b7e0a5b646f0a70cbefc536720a1633db76c84f4a99a390a",
+    ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
+    kind: "cannot-confirm",
+    stop: ["session:round-trip-limit:open_issues"],
+    failure: null,
+    judgeCalls: 1,
+    plan: null,
+    planSha256: null,
+  },
+  "judge-throw": {
+    requests: [
+      "60f2aaefcd7efbb4e27a1a48d6517ec17034e68a13991fb45528d54cae464209",
+      "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
+      "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
+    ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709","ba6320ab7e9ba530250fd780268893302dfcf8e12e0bfaf831ea9e055a948f1d"],
+    kind: "cannot-confirm",
+    stop: ["surface-check:unknown:unwritable[0]"],
+    failure: null,
+    judgeCalls: 2,
+    plan: null,
+    planSha256: null,
+  },
+};
+/** 結果の、変更前からある欄だけを取り出す（新しい欄は比べない。Issue #957） */
+const planStopOf = (result: PlanResult): string | readonly string[] | null =>
+  result.kind === "stopped"
+    ? result.reason
+    : result.kind === "cannot-confirm"
+      ? result.reasons.map((reason) => `${reason.source}:${reason.code}:${reason.path}`)
+      : null;
+const planFailureOf = (
+  result: PlanResult,
+): { readonly stage: string; readonly kind: string; readonly problems: readonly string[] } | null =>
+  result.kind === "stopped" && result.failure !== null
+    ? {
+        stage: result.failure.stage,
+        kind: result.failure.kind,
+        problems: (result.failure.problems ?? []).map((problem) => `${problem.field}:${problem.code}`),
+      }
+    : null;
+
+describe("行き先は今までどおり（Issue #957）", () => {
+  const CONFIRM: PlanResponder = {
+    async answer() {
+      return { kind: "answers", answers: [] };
+    },
+    async confirm() {
+      return "build";
+    },
+  };
+
+  /** 目録には答え、申告の点検（仕分け・裏付け・再点検）には答えを返さない判定（未点検で止まる例） */
+  const checkStopJudge: Judge = {
+    async judge(request: JudgeRequest) {
+      const answers: Record<string, JudgeAnswer> = {};
+      for (const name of Object.keys(request.questions)) {
+        if (name.startsWith("plan-triage:") || name.startsWith("plan-support:") || name.startsWith("plan-recheck-")) {
+          continue;
+        }
+        answers[name] = noul(1);
+      }
+      return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+    },
+  };
+
+  /** 目録には答え、申告の点検（仕分け）で例外を投げる判定（`safeJudge` の例外の経路） */
+  const throwingCheckJudge: Judge = {
+    async judge(request: JudgeRequest) {
+      if (Object.keys(request.questions).some((name) => name.startsWith("plan-triage:"))) {
+        throw new OpenAiAdapterError("network", "通信で終わった");
+      }
+      const answers: Record<string, JudgeAnswer> = {};
+      for (const name of Object.keys(request.questions)) answers[name] = noul(1);
+      return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+    },
+  };
+
+  const partialSurface = {
+    ambiguities: [
+      { id: "OI-a", requirementId: "R-1", text: "問い a", critical: true },
+      { id: "OI-b", requirementId: "R-1", text: "問い b", critical: false },
+    ],
+    unwritable: [],
+  };
+  const partialQuestions = {
+    questions: [
+      {
+        id: "Q-a",
+        openIssueId: "OI-a",
+        text: "問い a",
+        choices: [
+          { id: "c1", text: "こちら" },
+          { id: "c2", text: "あちら" },
+        ],
+        recommended: { choiceId: "c1", reason: "依頼に沿う" },
+        allowFreeText: true,
+      },
+    ],
+  };
+  const checkStopSurface = {
+    ambiguities: [{ id: "OI-open", requirementId: "R-1", text: "開いた事項", critical: true }],
+    unwritable: [
+      {
+        id: "U-1",
+        requirementId: "R-1",
+        part: "部分",
+        constraintIds: ["記録"],
+        reason: "理由",
+        alternative: "代案",
+      },
+    ],
+  };
+
+  it("11 の例で、要求の列・判定の要求・結果・停止・失敗の分類・呼び出し数が base（190f550）と同じ", async () => {
+    const [first, second] = CATALOG_FACETS;
+    if (first === undefined || second === undefined) throw new Error("目録の観点が 2 件未満");
+    const shownIds = [`OI:catalog:R-1:${first.id}`, `OI:catalog:R-1:${second.id}`];
+    const reuse = {
+      ambiguities: shownIds.map((id) => ({ id, requirementId: "R-1", text: "使い回し", critical: true })),
+      unwritable: [],
+    };
+    const duplicate = {
+      ambiguities: [
+        { id: "OI:dup", requirementId: "R-1", text: "重複 1", critical: true },
+        { id: "OI:dup", requirementId: "R-1", text: "重複 2", critical: true },
+      ],
+      unwritable: [],
+    };
+    const bad = { ambiguities: [], unwritable: "並びでない" };
+
+    const cases: readonly {
+      readonly name: string;
+      readonly make: () => {
+        readonly recording: ReturnType<typeof createRecordingClient>;
+        readonly judge: Judge;
+        readonly responder: PlanResponder;
+        readonly overrides?: Partial<PlanRunInput>;
+      };
+    }[] = [
+      {
+        name: "retry-pass",
+        make: () => ({
+          recording: createRecordingClient([
+            structured(REQUIREMENT_LIST_OUTPUT),
+            structured(REVERSE_CHECK_OUTPUT),
+            structured(bad),
+            structured(SURFACE_OUTPUT_CLEAR),
+          ]),
+          judge: createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor([]) }),
+          responder: CONFIRM,
+        }),
+      },
+      {
+        name: "retry-stop",
+        make: () => ({
+          recording: createRecordingClient([
+            structured(REQUIREMENT_LIST_OUTPUT),
+            structured(REVERSE_CHECK_OUTPUT),
+            structured(bad),
+            structured(bad),
+          ]),
+          judge: createFakeJudge(catalogAnswers()),
+          responder: ANSWER_NONE,
+        }),
+      },
+      {
+        name: "codes-differ",
+        make: () => ({
+          recording: createRecordingClient([
+            structured(REQUIREMENT_LIST_OUTPUT),
+            structured(REVERSE_CHECK_OUTPUT),
+            structured(SURFACE_OUTPUT),
+            structured({ questions: "並びでない" }),
+            structured(ZERO_QUESTIONS),
+          ]),
+          judge: createFakeJudge(catalogAnswers()),
+          responder: ANSWER_NONE,
+        }),
+      },
+      {
+        name: "partial-coverage",
+        make: () => ({
+          recording: createRecordingClient([
+            structured(REQUIREMENT_LIST_OUTPUT),
+            structured(REVERSE_CHECK_OUTPUT),
+            structured(partialSurface),
+            structured(partialQuestions),
+            structured(partialQuestions),
+          ]),
+          judge: createFakeJudge(catalogAnswers()),
+          responder: ANSWER_NONE,
+        }),
+      },
+      {
+        name: "zero-questions",
+        make: () => ({
+          recording: createRecordingClient([
+            structured(REQUIREMENT_LIST_OUTPUT),
+            structured(REVERSE_CHECK_OUTPUT),
+            structured(SURFACE_OUTPUT),
+            structured(ZERO_QUESTIONS),
+            structured(ZERO_QUESTIONS),
+          ]),
+          judge: createFakeJudge(catalogAnswers()),
+          responder: ANSWER_NONE,
+        }),
+      },
+      {
+        name: "id-reuse",
+        make: () => ({
+          recording: createRecordingClient([
+            structured(REQUIREMENT_LIST_OUTPUT),
+            structured(REVERSE_CHECK_OUTPUT),
+            structured(reuse),
+            structured(reuse),
+          ]),
+          judge: createFakeJudge(catalogUnspecifiedFor({ "R-1": [first.id, second.id] })),
+          responder: ANSWER_NONE,
+        }),
+      },
+      {
+        name: "duplicate",
+        make: () => ({
+          recording: createRecordingClient([
+            structured(REQUIREMENT_LIST_OUTPUT),
+            structured(REVERSE_CHECK_OUTPUT),
+            structured(duplicate),
+            structured(duplicate),
+          ]),
+          judge: createFakeJudge(catalogAnswers()),
+          responder: ANSWER_NONE,
+        }),
+      },
+      {
+        name: "surface-check-stop",
+        make: () => ({
+          recording: createRecordingClient([
+            structured(REQUIREMENT_LIST_OUTPUT),
+            structured(REVERSE_CHECK_OUTPUT),
+            structured(checkStopSurface),
+          ]),
+          judge: checkStopJudge,
+          responder: ANSWER_NONE,
+        }),
+      },
+      {
+        // 判定の口が例外を投げて unknown で止まる経路（`safeJudge` の例外。Issue #957 の低-6）
+        name: "judge-throw",
+        make: () => ({
+          recording: createRecordingClient([
+            structured(REQUIREMENT_LIST_OUTPUT),
+            structured(REVERSE_CHECK_OUTPUT),
+            structured(checkStopSurface),
+          ]),
+          judge: throwingCheckJudge,
+          responder: ANSWER_NONE,
+        }),
+      },
+      {
+        name: "p1p2-stop",
+        make: () => ({
+          recording: createRecordingClient([
+            structured(THREE_REQUIREMENTS),
+            structured(REVERSE_CHECK_OUTPUT),
+            structured(THREE_REQUIREMENTS),
+            structured(REVERSE_CHECK_OUTPUT),
+          ]),
+          judge: createFakeJudge({}),
+          responder: ANSWER_NONE,
+          overrides: { source: THREE_SOURCE },
+        }),
+      },
+      {
+        name: "round-trip-limit",
+        make: () => ({
+          recording: createRecordingClient([
+            structured(REQUIREMENT_LIST_OUTPUT),
+            structured(REVERSE_CHECK_OUTPUT),
+            structured(SURFACE_OUTPUT),
+            structured(QUESTIONS_OUTPUT),
+            structured(QUESTIONS_OUTPUT),
+            structured(QUESTIONS_OUTPUT),
+          ]),
+          judge: createFakeJudge(catalogAnswers()),
+          responder: ANSWER_NONE,
+        }),
+      },
+    ];
+
+    for (const c of cases) {
+      const base = BASE_190F550[c.name];
+      expect(base, c.name).toBeDefined();
+      if (base === undefined) continue;
+      const { recording, judge, responder, overrides } = c.make();
+      let judgeCalls = 0;
+      // 判定の口が受け取った要求（state・questions）も直列化して比べる（Issue #957 の低-6）。
+      // 門・合図・再送の通知は実行の都合で決まるので、要求の中身（state・questions）だけを写す。
+      const judgeRequests: string[] = [];
+      const countingJudge: Judge = {
+        async judge(request: JudgeRequest) {
+          judgeCalls += 1;
+          judgeRequests.push(await sha256Hex(JSON.stringify({ state: request.state, questions: request.questions })));
+          return judge.judge(request);
+        },
+      };
+      const result = await runPlan(makePlanInput(recording.client, countingJudge, responder, overrides ?? {}));
+      // 偽の client が受け取った要求の列（形のやり直しの要求を含む）を、直列化して比べる
+      const requests = await Promise.all(
+        recording.structured.map((request) => sha256Hex(JSON.stringify(request))),
+      );
+      expect(requests, c.name).toEqual(base.requests);
+      expect(judgeRequests, c.name).toEqual(base.judgeRequests);
+      // 追加の記録を除く結果・停止・失敗の分類・呼び出し数
+      expect(result.kind, c.name).toBe(base.kind);
+      expect(planStopOf(result), c.name).toEqual(base.stop);
+      expect(planFailureOf(result), c.name).toEqual(base.failure);
+      expect(recording.structured.length, c.name).toBe(base.requests.length);
+      expect(judgeCalls, c.name).toBe(base.judgeCalls);
+      // 確定した仕様と SHA（確定した走りだけ。確定しなければ仕様が無い）
+      if (result.kind === "confirmed") {
+        expect(base.plan, c.name).not.toBeNull();
+        expect(result.plan, c.name).toEqual(base.plan);
+        expect(await planDigest(result.plan), c.name).toBe(base.planSha256);
+        // 仕様の確認の SHA も、同じ値である
+        expect(result.plan.confirmation.sha256, c.name).toBe(base.planSha256);
+      } else {
+        expect(base.plan, c.name).toBeNull();
+        expect(base.planSha256, c.name).toBeNull();
+        expect((result as { readonly plan?: unknown }).plan, c.name).toBeUndefined();
+      }
+    }
   });
 });

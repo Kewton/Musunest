@@ -47,12 +47,16 @@ import {
   RECOMMENDED_INPUT,
   buildBuildCliRecord,
   buildPlanCliRecord,
+  buildPlanOnlyResult,
+  buildSurfaceCheckDiagnostic,
   buildSurfaceRelationTraceDiagnostic,
   createAnswersFilePlanResponder,
   createInteractivePlanResponder,
   createPlanTranscript,
   parsePlanAnswers,
+  parsePlanFile,
   sha256Hex,
+  validatePlanFile,
   type Terminal,
 } from "./cli-plan.js";
 import { createFakeJudge } from "./judge-fake.js";
@@ -3723,6 +3727,8 @@ interface PlanOnlyResultShape {
   readonly source_sha256: string;
   readonly conditions: Record<string, unknown>;
   readonly stop: { readonly kind: string; readonly reason: string | null; readonly codes: readonly string[] } | null;
+  /** 確定しなかった走りの一覧（要件の本文を持つ。Issue #957） */
+  readonly unfinished?: unknown;
 }
 
 async function readPlanOnlyResult(dir: string): Promise<PlanOnlyResultShape> {
@@ -3991,11 +3997,15 @@ describe("Plan だけを流す口（`--plan-only`。Issue #495）", () => {
     expect(declinedResult.outcome).toBe("stopped");
     expect(declinedResult.stop).toEqual({ kind: "stopped", reason: "declined", codes: [] });
 
-    // 誤りの文・原文の文を写さない
+    // 誤りの文・原文の文を写さない。**確定しなかった一覧（Issue #957）は要件の本文を持つので、この確認から
+    // は外す**——Plan の記録と申告の診断には本文を入れない、という門はそのまま別の試験で確かめる。
+    const { unfinished: _cannotUnfinished, ...cannotFields } = cannotResult;
+    const { unfinished: _failedUnfinished, ...failedFields } = failedResult;
+    const { unfinished: _declinedUnfinished, ...declinedFields } = declinedResult;
     const text = JSON.stringify({
-      cannot: cannotResult,
-      failed: failedResult,
-      declined: declinedResult,
+      cannot: cannotFields,
+      failed: failedFields,
+      declined: declinedFields,
     });
     expect(text).not.toContain(SOURCE_TEXT.slice(0, 4));
     expect(text).not.toContain("並びでない");
@@ -5278,5 +5288,207 @@ describe("T2条件指摘の記録", () => {
     // 既存の plan-record の形は変えない（別ファイルのまま）
     expect(record).not.toHaveProperty("reverse_check_trace");
     expect(record).not.toHaveProperty("reverseCheckTrace");
+  });
+});
+
+// ── Issue #957：Plan の停止の記録の写しと、古い形（欄の無い記録・結果）を読む ──────────────
+
+describe("Plan の停止の記録（記録の写しと古い形。Issue #957）", () => {
+  const CONDITIONS = {
+    model: "gpt-x",
+    effort: "low",
+    budget_usd: 1,
+    deadline_ms: 1,
+    timeout_ms: null,
+    vocabulary_version: "v1",
+    prompt_version: "v1",
+    contract_version: "v0.2",
+    factory_version: "0.0.0",
+    spec_engine_version: "0.0.0",
+  };
+
+  it("新しい欄を持たない古い結果でも、Plan の記録を空の並びで組み、古い記録をそのまま読める", () => {
+    const result = relationResult();
+    // 古い録画（新しい欄が無い）——欄の有無で落ちない
+    expect(result).not.toHaveProperty("shapeRetries");
+    expect(result).not.toHaveProperty("shapeRetryUnobserved");
+    expect(result).not.toHaveProperty("questionCoverageMisses");
+    const record = buildPlanCliRecord({
+      result,
+      transcript: createPlanTranscript(),
+      budgetUsd: 10,
+      planId: "plan-1",
+    });
+    expect(record.shape_retries).toEqual([]);
+    expect(record.shape_retry_unobserved).toEqual([]);
+    expect(record.question_coverage_misses).toEqual([]);
+    // 欄の無い古い記録も、JSON としてそのまま読める（新しい欄を要求しない）
+    const oldRecord: Record<string, unknown> = { ...record };
+    delete oldRecord["shape_retries"];
+    delete oldRecord["shape_retry_unobserved"];
+    delete oldRecord["question_coverage_misses"];
+    const read = JSON.parse(JSON.stringify(oldRecord)) as Record<string, unknown>;
+    expect(read["shape_retries"]).toBeUndefined();
+    expect(read["outcome"]).toBe(record.outcome);
+  });
+
+  it("申告の診断に、例外の出どころと種類を、例外で未点検にしたときだけ載せる", () => {
+    const base = {
+      check: 1,
+      requirementId: "R-1",
+      part: "部分",
+      reason: "理由",
+      constraintIds: ["記録"],
+      docVersion: "v1",
+      stage: "triage",
+      classification: "unknown",
+      adapter: "none",
+      confidence: null,
+      evidenceId: null,
+    };
+    const result = {
+      surfaceCheckDiagnostics: [
+        { ...base, index: 0, uncheckedOrigin: "jev", uncheckedKind: "network" },
+        { ...base, index: 1 },
+      ],
+    } as unknown as PlanResult;
+    const diagnostic = buildSurfaceCheckDiagnostic({ result, planId: "plan-1" });
+    expect(diagnostic.claims[0]).toMatchObject({ unchecked_origin: "jev", unchecked_kind: "network" });
+    expect(diagnostic.claims[1]).not.toHaveProperty("unchecked_origin");
+    expect(diagnostic.claims[1]).not.toHaveProperty("unchecked_kind");
+    // 文・状態コードは載らない（出どころと種類だけ）
+    const text = JSON.stringify(diagnostic);
+    expect(text).not.toContain("秘密の文");
+  });
+
+  it("確定しなかった結果は新しい欄に一覧を書き、確定した結果は null にする（包みの版は変えない）", () => {
+    const unfinished = {
+      requirements: [
+        { id: "R-1", text: "タスクを記録できる", kind: "existence", origin: { input_id: "S-1", quote: "タスクを記録する" }, parts: [] },
+      ],
+      decisions: [],
+      acceptedUnwritable: [],
+      openIssues: [{ id: "OI-1", text: "誰の分を数えるか", critical: true, status: "open" }],
+    };
+    const stopped = { kind: "stopped", reason: "malformed", failure: null, unfinished } as unknown as PlanResult;
+    const stoppedOut = buildPlanOnlyResult({
+      result: stopped,
+      planSha256: null,
+      sourceSha256: "abc",
+      conditions: CONDITIONS,
+    });
+    expect(stoppedOut.schema_version).toBe(PLAN_ONLY_RESULT_SCHEMA);
+    // 欄の名前は、確定した仕様（`plan`）と同じ snake_case で書く（Issue #957 の低-1）
+    expect(stoppedOut.unfinished).toEqual({
+      requirements: unfinished.requirements,
+      decisions: unfinished.decisions,
+      accepted_unwritable: [],
+      open_issues: unfinished.openIssues,
+    });
+    const unfinishedKeys = Object.keys(stoppedOut.unfinished ?? {});
+    expect(unfinishedKeys).toHaveLength(4);
+    for (const key of ["requirements", "decisions", "accepted_unwritable", "open_issues"]) {
+      expect(unfinishedKeys).toContain(key);
+    }
+    // camelCase の欄は残さない
+    expect(unfinishedKeys).not.toContain("acceptedUnwritable");
+    expect(unfinishedKeys).not.toContain("openIssues");
+
+    const confirmed = { kind: "confirmed", plan: CONFIRMED_PLAN, unfinished } as unknown as PlanResult;
+    const confirmedOut = buildPlanOnlyResult({
+      result: confirmed,
+      planSha256: "sha",
+      sourceSha256: "abc",
+      conditions: CONDITIONS,
+    });
+    expect(confirmedOut.schema_version).toBe(PLAN_ONLY_RESULT_SCHEMA);
+    expect(confirmedOut.unfinished).toBeNull();
+  });
+
+  it("新しい欄の無い確定済みの結果と、新しい欄のある確定済みの結果の両方を、Build の入口の検査が受ける", async () => {
+    const plan = await confirmedPlan();
+    const oldEnvelope = await envelopeOf(plan);
+    const newEnvelope = await envelopeOf(plan, { unfinished: null });
+    for (const envelope of [oldEnvelope, newEnvelope]) {
+      const parsed = parsePlanFile(JSON.stringify(envelope));
+      expect("envelope" in parsed).toBe(true);
+      if (!("envelope" in parsed)) return;
+      const validated = await validatePlanFile({
+        envelope: parsed.envelope,
+        source: SOURCE_TEXT,
+        vocabularyVersion: VOCABULARY_VERSION,
+      });
+      expect(validated.kind).toBe("ok");
+    }
+  });
+});
+
+describe("Plan の停止の記録に本文を入れない（Issue #957）", () => {
+  it("応答・事項・要件・例外の文の目印を、Plan の記録と申告の診断の追加の欄に写さない", () => {
+    const mark = "MARK957TEXT";
+    const result = {
+      ...(relationResult() as unknown as Record<string, unknown>),
+      shapeRetries: [
+        {
+          stage: "surface",
+          check: 1,
+          round: 1,
+          attempt: 1,
+          problems: [{ field: "ambiguities[0].id", code: "issue-id-reused" }],
+          reusedIds: [{ id: "OI:1", sources: ["catalog"] }],
+          duplicatedIds: ["OI:2"],
+        },
+      ],
+      shapeRetryUnobserved: [],
+      questionCoverageMisses: [
+        {
+          round: 1,
+          attempt: 1,
+          uncoveredIds: ["OI:9"],
+          openIssues: 1,
+          critical: 1,
+          questions: 0,
+          alsoCloses: 0,
+          closedBySource: 0,
+          remaining: 10,
+        },
+      ],
+      // 既存の欄には本文（部分・理由）が入る。追加の欄（出どころ・種類）には入れない
+      surfaceCheckDiagnostics: [
+        {
+          check: 1,
+          index: 0,
+          requirementId: "R-1",
+          part: `${mark}部分`,
+          reason: `${mark}理由`,
+          constraintIds: [],
+          docVersion: "v1",
+          stage: "triage",
+          classification: "unknown",
+          adapter: "none",
+          confidence: null,
+          evidenceId: null,
+          uncheckedOrigin: "jev",
+          uncheckedKind: "network",
+        },
+      ],
+    } as unknown as PlanResult;
+    const record = buildPlanCliRecord({
+      result,
+      transcript: createPlanTranscript(),
+      budgetUsd: 10,
+      planId: "plan-1",
+    });
+    const diagnostic = buildSurfaceCheckDiagnostic({ result, planId: "plan-1" });
+    const added = {
+      shape_retries: record.shape_retries,
+      shape_retry_unobserved: record.shape_retry_unobserved,
+      question_coverage_misses: record.question_coverage_misses,
+      unchecked: diagnostic.claims.map((claim) => ({
+        unchecked_origin: claim.unchecked_origin,
+        unchecked_kind: claim.unchecked_kind,
+      })),
+    };
+    expect(JSON.stringify(added)).not.toContain(mark);
   });
 });

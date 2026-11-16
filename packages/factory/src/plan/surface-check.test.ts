@@ -13,7 +13,10 @@ import { describe, expect, it } from "vitest";
 import { HOST_CAPABILITIES, HOST_CAPABILITY_FIRST_VIEW } from "@musunest/appspec-schema";
 import { createFakeJudge } from "../judge-fake.js";
 import { JudgeBudgetExceededError } from "../judge-budget.js";
-import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest } from "../judge.js";
+import { JevAdapterError } from "../judge-jev.js";
+import { LlmJudgeError } from "../judge-llm.js";
+import { createFallbackJudge, type Judge, type JudgeAnswer, type JudgeQuestion, type JudgeRequest } from "../judge.js";
+import { OpenAiAdapterError, OpenAiIncompleteError } from "../openai.js";
 import { SAMPLE_DOCUMENTS } from "../stages/__tests__/prompt.js";
 import {
   SUPPORT_QUESTION_PREFIX,
@@ -34,6 +37,7 @@ import {
   SURFACE_SUPPORT_QUESTION_PREFIX,
   SURFACE_TRIAGE_ASK_V2,
   SURFACE_TRIAGE_QUESTION_PREFIX,
+  classifyJudgeException,
   runSurfaceCheck,
   surfaceRecheckEvidenceQuestionName,
   surfaceRecheckKindQuestionName,
@@ -946,5 +950,164 @@ describe("実行環境の能力と申告の点検：v3 の材料（Issue #953）
       HOST_CAPABILITIES,
     );
     expect(JSON.stringify(requests[0]?.state)).toContain(JSON.stringify(HOST_CAPABILITY_FIRST_VIEW).slice(1, -1));
+  });
+});
+
+// ── Issue #957：判定の口の例外を、出どころと種類に分けて診断に残す ──────────────
+
+/** いつも同じ例外を投げる偽物（出どころの分類を見る用） */
+const throwingJudge = (error: Error): Judge => ({
+  async judge() {
+    throw error;
+  },
+});
+
+describe("Plan の停止の記録（例外の分類。Issue #957）", () => {
+  it("例外の出どころと種類だけを分類する（Jev・LLM・その他。文と状態コードは持たない）", () => {
+    expect(classifyJudgeException(new JevAdapterError("network", "秘密の文", 500))).toEqual({
+      origin: "jev",
+      kind: "network",
+    });
+    expect(classifyJudgeException(new JevAdapterError("http", "秘密の文", 503))).toEqual({
+      origin: "jev",
+      kind: "http",
+    });
+    expect(classifyJudgeException(new LlmJudgeError("秘密の文"))).toEqual({ origin: "llm", kind: "malformed" });
+    expect(classifyJudgeException(new Error("秘密の文"))).toEqual({ origin: "other", kind: "other" });
+    // 文・状態コード・URL は残さない
+    expect(JSON.stringify([
+      classifyJudgeException(new JevAdapterError("http", "秘密の文", 503)),
+      classifyJudgeException(new LlmJudgeError("秘密の文")),
+      classifyJudgeException(new Error("秘密の文")),
+    ])).not.toContain("秘密の文");
+  });
+
+  it("仕分けだけが例外になる例は、束の申告ごとに出どころと種類を残し、未点検（unknown）のままにする", async () => {
+    const { run } = check(surface(HOLE), {}, { judge: throwingJudge(new JevAdapterError("network", "秘密の文")) });
+    const result = await run;
+    expect(result.unchecked).toEqual([
+      { index: 0, requirementId: "R-1", part: "アプリ自体の名前・説明", code: "unknown" },
+    ]);
+    expect(result.diagnostics[0]).toMatchObject({
+      stage: "triage",
+      classification: "unknown",
+      uncheckedOrigin: "jev",
+      uncheckedKind: "network",
+    });
+  });
+
+  it("裏付けだけが例外になる例は、その束の申告に LLM の adapter の誤りを残す", async () => {
+    const primary = createFakeJudge({ [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9) });
+    let calls = 0;
+    const judge: Judge = {
+      async judge(request: JudgeRequest) {
+        calls += 1;
+        if (Object.keys(request.questions).some((name) => name.startsWith(SURFACE_SUPPORT_QUESTION_PREFIX))) {
+          throw new LlmJudgeError("秘密の文");
+        }
+        return primary.judge(request);
+      },
+    };
+    const { run } = check(surface(HOLE), {}, { judge });
+    const result = await run;
+    expect(calls).toBe(2);
+    expect(result.unchecked.map((entry) => entry.code)).toEqual(["unknown"]);
+    expect(result.diagnostics[0]).toMatchObject({
+      stage: "support",
+      classification: "unknown",
+      uncheckedOrigin: "llm",
+      uncheckedKind: "malformed",
+    });
+  });
+
+  it("再点検だけが例外になる例は、落とし先の例外（種類を持たない）を残す", async () => {
+    // 仕分けは確信度不明で再点検へ回す。落とし先（Luna）が種類を持たない例外を投げる
+    const { run } = check(surface(HOLE), { [surfaceTriageQuestionName(0)]: choice("vocabulary-hole") }, {
+      recheckJudge: throwingJudge(new Error("秘密の文")),
+    });
+    const result = await run;
+    expect(result.unchecked).toHaveLength(1);
+    expect(result.diagnostics[0]).toMatchObject({
+      stage: "recheck",
+      classification: "unknown",
+      uncheckedOrigin: "other",
+      uncheckedKind: "other",
+    });
+  });
+
+  it("予算の印つきの例外は、今までどおり投げ直されて未点検に化けない", async () => {
+    await expect(
+      check(surface(HOLE), {}, { judge: throwingJudge(new JudgeBudgetExceededError(1, 0)) }).run,
+    ).rejects.toBeInstanceOf(JudgeBudgetExceededError);
+  });
+});
+
+// ── Issue #957（直し）：LLM 側の例外の分類。LLM の判定は LlmClient の例外を包まずに投げる ──────────────
+
+describe("Plan の停止の記録（直し）", () => {
+  it("LLM 側の時間切れ・http・未完了を、既存の分類で llm の種類として残す（状態コード・文は残さない）", () => {
+    expect(classifyJudgeException(new OpenAiAdapterError("timeout", "秘密の文"))).toEqual({
+      origin: "llm",
+      kind: "timeout",
+    });
+    expect(classifyJudgeException(new OpenAiAdapterError("http", "秘密の文", 503))).toEqual({
+      origin: "llm",
+      kind: "http",
+    });
+    expect(classifyJudgeException(new OpenAiIncompleteError("max_output_tokens", undefined, "秘密の文"))).toEqual({
+      origin: "llm",
+      kind: "incomplete",
+    });
+    expect(classifyJudgeException(new OpenAiAdapterError("malformed", "秘密の文"))).toEqual({
+      origin: "llm",
+      kind: "malformed",
+    });
+    // 種類を持たない例外は今までどおり
+    expect(classifyJudgeException(new Error("秘密の文"))).toEqual({ origin: "other", kind: "other" });
+    // 文・状態コードは残さない
+    const text = JSON.stringify([
+      classifyJudgeException(new OpenAiAdapterError("http", "秘密の文", 503)),
+      classifyJudgeException(new OpenAiIncompleteError("max_output_tokens", undefined, "秘密の文")),
+    ]);
+    expect(text).not.toContain("秘密の文");
+    expect(text).not.toContain("503");
+    expect(text).not.toContain("max_output_tokens");
+  });
+
+  it("再点検が LLM 側の時間切れで答えたときは、出どころ llm・種類 timeout を残し、未点検のままにする", async () => {
+    const { run } = check(surface(HOLE), { [surfaceTriageQuestionName(0)]: choice("vocabulary-hole") }, {
+      recheckJudge: throwingJudge(new OpenAiAdapterError("timeout", "秘密の文")),
+    });
+    const result = await run;
+    expect(result.unchecked).toEqual([
+      { index: 0, requirementId: "R-1", part: "アプリ自体の名前・説明", code: "unknown" },
+    ]);
+    expect(result.diagnostics[0]).toMatchObject({
+      stage: "recheck",
+      classification: "unknown",
+      uncheckedOrigin: "llm",
+      uncheckedKind: "timeout",
+    });
+    expect(JSON.stringify(result.diagnostics)).not.toContain("秘密の文");
+  });
+
+  it("落とし先（LLM）が HTTP の誤りで終わったときは、最後に受け取った例外の種類を残す", async () => {
+    const judge = createFallbackJudge({
+      primary: throwingJudge(new JevAdapterError("unavailable", "主の文")),
+      fallback: throwingJudge(new OpenAiAdapterError("http", "落とし先の文", 503)),
+    });
+    const { run } = check(surface(HOLE), {}, { judge });
+    const result = await run;
+    expect(result.unchecked.map((entry) => entry.code)).toEqual(["unknown"]);
+    expect(result.diagnostics[0]).toMatchObject({
+      stage: "triage",
+      classification: "unknown",
+      uncheckedOrigin: "llm",
+      uncheckedKind: "http",
+    });
+    const text = JSON.stringify(result.diagnostics);
+    expect(text).not.toContain("主の文");
+    expect(text).not.toContain("落とし先の文");
+    expect(text).not.toContain("503");
   });
 });
