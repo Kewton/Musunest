@@ -2,14 +2,14 @@
 //
 // **実 API は呼ばない。** 記録した応答を返す偽物の LLM で閉じ、Plan の経路と同じ要求・同じ選択で流れる
 // ことを、要求のバイト列で確かめる。採点（保持率・検出率）は持たない。
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AGENT_LIMITS, type AgentLimits } from "../limits.js";
 import { createFakeJudge } from "../judge-fake.js";
-import { makeGateway, createRecordingClient, REQUIREMENT_LIST_OUTPUT, SAMPLE_DOCUMENTS, SOURCE_TEXT } from "../stages/__tests__/prompt.js";
-import { runReverseCheckLoopWithOperation, REVERSE_CHECK_SCHEMA_NAME } from "../stages/reverse-check.js";
+import { createRecordingClient, REQUIREMENT_LIST_OUTPUT, SAMPLE_DOCUMENTS, SOURCE_TEXT } from "../stages/__tests__/prompt.js";
+import { REVERSE_CHECK_SCHEMA_NAME } from "../stages/reverse-check.js";
 import { REQUIREMENTS_SCHEMA_NAME } from "../stages/requirements.js";
 import { structured } from "../__tests__/run.js";
-import { PLAN_REVERSE_CHECK_SELECTIONS, runPlan, type PlanResponder } from "./run-plan.js";
+import { runPlan, type PlanResponder } from "./run-plan.js";
 import {
   PLAN_PROBE_CASES_SCHEMA,
   buildPlanProbeConditions,
@@ -31,6 +31,12 @@ const REQUIREMENTS = REQUIREMENT_LIST_OUTPUT.requirements;
 /** Plan の P1 の応答（決定は空。探針へ渡す一覧と同じにする） */
 const PLAN_LIST_OUTPUT = { ...REQUIREMENT_LIST_OUTPUT, decisions: [] };
 
+/** 枠の文を持つ P1 の応答（P2 の一覧に `framing` が載る） */
+const FRAMED_LIST_OUTPUT = {
+  ...PLAN_LIST_OUTPUT,
+  framing: [{ quote: "タスク", position: { start: 0, end: 3 } }],
+};
+
 /** 引用が原文に無い要件を 1 つ持つ P1 の応答（引用の修復の経路に入る） */
 const BAD_QUOTE_LIST_OUTPUT = {
   ...PLAN_LIST_OUTPUT,
@@ -39,9 +45,9 @@ const BAD_QUOTE_LIST_OUTPUT = {
   ),
 };
 
-/** 引用の修復の応答 */
-const QUOTE_REPAIR_OUTPUT = {
-  repairs: [{ index: 0, quote: "タスクを記録する", position: { start: 0, end: 8 } }],
+/** 修復しても引用が原文に無いままの応答（Plan は requirements の段で確定を止める） */
+const BAD_QUOTE_REPAIR_OUTPUT = {
+  repairs: [{ index: 0, quote: "原文に無い引用", position: { start: 0, end: 8 } }],
 };
 
 function caseSet(source: string, stage: PlanProbeStage, extras: Partial<PlanProbeCaseSet["cases"][number]> = {}): PlanProbeCaseSet {
@@ -60,8 +66,18 @@ function caseSet(source: string, stage: PlanProbeStage, extras: Partial<PlanProb
 }
 
 /** Plan の requirements の段が送る 4 つの要求（P1 → P2 → 作り直しの P1 → P2）の台本 */
-function planScript() {
-  return [structured(PLAN_LIST_OUTPUT), structured({ uncovered: [] }), structured(PLAN_LIST_OUTPUT), structured({ uncovered: [] })];
+function planScript(first: unknown = PLAN_LIST_OUTPUT) {
+  return [structured(first), structured({ uncovered: [] }), structured(PLAN_LIST_OUTPUT), structured({ uncovered: [] })];
+}
+
+/** 引用の修復を通る台本（修復しても引用が無いので、Plan は requirements の段で止まる） */
+function quoteRepairScript() {
+  return [
+    structured(BAD_QUOTE_LIST_OUTPUT),
+    structured({ uncovered: [] }),
+    structured(BAD_QUOTE_REPAIR_OUTPUT),
+    structured({ uncovered: [] }),
+  ];
 }
 
 const responder: PlanResponder = {
@@ -73,8 +89,8 @@ const responder: PlanResponder = {
   },
 };
 
-async function runPlanRequirements(source: string) {
-  const recording = createRecordingClient(planScript());
+async function runPlanRequirements(source: string, calls: ReturnType<typeof planScript> = planScript()) {
+  const recording = createRecordingClient(calls);
   const result = await runPlan({
     source,
     documents: SAMPLE_DOCUMENTS,
@@ -143,6 +159,12 @@ describe("Plan の探針", () => {
     expect(JSON.stringify(probe.requests)).toBe(JSON.stringify([plan.requests[1]]));
   });
 
+  it("p2 の枠の文も、Plan の初回の P2 と同じに渡す", async () => {
+    const plan = await runPlanRequirements(PROBE_SOURCE, planScript(FRAMED_LIST_OUTPUT));
+    const probe = await runProbe("p2", PROBE_SOURCE, { extras: { framing: ["タスク"] } });
+    expect(JSON.stringify(probe.requests)).toBe(JSON.stringify([plan.requests[1]]));
+  });
+
   it("loop の呼び出し列と各要求が、Plan の requirements の段と直列化して byte で同じ", async () => {
     const plan = await runPlanRequirements(PROBE_SOURCE);
     const probe = await runProbe("loop", PROBE_SOURCE);
@@ -150,39 +172,62 @@ describe("Plan の探針", () => {
     expect(JSON.stringify(probe.requests)).toBe(JSON.stringify(plan.requests));
   });
 
-  it("loop の引用の修復の要求も、Plan と同じ選択の往復と直列化して byte で同じ", async () => {
-    const script = () => [
-      structured(BAD_QUOTE_LIST_OUTPUT),
-      structured({ uncovered: [] }),
-      structured(QUOTE_REPAIR_OUTPUT),
-      structured({ uncovered: [] }),
-    ];
-    const planSide = createRecordingClient(script());
-    const outcome = await runReverseCheckLoopWithOperation({
-      source: SOURCE_TEXT,
-      documents: SAMPLE_DOCUMENTS,
-      gateway: makeGateway(planSide.client, { effort: "low" }),
-      ...PLAN_REVERSE_CHECK_SELECTIONS,
-    });
-    expect(outcome.ok).toBe(true);
-    const probe = await runProbe("loop", SOURCE_TEXT, { calls: script() });
-    expect(JSON.stringify(probe.requests)).toBe(JSON.stringify(planSide.structured));
+  it("loop の引用の修復の要求も、本物の Plan の requirements の段と直列化して byte で同じ", async () => {
+    const plan = await runPlanRequirements(SOURCE_TEXT, quoteRepairScript());
+    const probe = await runProbe("loop", SOURCE_TEXT, { calls: quoteRepairScript() });
+    expect(plan.result).toMatchObject({ kind: "cannot-confirm" });
+    expect(JSON.stringify(probe.requests)).toBe(JSON.stringify(plan.requests));
     expect(probe.requests.some((request) => request.schemaName === "requirement-quote-repair")).toBe(true);
   });
 
-  it("探針の側だけが選択を 1 つ欠いた写しを渡す変異で、要求の比較が赤になる", async () => {
+  it("探針の側だけが選択を 1 つ欠いた写しを渡す変異で、p2 と loop の byte 比較が赤になる", async () => {
     const plan = await runPlanRequirements(PROBE_SOURCE);
-    // 探針の代わりの変異（observeConditionFindings を欠いた写し）。P2 の要求が Plan と別物になる
-    const recording = createRecordingClient(planScript());
-    await runReverseCheckLoopWithOperation({
-      source: PROBE_SOURCE,
-      documents: SAMPLE_DOCUMENTS,
-      gateway: makeGateway(recording.client, { effort: "low" }),
-      quoteRepair: true,
-      meaningRule: true,
-      keepValidProvenance: true,
+    vi.resetModules();
+    vi.doMock("./run-plan.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("./run-plan.js")>();
+      return {
+        ...actual,
+        // 探針の側だけが欠いた写しを使う変異（Plan の経路は本物の定数のまま）
+        PLAN_REVERSE_CHECK_SELECTIONS: { ...actual.PLAN_REVERSE_CHECK_SELECTIONS, observeConditionFindings: false },
+      };
     });
-    expect(JSON.stringify(recording.structured[1])).not.toBe(JSON.stringify(plan.requests[1]));
+    try {
+      const mutated = await import("./probe.js");
+      const p2Calls = createRecordingClient([structured({ uncovered: [] })]);
+      const p2 = await mutated.runPlanProbe({
+        stage: "p2",
+        cases: caseSet(PROBE_SOURCE, "p2"),
+        documents: SAMPLE_DOCUMENTS,
+        client: p2Calls.client,
+        budgetUsd: 10,
+        deadline: 60_000,
+        now: () => 0,
+        rates: RATES,
+        effort: "low",
+        repeat: 1,
+      });
+      expect(p2.runs[0]?.state).toBe("ok");
+      expect(JSON.stringify(p2Calls.structured)).not.toBe(JSON.stringify([plan.requests[1]]));
+
+      const loopCalls = createRecordingClient(planScript());
+      const loop = await mutated.runPlanProbe({
+        stage: "loop",
+        cases: caseSet(PROBE_SOURCE, "loop"),
+        documents: SAMPLE_DOCUMENTS,
+        client: loopCalls.client,
+        budgetUsd: 10,
+        deadline: 60_000,
+        now: () => 0,
+        rates: RATES,
+        effort: "low",
+        repeat: 1,
+      });
+      expect(loop.runs[0]?.state).toBe("ok");
+      expect(JSON.stringify(loopCalls.structured)).not.toBe(JSON.stringify(plan.requests));
+    } finally {
+      vi.doUnmock("./run-plan.js");
+      vi.resetModules();
+    }
   });
 
   // ── 段の外を呼ばない ────────────────────────────────────────────────
@@ -215,6 +260,31 @@ describe("Plan の探針", () => {
     expect(names.every((name) => name === REQUIREMENTS_SCHEMA_NAME || name === REVERSE_CHECK_SCHEMA_NAME)).toBe(true);
     expect(names).toContain(REQUIREMENTS_SCHEMA_NAME);
     expect(names).toContain(REVERSE_CHECK_SCHEMA_NAME);
+  });
+
+  // ── 門は回ごと（Plan の 1 回の走りに当たる）────────────────────────
+
+  it("門と口を回ごとに作り直すので、loop を 7 回流しても呼び出しの上限で止まらない", async () => {
+    const probe = await runProbe("loop", PROBE_SOURCE, {
+      calls: Array.from({ length: 7 }, () => planScript()).flat(),
+      repeat: 7,
+    });
+    expect(probe.result.runs.map((run) => run.state)).toEqual(Array.from({ length: 7 }, () => "ok"));
+    expect(probe.result.summary).toMatchObject({ planned: 7, completed: 7, failed: 0, not_run: 0 });
+    expect(probe.result.runs.every((run) => run.calls === 4 && run.stage_calls === 4)).toBe(true);
+  });
+
+  it("呼び出しの上限は回ごとに 0 から数え、1 回で超えた回だけ failed / call-limit にする", async () => {
+    const probe = await runProbe("loop", PROBE_SOURCE, {
+      calls: [...planScript(), ...planScript()],
+      repeat: 2,
+      limits: { ...AGENT_LIMITS, callCount: 3 },
+    });
+    expect(probe.result.runs.map((run) => [run.state, run.stop_reason, run.calls])).toEqual([
+      ["failed", "call-limit", 3],
+      ["failed", "call-limit", 3],
+    ]);
+    expect(probe.result.summary).toMatchObject({ completed: 0, failed: 2, not_run: 0 });
   });
 
   // ── 組の検査（呼び出し 0 回）────────────────────────────────────────
@@ -341,22 +411,50 @@ describe("Plan の探針", () => {
     ]);
     expect(withRanges.result.runs[0]?.state).toBe(withoutRanges.result.runs[0]?.state);
     expect(withRanges.result.summary).toEqual(withoutRanges.result.summary);
-    expect(observePlanProbeOverlaps(undefined, null, null)).toEqual([]);
+    expect(observePlanProbeOverlaps(undefined, null, null, "ok")).toBeNull();
+  });
+
+  it("一覧が無い回の重なりは null、状態が ok でない回の断片は null（0 件と混ぜない）", async () => {
+    const failedP2 = await runProbe("p2", PROBE_SOURCE, {
+      calls: [structured({}), structured({})],
+      extras: { ranges: [{ id: "r-1", start: 0, end: 8 }] },
+    });
+    expect(failedP2.result.runs[0]?.state).toBe("failed");
+    expect(failedP2.result.runs[0]?.overlaps).toEqual([
+      { range_id: "r-1", requirement_ids: ["R-1"], remaining_fragments: null },
+    ]);
+
+    const failedLoop = await runProbe("loop", PROBE_SOURCE, {
+      calls: [structured({}), structured({})],
+      extras: { ranges: [{ id: "r-1", start: 0, end: 8 }] },
+    });
+    expect(failedLoop.result.runs[0]?.state).toBe("failed");
+    expect(failedLoop.result.runs[0]?.list).toBeNull();
+    expect(failedLoop.result.runs[0]?.overlaps).toBeNull();
+
+    const notRun = await runProbe("p1", PROBE_SOURCE, {
+      calls: [],
+      budgetUsd: 0.0000001,
+      extras: { ranges: [{ id: "r-1", start: 0, end: 8 }] },
+    });
+    expect(notRun.result.runs[0]?.state).toBe("not-run");
+    expect(notRun.result.runs[0]?.overlaps).toBeNull();
   });
 
   // ── 未実行と失敗を 0 にしない ────────────────────────────────────────
 
   it("予算切れ・締切・呼び出しの上限・形の失敗で、状態と停止の理由が分かれ、後続が not-run になる", async () => {
     const budget = await runProbe("p1", SOURCE_TEXT, { calls: [], budgetUsd: 0.0000001, repeat: 2 });
-    expect(budget.result.runs.map((run) => [run.state, run.stop_reason])).toEqual([
-      ["failed", "budget"],
-      ["not-run", "budget"],
+    // 1 回も呼ばずに予算で断った回は `not-run`（呼んでから止まった回は `failed`）
+    expect(budget.result.runs.map((run) => [run.state, run.stop_reason, run.calls])).toEqual([
+      ["not-run", "budget", 0],
+      ["not-run", "budget", 0],
     ]);
-    expect(budget.result.summary).toMatchObject({ completed: 0, failed: 1, not_run: 1 });
+    expect(budget.result.summary).toMatchObject({ completed: 0, failed: 0, not_run: 2 });
 
     const deadline = await runProbe("p1", SOURCE_TEXT, { calls: [], deadline: 0, repeat: 2 });
     expect(deadline.result.runs.map((run) => [run.state, run.stop_reason])).toEqual([
-      ["failed", "deadline"],
+      ["not-run", "deadline"],
       ["not-run", "deadline"],
     ]);
 
@@ -365,9 +463,9 @@ describe("Plan の探針", () => {
       repeat: 2,
       limits: { ...AGENT_LIMITS, callCount: 0 },
     });
-    expect(limit.result.runs.map((run) => [run.state, run.stop_reason])).toEqual([
-      ["failed", "call-limit"],
-      ["not-run", "call-limit"],
+    expect(limit.result.runs.map((run) => [run.state, run.stop_reason, run.calls])).toEqual([
+      ["not-run", "call-limit", 0],
+      ["not-run", "call-limit", 0],
     ]);
 
     const malformed = await runProbe("p1", SOURCE_TEXT, {
@@ -410,6 +508,7 @@ describe("Plan の探針", () => {
       stage: "loop",
       cases,
       caseSetSha256: "case-set-sha",
+      caseFileSha256: "case-file-sha",
       documents: SAMPLE_DOCUMENTS,
       sourceSha256: { "case-1": "source-sha" },
       provider: "openai",
@@ -422,6 +521,7 @@ describe("Plan の探針", () => {
       rates: RATES,
     });
     expect(conditions.case_set_sha256).toBe("case-set-sha");
+    expect(conditions.case_file_sha256).toBe("case-file-sha");
     expect(conditions.documents.map((document) => document.name)).toEqual(SAMPLE_DOCUMENTS.map((document) => document.name));
     expect(conditions.documents.every((document) => document.bytes > 0 && document.sha256 !== "")).toBe(true);
     expect(JSON.stringify(conditions)).not.toContain(SAMPLE_DOCUMENTS[0]?.text ?? "");

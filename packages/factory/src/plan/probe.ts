@@ -7,8 +7,10 @@
 // `runReverseCheckLoopWithOperation` を、Plan の経路と同じ引数・同じ選択
 // （`PLAN_REVERSE_CHECK_SELECTIONS`）で呼ぶ。ここに写しを置くと、Plan が選択を足したときに古い写しを送る。
 //
-// 予算・締切・呼び出しの上限は 1 つの共通の口と 1 つの予算で守り、逐次に流す。1 回でも止まったら残りは
-// `not-run` にする。usage が分からない回は予約を戻さず、後続も止める。
+// 予算・usage は起動の全体で 1 つを共有し、門（呼び出しの上限）と共通の口は**回ごとに作り直す**。
+// 締切は起動の全体の絶対時刻である。1 回も呼ばずに断った回は `not-run`、呼んでから止まった回は `failed`。
+// 予算・締切・usage 不明など起動の全体に効く理由では後続も `not-run` にし、回ごとの呼び出しの上限では
+// 後続を止めない。
 import { JobBudget, type TokenRates } from "../budget.js";
 import {
   CallGateway,
@@ -19,7 +21,7 @@ import {
 import { sha256Hex } from "../cli-plan.js";
 import { AGENT_LIMITS, type AgentLimits } from "../limits.js";
 import type { LlmClient, LlmStructuredRequest } from "../llm.js";
-import type { Requirement, RequirementList } from "../pipeline.js";
+import type { Framing, Requirement, RequirementList } from "../pipeline.js";
 import { UsageMeter, usageDelta, type UsageSnapshot } from "../record.js";
 import { decideQuotePosition, runRequirements } from "../stages/requirements.js";
 import {
@@ -67,6 +69,8 @@ export interface PlanProbeCase {
   readonly source: string;
   readonly requirements?: readonly PlanProbeRequirement[];
   readonly ranges?: readonly PlanProbeRange[];
+  /** `p2` の一覧に付ける枠の文（原文からそのまま写した文字列。無ければ `[]`） */
+  readonly framing?: readonly string[];
 }
 
 /** 題材の組（JSON 1 本） */
@@ -93,6 +97,7 @@ export const PLAN_PROBE_CASE_ERROR_CODES = [
   "probe-cases:missing-requirements",
   "probe-cases:coverage",
   "probe-cases:reposition",
+  "probe-cases:framing",
 ] as const;
 export type PlanProbeCaseErrorCode = (typeof PLAN_PROBE_CASE_ERROR_CODES)[number];
 
@@ -183,11 +188,26 @@ function readCase(value: unknown): PlanProbeCase | { readonly code: PlanProbeCas
       ranges.push({ id: rangeId, start, end });
     }
   }
+  const rawFraming = value["framing"];
+  let framing: string[] | undefined;
+  if (rawFraming !== undefined) {
+    if (!Array.isArray(rawFraming)) {
+      return { code: "probe-cases:shape", error: "枠の文の一覧は並び（array）であること" };
+    }
+    framing = [];
+    for (const item of rawFraming) {
+      if (typeof item !== "string" || item === "") {
+        return { code: "probe-cases:shape", error: "枠の文は空でない文字列であること" };
+      }
+      framing.push(item);
+    }
+  }
   return {
     id,
     source,
     ...(requirements === undefined ? {} : { requirements }),
     ...(ranges === undefined ? {} : { ranges }),
+    ...(framing === undefined ? {} : { framing }),
   };
 }
 
@@ -224,6 +244,11 @@ function checkCaseForStage(
       decided.end !== requirement.position.end
     ) {
       return { code: "probe-cases:reposition", error: "p2 の一覧の位置を、コードの検査が決め直します" };
+    }
+  }
+  for (const quote of probeCase.framing ?? []) {
+    if (decideQuotePosition(probeCase.source, quote, { start: 0, end: 0 }) === undefined) {
+      return { code: "probe-cases:framing", error: "p2 の枠の文が、原文の中で 1 か所に決まりません" };
     }
   }
   return null;
@@ -364,7 +389,8 @@ export interface PlanProbeListRecord {
 export interface PlanProbeOverlap {
   readonly range_id: string;
   readonly requirement_ids: readonly string[];
-  readonly remaining_fragments: readonly { readonly start: number; readonly end: number }[];
+  /** 残った断片。状態が `ok` でない、または P2 が無い回は観測できないので `null` */
+  readonly remaining_fragments: readonly { readonly start: number; readonly end: number }[] | null;
 }
 
 /** 1 回ごとの記録（`--out` の `run-NNNN.json`） */
@@ -374,7 +400,7 @@ export interface PlanProbeRunRecord {
   readonly case_id: string;
   readonly run: number;
   readonly state: PlanProbeRunState;
-  /** その回のあとに後続を止めた理由（止めていなければ `null`） */
+  /** その回で止まった理由（止まらずに終われば `null`。後続を止めたかは理由の種類で決まる） */
   readonly stop_reason: PlanProbeStopReason | null;
   readonly source_sha256: string;
   /** 送った要求 1 つずつの SHA-256（送った順） */
@@ -387,18 +413,26 @@ export interface PlanProbeRunRecord {
   readonly trace: unknown;
   /** 落ちの内訳（往復が無ければ `null`） */
   readonly diagnosis: ReverseCheckDiagnosis | null;
-  /** 形のやり直しを除いた段の呼び出しの数 */
+  /**
+   * 段の呼び出しの数。**Plan の記録の `calls` と同じなのは `calls` のほう**で、こちらは
+   * `calls` から形のやり直しの数（`shape_retries`）を引いた値である。**通信の再試行は除かない**
+   * ——usage の数え方のままで、1 回の論理呼び出しが再送で複数回に数えられうる。
+   */
   readonly stage_calls: number;
-  /** 形のやり直しの数（段の呼び出しとは別に数える） */
+  /** 形のやり直しの数（`stage_calls` と `calls` の差。段の呼び出しとは別に数える） */
   readonly shape_retries: number;
-  /** 共通の口が見た実開始試行の数 */
+  /**
+   * **Plan の記録の `calls` と同じ欄**。usage が見た呼び出しの数で、形のやり直しと
+   * 通信の再試行を**どちらも含む**（`usageDelta(...).calls` と同じ数え方）。
+   */
   readonly calls: number;
   readonly usage: UsageSnapshot;
   readonly cost_usd: number;
   /** usage が返らず、予約が戻らなかったか */
   readonly usage_unknown: boolean;
   readonly failure: PlanProbeFailureRecord | null;
-  readonly overlaps: readonly PlanProbeOverlap[];
+  /** 範囲の重なりの観測。一覧が無い回は `null` */
+  readonly overlaps: readonly PlanProbeOverlap[] | null;
 }
 
 /** 集計の 1 件（題材ごと） */
@@ -436,6 +470,8 @@ export interface PlanProbeConditions {
   readonly stage: PlanProbeStage;
   readonly cases_version: string;
   readonly case_set_sha256: string;
+  /** 題材の組のファイルのバイト列の SHA-256 */
+  readonly case_file_sha256: string;
   readonly documents: readonly { readonly name: string; readonly bytes: number; readonly sha256: string }[];
   readonly sources: readonly { readonly case_id: string; readonly sha256: string }[];
   readonly provider: string;
@@ -565,20 +601,26 @@ function overlaps(left: { readonly start: number; readonly end: number }, right:
 
 /**
  * 範囲ごとの重なりを観測する（**合否ではない**）。範囲に重なる要件の ID と、P2 の残った断片を機械的に返す。
- * 重なりの有無で、状態・集計は変えない。
+ * 一覧が無い回は `null`（観測していない）。状態が `ok` でない回、または P2 が無い回は、断片を `null` にする
+ * ——「残った断片が 0 件」と「観測できなかった」を混ぜない。重なりの有無で、状態・集計は変えない。
  */
 export function observePlanProbeOverlaps(
   ranges: readonly PlanProbeRange[] | undefined,
   list: RequirementList | null,
   p2: PlanProbeP2Record | null,
-): readonly PlanProbeOverlap[] {
-  if (ranges === undefined || list === null) return [];
+  state: PlanProbeRunState,
+): readonly PlanProbeOverlap[] | null {
+  if (list === null) return null;
+  if (ranges === undefined) return [];
+  const observed = state === "ok" && p2 !== null;
   return ranges.map((range) => {
     const requirementIds = list.requirements
       .filter((requirement) => overlaps(requirement.position, range))
       .map((requirement) => requirement.id);
-    const fragments = (p2?.remaining_fragments ?? []).filter((fragment) => overlaps(fragment, range));
-    return { range_id: range.id, requirement_ids: requirementIds, remaining_fragments: fragments };
+    const remainingFragments = !observed
+      ? null
+      : p2.remaining_fragments.filter((fragment) => overlaps(fragment, range));
+    return { range_id: range.id, requirement_ids: requirementIds, remaining_fragments: remainingFragments };
   });
 }
 
@@ -617,6 +659,15 @@ interface StageRunOutcome {
   readonly stopReason: PlanProbeStopReason | null;
 }
 
+/** 題材の枠の文を、原文の中の 1 か所の位置へ決める（流す前の検査が決まることを保証する） */
+function framingOf(probeCase: PlanProbeCase): readonly Framing[] {
+  return (probeCase.framing ?? []).map((quote) => {
+    const position = decideQuotePosition(probeCase.source, quote, { start: 0, end: 0 });
+    if (position === undefined) throw new RangeError("枠の文の位置が 1 か所に決まりません");
+    return { quote, position };
+  });
+}
+
 /**
  * 題材 1 件を 1 回流す（段に依らず、同じ共通の口を使う）。**Plan の経路と同じ関数・同じ選択**を呼ぶ。
  */
@@ -638,7 +689,8 @@ async function runStage(
   }
   if (input.stage === "p2") {
     // P1 の正規化が付ける欄（`framing`・`positionCorrections`）まで同じ順で組み、Plan の初回の P2 へ
-    // 渡る一覧とバイト列で同じにする（Issue #956）。要件は渡された一覧のまま送る。
+    // 渡る一覧とバイト列で同じにする（Issue #956）。要件は渡された一覧のまま送り、枠の文は原文の中の
+    // 1 か所に決まる位置を付ける（`validatePlanProbeCaseSet` が流す前に確かめる）。
     const list: RequirementList = {
       requirements: (probeCase.requirements ?? []).map(
         (requirement): Requirement => ({
@@ -648,7 +700,7 @@ async function runStage(
           position: { start: requirement.position.start, end: requirement.position.end },
         }),
       ),
-      framing: [],
+      framing: framingOf(probeCase),
       decisions: [],
       unresolved: [],
       positionCorrections: 0,
@@ -702,33 +754,38 @@ async function runStage(
   };
 }
 
+/** 題材の組の SHA-256（条件の記録に載せる。`case_set_sha256`） */
+export function planProbeCaseSetSha256(cases: PlanProbeCaseSet): Promise<string> {
+  return sha256Hex(serializeJson(cases));
+}
+
+/** 題材ごとの原文の SHA-256（条件の記録に載せる） */
+export async function planProbeSourceSha256(cases: PlanProbeCaseSet): Promise<Record<string, string>> {
+  const sha256: Record<string, string> = {};
+  for (const probeCase of cases.cases) {
+    sha256[probeCase.id] = await sha256Hex(probeCase.source);
+  }
+  return sha256;
+}
+
 /**
- * 探針の本体（Issue #956）。1 つの予算・1 つの門・1 つの共通の口を、起動の全体で共有し、**逐次に**流す。
- * 1 回でも止まったら残りを `not-run` にし、usage が分からない回は予約を戻さずに後続を止める。
+ * 探針の本体（Issue #956）。予算・usage・記録の包みは起動の全体で 1 つを共有し、**逐次に**流す。
+ * 門（呼び出しの上限）と `CallGateway` は**回ごとに作り直す**——1 回は 1 つの Plan の走りに当たるので、
+ * 呼び出しの上限も回ごとに数え直す。締切は起動の全体の絶対時刻で、回を始める前に過ぎていれば、その回と
+ * 残りを `not-run` にする。
+ *
+ * 状態は、1 回も呼ばずに予算・締切・呼び出しの上限で断った回を `not-run`、1 回でも呼んでから止まった回を
+ * `failed`、止まらずに終わった回を `ok` とする。後続を止めるのは、起動の全体に効く理由（予算・締切・
+ * usage 不明と、その他の失敗）だけである。呼び出しの上限は回ごとなので後続を止めない。
  */
 export async function runPlanProbe(input: PlanProbeInput): Promise<PlanProbeResult> {
   const limits = input.limits ?? AGENT_LIMITS;
   const meter = new UsageMeter();
   const budget = new JobBudget(input.budgetUsd);
-  const gate = createCallGate({ now: input.now, deadline: input.deadline, limit: limits.callCount });
   const recorder = createRequestRecorder(meter.wrap(input.client));
-  const gateway = new CallGateway({
-    client: recorder.client,
-    budget,
-    rates: input.rates,
-    now: input.now,
-    deadline: input.deadline,
-    limits,
-    effort: input.effort,
-    gate,
-    ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
-  });
 
   const runs: PlanProbeRunRecord[] = [];
-  const sourceSha256: Record<string, string> = {};
-  for (const probeCase of input.cases.cases) {
-    sourceSha256[probeCase.id] = await sha256Hex(probeCase.source);
-  }
+  const sourceSha256 = await planProbeSourceSha256(input.cases);
   let stopped: PlanProbeStopReason | null = null;
   for (const probeCase of input.cases.cases) {
     for (let run = 1; run <= input.repeat; run += 1) {
@@ -738,6 +795,29 @@ export async function runPlanProbe(input: PlanProbeInput): Promise<PlanProbeResu
         await input.onRun?.(record);
         continue;
       }
+      // 締切は起動の全体のもの。回を始める前に過ぎていれば、この回も残りも `not-run` にする。
+      if (input.now() >= input.deadline) {
+        stopped = "deadline";
+        const record = notRunRecord(input, probeCase, run, stopped, sourceSha256[probeCase.id] ?? "");
+        runs.push(record);
+        await input.onRun?.(record);
+        continue;
+      }
+
+      // 門と口は回ごとに作り直す（予算・usage・記録の包みは起動の全体で共有する）。
+      const gate = createCallGate({ now: input.now, deadline: input.deadline, limit: limits.callCount });
+      const gateway = new CallGateway({
+        client: recorder.client,
+        budget,
+        rates: input.rates,
+        now: input.now,
+        deadline: input.deadline,
+        limits,
+        effort: input.effort,
+        gate,
+        ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
+      });
+
       const beforeUsage = meter.snapshot;
       const beforeCounts: CallCounts = gateway.counts;
       const beforeRequests = recorder.requests.length;
@@ -763,13 +843,17 @@ export async function runPlanProbe(input: PlanProbeInput): Promise<PlanProbeResu
       const usageUnknown = hasUnsettledReservation(beforeReserved, budget.reservedUsd);
       const list = outcome.list;
       const p2 = outcome.p2;
+      /** 1 回も呼ばずに断った回は `not-run`、1 回でも呼んでから止まった回は `failed` */
+      const state: PlanProbeRunState =
+        outcome.failure === null ? "ok" : calls.attempts.started === 0 ? "not-run" : "failed";
+      const stopReason = outcome.stopReason ?? (usageUnknown ? "usage-unknown" : null);
       const record: PlanProbeRunRecord = {
         schema_version: PLAN_PROBE_RUN_SCHEMA,
         stage: input.stage,
         case_id: probeCase.id,
         run,
-        state: outcome.failure === null ? "ok" : "failed",
-        stop_reason: outcome.stopReason ?? (usageUnknown ? "usage-unknown" : null),
+        state,
+        stop_reason: stopReason,
         source_sha256: sourceSha256[probeCase.id] ?? "",
         request_sha256: await Promise.all(
           recorder.requests.slice(beforeRequests).map((request) => sha256Hex(JSON.stringify(request))),
@@ -779,25 +863,26 @@ export async function runPlanProbe(input: PlanProbeInput): Promise<PlanProbeResu
         p2,
         trace: outcome.trace ?? null,
         diagnosis: outcome.diagnosis,
-        stage_calls: Math.max(0, recorder.requests.length - beforeRequests - calls.retries.shape),
+        stage_calls: Math.max(0, usage.calls - calls.retries.shape),
         shape_retries: calls.retries.shape,
-        calls: calls.attempts.started,
+        calls: usage.calls,
         usage,
         cost_usd: budget.spentUsd - beforeSpent,
         usage_unknown: usageUnknown,
         failure: outcome.failure,
-        overlaps: observePlanProbeOverlaps(probeCase.ranges, list, p2),
+        overlaps: observePlanProbeOverlaps(probeCase.ranges, list, p2, state),
       };
       runs.push(record);
       await input.onRun?.(record);
-      if (record.stop_reason !== null) stopped = record.stop_reason;
+      // 呼び出しの上限は回ごとの門なので、その失敗は後続を止めない（次の回は 0 から数える）。
+      if (stopReason !== null && stopReason !== "call-limit") stopped = stopReason;
     }
   }
 
   return {
     runs,
     summary: buildPlanProbeSummary(input, runs, budget),
-    caseSetSha256: await sha256Hex(serializeJson(input.cases)),
+    caseSetSha256: await planProbeCaseSetSha256(input.cases),
     sourceSha256,
   };
 }
@@ -839,7 +924,7 @@ function notRunRecord(
     cost_usd: 0,
     usage_unknown: false,
     failure: null,
-    overlaps: [],
+    overlaps: null,
   };
 }
 
@@ -889,6 +974,7 @@ export async function buildPlanProbeConditions(input: {
   readonly stage: PlanProbeStage;
   readonly cases: PlanProbeCaseSet;
   readonly caseSetSha256: string;
+  readonly caseFileSha256: string;
   readonly documents: readonly PromptDocument[];
   readonly sourceSha256: Readonly<Record<string, string>>;
   readonly provider: string;
@@ -905,6 +991,7 @@ export async function buildPlanProbeConditions(input: {
     stage: input.stage,
     cases_version: input.cases.cases_version,
     case_set_sha256: input.caseSetSha256,
+    case_file_sha256: input.caseFileSha256,
     documents: await Promise.all(
       input.documents.map(async (document) => ({
         name: document.name,
