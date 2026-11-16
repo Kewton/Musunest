@@ -30,11 +30,14 @@ import type { PromptDocument } from "./stages/prompt.js";
 import {
   buildPlanProbeConditions,
   parsePlanProbeCases,
+  planProbeCaseSetSha256,
+  planProbeSourceSha256,
   runPlanProbe,
   validatePlanProbeCaseSet,
   PLAN_PROBE_STAGES,
   type PlanProbeStage,
 } from "./plan/probe.js";
+import { sha256Hex } from "./cli-plan.js";
 import { DEFAULT_OLLAMA_MODEL } from "./ollama.js";
 import { DEFAULT_OPENAI_MODEL } from "./openai.js";
 import { DEFAULT_OPENROUTER_MODEL } from "./openrouter.js";
@@ -259,7 +262,38 @@ export async function runPlanProbeCli(deps: PlanProbeCliDeps): Promise<number> {
     ...(parsed.provider === undefined ? {} : { provider: parsed.provider }),
   });
 
-  await deps.makeDirectory(parsed.outDir);
+  try {
+    // 親は既存であることを要する（recursive にしない）。既にあれば `EEXIST` で断る。
+    await deps.makeDirectory(parsed.outDir);
+  } catch (error) {
+    const code = (error as { readonly code?: unknown }).code;
+    log(
+      code === "EEXIST"
+        ? `使い方の誤り: 出力先 ${parsed.outDir} は既にあります（新しいディレクトリだけを受けます）`
+        : `使い方の誤り: 出力先 ${parsed.outDir} を作れません`,
+    );
+    return EXIT_USAGE;
+  }
+
+  // 条件は**流す前**に書く（回の途中で止まっても、何を流したかが残る）。集計は最後に書く。
+  const conditions = await buildPlanProbeConditions({
+    stage: parsed.stage,
+    cases: parsedCases.cases,
+    caseSetSha256: await planProbeCaseSetSha256(parsedCases.cases),
+    caseFileSha256: await sha256Hex(text),
+    documents,
+    sourceSha256: await planProbeSourceSha256(parsedCases.cases),
+    provider,
+    model: parsed.model,
+    effort: parsed.effort,
+    repeat: parsed.repeat,
+    budgetUsd,
+    deadlineMs,
+    limits,
+    rates,
+  });
+  await deps.writeFile(joinPath(parsed.outDir, "conditions.json"), JSON.stringify(conditions));
+
   let completedOrder = 0;
   const result = await runPlanProbe({
     stage: parsed.stage,
@@ -279,22 +313,6 @@ export async function runPlanProbeCli(deps: PlanProbeCliDeps): Promise<number> {
     },
   });
 
-  const conditions = await buildPlanProbeConditions({
-    stage: parsed.stage,
-    cases: parsedCases.cases,
-    caseSetSha256: result.caseSetSha256,
-    documents,
-    sourceSha256: result.sourceSha256,
-    provider,
-    model: parsed.model,
-    effort: parsed.effort,
-    repeat: parsed.repeat,
-    budgetUsd,
-    deadlineMs,
-    limits,
-    rates,
-  });
-  await deps.writeFile(joinPath(parsed.outDir, "conditions.json"), JSON.stringify(conditions));
   await deps.writeFile(joinPath(parsed.outDir, "summary.json"), JSON.stringify(result.summary));
 
   log(
@@ -323,7 +341,7 @@ interface NodeProcess {
 interface NodeFs {
   readFile(path: string, encoding: "utf8"): Promise<string>;
   writeFile(path: string, data: string, encoding: "utf8"): Promise<void>;
-  mkdir(path: string, options: { recursive: true }): Promise<string | undefined>;
+  mkdir(path: string): Promise<string | undefined>;
   stat(path: string): Promise<unknown>;
 }
 
@@ -348,7 +366,8 @@ export async function nodePlanProbeDeps(proc: NodeProcess): Promise<PlanProbeCli
     readFile: (path) => fs.readFile(path, "utf8"),
     writeFile: (path, text) => fs.writeFile(path, text, "utf8"),
     makeDirectory: async (path) => {
-      await fs.mkdir(path, { recursive: true });
+      // 親は既存であることを要する。既にある出力先は `EEXIST` で断る（recursive にしない）。
+      await fs.mkdir(path);
     },
     pathExists: async (path) => {
       try {

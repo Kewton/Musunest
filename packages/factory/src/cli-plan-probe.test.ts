@@ -16,6 +16,7 @@ import {
 } from "./plan/probe.js";
 import { createRecordingClient, REQUIREMENT_LIST_OUTPUT, SAMPLE_DOCUMENTS, SOURCE_TEXT } from "./stages/__tests__/prompt.js";
 import { structured } from "./__tests__/run.js";
+import { sha256Hex } from "./cli-plan.js";
 
 const SECRET = "sk-SECRET-SENTINEL-956";
 
@@ -33,6 +34,8 @@ interface Harness {
   readonly written: { readonly path: string; readonly text: string }[];
   readonly directories: string[];
   readonly clientOptions: { readonly apiKey: string; readonly model: string; readonly effort: string }[];
+  /** 書いた・作った・呼んだの順（条件を流す前に書いたことを見る） */
+  readonly events: string[];
 }
 
 function harness(options: {
@@ -41,12 +44,14 @@ function harness(options: {
   readonly exists?: ReadonlySet<string>;
   readonly calls?: ReturnType<typeof structured>[];
   readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly makeDirectoryError?: { readonly code: string };
 } = {}): Harness {
   const casesPath = "cases.json";
   const reads: string[] = [];
   const written: { path: string; text: string }[] = [];
   const directories: string[] = [];
   const clientOptions: { apiKey: string; model: string; effort: string }[] = [];
+  const events: string[] = [];
   const recording = createRecordingClient(options.calls ?? [structured(REQUIREMENT_LIST_OUTPUT)]);
   const deps: PlanProbeCliDeps = {
     argv:
@@ -60,19 +65,30 @@ function harness(options: {
     },
     writeFile: async (path, text) => {
       written.push({ path, text });
+      events.push(`write:${path}`);
     },
     makeDirectory: async (path) => {
+      if (options.makeDirectoryError !== undefined) {
+        throw Object.assign(new Error("cannot create"), options.makeDirectoryError);
+      }
       directories.push(path);
+      events.push(`mkdir:${path}`);
     },
     pathExists: async (path) => options.exists?.has(path) ?? false,
     loadDocuments: async () => SAMPLE_DOCUMENTS,
     makeClient: (client) => {
       clientOptions.push({ apiKey: client.apiKey, model: client.model, effort: client.effort });
-      return recording.client;
+      return {
+        callStructured: async (request) => {
+          events.push("call");
+          return recording.client.callStructured(request);
+        },
+        callWithTools: (request) => recording.client.callWithTools(request),
+      };
     },
     log: () => undefined,
   };
-  return { deps, reads, written, directories, clientOptions };
+  return { deps, reads, written, directories, clientOptions, events };
 }
 
 function writtenNamed(harnessResult: Harness, name: string): string | undefined {
@@ -139,6 +155,26 @@ describe("Plan の探針の入口", () => {
     );
     const summary = JSON.parse(writtenNamed(run, "summary.json") ?? "null");
     expect(summary).toMatchObject({ schema_version: PLAN_PROBE_SUMMARY_SCHEMA, planned: 1, completed: 1 });
+  });
+
+  it("条件のファイルを流す前に書き、題材の組のファイルの SHA も残す", async () => {
+    const run = harness();
+    expect(await runPlanProbeCli(run.deps)).toBe(EXIT_OK);
+    const conditions = JSON.parse(writtenNamed(run, "conditions.json") ?? "null");
+    expect(conditions.case_file_sha256).toBe(await sha256Hex(casesText()));
+    expect(conditions.case_set_sha256).toEqual(expect.any(String));
+    const conditionsAt = run.events.indexOf("write:out/conditions.json");
+    const firstCall = run.events.indexOf("call");
+    expect(conditionsAt).toBeGreaterThanOrEqual(0);
+    expect(firstCall).toBeGreaterThan(conditionsAt);
+    expect(run.events.at(-1)).toBe("write:out/summary.json");
+  });
+
+  it("出力先を作れないとき（既にある）は、呼ばず・書かずに使い方の誤りで終わる", async () => {
+    const run = harness({ makeDirectoryError: { code: "EEXIST" } });
+    expect(await runPlanProbeCli(run.deps)).toBe(EXIT_USAGE);
+    expect(run.events).not.toContain("call");
+    expect(run.written).toEqual([]);
   });
 
   it("鍵と環境変数の値の目印文字列を、条件・回・集計のファイルに書かない", async () => {
