@@ -18,7 +18,8 @@
     "lint": "oxlint src",
     "test": "vitest run --passWithNoTests",
     "factory:run": "node dist/cli.js",
-    "factory:judge-claims": "node dist/cli-claims.js"
+    "factory:judge-claims": "node dist/cli-claims.js",
+    "factory:plan-probe": "node dist/cli-plan-probe.js"
   },
   "dependencies": {
     "@musunest/appspec-schema": "workspace:*",

@@ -12,6 +12,7 @@ import { sha256Hex } from "@musunest/spec-engine";
 import {
   API_KEY_ENV,
   DEFAULT_BUDGET_USD,
+  type LlmClientFactories,
   DEFAULT_DEADLINE_MS,
   DEFAULT_RATES,
   EXIT_OK,
@@ -33,6 +34,7 @@ import {
   VOCABULARY_VERSION,
   USAGE,
   apiKeyEnvOf,
+  makeLlmClient,
   parseCliArguments,
   parseStageEfforts,
   ratesOf,
@@ -9994,5 +9996,41 @@ describe("差分の洗い出しの関係の trace を、実走の --out に置�
     ]);
     expect(record.issue_flow[1]?.relation_check_failed).toBe(1);
     expect(record).not.toHaveProperty("surface_relation_trace");
+  });
+});
+
+describe("入口の client の組み立て（Issue #956）", () => {
+  it("provider ごとに作られる client と渡る設定が同じ", () => {
+    const fake: LlmClient = {
+      async callStructured() {
+        throw new Error("unused");
+      },
+      async callWithTools() {
+        throw new Error("unused");
+      },
+    };
+    const seen: { readonly name: string; readonly options: Record<string, unknown> }[] = [];
+    const factoryOf = (name: string) => (options: { apiKey: string; model: string; effort: string; envelope?: EnvelopeId }) => {
+      seen.push({ name, options: { ...options } });
+      return fake;
+    };
+    const factories: LlmClientFactories = {
+      openai: factoryOf("openai"),
+      ollama: factoryOf("ollama"),
+      openrouter: factoryOf("openrouter"),
+    };
+
+    expect(makeLlmClient({ apiKey: "k", model: "m", effort: "e" }, factories)).toBe(fake);
+    expect(makeLlmClient({ apiKey: "k", model: "m", effort: "e", provider: "ollama" }, factories)).toBe(fake);
+    expect(makeLlmClient({ apiKey: "k", model: "m", effort: "e", provider: "openrouter" }, factories)).toBe(fake);
+    expect(makeLlmClient({ apiKey: "k", model: "m", effort: "e", envelope: "v1.1a" }, factories)).toBe(fake);
+
+    expect(seen).toEqual([
+      { name: "openai", options: { apiKey: "k", model: "m", effort: "e" } },
+      { name: "ollama", options: { apiKey: "k", model: "m", effort: "e" } },
+      { name: "openrouter", options: { apiKey: "k", model: "m", effort: "e" } },
+      { name: "openai", options: { apiKey: "k", model: "m", effort: "e", envelope: "v1.1a" } },
+    ]);
+    expect(JSON.stringify(seen)).not.toContain("provider");
   });
 });
