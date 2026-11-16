@@ -1136,6 +1136,29 @@ export interface PlanRunInput {
   readonly judgeMaxOutputTokens?: number;
 }
 
+/**
+ * Plan の経路だけが立てる逆照合の選択（Issue #956）。**Plan と探針が同じものを使う**——探針の側へ
+ * 値を写すと、Plan が選択を足したときに古い写しを送る。値は今までの Plan の経路と同じである。
+ */
+export interface PlanReverseCheckSelections {
+  /** 落ちが来歴だけのときは、全体の作り直しではなく引用の修復を使う（Issue #917） */
+  readonly quoteRepair: true;
+  /** 対応の意味の基準を 3 つの P2 すべてに足す（Issue #925） */
+  readonly meaningRule: true;
+  /** 全体の作り直しの後、有効な引用と位置を前の一覧の値に戻す（Issue #942） */
+  readonly keepValidProvenance: true;
+  /** 条件の指摘の詳細を求める派生 schema を 3 つの P2 すべてに使う（Issue #948） */
+  readonly observeConditionFindings: true;
+}
+
+/** Plan と探針が共有する逆照合の選択（Issue #956）。**値は変えない** */
+export const PLAN_REVERSE_CHECK_SELECTIONS: PlanReverseCheckSelections = {
+  quoteRepair: true,
+  meaningRule: true,
+  keepValidProvenance: true,
+  observeConditionFindings: true,
+};
+
 /** 早く止まる合図（`runPlan` の中だけで使う） */
 class PlanStop extends Error {
   readonly failure: PlanFailure;
@@ -2197,18 +2220,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         source: input.source,
         documents: input.documents,
         gateway,
-        // 落ちが来歴だけのときは、全体の作り直しではなく引用の修復を使う（Issue #917。**Plan の経路だけ**の
-        // 明示の選択である。既定の Build の経路は今までどおり全体の作り直し）
-        quoteRepair: true,
-        // 対応の意味の基準（Issue #925。**Plan の経路だけ**の明示の選択である。既定の Build の経路は
-        // 今までどおり 3 文だけを送る）
-        meaningRule: true,
-        // 全体の作り直しの後、落ちていなかった要件の有効な引用と位置を前の一覧の値に戻す（Issue #942。
-        // **Plan の経路だけ**の明示の選択である。既定の Build の経路は呼び出しの列・要求・結果を変えない）
-        keepValidProvenance: true,
-        // 条件の指摘の詳細（findingDetails）を求める派生 schema を、3 つの P2 すべてに使う（Issue #948。
-        // **Plan の経路だけ**の明示の選択である。既定の Build の経路は schema・要求・結果を変えない）
-        observeConditionFindings: true,
+        // Plan の経路だけの逆照合の選択（引用の修復・意味の基準・有効な来歴の保持・条件の指摘の観測。
+        // Issue #917・#925・#942・#948）。探針と同じ定数を使う（Issue #956）。値は今までと同じ
+        ...PLAN_REVERSE_CHECK_SELECTIONS,
       });
       // 止まったときも、止まるまでに終えた往復の分を結果へ残す（Issue #430・#919）
       requirementsDiagnosis = outcome.ok ? outcome.value.diagnosis : outcome.diagnosis;
