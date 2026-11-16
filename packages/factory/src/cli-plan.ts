@@ -11,7 +11,15 @@
 //
 // **端末もファイルも扱わない**——`Terminal` は呼ぶ側（cli.ts）が用意し、答えのファイルは文字列で受け取る。
 // 実 API も本物の端末も使わない（試験は偽物を差し込む。CLAUDE.md の不変条件）。
-import { checkConfirmedPlan, planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
+import {
+  checkConfirmedPlan,
+  planDigest,
+  type ConfirmedPlan,
+  type PlanAcceptedUnwritable,
+  type PlanDecision,
+  type PlanOpenIssue,
+  type PlanRequirement,
+} from "@musunest/appspec-schema";
 import type { StageOutputLimits } from "./call.js";
 import type { StageModels } from "./limits.js";
 import { pickFailureForRecord, type FailureAttribution } from "./record.js";
@@ -30,7 +38,6 @@ import {
   type PlanResult,
   type PlanStageRecord,
   type PlanSurfaceCheckSummary,
-  type PlanUnfinished,
 } from "./plan/run-plan.js";
 import { SCRIPT_MATCHER_VERSION, type PlanScriptMatch, type ScriptMatchState } from "./plan/script-responder.js";
 import { isRecord } from "./stages/prompt.js";
@@ -1573,6 +1580,18 @@ export interface PlanOnlyStopRecord {
   readonly codes: readonly string[];
 }
 
+/**
+ * 確定しなかった走りの、止まった時点の一覧を `plan-result.json` に書く形（snake_case。Issue #957）。
+ * 確定した仕様（`plan`）の欄と同じ名前で読めるように、`accepted_unwritable`・`open_issues` にする。
+ * **要件の本文を持つので、`plan-record.json` には写さない。**
+ */
+export interface PlanOnlyUnfinished {
+  readonly requirements: readonly PlanRequirement[];
+  readonly decisions: readonly PlanDecision[];
+  readonly accepted_unwritable: readonly PlanAcceptedUnwritable[];
+  readonly open_issues: readonly PlanOpenIssue[];
+}
+
 /** Plan だけの結果（`--out` の `plan-result.json`。Issue #495） */
 export interface PlanOnlyResult {
   readonly schema_version: string;
@@ -1589,10 +1608,10 @@ export interface PlanOnlyResult {
   /**
    * 確定せずに終わった走りの、止まった時点の一覧（Issue #957）。確定した仕様の欄（`plan`）とは**別の欄**
    * であり、Build の入口はこの欄を読まない。確定した走りと、要件の一覧が 1 度も組まれていない走り
-   * （P1・P2 で止まった）は `null`。**包みの版（`PLAN_ONLY_RESULT_SCHEMA`）は変えない**——この欄の無い
-   * 古い結果も今までどおり読める。
+   * （P1・P2 で止まった）は `null`。**欄の名前はファイルの他の欄と同じ snake_case** にする。
+   * **包みの版（`PLAN_ONLY_RESULT_SCHEMA`）は変えない**——この欄の無い古い結果も今までどおり読める。
    */
-  readonly unfinished: PlanUnfinished | null;
+  readonly unfinished: PlanOnlyUnfinished | null;
 }
 
 /** 符号の並びから重複を除く（順は保つ） */
@@ -1607,6 +1626,21 @@ export function planOnlyStop(result: PlanResult): PlanOnlyStopRecord | null {
     return { kind: "cannot-confirm", reason: null, codes: uniqueCodes(result.reasons.map((reason) => reason.code)) };
   }
   return { kind: "stopped", reason: result.reason, codes: uniqueCodes(failureCodes(result.failure)) };
+}
+
+/**
+ * 確定しなかった一覧を、`plan-result.json` の snake_case の形に写す（Issue #957 の低-1）。
+ * `acceptedUnwritable`・`openIssues` を、確定した仕様（`plan`）と同じ `accepted_unwritable`・
+ * `open_issues` にする。**要件の本文はこのファイルにだけ書く。**
+ */
+function planOnlyUnfinished(unfinished: PlanResult["unfinished"]): PlanOnlyUnfinished | null {
+  if (unfinished === undefined || unfinished === null) return null;
+  return {
+    requirements: unfinished.requirements.map((requirement) => ({ ...requirement })),
+    decisions: unfinished.decisions.map((decision) => ({ ...decision })),
+    accepted_unwritable: unfinished.acceptedUnwritable.map((entry) => ({ ...entry })),
+    open_issues: unfinished.openIssues.map((issue) => ({ ...issue })),
+  };
 }
 
 /** Plan だけの結果を組む（`--out` に書く。Issue #495） */
@@ -1625,8 +1659,9 @@ export function buildPlanOnlyResult(input: {
     conditions: input.conditions,
     stop: planOnlyStop(input.result),
     // 確定せずに終わった走りにだけ、止まった時点の一覧を書く（Issue #957）。確定した走りと、要件の一覧が
-    // 組まれていない走り（P1・P2）は `null`。古い結果（欄を持たない録画）でも書ける。
-    unfinished: input.result.kind === "confirmed" ? null : (input.result.unfinished ?? null),
+    // 組まれていない走り（P1・P2）は `null`。欄の名前はファイルの他の欄と同じ snake_case にする（低-1）。
+    // 古い結果（欄を持たない録画）でも書ける。
+    unfinished: input.result.kind === "confirmed" ? null : planOnlyUnfinished(input.result.unfinished),
   };
 }
 

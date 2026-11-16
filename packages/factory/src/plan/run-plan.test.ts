@@ -15,6 +15,7 @@ import { buildPlanCliRecord, createPlanTranscript, planStopReasonLine } from "..
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.js";
 import { createJevJudge, type JevFetch } from "../judge-jev.js";
+import { OpenAiAdapterError } from "../openai.js";
 import { AGENT_LIMITS } from "../limits.js";
 import type {
   LlmClient,
@@ -8793,6 +8794,71 @@ describe("Plan の停止の記録（Issue #957）", () => {
   });
 });
 
+// ── Issue #957（直し）：未観測の線と、止まった時点の一覧 ─────────────────────────
+
+describe("Plan の停止の記録（直し）", () => {
+  it("応答の前に通信で終わった段は、形に落ちなかった 0 件ではなく未観測として残す", async () => {
+    // 洗い出しの最初の呼び出し（3 回目）から通信で失敗する。段は応答を 1 つも受け取らない
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+    ]);
+    let calls = 0;
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        if (calls >= 3) throw new OpenAiAdapterError("network", "通信で終わった");
+        return recording.client.callStructured<T>(request);
+      },
+      async callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
+        return recording.client.callWithTools(request);
+      },
+    };
+    const result = await runPlan(makePlanInput(client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface");
+    expect(result.shapeRetries).toEqual([]);
+    // 応答を受け取っていないので、形に落ちなかった 0 件ではなく未観測である
+    expect(result.shapeRetryUnobserved).toEqual(["surface", "questions"]);
+  });
+
+  it("確定しなかった一覧は、答えで要件が増えた後の止まった時点を写す（P2 の時点ではない）", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      // その往復で増えた要件だけの差分点検（Issue #434）
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const responder: PlanResponder = {
+      async answer(request) {
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
+      },
+      async confirm() {
+        return "stop";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("declined");
+    // 答えから増えた要件（R:A:Q1-1）も、止まった時点の一覧に入る
+    expect(result.unfinished?.requirements.map((requirement) => requirement.id)).toEqual([
+      "R-1",
+      "R-2",
+      "R:A:Q1-1",
+    ]);
+  });
+});
+
 // ── Issue #957：行き先は今までどおり ───────────────────────────────────────────
 //
 // 新しい記録（形のやり直し・例外の分類・確定しなかった一覧）を足しても、**送る要求・呼び出し列・結果・
@@ -8803,6 +8869,8 @@ describe("Plan の停止の記録（Issue #957）", () => {
 /** base（main = 190f550）の別 worktree で実測した、要求の列・結果・確定した仕様（Issue #957） */
 const BASE_190F550: Readonly<Record<string, {
   readonly requests: readonly string[];
+  /** 判定の口が受け取った要求（state・questions）を直列化した SHA-256 の列（Issue #957 の低-6） */
+  readonly judgeRequests: readonly string[];
   readonly kind: string;
   readonly stop: string | readonly string[] | null;
   readonly failure: { readonly stage: string; readonly kind: string; readonly problems: readonly string[] } | null;
@@ -8819,6 +8887,7 @@ const BASE_190F550: Readonly<Record<string, {
       "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
       "d318520ef12389e288ee80ddf40b85eb417812cbda8868757db8f1e386c012a3",
     ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709","af100b2b8fc4021a21aa7a7627d3241e868ff418709449a29c3ec74ab8edd584"],
     kind: "confirmed",
     stop: null,
     failure: null,
@@ -8887,6 +8956,7 @@ const BASE_190F550: Readonly<Record<string, {
       "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
       "d318520ef12389e288ee80ddf40b85eb417812cbda8868757db8f1e386c012a3",
     ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
     kind: "stopped",
     stop: "malformed",
     failure: { stage: "surface", kind: "malformed", problems: ["unwritable:shape"] },
@@ -8902,6 +8972,7 @@ const BASE_190F550: Readonly<Record<string, {
       "46fe0f5e7dc9d95502abbaa9a76512b25930dd1309b2c9b7e923baf7dd25fe0e",
       "767bb16491a7803798109575cb59e057dd4b5619092a20e7663bbe2fc6a41f95",
     ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
     kind: "stopped",
     stop: "malformed",
     failure: { stage: "questions", kind: "malformed", problems: ["questions:question-coverage"] },
@@ -8917,6 +8988,7 @@ const BASE_190F550: Readonly<Record<string, {
       "48932294ba40ac3570d387bf157e806ad3dc5ffa661db7015c547a1cfb948e4f",
       "3ee36267a3ef3119dd1df203d44167c2936612d1d178a1b6e6e23a2fffb85605",
     ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
     kind: "stopped",
     stop: "malformed",
     failure: { stage: "questions", kind: "malformed", problems: ["questions:question-coverage"] },
@@ -8932,6 +9004,7 @@ const BASE_190F550: Readonly<Record<string, {
       "46fe0f5e7dc9d95502abbaa9a76512b25930dd1309b2c9b7e923baf7dd25fe0e",
       "8df7c60b131d2fe46a655fc70b0c0ad0cbc04dafdd1bc3b88553ec77beae653d",
     ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
     kind: "stopped",
     stop: "malformed",
     failure: { stage: "questions", kind: "malformed", problems: ["questions:question-coverage"] },
@@ -8946,6 +9019,7 @@ const BASE_190F550: Readonly<Record<string, {
       "028762f4c545a599ad768afa9b00f4996f3b1925ea254ade35889867485403f2",
       "e318eddd9e8d45777764253afa3395488a5c20257cb1f38e8f21a435e287f5c7",
     ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
     kind: "stopped",
     stop: "malformed",
     failure: { stage: "surface", kind: "malformed", problems: ["ambiguities[0].id:issue-id-reused", "ambiguities[1].id:issue-id-reused"] },
@@ -8960,6 +9034,7 @@ const BASE_190F550: Readonly<Record<string, {
       "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
       "04fe1816b08c0aaee8a66bf97089f3f130b232571949020a147a56bf0a15a200",
     ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
     kind: "stopped",
     stop: "malformed",
     failure: { stage: "surface", kind: "malformed", problems: ["ambiguities[1].id:issue-id-duplicated"] },
@@ -8973,6 +9048,7 @@ const BASE_190F550: Readonly<Record<string, {
       "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
       "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
     ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709","ba6320ab7e9ba530250fd780268893302dfcf8e12e0bfaf831ea9e055a948f1d"],
     kind: "cannot-confirm",
     stop: ["surface-check:unknown:unwritable[0]"],
     failure: null,
@@ -8987,6 +9063,7 @@ const BASE_190F550: Readonly<Record<string, {
       "5a59db0024255f5094e7b82ceb0b0e16de5086f1d003804934bd8493749927d5",
       "3fdef92fb5189226ffe014fe0d8793c79b8074b574f24d143ecfcb7a9e93e852",
     ],
+    judgeRequests: [],
     kind: "cannot-confirm",
     stop: ["reverse-check:uncovered-source:source[*]"],
     failure: null,
@@ -9003,10 +9080,25 @@ const BASE_190F550: Readonly<Record<string, {
       "098a4c938e9a0cd6b7f6586e9394078151c3c7c7e34e3137087a7730ce29c1f4",
       "ac1ead87efda4883b7e0a5b646f0a70cbefc536720a1633db76c84f4a99a390a",
     ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709"],
     kind: "cannot-confirm",
     stop: ["session:round-trip-limit:open_issues"],
     failure: null,
     judgeCalls: 1,
+    plan: null,
+    planSha256: null,
+  },
+  "judge-throw": {
+    requests: [
+      "60f2aaefcd7efbb4e27a1a48d6517ec17034e68a13991fb45528d54cae464209",
+      "7268b00da8ac7e18ebffe675491a91777c339958ff940cad84a431de024dcf65",
+      "0d299f38666a704cc52837b487f24903f783a6cd593896fa4b2d29f025a0f5fe",
+    ],
+    judgeRequests: ["4e1a5ac8cfe50393f710192670d8348fc452c86234ac12fbc41076b935ef8709","ba6320ab7e9ba530250fd780268893302dfcf8e12e0bfaf831ea9e055a948f1d"],
+    kind: "cannot-confirm",
+    stop: ["surface-check:unknown:unwritable[0]"],
+    failure: null,
+    judgeCalls: 2,
     plan: null,
     planSha256: null,
   },
@@ -9053,6 +9145,18 @@ describe("行き先は今までどおり（Issue #957）", () => {
     },
   };
 
+  /** 目録には答え、申告の点検（仕分け）で例外を投げる判定（`safeJudge` の例外の経路） */
+  const throwingCheckJudge: Judge = {
+    async judge(request: JudgeRequest) {
+      if (Object.keys(request.questions).some((name) => name.startsWith("plan-triage:"))) {
+        throw new OpenAiAdapterError("network", "通信で終わった");
+      }
+      const answers: Record<string, JudgeAnswer> = {};
+      for (const name of Object.keys(request.questions)) answers[name] = noul(1);
+      return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+    },
+  };
+
   const partialSurface = {
     ambiguities: [
       { id: "OI-a", requirementId: "R-1", text: "問い a", critical: true },
@@ -9089,7 +9193,7 @@ describe("行き先は今までどおり（Issue #957）", () => {
     ],
   };
 
-  it("10 の例で、要求の列・結果・停止・失敗の分類・呼び出し数が base（190f550）と同じ", async () => {
+  it("11 の例で、要求の列・判定の要求・結果・停止・失敗の分類・呼び出し数が base（190f550）と同じ", async () => {
     const [first, second] = CATALOG_FACETS;
     if (first === undefined || second === undefined) throw new Error("目録の観点が 2 件未満");
     const shownIds = [`OI:catalog:R-1:${first.id}`, `OI:catalog:R-1:${second.id}`];
@@ -9222,6 +9326,19 @@ describe("行き先は今までどおり（Issue #957）", () => {
         }),
       },
       {
+        // 判定の口が例外を投げて unknown で止まる経路（`safeJudge` の例外。Issue #957 の低-6）
+        name: "judge-throw",
+        make: () => ({
+          recording: createRecordingClient([
+            structured(REQUIREMENT_LIST_OUTPUT),
+            structured(REVERSE_CHECK_OUTPUT),
+            structured(checkStopSurface),
+          ]),
+          judge: throwingCheckJudge,
+          responder: ANSWER_NONE,
+        }),
+      },
+      {
         name: "p1p2-stop",
         make: () => ({
           recording: createRecordingClient([
@@ -9258,9 +9375,13 @@ describe("行き先は今までどおり（Issue #957）", () => {
       if (base === undefined) continue;
       const { recording, judge, responder, overrides } = c.make();
       let judgeCalls = 0;
+      // 判定の口が受け取った要求（state・questions）も直列化して比べる（Issue #957 の低-6）。
+      // 門・合図・再送の通知は実行の都合で決まるので、要求の中身（state・questions）だけを写す。
+      const judgeRequests: string[] = [];
       const countingJudge: Judge = {
         async judge(request: JudgeRequest) {
           judgeCalls += 1;
+          judgeRequests.push(await sha256Hex(JSON.stringify({ state: request.state, questions: request.questions })));
           return judge.judge(request);
         },
       };
@@ -9270,6 +9391,7 @@ describe("行き先は今までどおり（Issue #957）", () => {
         recording.structured.map((request) => sha256Hex(JSON.stringify(request))),
       );
       expect(requests, c.name).toEqual(base.requests);
+      expect(judgeRequests, c.name).toEqual(base.judgeRequests);
       // 追加の記録を除く結果・停止・失敗の分類・呼び出し数
       expect(result.kind, c.name).toBe(base.kind);
       expect(planStopOf(result), c.name).toEqual(base.stop);

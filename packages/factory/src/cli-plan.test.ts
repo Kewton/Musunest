@@ -5378,7 +5378,21 @@ describe("Plan の停止の記録（記録の写しと古い形。Issue #957）"
       conditions: CONDITIONS,
     });
     expect(stoppedOut.schema_version).toBe(PLAN_ONLY_RESULT_SCHEMA);
-    expect(stoppedOut.unfinished).toEqual(unfinished);
+    // 欄の名前は、確定した仕様（`plan`）と同じ snake_case で書く（Issue #957 の低-1）
+    expect(stoppedOut.unfinished).toEqual({
+      requirements: unfinished.requirements,
+      decisions: unfinished.decisions,
+      accepted_unwritable: [],
+      open_issues: unfinished.openIssues,
+    });
+    const unfinishedKeys = Object.keys(stoppedOut.unfinished ?? {});
+    expect(unfinishedKeys).toHaveLength(4);
+    for (const key of ["requirements", "decisions", "accepted_unwritable", "open_issues"]) {
+      expect(unfinishedKeys).toContain(key);
+    }
+    // camelCase の欄は残さない
+    expect(unfinishedKeys).not.toContain("acceptedUnwritable");
+    expect(unfinishedKeys).not.toContain("openIssues");
 
     const confirmed = { kind: "confirmed", plan: CONFIRMED_PLAN, unfinished } as unknown as PlanResult;
     const confirmedOut = buildPlanOnlyResult({
