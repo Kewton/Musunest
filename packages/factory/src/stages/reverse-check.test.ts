@@ -40,6 +40,7 @@ import {
   splitSourceSentences,
   summarizeConditionFindings,
 } from "./reverse-check.js";
+import { FINDING_CHECK_SCHEMA_NAME } from "./finding-check.js";
 import { ruleDefinitionDefects } from "./prompt.js";
 import {
   INJECTED_INSTRUCTION,
@@ -3030,5 +3031,675 @@ describe("T2条件指摘の記録（純粋な関数）", () => {
     expect(checked.value.findingDetails).toEqual([
       { uncoveredIndex: 0, missingKind: "target", requirementIds: ["R-1"] },
     ]);
+  });
+});
+
+// ── Issue #967：P2 の会話の指摘を 1 件ずつ最大 3 回確かめる ─────────────────
+
+const carried = (requirementId = "R-1") => ({
+  verdict: "carried",
+  requirement_ids: [requirementId],
+  reason: "本文に表されている",
+});
+const isFindingCheck = (request: { readonly schemaName: string } | undefined): boolean =>
+  request?.schemaName === FINDING_CHECK_SCHEMA_NAME;
+const findingRequests = (recording: { readonly structured: readonly { readonly schemaName: string }[] }): number =>
+  recording.structured.filter(isFindingCheck).length;
+
+describe("P2 の会話の指摘の確かめ（Issue #967）", () => {
+  /** 会話が挙げる、覆われていない部分（コードの落ちとは重ならない） */
+  const CONVERSATION = { uncovered: [{ start: 0, end: 3 }] };
+  const missing = { verdict: "missing", requirement_ids: [], reason: "どれにも表されていない" };
+  const notACondition = { verdict: "not-a-condition", requirement_ids: [], reason: "背景の説明" };
+
+  it("3 回とも carried なら指摘を外し、作り直しを呼ばず、未達も残らない（前で赤・後で緑）", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(CONVERSATION),
+      structured(carried()),
+      structured(carried()),
+      structured(carried()),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(false);
+    expect(outcome.value.repaired).toBe(false);
+    expect(outcome.value.unmet).toEqual([]);
+    expect(outcome.value.diagnosis.unmet).toEqual({
+      quoteNotFound: 0,
+      positionMismatch: 0,
+      uncoveredSource: { code: 0, conversation: 1 },
+    });
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 1, unchecked: 0, attempts: 3 });
+    expect(outcome.value.trace?.findingChecks).toHaveLength(1);
+    expect(outcome.value.trace?.findingChecks?.[0]).toMatchObject({
+      phase: "redo",
+      range: { start: 0, end: 3 },
+      excluded: true,
+      uncheckedReason: null,
+    });
+    expect(outcome.value.trace?.findingChecks?.[0]?.trials).toHaveLength(3);
+    // 確かめを 3 回だけ呼ぶ（1 件あたり 3 回まで）
+    expect(findingRequests(recording)).toBe(3);
+
+    // 前で赤：旗を外すと同じ応答では作り直しへ進み、未達が残る
+    const withoutFlag = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(CONVERSATION),
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(CONVERSATION),
+    ]);
+    const red = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(withoutFlag.client, { maxAttempts: 1 }),
+    });
+    expect(red.ok).toBe(true);
+    if (!red.ok) return;
+    expect(red.value.redone).toBe(true);
+    expect(red.value.unmet.map((miss) => miss.kind)).toEqual(["uncovered-source"]);
+    expect(findingRequests(withoutFlag)).toBe(0);
+  });
+
+  it("3 回とも not-a-condition でも外す", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(CONVERSATION),
+      structured(notACondition),
+      structured(carried()),
+      structured(notACondition),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(false);
+    expect(outcome.value.unmet).toEqual([]);
+  });
+
+  it("1 回でも missing なら、その場でやめて指摘を保ち、その後を呼ばない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(CONVERSATION),
+      structured(carried()),
+      structured(missing),
+      // missing の後は呼ばない。保ったので作り直す
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(true);
+    // 保った指摘は、作り直しの理由に残る（作り直しの後の P2 が全体を照らし直す）
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 0, unchecked: 0, attempts: 2 });
+    // carried・missing の 2 回だけ（3 回目を呼ばない）
+    expect(findingRequests(recording)).toBe(2);
+  });
+
+  it("ID の確かめ: carried でも ID が空か一覧に無ければ missing と数え、その回でやめる", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(CONVERSATION),
+      structured(carried("R-9")),
+      // 一覧に無い ID は missing。その後は呼ばない
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(true);
+    expect(outcome.value.trace?.findingChecks?.[0]?.trials[0]).toMatchObject({ verdict: "carried", kept: true });
+    expect(findingRequests(recording)).toBe(1);
+  });
+
+  it("呼び出しの失敗（締切）でも指摘を保ち、Plan を止めない", async () => {
+    const recording = createRecordingClient([structured(REQUIREMENT_LIST_OUTPUT), structured(CONVERSATION), structured(REQUIREMENT_LIST_OUTPUT), structured(REVERSE_CHECK_OUTPUT)]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      // 確かめ役の口だけ、締切を過ぎている
+      findingCheckGateway: makeGateway(recording.client, { maxAttempts: 1, deadline: 0 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(true);
+    // 成功した判定が 0 回なので、確かめなかった数に入れる（Issue #967）
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 0, unchecked: 1, attempts: 0 });
+    expect(outcome.value.trace?.findingChecks?.[0]).toMatchObject({
+      excluded: false,
+      uncheckedReason: "deadline",
+    });
+    expect(outcome.value.trace?.findingChecks?.[0]?.trials[0]).toMatchObject({ verdict: null, failure: "deadline", kept: true });
+  });
+
+  it("形の誤り（malformed）でも指摘を保ち、Plan を止めない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(CONVERSATION),
+      // 形のやり直しの 2 回とも合わない
+      structured({}),
+      structured({}),
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(true);
+    // 形のやり直しの 2 試行を含み、成功した判定は 0 回なので、確かめなかった数に入れる
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 0, unchecked: 1, attempts: 2 });
+    expect(outcome.value.trace?.findingChecks?.[0]?.trials[0]).toMatchObject({ failure: "malformed", kept: true });
+  });
+
+  it("確かめの枠（時点ごと）を使い切ると、残りは確かめずに保ち、理由を残す", async () => {
+    const twoFindings = { uncovered: [{ start: 0, end: 3 }, { start: 9, end: 12 }] };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(twoFindings),
+      // 時点ごとの枠 1 なので、1 件目だけを確かめる
+      structured(carried()),
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+      findingCheckAttempts: 1,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 1 回しか確かめていない指摘は、3 回の一致にならないので外さない（門を緩めない側）
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 0, unchecked: 1, attempts: 1 });
+    expect(outcome.value.trace?.findingChecks?.map((entry) => entry.uncheckedReason)).toEqual([
+      "attempts",
+      "attempts",
+    ]);
+    expect(findingRequests(recording)).toBe(1);
+  });
+
+  it("覆いが残る → 外した指摘を運ばず、残った落ちだけで作り直す", async () => {
+    const source = "AAAを記録する。BBBを合計する。CCCを印字する。";
+    const list = {
+      requirements: [
+        { id: "R-1", text: "AAAを記録できる", quote: "AAAを記録する。", position: { start: 0, end: 9 } },
+        { id: "R-2", text: "BBBを合計できる", quote: "BBBを合計する。", position: { start: 9, end: 18 } },
+        { id: "R-3", text: "CCCを印字できる", quote: "CCCを印字する。", position: { start: 18, end: 27 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      // 範囲の始まりの順に、AAA（外す）・BBB（保つ）
+      structured({ uncovered: [{ start: 0, end: 3 }, { start: 9, end: 12 }] }),
+      structured(carried("R-1")),
+      structured(carried("R-1")),
+      structured(carried("R-1")),
+      structured(missing),
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(true);
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 1, unchecked: 0, attempts: 4 });
+    // 作り直しの指示には、保った落ちだけを運び、外した指摘は運ばない
+    const redoRequest = recording.structured.find((request) => request.schemaName === "requirement-list" && request.input.includes("前回の要件の一覧"));
+    expect(redoRequest?.input).toContain("覆われていない部分「BBB」");
+    expect(redoRequest?.input).not.toContain("覆われていない部分「AAA」");
+  });
+
+  it("来歴だけが残る → 修復へ進み、作り直しを呼ばない（作り直しの前の入口）", async () => {
+    const source = "印を出す。印を出す。";
+    const list = {
+      requirements: [
+        // 引用は 2 か所にあり、位置が 1 か所に決まらない（来歴の落ち）
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        // 2 か所目を覆う（コードの覆いは満たす）
+        { id: "R-2", text: "印を出せる", quote: "印を出す。", position: { start: 5, end: 10 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured({ uncovered: [{ start: 0, end: 3 }] }),
+      structured(carried("R-1")),
+      structured(carried("R-1")),
+      structured(carried("R-1")),
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+      quoteRepair: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.repaired).toBe(true);
+    expect(outcome.value.redone).toBe(false);
+    // 全体の作り直し（2 回目の P1）は呼ばない
+    expect(recording.structured.filter((request) => request.schemaName === "requirement-list")).toHaveLength(1);
+  });
+
+  it("修復の後の P2 の後の入口でも、3 回とも carried なら全体の作り直しを呼ばずに ok で返る", async () => {
+    const source = "印を出す。印を出す。";
+    const list = {
+      requirements: [
+        // 引用は 2 か所にあり、位置が 1 か所に決まらない（来歴の落ち）
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        // 2 か所目を覆う（コードの覆いは満たす）
+        { id: "R-2", text: "印を出せる", quote: "印を出す。", position: { start: 5, end: 10 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      // 初回の P2 は落ちを挙げない（来歴だけなので、修復の経路に入る）
+      structured(REVERSE_CHECK_OUTPUT),
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      // 修復の後の P2 が、覆われていない部分を申告する（作り直しの前の入口）
+      structured({ uncovered: [{ start: 0, end: 3 }] }),
+      structured(carried("R-1")),
+      structured(carried("R-1")),
+      structured(carried("R-1")),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+      quoteRepair: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.repaired).toBe(true);
+    expect(outcome.value.redone).toBe(false);
+    expect(outcome.value.unmet).toEqual([]);
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 1, unchecked: 0, attempts: 3 });
+    expect(outcome.value.trace?.findingChecks?.[0]).toMatchObject({ phase: "redo", excluded: true });
+    // 全体の作り直し（2 回目の P1）は呼ばない
+    expect(recording.structured.filter((request) => request.schemaName === "requirement-list")).toHaveLength(1);
+    // 確かめ役は 3 回だけ
+    expect(findingRequests(recording)).toBe(3);
+  });
+
+  it("停止の前: 会話の指摘が全部外れれば、unmet から除かれる", async () => {
+    const partialSource = "タスクを記録する。件数を合計する。";
+    const partialList = {
+      requirements: [{ id: "R-1", text: "記録できる", quote: "タスクを記録する", position: { start: 0, end: 8 } }],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(partialList),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(CONVERSATION),
+      structured(carried()),
+      structured(carried()),
+      structured(carried()),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: partialSource,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(true);
+    expect(outcome.value.unmet).toEqual([]);
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 1, unchecked: 0, attempts: 3 });
+    expect(outcome.value.trace?.findingChecks?.[0]).toMatchObject({ phase: "stop", excluded: true });
+  });
+
+  it("停止の前: コードの落ちが残れば、確かめ役を呼ばずに今までどおり止まる", async () => {
+    const partialSource = "タスクを記録する。件数を合計する。";
+    const partialList = {
+      requirements: [{ id: "R-1", text: "記録できる", quote: "タスクを記録する", position: { start: 0, end: 8 } }],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(partialList),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(partialList),
+      structured(CONVERSATION),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: partialSource,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // コードの覆いの落ちと会話の指摘が残る
+    expect(outcome.value.unmet.map((miss) => miss.kind)).toEqual(["uncovered-source", "uncovered-source"]);
+    expect(findingRequests(recording)).toBe(0);
+    expect(outcome.value.diagnosis.findingCheck).toBeUndefined();
+  });
+
+  it("停止の前: 1 件を保った時点で、残りの指摘は確かめない", async () => {
+    const partialSource = "タスクを記録する。件数を合計する。";
+    const partialList = {
+      requirements: [{ id: "R-1", text: "記録できる", quote: "タスクを記録する", position: { start: 0, end: 8 } }],
+      decisions: [],
+      unresolved: [],
+    };
+    const twoFindings = { uncovered: [{ start: 0, end: 3 }, { start: 9, end: 12 }] };
+    const recording = createRecordingClient([
+      structured(partialList),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(twoFindings),
+      structured(missing),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: partialSource,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(findingRequests(recording)).toBe(1);
+    expect(outcome.value.unmet).toHaveLength(2);
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 0, unchecked: 1, attempts: 1 });
+    expect(outcome.value.trace?.findingChecks?.map((entry) => entry.uncheckedReason)).toEqual([null, "kept"]);
+  });
+
+  it("会話の指摘の無い本は、旗の有無で要求・結果・診断が変わらない（ほかは今までどおり）", async () => {
+    const run = async (findingCheck: boolean) => {
+      const recording = createRecordingClient([
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+      ]);
+      const outcome = await runReverseCheckLoopWithOperation({
+        source: SOURCE_TEXT,
+        documents: SAMPLE_DOCUMENTS,
+        gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+        ...(findingCheck ? { findingCheck: true } : {}),
+      });
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) throw new Error("前提が壊れた");
+      return {
+        requests: recording.structured.map((request) => JSON.stringify(request)),
+        result: outcome.value.report,
+        unmet: outcome.value.unmet,
+        diagnosis: outcome.value.diagnosis,
+        trace: outcome.value.trace,
+      };
+    };
+    expect(await run(true)).toEqual(await run(false));
+  });
+
+  it("旗なしの経路では、会話の指摘があっても確かめ役を呼ばない（Build の既定）", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(CONVERSATION),
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(true);
+    expect(findingRequests(recording)).toBe(0);
+    expect(outcome.value.diagnosis.findingCheck).toBeUndefined();
+    expect(outcome.value.trace?.findingChecks).toBeUndefined();
+  });
+
+  it("作り直しの前の枠は入口をまたいで 1 つ持ち、修復の後の入口が残りを引き継ぐ", async () => {
+    const source = "印を出す。印を出す。";
+    // 初回は来歴だけ（R-1 の位置が 1 か所に決まらない）
+    const partialList = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        { id: "R-2", text: "印を出せる", quote: "印を出す。", position: { start: 5, end: 10 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    // 修復と作り直しの後の一覧（コードの落ちが無い）
+    const fixedList = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: { start: 0, end: 10 } },
+        { id: "R-2", text: "印を出せる", quote: "印を出す。", position: { start: 5, end: 10 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const conversation = { uncovered: [{ start: 0, end: 3 }] };
+    const recording = createRecordingClient([
+      structured(partialList),
+      structured(conversation),
+      // 初回の入口で 3 回とも carried（時点の枠 3 を使い切る）
+      structured(carried("R-1")),
+      structured(carried("R-1")),
+      structured(carried("R-1")),
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      // 修復の後の入口は、初回の入口の残り（0）を引き継ぐので確かめない
+      structured(conversation),
+      structured(fixedList),
+      structured(conversation),
+      // 停止の前は別の枠（3）を使う
+      structured(carried("R-1")),
+      structured(carried("R-1")),
+      structured(carried("R-1")),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+      quoteRepair: true,
+      findingCheckAttempts: 6,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.repaired).toBe(true);
+    expect(outcome.value.redone).toBe(true);
+    expect(outcome.value.unmet).toEqual([]);
+    // 作り直しの前 3・停止の前 3 で、合計は 6（12 を超えない）
+    expect(findingRequests(recording)).toBe(6);
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 2, unchecked: 1, attempts: 6 });
+    expect(outcome.value.trace?.findingChecks?.map((entry) => [entry.phase, entry.excluded, entry.uncheckedReason])).toEqual([
+      ["redo", true, null],
+      ["redo", false, "attempts"],
+      ["stop", true, null],
+    ]);
+  });
+
+  it("作り直しの前に missing で保った指摘と重なる指摘は、停止の前に確かめずに保つ", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(CONVERSATION),
+      // 作り直しの前に missing で保つ
+      structured(missing),
+      structured(REQUIREMENT_LIST_OUTPUT),
+      // 作り直しの後に再び挙がる（停止の前は確かめない）
+      structured(CONVERSATION),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(true);
+    expect(outcome.value.unmet).toHaveLength(1);
+    // 確かめ役の呼び出しは、作り直しの前の 1 回だけ
+    expect(findingRequests(recording)).toBe(1);
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 0, unchecked: 1, attempts: 1 });
+    expect(outcome.value.trace?.findingChecks?.map((entry) => entry.uncheckedReason)).toEqual([
+      null,
+      "kept-before-redo",
+    ]);
+  });
+
+  it("往復の経路でも、確かめ役の要求に P2 の詳細・ほかの指摘・前の判定を渡さず、3 回が byte で同じ", async () => {
+    const source = "AAAを記録する。BBBを合計する。CCCを印字する。";
+    const list = {
+      requirements: [
+        { id: "R-1", text: "AAAを記録できる", quote: "AAAを記録する。", position: { start: 0, end: 9 } },
+        { id: "R-2", text: "BBBを合計できる", quote: "BBBを合計する。", position: { start: 9, end: 18 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const secondStart = 9;
+    // P2 の答えには、詳細の目印・別の文の指摘・コードの落ち（3 文目）を含める
+    const conversation = {
+      uncovered: [{ start: 0, end: 3 }, { start: secondStart, end: 12 }],
+      findingDetails: [{ uncoveredIndex: 0, missingKind: "MARK_KIND", requirementIds: ["MARK_ID"] }],
+    };
+    const markedCarried = { verdict: "carried", requirement_ids: ["R-1"], reason: "MARK_REASON_ONE" };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(conversation),
+      structured(markedCarried),
+      structured(markedCarried),
+      structured(markedCarried),
+      structured(missing),
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    const requests = recording.structured.filter(isFindingCheck);
+    expect(requests).toHaveLength(4);
+    // 1 件目の 3 回の要求は byte で同じ
+    expect(JSON.stringify(requests[1])).toBe(JSON.stringify(requests[0]));
+    expect(JSON.stringify(requests[2])).toBe(JSON.stringify(requests[0]));
+    for (const request of requests.slice(0, 3)) {
+      const text = request.input;
+      // P2 の詳細・前の回の判定・ほかの指摘・P2 の detail の定型文を渡さない
+      expect(text).not.toContain("MARK_KIND");
+      expect(text).not.toContain("MARK_ID");
+      expect(text).not.toContain("MARK_REASON_ONE");
+      expect(text).not.toContain("findingDetails");
+      expect(text).not.toContain(`"start": ${secondStart}`);
+      expect(text).not.toContain("逆照合の会話が挙げた");
+    }
+  });
+
+  it("門の limit で返ったら、その時点の残りを呼ばずに理由つきで打ち切る（成功 0 回は unchecked）", async () => {
+    const source = SOURCE_TEXT;
+    const list = {
+      requirements: REQUIREMENT_LIST_OUTPUT.requirements.map((requirement) => ({ ...requirement })),
+      decisions: [],
+      unresolved: [],
+    };
+    const twoFindings = { uncovered: [{ start: 0, end: 3 }, { start: 9, end: 12 }] };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(twoFindings),
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheckGateway: new CallGateway({
+        client: recording.client,
+        budget: new JobBudget(10),
+        rates: { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 },
+        now: () => 0,
+        deadline: 60_000,
+        maxAttempts: 1,
+        limits: { ...AGENT_LIMITS, callCount: 0 },
+      }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(findingRequests(recording)).toBe(0);
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 0, unchecked: 2, attempts: 0 });
+    expect(outcome.value.trace?.findingChecks?.map((entry) => entry.uncheckedReason)).toEqual(["limit", "limit"]);
+  });
+
+  it("門の budget で返ったら、理由 budget を記録して保つ", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(CONVERSATION),
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      findingCheckGateway: makeGateway(recording.client, { maxAttempts: 1, budgetUsd: 0 }),
+      findingCheck: true,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(findingRequests(recording)).toBe(0);
+    expect(outcome.value.diagnosis.findingCheck).toEqual({ excluded: 0, unchecked: 1, attempts: 0 });
+    expect(outcome.value.trace?.findingChecks?.[0]).toMatchObject({
+      uncheckedReason: "budget",
+    });
+    expect(outcome.value.trace?.findingChecks?.[0]?.trials[0]).toMatchObject({ failure: "budget", kept: true });
   });
 });

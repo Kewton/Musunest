@@ -10,7 +10,9 @@
 // 落ちがあれば ① をやり直す（1 回まで）。やり直しても残った落ちは**未達**として最後まで持つ。
 import { sha256Hex } from "@musunest/spec-engine";
 import type { CallGateway } from "../call.js";
+import { FINDING_CHECK_ATTEMPTS } from "../limits.js";
 import type { Framing, Requirement, RequirementList, ReverseCheckMiss, ReverseCheckResult, SourceRange } from "../pipeline.js";
+import { normalizeFindingCheckVerdict, runFindingCheck, type FindingCheckVerdict } from "./finding-check.js";
 import {
   buildStructuredRequest,
   callStructuredChecked,
@@ -824,11 +826,68 @@ export interface ReverseCheckTraceRound {
 /**
  * 逆照合の往復ごとの診断（Issue #919）。原文は複写せず、SHA-256 と長さだけを持つ。往復の並びは実行の順
  * である。判定・やり直し・持ち越し・P3 以降の入力には使わない（点検の材料である）。
+ *
+ * `findingChecks` は、P2 の会話の指摘を確かめた記録である（Issue #967。**確かめた指摘があるときだけ**
+ * 載せる——旗の無い経路と、会話の指摘の無い往復は欄を持たない）。範囲・判定（3 回まで）・外したか・
+ * 確かめなかった理由と、確かめ役の `reason` を残す。ID は、確かめ役の答えが申告した要件 ID だけである。
  */
 export interface ReverseCheckTrace {
   readonly sourceSha256: string;
   readonly sourceLength: number;
   readonly rounds: readonly ReverseCheckTraceRound[];
+  readonly findingChecks?: readonly ReverseCheckFindingCheckEntry[];
+}
+
+/** 確かめを行った時点（**有限の 2 つ**。Issue #967） */
+export const FINDING_CHECK_PHASES = ["redo", "stop"] as const;
+export type FindingCheckPhase = (typeof FINDING_CHECK_PHASES)[number];
+
+/** 指摘を確かめなかった理由（**有限の値**。Issue #967） */
+export const FINDING_CHECK_UNCHECKED_REASONS = [
+  /** 時点の試行の枠を使い切った */
+  "attempts",
+  /** 停止の前で、1 件を保った後に残りを確かめない */
+  "kept",
+  /** 作り直しの前に missing で保った指摘と範囲が重なるので、停止の前は確かめない */
+  "kept-before-redo",
+  /** 呼び出しの上限で返った */
+  "limit",
+  /** 締切で返った */
+  "deadline",
+  /** 予算で返った */
+  "budget",
+] as const;
+export type FindingCheckUncheckedReason = (typeof FINDING_CHECK_UNCHECKED_REASONS)[number];
+
+/** 確かめ役の 1 回の判定（Issue #967）。失敗した回は `failure` を持ち、`verdict`・`reason` は `null` */
+export interface ReverseCheckFindingCheckTrial {
+  /** 会話が返した判定（正規化の前） */
+  readonly verdict: FindingCheckVerdict | null;
+  /** 会話が申告した要件 ID（失敗した回は空） */
+  readonly requirementIds: readonly string[];
+  /** 確かめ役の理由（失敗した回は `null`） */
+  readonly reason: string | null;
+  /** 呼び出しの失敗の種類（成功した回は `null`） */
+  readonly failure: string | null;
+  /** この回を missing（指摘を保つ）と数えたか */
+  readonly kept: boolean;
+}
+
+/** 指摘 1 件の確かめの記録（Issue #967）。範囲・判定（3 回まで）・外したか・確かめなかった理由 */
+export interface ReverseCheckFindingCheckEntry {
+  readonly phase: FindingCheckPhase;
+  readonly range: SourceRange;
+  readonly trials: readonly ReverseCheckFindingCheckTrial[];
+  readonly excluded: boolean;
+  /** 判定を行わなかった（または途中でやめた）理由。最後まで 3 回を確かめたときは `null` */
+  readonly uncheckedReason: FindingCheckUncheckedReason | null;
+}
+
+/** 確かめの件数（**件数だけ**。Issue #967）。`excluded` は外した指摘、`unchecked` は 1 回も確かめなかった指摘 */
+export interface ReverseCheckFindingCheckCounts {
+  readonly excluded: number;
+  readonly unchecked: number;
+  readonly attempts: number;
 }
 
 /** コードの落ちに会話の申告を足した結果（`droppedBlankMisses` は捨てた断片の数。Issue #377） */
@@ -1143,6 +1202,11 @@ export interface ReverseCheckDiagnosis {
   readonly redone: boolean;
   /** やり直しても残った落ち（`unmet`）の件数の内訳 */
   readonly unmet: ReverseCheckMissCounts;
+  /**
+   * 確かめの件数（Issue #967）。**Plan の経路で、会話の指摘を 1 件でも確かめたときだけ**載せる。
+   * 外した数・確かめなかった数・試行の数を、生の落ちの数（`unmet`・往復の `misses`）とは別に持つ。
+   */
+  readonly findingCheck?: ReverseCheckFindingCheckCounts;
 }
 
 /** 0 件の落ちの内訳 */
@@ -1315,6 +1379,23 @@ export interface ReverseCheckLoopInput {
    * まま）。省けば（Plan を経ない Build の経路）呼び出しの列・要求のバイト列・結果を変えない。
    */
   readonly conditionRule?: boolean;
+  /**
+   * P2 の会話の指摘を、別の呼び出しで 1 件ずつ最大 3 回確かめるか（Issue #967）。**Plan の経路だけ**が
+   * 明示の選択で有効にする。省けば（Plan を経ない Build の経路）呼び出しの列・要求のバイト列・結果・
+   * 診断を変えない。
+   */
+  readonly findingCheck?: boolean;
+  /**
+   * 確かめ役の呼び出しに使う口（Issue #967）。**総呼び出しの門を持たない口**を Plan の経路が渡す——
+   * 確かめの試行は `findingCheckAttempts` で別に数え、総呼び出しには数えない（所有者の決定）。
+   * 省けば `gateway` をそのまま使う（試験のため）。
+   */
+  readonly findingCheckGateway?: CallGateway;
+  /**
+   * 確かめの試行の枠（Issue #967。既定は `FINDING_CHECK_ATTEMPTS`）。時点ごとに半分ずつ使う。
+   * 試験が小さくするための口である。
+   */
+  readonly findingCheckAttempts?: number;
 }
 
 /** ①' と ① のやり直しの結果 */
@@ -1483,6 +1564,56 @@ export type ReverseCheckLoopOutcome =
     };
 
 /**
+ * 確かめ役の呼び出しが**門**で返らなかった理由（Issue #967）。締切・予算・呼び出しの上限は、その時点の
+ * 残りを確かめなかった理由として記録する。それ以外の失敗（通信・形など）は、その回を missing と数える。
+ */
+function findingCheckGateReason(failure: StageFailure): FindingCheckUncheckedReason | null {
+  if (failure.kind === "limit" || failure.kind === "callLimit") return "limit";
+  if (failure.kind === "deadline") return "deadline";
+  if (failure.kind === "budget") return "budget";
+  return null;
+}
+
+/** 確かめの記録を、trace に載せるための写しにする（Issue #967） */
+function cloneFindingCheckEntry(entry: ReverseCheckFindingCheckEntry): ReverseCheckFindingCheckEntry {
+  return {
+    phase: entry.phase,
+    range: { start: entry.range.start, end: entry.range.end },
+    trials: entry.trials.map((trial) => ({
+      verdict: trial.verdict,
+      requirementIds: trial.requirementIds.slice(),
+      reason: trial.reason,
+      failure: trial.failure,
+      kept: trial.kept,
+    })),
+    excluded: entry.excluded,
+    uncheckedReason: entry.uncheckedReason,
+  };
+}
+
+/**
+ * 指摘を範囲の始まりの順（同じ始まりなら終わりの順）に並べる（Issue #967）。元の並びは変えない。
+ * 安定な挿入の並べ替えで、同じ範囲の指摘どうしの順を入れ替えない。
+ */
+function orderFindingsByRange<T extends { readonly range: SourceRange }>(items: readonly T[]): readonly T[] {
+  const ordered: T[] = [];
+  for (const item of items) {
+    let index = ordered.length;
+    while (index > 0) {
+      const previous = ordered[index - 1];
+      if (previous === undefined) break;
+      const comesBefore =
+        item.range.start < previous.range.start ||
+        (item.range.start === previous.range.start && item.range.end < previous.range.end);
+      if (!comesBefore) break;
+      index -= 1;
+    }
+    ordered.splice(index, 0, item);
+  }
+  return ordered;
+}
+
+/**
  * ① → ①' を回し、落ちがあれば ① を**1 回だけ**やり直す（§1）。やり直しても残った落ちは未達として
  * 返す（合否はここでは決めない）。**止まったときは、どの呼び出しで止まったかを返す**（Issue #397）。
  * あわせて、往復ごとの落ちの件数の内訳（種類ごと・出どころごと。Issue #430）を返す——止まったときは、
@@ -1497,11 +1628,26 @@ export async function runReverseCheckLoopWithOperation(
   const traces: ReverseCheckTraceRound[] = [];
   // 原文は複写せず、SHA-256 と長さだけを診断に持つ（Issue #919）。呼び出しの列・要求は変えない
   const sourceSha256 = await sha256Hex(input.source);
+  /** 確かめた指摘の記録（Issue #967。確かめた指摘があるときだけ trace に載せる） */
+  const findingChecks: ReverseCheckFindingCheckEntry[] = [];
+  /** 確かめの件数（Issue #967。確かめを始めたときだけ診断に載せる） */
+  let findingCheckCounts: { excluded: number; unchecked: number; attempts: number } | null = null;
+  const ensureFindingCheckCounts = (): { excluded: number; unchecked: number; attempts: number } => {
+    findingCheckCounts ??= { excluded: 0, unchecked: 0, attempts: 0 };
+    return findingCheckCounts;
+  };
+  const findingCheckDiagnosis = (): { readonly findingCheck?: ReverseCheckFindingCheckCounts } =>
+    findingCheckCounts === null ? {} : { findingCheck: { ...findingCheckCounts } };
   const buildTrace = (): ReverseCheckTrace => ({
     sourceSha256,
     sourceLength: input.source.length,
     rounds: traces,
+    ...(findingChecks.length === 0 ? {} : { findingChecks: findingChecks.map(cloneFindingCheckEntry) }),
   });
+  /** `effectiveMisses` を省いたときの落ち（P2 が返した値のまま） */
+  let effectiveMisses: readonly ReverseCheckMiss[] | null = null;
+  /** この P2 の報告について、作り直しの前の確かめを済ませたか（停止の前の確かめを二重にしない） */
+  let verifiedCurrentReport = false;
   /** ① のやり直し（**一覧の全体を作り直した**）を**終えた**か（Issue #430） */
   let redoCompleted = false;
   /** 引用の修復を当てたか（Issue #917） */
@@ -1511,7 +1657,7 @@ export async function runReverseCheckLoopWithOperation(
     ok: false,
     failure,
     operation,
-    diagnosis: { rounds, redone: redoCompleted, unmet: emptyReverseCheckMissCounts() },
+    diagnosis: { rounds, redone: redoCompleted, unmet: emptyReverseCheckMissCounts(), ...findingCheckDiagnosis() },
     trace: buildTrace(),
   });
   const first = await runRequirements({
@@ -1549,17 +1695,232 @@ export async function runReverseCheckLoopWithOperation(
     };
   }
 
-  // ── 経路の表（Issue #917）───────────────────────────────────────────────
+  // ── 経路の表（Issue #917・#967）─────────────────────────────────────────
   //   初回の落ち          経路
   //   なし                  P1 → P2（ここまでで返る）
-  //   覆いを含む            作り直し → P2 →（来歴だけが残れば）修復 → P2
+  //   覆いを含む            確かめ（作り直しの前） → 作り直し → P2 →（来歴だけが残れば）修復 → P2
   //   来歴だけ（修復 off）  作り直し → P2（従来のまま。Plan を経ない Build の既定）
-  //   来歴だけ（修復 on）   修復 → P2 →（覆いを含めば）作り直し → P2
-  // 修復も作り直しも、1 回の流れで最大 1 回。使い切って落ちが残れば、問いの前に確定を止める（呼ぶ側）。
+  //   来歴だけ（修復 on）   修復 → P2 →（覆いを含めば）確かめ → 作り直し → P2
+  // 確かめで外した指摘は、その時点の落ちから除いて**経路を引き直す**。5 つを使い切って落ちが残れば、
+  // 停止の前にもう一度確かめ、それでも残れば問いの前に確定を止める（呼ぶ側）。
   let current = first.value;
   let currentReport = initial.value.result;
   let repairTried = false;
   const useRepair = input.quoteRepair === true;
+  const findingCheckEnabled = input.findingCheck === true;
+  const findingCheckGateway = input.findingCheckGateway ?? input.gateway;
+  /** 時点ごとの確かめの試行の枠（再送と形のやり直しも数える。Issue #967） */
+  const findingCheckPhaseAttempts = Math.max(
+    0,
+    Math.ceil((input.findingCheckAttempts ?? FINDING_CHECK_ATTEMPTS) / 2),
+  );
+  /**
+   * 時点ごとの残りの枠（Issue #967）。**往復の関数で 1 つずつ持ち**、初回の P2 の後と修復の後の P2 の後の
+   * 2 つの入口で同じ「作り直しの前」の残りを使う。合計は `FINDING_CHECK_ATTEMPTS` を超えない。
+   */
+  const findingCheckBudgets: Record<FindingCheckPhase, { remaining: number }> = {
+    redo: { remaining: findingCheckPhaseAttempts },
+    stop: { remaining: findingCheckPhaseAttempts },
+  };
+  /** 作り直しの前に missing と数えて保った指摘の範囲（停止の前の確かめを省く。Issue #967） */
+  const keptBeforeRedoRanges: SourceRange[] = [];
+
+  /**
+   * コードが見つけた落ちの件数。**P2 の `misses` は「コードの落ち（`checkRequirementCoverageDetailed` の
+   * 順）＋会話の断片」の並び**である前提で、先頭を切り落とす（`runReverseCheckWithDiagnosis` と同じ組み方）。
+   */
+  const codeMissCountOf = (): number => checkRequirementCoverageDetailed(input.source, current).length;
+
+  /** 1 件の指摘を、別々の呼び出しで最大 3 回確かめる（Issue #967） */
+  const verifyFinding = async (
+    phase: FindingCheckPhase,
+    miss: Extract<ReverseCheckMiss, { kind: "uncovered-source" }>,
+    budget: { remaining: number },
+  ): Promise<ReverseCheckFindingCheckEntry> => {
+    const counts = ensureFindingCheckCounts();
+    const sentences = overlappingSentences(input.source, miss.range).map((range) =>
+      input.source.slice(range.start, range.end),
+    );
+    const trials: ReverseCheckFindingCheckTrial[] = [];
+    let excluded = true;
+    let uncheckedReason: FindingCheckUncheckedReason | null = null;
+    for (let round = 0; round < 3; round += 1) {
+      if (budget.remaining <= 0) {
+        excluded = false;
+        uncheckedReason = "attempts";
+        break;
+      }
+      const before = findingCheckGateway.attempts.started;
+      const outcome = await runFindingCheck({
+        source: input.source,
+        list: current,
+        range: miss.range,
+        sentences,
+        gateway: findingCheckGateway,
+      });
+      const used = Math.max(0, findingCheckGateway.attempts.started - before);
+      budget.remaining -= used;
+      counts.attempts += used;
+      if (!outcome.ok) {
+        // 呼び出しの失敗・形の誤りは missing と数える（Issue #967）
+        trials.push({
+          verdict: null,
+          requirementIds: [],
+          reason: null,
+          failure: outcome.failure.kind,
+          kept: true,
+        });
+        excluded = false;
+        uncheckedReason = findingCheckGateReason(outcome.failure);
+        break;
+      }
+      const verdict = normalizeFindingCheckVerdict(current, outcome.value);
+      const kept = verdict === "missing";
+      trials.push({
+        verdict: outcome.value.verdict,
+        requirementIds: outcome.value.requirementIds.slice(),
+        reason: outcome.value.reason,
+        failure: null,
+        kept,
+      });
+      if (kept) {
+        excluded = false;
+        break;
+      }
+    }
+    return { phase, range: { start: miss.range.start, end: miss.range.end }, trials, excluded, uncheckedReason };
+  };
+
+  /**
+   * 1 つの時点の確かめを行う（Issue #967）。会話の `uncovered-source` を範囲の始まりの順に確かめ、
+   * 3 回とも carried／not-a-condition のものだけを外す。`stop` の時点では、1 件でも保てば残りを確かめない。
+   * 確かめる指摘が無いときは `null` を返す（何も変えない）。
+   */
+  const runFindingCheckPhase = async (
+    phase: FindingCheckPhase,
+  ): Promise<{ readonly remaining: readonly ReverseCheckMiss[] } | null> => {
+    if (!findingCheckEnabled) return null;
+    const codeCount = codeMissCountOf();
+    // 停止の前は、コードの落ちが残っていれば確かめない（どうせ止まる。Issue #967）
+    if (phase === "stop" && codeCount > 0) return null;
+    const conversation = currentReport.misses.slice(codeCount);
+    const findings = conversation.filter(
+      (miss): miss is Extract<ReverseCheckMiss, { kind: "uncovered-source" }> => miss.kind === "uncovered-source",
+    );
+    if (findings.length === 0) return null;
+    const ordered = orderFindingsByRange(findings);
+    ensureFindingCheckCounts();
+    // 時点の残りは、往復の関数で 1 つ持っているものを使う（入口ごとに作り直さない。Issue #967）
+    const budget = findingCheckBudgets[phase];
+    const excludedKeys = new Set<string>();
+    let stopped = false;
+    let gateStop: FindingCheckUncheckedReason | null = null;
+    const overlapsKeptBeforeRedo = (range: SourceRange): boolean =>
+      keptBeforeRedoRanges.some((kept) => kept.start < range.end && range.start < kept.end);
+    for (const miss of ordered) {
+      const key = `${miss.range.start}-${miss.range.end}`;
+      if (gateStop !== null) {
+        findingChecks.push({
+          phase,
+          range: { start: miss.range.start, end: miss.range.end },
+          trials: [],
+          excluded: false,
+          uncheckedReason: gateStop,
+        });
+        ensureFindingCheckCounts().unchecked += 1;
+        continue;
+      }
+      if (stopped) {
+        findingChecks.push({
+          phase,
+          range: { start: miss.range.start, end: miss.range.end },
+          trials: [],
+          excluded: false,
+          uncheckedReason: "kept",
+        });
+        ensureFindingCheckCounts().unchecked += 1;
+        continue;
+      }
+      // 作り直しの前に missing と数えて保った指摘と範囲が重なるなら、停止の前は確かめずに保つ（Issue #967）
+      if (phase === "stop" && overlapsKeptBeforeRedo(miss.range)) {
+        findingChecks.push({
+          phase,
+          range: { start: miss.range.start, end: miss.range.end },
+          trials: [],
+          excluded: false,
+          uncheckedReason: "kept-before-redo",
+        });
+        ensureFindingCheckCounts().unchecked += 1;
+        stopped = true;
+        continue;
+      }
+      if (budget.remaining <= 0) {
+        findingChecks.push({
+          phase,
+          range: { start: miss.range.start, end: miss.range.end },
+          trials: [],
+          excluded: false,
+          uncheckedReason: "attempts",
+        });
+        ensureFindingCheckCounts().unchecked += 1;
+        continue;
+      }
+      const entry = await verifyFinding(phase, miss, budget);
+      findingChecks.push(entry);
+      const hadVerdict = entry.trials.some((trial) => trial.verdict !== null);
+      if (entry.excluded) {
+        excludedKeys.add(key);
+        ensureFindingCheckCounts().excluded += 1;
+      } else {
+        // 成功した判定が 0 回の指摘（門の理由で全部失敗）は、確かめなかった数に入れる（Issue #967）
+        if (!hadVerdict) ensureFindingCheckCounts().unchecked += 1;
+        // 作り直しの前に missing と数えた指摘の範囲を控える（停止の前の確かめを省く）
+        if (phase === "redo" && entry.trials.some((trial) => trial.kept && trial.verdict !== null)) {
+          keptBeforeRedoRanges.push({ start: entry.range.start, end: entry.range.end });
+        }
+        // 門の理由（締切・予算・上限）で返ったら、その時点の残りは呼ばずに理由つきで打ち切る
+        if (
+          entry.uncheckedReason === "limit" ||
+          entry.uncheckedReason === "deadline" ||
+          entry.uncheckedReason === "budget"
+        ) {
+          gateStop = entry.uncheckedReason;
+        }
+      }
+      // 停止の前は、1 件でも保てば止まることが決まる。残りの指摘は確かめない（Issue #967）
+      if (!entry.excluded && phase === "stop") stopped = true;
+    }
+    verifiedCurrentReport = true;
+    const remaining = [
+      ...currentReport.misses.slice(0, codeCount),
+      ...conversation.filter(
+        (miss) =>
+          miss.kind !== "uncovered-source" ||
+          !excludedKeys.has(`${miss.range.start}-${miss.range.end}`),
+      ),
+    ];
+    return { remaining };
+  };
+
+  /**
+   * 作り直しの前の確かめ（Issue #967）。外した指摘を除いた落ちで、経路を引き直す:
+   * `done`（落ちが無い）・`repair`（来歴だけ）・`redo`（覆いが残る）。
+   */
+  const findingCheckBeforeRedo = async (): Promise<"done" | "repair" | "redo"> => {
+    const checked = await runFindingCheckPhase("redo");
+    if (checked === null) return "redo";
+    effectiveMisses = checked.remaining;
+    if (checked.remaining.length === 0) return "done";
+    if (useRepair && isProvenanceOnlyMisses(checked.remaining)) return "repair";
+    return "redo";
+  };
+
+  /** 停止の前の確かめ（Issue #967）。外した指摘を除いた `unmet` を残す */
+  const findingCheckBeforeStop = async (): Promise<void> => {
+    if (verifiedCurrentReport) return;
+    const checked = await runFindingCheckPhase("stop");
+    if (checked !== null) effectiveMisses = checked.remaining;
+  };
 
   /** 引用の修復を 1 回だけ試す。`"ok"` なら `current` を直した一覧に差し替えた */
   const tryQuoteRepair = async (): Promise<ReverseCheckLoopOutcome | "ok" | "skip"> => {
@@ -1595,6 +1956,8 @@ export async function runReverseCheckLoopWithOperation(
     rounds.push(after.value.round);
     traces.push(after.value.trace);
     currentReport = after.value.result;
+    effectiveMisses = null;
+    verifiedCurrentReport = false;
     return "ok";
   };
 
@@ -1605,7 +1968,8 @@ export async function runReverseCheckLoopWithOperation(
       source: input.source,
       documents: input.documents,
       gateway: input.gateway,
-      redo: { previous: current, misses: currentReport.misses },
+      // 外した指摘は、作り直しの指示にも運ばない（残った落ちだけで作り直す。Issue #967）
+      redo: { previous: current, misses: effectiveMisses ?? currentReport.misses },
       ...(input.conditionRule === true ? { conditionRule: true } : {}),
     });
     if (!redone.ok) return stop(redone.failure, "requirements-redo");
@@ -1632,45 +1996,68 @@ export async function runReverseCheckLoopWithOperation(
     traces.push(second.value.trace);
     current = kept.list;
     currentReport = second.value.result;
+    effectiveMisses = null;
+    verifiedCurrentReport = false;
     return "ok";
   };
 
   /** 直し方をすべて使い切ったときの終わり（落ちが残っていれば、そのまま未達として返す） */
-  const finish = (): ReverseCheckLoopOutcome => ({
-    ok: true,
-    value: {
-      list: current,
-      report: currentReport,
-      redone: redoCompleted,
-      repaired,
-      unmet: currentReport.misses,
-      diagnosis: {
-        rounds,
+  const finish = async (): Promise<ReverseCheckLoopOutcome> => {
+    await findingCheckBeforeStop();
+    return {
+      ok: true,
+      value: {
+        list: current,
+        report: currentReport,
         redone: redoCompleted,
-        unmet: countReverseCheckMisses(input.source, current, currentReport.misses),
+        repaired,
+        // 外した会話の指摘は `unmet` から除く（Issue #967）。生の数は診断に残す
+        unmet: effectiveMisses ?? currentReport.misses,
+        diagnosis: {
+          rounds,
+          redone: redoCompleted,
+          // 生の P2 の数は今までどおり持つ（外した数は別の欄。Issue #967）
+          unmet: countReverseCheckMisses(input.source, current, currentReport.misses),
+          ...findingCheckDiagnosis(),
+        },
+        trace: buildTrace(),
       },
-      trace: buildTrace(),
-    },
-  });
+    };
+  };
 
   // 修復を先に使う経路（来歴だけの落ち）と、作り直しを先に使う経路（覆いを含む・修復 off）。
   if (useRepair && isProvenanceOnlyMisses(currentReport.misses)) {
     const firstStep = await tryQuoteRepair();
-    if (firstStep !== "ok") return firstStep === "skip" ? finish() : firstStep;
-    // 修復の後の照らし直しで覆いを含めば、全体の作り直しへ 1 回進む
+    if (firstStep !== "ok") return firstStep === "skip" ? await finish() : firstStep;
+    // 修復の後の照らし直しで覆いを含めば、確かめてから全体の作り直しへ 1 回進む
     if (currentReport.misses.length > 0 && !isProvenanceOnlyMisses(currentReport.misses)) {
+      const route = await findingCheckBeforeRedo();
+      if (route !== "redo") return await finish();
       const secondStep = await tryWholeRedo();
-      if (secondStep !== "ok") return secondStep === "skip" ? finish() : secondStep;
+      if (secondStep !== "ok") return secondStep === "skip" ? await finish() : secondStep;
     }
-    return finish();
+    return await finish();
   }
 
+  const route = await findingCheckBeforeRedo();
+  if (route === "done") return await finish();
+  if (route === "repair") {
+    const repairStep = await tryQuoteRepair();
+    if (repairStep !== "ok") return repairStep === "skip" ? await finish() : repairStep;
+    if (currentReport.misses.length > 0 && !isProvenanceOnlyMisses(currentReport.misses)) {
+      const secondRoute = await findingCheckBeforeRedo();
+      if (secondRoute !== "redo") return await finish();
+      const redoStep = await tryWholeRedo();
+      if (redoStep !== "ok") return redoStep === "skip" ? await finish() : redoStep;
+    }
+    return await finish();
+  }
   const redoStep = await tryWholeRedo();
-  if (redoStep !== "ok") return redoStep === "skip" ? finish() : redoStep;
+  if (redoStep !== "ok") return redoStep === "skip" ? await finish() : redoStep;
   // 作り直しの後に来歴だけが残れば、修復へ 1 回進む
   if (useRepair && isProvenanceOnlyMisses(currentReport.misses)) {
     const repairStep = await tryQuoteRepair();
-    if (repairStep !== "ok") return repairStep === "skip" ? finish() : repairStep;
+    if (repairStep !== "ok") return repairStep === "skip" ? await finish() : repairStep;
   }
-  return finish();
+  return await finish();
 }

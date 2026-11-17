@@ -71,6 +71,17 @@ export const AGENT_LIMITS = {
   planFreeTextChars: 500,
 } as const;
 
+/**
+ * Plan の経路で、P2 の会話の指摘を確かめる試行の数の上限（Issue #967）。**時点ごとに半分ずつ**
+ * （作り直しの前 6・停止の前 6）を使い、再送と形のやり直しも数える。総呼び出し（`callCount`）には
+ * 数えない——所有者が 2026-11-17 に決めた（確かめの枠を総呼び出しの外に置く）。
+ *
+ * **`AGENT_LIMITS` には入れない。** v1・v1.1α の上限の表は、`v12/limits.test.ts` と
+ * `v12/search-repair.test.ts` が「直す前と同じ欄と値」として固定しており、その 2 本は本 Issue の
+ * 変更範囲の外にある。値の意味は `AGENT_LIMITS` の隣に置いたこの定数が持つ。
+ */
+export const FINDING_CHECK_ATTEMPTS = 12;
+
 /** 上限の名前（`AGENT_LIMITS` の欄の名前） */
 export type LimitName = keyof typeof AGENT_LIMITS;
 
@@ -189,6 +200,7 @@ export const OUTPUT_STAGES = [
   "semantic-check", // T1'' 表の意味の点検
   "test-spec", // T2 試験の仕様
   "decl-check", // B3' 宣言の意味の点検
+  "finding-check", // P2 の会話の指摘を 1 件ずつ確かめる（Issue #967）
 ] as const;
 export type OutputStage = (typeof OUTPUT_STAGES)[number];
 
@@ -225,6 +237,7 @@ export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage
     "semantic-check": 16_384,
     "test-spec": 32_768,
     "decl-check": 16_384,
+    "finding-check": 8_192,
   },
   medium: {
     surface: 32_768,
@@ -241,6 +254,7 @@ export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage
     "semantic-check": 16_384,
     "test-spec": 32_768,
     "decl-check": 16_384,
+    "finding-check": 8_192,
   },
   high: {
     surface: 32_768,
@@ -257,6 +271,7 @@ export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage
     "semantic-check": 16_384,
     "test-spec": 32_768,
     "decl-check": 16_384,
+    "finding-check": 8_192,
   },
 };
 
