@@ -120,18 +120,20 @@ function structured(output: unknown, usage: LlmUsage | undefined = USAGE): Recor
   return rawStructured(withSurfaceRelations(output), usage);
 }
 
-/** 条件を本文へ残す原則の 4 文（Issue #964。比較からだけ除くために使う） */
-const CONDITION_RULE_TEXTS: ReadonlySet<string> = new Set(
-  REQUIREMENTS_CONDITION_RULE_DEFINITIONS.map((definition) => definition.text),
-);
+/** 条件を本文へ残す原則の 4 文（Issue #964。順序も見る） */
+const CONDITION_RULE_TEXTS = REQUIREMENTS_CONDITION_RULE_DEFINITIONS.map((definition) => definition.text);
 
 /**
  * 比較用の要求。**Plan の P1 の規則の並びから、Issue #964 の 4 文だけを取り除く**——この Issue が
  * 意図して変える唯一の差であり、ほかの要求・ほかの差はそのまま比べる（既存の期待は変えない）。
+ * **除く前に、7 文の後ろにちょうど 4 文がこの順であることを確かめる**（形のやり直しを含む、既存の
+ * 筋書きのすべての P1 の要求で固定する。Issue #964 の推奨 1）。
  */
 function withoutConditionRules(request: LlmStructuredRequest): LlmStructuredRequest {
   if (request.schemaName !== REQUIREMENTS_SCHEMA_NAME || request.rules === undefined) return request;
-  return { ...request, rules: request.rules.filter((rule) => !CONDITION_RULE_TEXTS.has(rule)) };
+  expect(request.rules.slice(0, REQUIREMENTS_RULES.length)).toEqual([...REQUIREMENTS_RULES]);
+  expect(request.rules.slice(REQUIREMENTS_RULES.length)).toEqual(CONDITION_RULE_TEXTS);
+  return { ...request, rules: request.rules.slice(0, REQUIREMENTS_RULES.length) };
 }
 
 /** 申告の独立点検の要求か（問いの名前の頭で見分ける。Issue #953） */

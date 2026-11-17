@@ -1233,7 +1233,10 @@ export interface PlanReverseCheckSelections {
   readonly conditionRule: true;
 }
 
-/** Plan と探針が共有する逆照合の選択（Issue #956）。値は Plan の経路のものである */
+/**
+ * Plan と探針が共有する逆照合の選択（Issue #956）。値は Plan の経路のものである。
+ * **値は Plan と探針で同時にだけ変える**——探針の p1・loop・修復の byte 一致の試験が見る。
+ */
 export const PLAN_REVERSE_CHECK_SELECTIONS: PlanReverseCheckSelections = {
   quoteRepair: true,
   meaningRule: true,

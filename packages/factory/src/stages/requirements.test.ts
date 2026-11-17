@@ -519,24 +519,33 @@ describe("P1 の条件の原則（Issue #964）", () => {
       new URL("../../../../workspace/mvp/m1/agent/methodology/ledger/rules.md", import.meta.url),
       "utf8",
     );
-    const ours = new Set(REQUIREMENTS_CONDITION_RULE_DEFINITIONS.map((definition) => definition.id));
+    const ours = new Map(
+      REQUIREMENTS_CONDITION_RULE_DEFINITIONS.map((definition) => [definition.id, definition.text] as const),
+    );
     const existing = [
       ...REQUIREMENT_QUOTE_REPAIR_RULE_DEFINITIONS,
       ...REVERSE_CHECK_MEANING_RULE_DEFINITIONS,
     ].map((definition) => definition.id);
-    for (const id of ours) expect(existing, id).not.toContain(id);
-    const ledgerIds = ledger
+    for (const id of ours.keys()) expect(existing, id).not.toContain(id);
+    // 台帳の行を、ID（1 列目）と規則の文（2 列目）で読む
+    const ledgerRows = ledger
       .split("\n")
       .flatMap((line) => {
-        const match = /^\|\s*(R-[a-z0-9]+-\d+)\s*\|/.exec(line);
-        const id = match?.[1];
-        return id === undefined ? [] : [id];
-      })
-      // 自分の 4 つの行（窓口が後で足す）は除く——足した後も重なりを見ない
-      .filter((id) => !ours.has(id));
-    for (const id of ours) expect(ledgerIds, id).not.toContain(id);
+        const cells = line.split("|");
+        const id = cells[1]?.trim();
+        const text = cells[2]?.trim();
+        if (id === undefined || text === undefined || !/^R-[a-z0-9]+-\d+$/.test(id)) return [];
+        return [{ id, text }];
+      });
+    // 除くのは、**ID と文が両方とも自分の定義と一致する行だけ**である（窓口が台帳へ写した後も通る）。
+    // 同じ ID で別の文を持つ行は残るので、下の照合で赤になる（Issue #964 の推奨 2）。
+    const others = ledgerRows.filter((row) => ours.get(row.id) !== row.text);
+    for (const id of ours.keys()) {
+      const conflicting = others.filter((row) => row.id === id);
+      expect(conflicting, id).toEqual([]);
+    }
     // 照らした台帳に既存の行があること（空の台帳を相手に緑にしない）
-    expect(ledgerIds.length).toBeGreaterThan(0);
+    expect(others.length).toBeGreaterThan(0);
   });
 
   it("R-rqc-01 と R-rcm-01 の文が、種類の並びの同じ定数を含む", () => {
