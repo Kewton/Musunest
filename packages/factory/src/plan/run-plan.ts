@@ -1231,6 +1231,8 @@ export interface PlanReverseCheckSelections {
   readonly observeConditionFindings: true;
   /** 条件を本文へ残す原則を、初回と全体の作り直しの 2 つの P1 に足す（Issue #964） */
   readonly conditionRule: true;
+  /** P2 の会話の指摘を、別の呼び出しで 1 件ずつ最大 3 回確かめる（Issue #967） */
+  readonly findingCheck: true;
 }
 
 /**
@@ -1243,6 +1245,7 @@ export const PLAN_REVERSE_CHECK_SELECTIONS: PlanReverseCheckSelections = {
   keepValidProvenance: true,
   observeConditionFindings: true,
   conditionRule: true,
+  findingCheck: true,
 };
 
 /** 早く止まる合図（`runPlan` の中だけで使う） */
@@ -1734,8 +1737,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   // 生成と判定で共有する実試行の門（Issue #432）。生成の呼び出し・その再試行・判定の呼び出し・Jev→Luna の
   // 切り替え・独立した再点検が、**同じ 1 つの数**で締切と総呼び出し数に掛かる。
   const gate = createCallGate({ now: input.now, deadline: input.deadline, limit: limits.callCount });
+  const wrappedClient = meter.wrap(input.client);
   const gateway = new CallGateway({
-    client: meter.wrap(input.client),
+    client: wrappedClient,
     budget,
     rates: input.rates,
     now: input.now,
@@ -1743,6 +1747,18 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     limits,
     effort: input.effort,
     gate,
+    ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
+  });
+  // 確かめ役の口（Issue #967）。**総呼び出しの門を持たない**——確かめの試行は `findingCheckAttempts` で
+  // 別に数え、総呼び出し（24）には数えない（所有者の決定）。予算・締切・単価・effort は Plan の口と同じ。
+  const findingCheckGateway = new CallGateway({
+    client: wrappedClient,
+    budget,
+    rates: input.rates,
+    now: input.now,
+    deadline: input.deadline,
+    limits,
+    effort: input.effort,
     ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
   });
   // 判定の口を、**この Plan の予算に結び付けた包み**で包む（#359）。判定の費用も、段の呼び出しと同じ
@@ -2365,9 +2381,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         source: input.source,
         documents: input.documents,
         gateway,
-        // Plan の経路だけの逆照合の選択（引用の修復・意味の基準・有効な来歴の保持・条件の指摘の観測。
-        // Issue #917・#925・#942・#948）。探針と同じ定数を使う（Issue #956）。値は今までと同じ
+        // Plan の経路だけの逆照合の選択（引用の修復・意味の基準・有効な来歴の保持・条件の指摘の観測・
+        // 指摘の確かめ。Issue #917・#925・#942・#948・#967）。探針と同じ定数を使う（Issue #956）。
         ...PLAN_REVERSE_CHECK_SELECTIONS,
+        findingCheckGateway,
       });
       // 止まったときも、止まるまでに終えた往復の分を結果へ残す（Issue #430・#919）
       requirementsDiagnosis = outcome.ok ? outcome.value.diagnosis : outcome.diagnosis;

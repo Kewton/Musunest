@@ -675,6 +675,7 @@ async function runStage(
   input: PlanProbeInput,
   probeCase: PlanProbeCase,
   gateway: CallGateway,
+  findingCheckGateway: CallGateway,
 ): Promise<StageRunOutcome> {
   if (input.stage === "p1") {
     const outcome = await runRequirements({
@@ -733,7 +734,9 @@ async function runStage(
     source: probeCase.source,
     documents: input.documents,
     gateway,
+    // Plan と同じ選択（指摘の確かめを含む。Issue #967）。確かめ役は**門を持たない口**を通す。
     ...PLAN_REVERSE_CHECK_SELECTIONS,
+    findingCheckGateway,
   });
   if (!outcome.ok) {
     return {
@@ -818,6 +821,17 @@ export async function runPlanProbe(input: PlanProbeInput): Promise<PlanProbeResu
         gate,
         ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
       });
+      // 確かめ役の口（Issue #967）。Plan と同じく総呼び出しの門を持たない。
+      const findingCheckGateway = new CallGateway({
+        client: recorder.client,
+        budget,
+        rates: input.rates,
+        now: input.now,
+        deadline: input.deadline,
+        limits,
+        effort: input.effort,
+        ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
+      });
 
       const beforeUsage = meter.snapshot;
       const beforeCounts: CallCounts = gateway.counts;
@@ -827,7 +841,7 @@ export async function runPlanProbe(input: PlanProbeInput): Promise<PlanProbeResu
 
       let outcome: StageRunOutcome;
       try {
-        outcome = await runStage(input, probeCase, gateway);
+        outcome = await runStage(input, probeCase, gateway, findingCheckGateway);
       } catch {
         outcome = {
           list: null,

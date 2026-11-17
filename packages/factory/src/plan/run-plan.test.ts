@@ -8,7 +8,7 @@
 //   5. 予算が尽きると「止まった」になる。使った額に LLM と判定の費用が入る
 //   6. 段ごとの記録が結果に入る
 //   7. 判定の包みが、共有の門を Jev の内部の再送へ届ける（Issue #469）
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { checkConfirmedPlan, HOST_CAPABILITIES, isConfirmationValid, planDigest, type ConfirmedPlan, type PlanAcceptedUnwritable, type PlanOpenIssue, type PlanPart, type PlanRequirement } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { buildPlanCliRecord, createPlanTranscript, planStopReasonLine } from "../cli-plan.js";
@@ -86,6 +86,7 @@ import {
   REVERSE_CHECK_SCHEMA_NAME,
   runReverseCheckLoop,
 } from "../stages/reverse-check.js";
+import { FINDING_CHECK_SCHEMA_NAME } from "../stages/finding-check.js";
 import {
   REQUIREMENTS_CONDITION_RULE_DEFINITIONS,
   REQUIREMENTS_RULES,
@@ -144,6 +145,15 @@ function isClaimCheckRequest(request: JudgeRequest): boolean {
 }
 
 const RATES = { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 };
+
+/** 確かめ役の「missing」の答え（指摘を保つ。Issue #967 の試験で使う） */
+const FINDING_MISSING = { verdict: "missing", requirement_ids: [], reason: "条件の欠落として保つ" };
+/** 確かめ役の「carried」の答え（Issue #967 の試験で使う。要件 ID は一覧に実在させる） */
+const findingCarried = (requirementId: string) => ({
+  verdict: "carried",
+  requirement_ids: [requirementId],
+  reason: "本文に表されている",
+});
 
 const noul = (value: number): JudgeAnswer => ({ kind: "noul", noul: value });
 
@@ -1258,8 +1268,11 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
     const recording = createRecordingClient([
       structured(coveredList),
       structured(conversation),
+      // 確かめ役が保つので、指摘は残り、今までどおり止まる（Issue #967）
+      structured(FINDING_MISSING),
       structured(coveredList),
       structured(conversation),
+      structured(FINDING_MISSING),
     ]);
 
     const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE));
@@ -6590,8 +6603,10 @@ describe("複数の文にまたがる引用の対応を、P2 から P6 まで保
     const recording = createRecordingClient([
       structured(RC_ALL_COVERED),
       structured(RC_CONVERSATION),
+      structured(FINDING_MISSING),
       structured(RC_ALL_COVERED),
       structured(RC_CONVERSATION),
+      structured(FINDING_MISSING),
     ]);
 
     const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE, { source: RC2_SOURCE }));
@@ -7759,6 +7774,7 @@ describe("Plan の経路の引用の修復（Issue #917）", () => {
       structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
       // 修復の後の P2 が、覆われていない部分を申告する（門を省いていれば、この落ちは出ない）
       structured({ uncovered: [{ start: 0, end: 3 }] }),
+      structured(FINDING_MISSING),
       structured(THREE_REQUIREMENTS),
       structured(REVERSE_CHECK_OUTPUT),
     ]);
@@ -7941,6 +7957,7 @@ describe("Plan の経路の P2 の要求に、対応の意味の基準が入る�
       structured(REVERSE_CHECK_OUTPUT),
       structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
       structured({ uncovered: [{ start: 0, end: 3 }] }),
+      structured(FINDING_MISSING),
       structured(redone),
       structured(REVERSE_CHECK_OUTPUT),
     ]);
@@ -8012,6 +8029,7 @@ describe("Plan の経路の P1 の要求に、条件を本文へ残す原則が�
       structured(REVERSE_CHECK_OUTPUT),
       structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
       structured({ uncovered: [{ start: 0, end: 3 }] }),
+      structured(FINDING_MISSING),
       structured(redone),
       structured(REVERSE_CHECK_OUTPUT),
     ]);
@@ -8058,6 +8076,172 @@ describe("Plan の経路の P1 の要求に、条件を本文へ残す原則が�
     const request = recording.structured[0];
     expect(meaningRulesOf(request)).toEqual([...REQUIREMENTS_RULES]);
     expect(meaningRulesOf(request).some((rule) => CONDITION_TEXTS.includes(rule))).toBe(false);
+  });
+});
+
+// ── Issue #967：Plan の経路で、P2 の会話の指摘を 3 回確かめて外す ────────────
+
+describe("Plan の経路で、P2 の会話の指摘を 3 回確かめて外す（Issue #967）", () => {
+  /** 3 文の原文（すべての文を下の一覧が覆う） */
+  const FC_SOURCE = "タスクを記録する。件数を合計する。印を出す。";
+  const FC_LIST = {
+    requirements: [
+      { id: "R-1", text: "記録できる", quote: "タスクを記録する。", position: { start: 0, end: 9 } },
+      {
+        id: "R-2",
+        text: "合計して印を出せる",
+        quote: "件数を合計する。印を出す。",
+        position: { start: 9, end: 24 },
+      },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+
+  it("確かめ役が 3 回とも carried を返すと、作り直しを呼ばず、問いの前に止まらない", async () => {
+    const recording = createRecordingClient([
+      // 3 文すべてを覆う一覧（コードの落ちは無い）
+      structured(FC_LIST),
+      // 会話の指摘 1 件（覆われている文の中）
+      structured({ uncovered: [{ start: 0, end: 9 }] }),
+      structured(findingCarried("R-2")),
+      structured(findingCarried("R-2")),
+      structured(findingCarried("R-2")),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswersFor(["R-1", "R-2"]),
+      [confirmQuestionName("S-1")]: noul(0.95),
+      [confirmQuestionName("S-2")]: noul(0.95),
+      [confirmQuestionName("S-3")]: noul(0.95),
+    });
+    let answerCalls = 0;
+    let confirmCalls = 0;
+    const responder: PlanResponder = {
+      async answer() {
+        answerCalls += 1;
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        confirmCalls += 1;
+        return "build";
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder, { source: FC_SOURCE }));
+
+    // 問いの前に止まらない
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 作り直し（2 回目の P1）も、2 回目の P2 も呼ばない
+    expect(recording.structured.filter((request) => request.schemaName === REQUIREMENTS_SCHEMA_NAME)).toHaveLength(1);
+    expect(recording.structured.filter((request) => request.schemaName === REVERSE_CHECK_SCHEMA_NAME)).toHaveLength(1);
+    // 確かめ役は 3 回（同じ指摘に 3 回の一致）
+    expect(recording.structured.filter((request) => request.schemaName === FINDING_CHECK_SCHEMA_NAME)).toHaveLength(3);
+    expect(result.requirementsDiagnosis.rounds.map((round) => round.fix)).toEqual(["initial"]);
+    expect(result.requirementsDiagnosis.findingCheck).toEqual({ excluded: 1, unchecked: 0, attempts: 3 });
+    expect(result.reverseCheckTrace?.findingChecks).toHaveLength(1);
+    expect(result.reverseCheckTrace?.findingChecks?.[0]).toMatchObject({ phase: "redo", excluded: true });
+    expect(result.reverseCheckTrace?.findingChecks?.[0]?.trials).toHaveLength(3);
+    expect(answerCalls).toBe(0);
+    expect(confirmCalls).toBe(1);
+  });
+
+  it("確かめは総呼び出しの上限に数えない（数えれば requirements で止まる台本）", async () => {
+    const recording = createRecordingClient([
+      structured(FC_LIST),
+      structured({ uncovered: [{ start: 0, end: 9 }] }),
+      structured(findingCarried("R-2")),
+      structured(findingCarried("R-2")),
+      structured(findingCarried("R-2")),
+    ]);
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE, {
+        source: FC_SOURCE,
+        // P1・P2 の 2 回と目録の 1 回で使い切る。確かめの 3 回を数えれば requirements で止まる
+        limits: { ...AGENT_LIMITS, callCount: 3 },
+      }),
+    );
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    // 確かめは別の口なので、requirements は通り、その次の LLM の段で門に当たる
+    expect(result.failure?.stage).toBe("surface");
+    expect(result.failure?.kind).toBe("call-limit");
+    expect(result.stages.find((stage) => stage.stage === "requirements")?.status).toBe("ok");
+    expect(recording.structured.filter((request) => request.schemaName === REQUIREMENTS_SCHEMA_NAME)).toHaveLength(1);
+    expect(recording.structured.filter((request) => request.schemaName === FINDING_CHECK_SCHEMA_NAME)).toHaveLength(3);
+  });
+
+  it("確かめ役も締切を通り、確かめの途中で過ぎると保って次の段で止まる", async () => {
+    const recording = createRecordingClient([
+      structured(FC_LIST),
+      structured({ uncovered: [{ start: 0, end: 9 }] }),
+    ]);
+    let expired = false;
+    const base = recording.client;
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest) {
+        const response = await base.callStructured<T>(request);
+        // P2 の応答の直後に締切を過ぎる（次の確かめ役の実試行の直前）
+        if (request.schemaName === REVERSE_CHECK_SCHEMA_NAME) expired = true;
+        return response;
+      },
+      callWithTools: (request) => base.callWithTools(request),
+    };
+    const result = await runPlan(
+      makePlanInput(client, createFakeJudge({}), ANSWER_NONE, {
+        source: FC_SOURCE,
+        deadline: 10_000,
+        now: () => (expired ? 20_000 : 0),
+      }),
+    );
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    // 確かめ役は締切で保ち、次の作り直しで今までどおり止まる
+    expect(result.failure?.kind).toBe("deadline");
+    expect(result.failure?.operation).toBe("requirements-redo");
+    const entry = result.reverseCheckTrace?.findingChecks?.[0];
+    expect(entry).toMatchObject({ excluded: false, uncheckedReason: "deadline" });
+    expect(entry?.trials[0]).toMatchObject({ failure: "deadline", kept: true });
+  });
+
+  it("会話の指摘の無い本は、旗の有無で全要求・呼び出し列・診断が同じ", async () => {
+    const script = () => [
+      structured(THREE_REQUIREMENTS),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(THREE_REQUIREMENTS),
+      structured(REVERSE_CHECK_OUTPUT),
+    ];
+    const normalRecording = createRecordingClient(script());
+    const normal = await runPlan(
+      makePlanInput(normalRecording.client, createFakeJudge({}), ANSWER_NONE, { source: THREE_SOURCE }),
+    );
+    expect(normal.kind).toBe("cannot-confirm");
+
+    vi.resetModules();
+    vi.doMock("./run-plan.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("./run-plan.js")>();
+      return {
+        ...actual,
+        // 旗を外した写し（会話の指摘が無い本では、要求・結果・診断が変わらない）
+        PLAN_REVERSE_CHECK_SELECTIONS: { ...actual.PLAN_REVERSE_CHECK_SELECTIONS, findingCheck: false },
+      };
+    });
+    try {
+      const mutated = await import("./run-plan.js");
+      const mutatedRecording = createRecordingClient(script());
+      const result = await mutated.runPlan(
+        makePlanInput(mutatedRecording.client, createFakeJudge({}), ANSWER_NONE, { source: THREE_SOURCE }),
+      );
+      expect(JSON.stringify(mutatedRecording.structured)).toBe(JSON.stringify(normalRecording.structured));
+      expect(result.kind).toBe(normal.kind);
+      expect(result.requirementsDiagnosis).toEqual(normal.requirementsDiagnosis);
+      expect(result.reverseCheckTrace).toEqual(normal.reverseCheckTrace);
+    } finally {
+      vi.doUnmock("./run-plan.js");
+      vi.resetModules();
+    }
   });
 });
 
@@ -8449,9 +8633,11 @@ async function runPlanConditionRecord(missingKind: string) {
       uncovered: [{ start: 0, end: 3 }],
       findingDetails: [{ uncoveredIndex: 0, missingKind, requirementIds: ["R-1"] }],
     }),
+    structured(FINDING_MISSING),
     structured(redone),
     // 作り直しの後も覆いが残り、問いの前に止まる（P3 以降へ進まない）
     structured({ uncovered: [{ start: 0, end: 3 }], findingDetails: [] }),
+    structured(FINDING_MISSING),
   ]);
   const result = await runPlan(
     makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE, { source }),
@@ -8489,11 +8675,13 @@ describe("T2条件指摘の記録", () => {
         uncovered: [{ start: 0, end: 3 }],
         findingDetails: [{ uncoveredIndex: 0, missingKind: "time", requirementIds: ["R-1"] }],
       }),
+      structured(FINDING_MISSING),
       structured(redone),
       structured({
         uncovered: [{ start: 0, end: 3 }],
         findingDetails: [{ uncoveredIndex: 0, missingKind: "negation", requirementIds: ["R-1"] }],
       }),
+      structured(FINDING_MISSING),
     ]);
 
     const result = await runPlan(
