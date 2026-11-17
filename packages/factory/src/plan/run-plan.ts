@@ -1229,14 +1229,20 @@ export interface PlanReverseCheckSelections {
   readonly keepValidProvenance: true;
   /** 条件の指摘の詳細を求める派生 schema を 3 つの P2 すべてに使う（Issue #948） */
   readonly observeConditionFindings: true;
+  /** 条件を本文へ残す原則を、初回と全体の作り直しの 2 つの P1 に足す（Issue #964） */
+  readonly conditionRule: true;
 }
 
-/** Plan と探針が共有する逆照合の選択（Issue #956）。**値は変えない** */
+/**
+ * Plan と探針が共有する逆照合の選択（Issue #956）。値は Plan の経路のものである。
+ * **値は Plan と探針で同時にだけ変える**——探針の p1・loop・修復の byte 一致の試験が見る。
+ */
 export const PLAN_REVERSE_CHECK_SELECTIONS: PlanReverseCheckSelections = {
   quoteRepair: true,
   meaningRule: true,
   keepValidProvenance: true,
   observeConditionFindings: true,
+  conditionRule: true,
 };
 
 /** 早く止まる合図（`runPlan` の中だけで使う） */

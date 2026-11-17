@@ -38,6 +38,57 @@ export const REQUIREMENTS_RULES: readonly string[] = [
   "重大な曖昧さ（どちらに決めるかで作るものが変わる）は決めずに、unresolved にその問いを残す。",
 ];
 
+/** 条件を本文へ残す原則が対応する失敗のモード（Issue #964。台帳 M-21） */
+export const REQUIREMENTS_CONDITION_FAILURE_MODES = ["M-21"] as const;
+
+/**
+ * 条件を本文へ残す原則の規則（Issue #964）。**Plan の経路だけ**が旗 `conditionRule` で有効にする。
+ * 既存の 7 文（`REQUIREMENTS_RULES`）は配列のまま変えず、この組を**その後ろ**に足す——旗の無い
+ * Build の経路は、送る規則のバイト列を変えない。文は窓口の試作で送った文と byte で同じである。
+ */
+export const REQUIREMENTS_CONDITION_RULE_DEFINITIONS: readonly RuleDefinition[] = [
+  {
+    id: "R-rqc-01",
+    text: "要件の本文（text）は、原文がその要求に付けている条件・制約（対象・否定・例外・時点・期限・数量・適用の範囲・指定の文言）のすべてを表す。時点には、操作や表示の契機を含む。契機が利用者の行いや状態の変わり目であっても、時点として本文に書く。引用（quote）は出典の目印であり、引用にあっても本文に書かなければ条件は残らない。",
+    why: "後の段と確定した仕様が読むのは本文である。本文に無い条件は仕様から消え、利用者は確認の画面で気づけない。逆照合は同じ種類の条件を本文で点検する。契機の文は、試作の 1 回目で残った欠落が利用者の行いや状態の変わり目を契機にする時点だったため足した（「時点として」は、契機を対象の修飾へ書く取り違えを避けるため）",
+    since: "Issue #964",
+    modes: REQUIREMENTS_CONDITION_FAILURE_MODES,
+  },
+  {
+    id: "R-rqc-02",
+    text: "ある条件が複数の要求に掛かるときは、掛かる要求それぞれの本文に書く。同じ契機で複数のものを示すときや行うときも、その契機をそれぞれの本文に書く。",
+    why: "要件は 1 行ずつ別に読まれ、別に作られる。1 行にだけ書いた条件は、ほかの行には掛からない。同じ契機が複数の表示に掛かる時点が、試作の 1 回目で一部にだけ残ったため、契機の文を足した",
+    since: "Issue #964",
+    modes: REQUIREMENTS_CONDITION_FAILURE_MODES,
+  },
+  {
+    id: "R-rqc-03",
+    text: "原文が対象や場合を限っているときは、本文も限定として書く。行えることを述べるだけの文に言い換えない。",
+    why: "「行える」と「それに限って行う」は別の要求で、前者の本文から限定は復元できない",
+    since: "Issue #964",
+    modes: REQUIREMENTS_CONDITION_FAILURE_MODES,
+  },
+  {
+    id: "R-rqc-04",
+    text: "原文に無い条件を足さない。新しい動作・対象・条件・制約を加えない語（つなぎ・評価・感想・挨拶・理由や背景の説明）は条件にしない。その形でも、先に挙げた種類の条件を運ぶ語は条件として扱う。操作を使いたい場面や理由を述べる語を、操作の対象を限る修飾や品質の要件に言い換えない。対象を限るのは、原文が対象そのものを限っているときだけである。",
+    why: "条件を残す原則は、背景の語を条件へ昇格させる向きに倒れやすい。原文に無い条件は、利用者への問いと書けない申告を増やす。語の並びは逆照合の基準（R-rcm-03）と同じにし、理由や背景の説明だけを足した（作る側の保ちすぎは、背景の語の昇格で起きる）。場面・理由の語を対象の修飾・品質の要件に言い換えない文は、試作の 1 回目で背景の語の昇格が増えたため足した。「その形でも」の後ろに置くのは、その文が場面の語を指すと読まれないため。対象を限る線は R-rqc-03 と同じにした",
+    since: "Issue #964",
+    modes: REQUIREMENTS_CONDITION_FAILURE_MODES,
+  },
+];
+
+/** 条件を本文へ残す原則の規則（`text` の並び。規則と定義が食い違わないよう定義から組む） */
+export const REQUIREMENTS_CONDITION_RULES: readonly string[] = ruleTexts(REQUIREMENTS_CONDITION_RULE_DEFINITIONS);
+
+/**
+ * ① の規則（`text` の並び。Issue #964）。旗が有効なときだけ、既存の 7 文の**後ろ**に `R-rqc-01`〜`04` の
+ * 文を足す。旗の無いときは既存の 7 文の配列をそのまま返す（送る規則のバイト列を変えない）。
+ */
+export function requirementsRulesOf(conditionRule?: boolean): readonly string[] {
+  if (conditionRule !== true) return REQUIREMENTS_RULES;
+  return [...REQUIREMENTS_RULES, ...REQUIREMENTS_CONDITION_RULES];
+}
+
 /**
  * ① の JSON Schema（構造化出力）。欄の形の正本はこの schema で、コードの `checkRequirementOutput` が
  * 同じ形を手で確かめる（schema は adapter に渡り、違反はコードが見る。§2.2）。
@@ -108,6 +159,11 @@ export interface RequirementsInput {
     readonly previous: RequirementList;
     readonly misses: readonly ReverseCheckMiss[];
   };
+  /**
+   * 条件を本文へ残す原則（`R-rqc-01`〜`04`）を規則に足すか（Issue #964）。**Plan の経路だけ**が明示の選択で
+   * 有効にする。省けば（Plan を経ない Build の経路）送る規則は今までどおり 7 文だけである。
+   */
+  readonly conditionRule?: boolean;
 }
 
 function checkPosition(value: unknown, field: string, problems: Problem[]): SourceRange | undefined {
@@ -548,7 +604,7 @@ export async function runRequirements(input: RequirementsInput): Promise<StageOu
     };
   }
   const request = buildStructuredRequest({
-    rules: REQUIREMENTS_RULES,
+    rules: requirementsRulesOf(input.conditionRule),
     documents: input.documents,
     data: buildData(input),
     schemaName: REQUIREMENTS_SCHEMA_NAME,
