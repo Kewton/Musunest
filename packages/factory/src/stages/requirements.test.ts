@@ -1,16 +1,27 @@
 // ① 要件にする（stages/requirements.ts）の unit テスト（02 §1・F-3・F-6）。
 import { describe, expect, it } from "vitest";
+import { sha256Hex } from "@musunest/spec-engine";
 import { AGENT_LIMITS } from "../limits.js";
 import type { RequirementList } from "../pipeline.js";
+import { ruleDefinitionDefects } from "./prompt.js";
 import {
+  REQUIREMENTS_CONDITION_RULE_DEFINITIONS,
+  REQUIREMENTS_CONDITION_RULES,
+  REQUIREMENTS_RULES,
   REQUIREMENTS_SCHEMA_NAME,
+  REQUIREMENT_QUOTE_REPAIR_RULE_DEFINITIONS,
   REQUIREMENT_QUOTE_REPAIR_SCHEMA_NAME,
   checkQuoteRepairOutput,
   checkRequirementOutput,
+  requirementsRulesOf,
   runQuoteRepair,
   runRequirements,
 } from "./requirements.js";
-import { checkRequirementCoverage, runReverseCheckLoop } from "./reverse-check.js";
+import {
+  REVERSE_CHECK_MEANING_RULE_DEFINITIONS,
+  checkRequirementCoverage,
+  runReverseCheckLoop,
+} from "./reverse-check.js";
 import {
   INJECTED_INSTRUCTION,
   REQUIREMENT_LIST,
@@ -470,5 +481,107 @@ describe("引用の修復の要求と応答の形（Issue #917）", () => {
       misses: [],
     });
     expect(recording.structured[0]?.maxOutputTokens).toBe(gateway.maxOutputTokens("requirements"));
+  });
+});
+
+// ── P1 の条件の原則（Issue #964）──────────────────────────────────────────
+//
+// 原文の条件を、掛かる先それぞれの本文へ残す原則を、旗が有効なときだけ既存の 7 文の後ろに足す。
+// R-rcm-01 の種類の並びと同じ定数を、作る側（R-rqc-01）と点検する側（R-rcm-01）の両方が含むことを固定する。
+
+describe("P1 の条件の原則（Issue #964）", () => {
+  /** 送る 4 文（定義の `text`。規則の ID は文に入れない） */
+  const CONDITION_TEXTS = REQUIREMENTS_CONDITION_RULE_DEFINITIONS.map((definition) => definition.text);
+  /** R-rqc-01 と R-rcm-01 が共有する、条件の種類の並び（試験の側の 1 つの定数） */
+  const CONDITION_KIND_ORDER = "対象・否定・例外・時点・期限・数量・適用の範囲・指定の文言";
+
+  it("定義は ID が `R-rqc-01`〜`04` の順で、理由・履歴・失敗のモードがあり、定義の欠陥の検査が空", () => {
+    expect(REQUIREMENTS_CONDITION_RULE_DEFINITIONS.map((definition) => definition.id)).toEqual([
+      "R-rqc-01",
+      "R-rqc-02",
+      "R-rqc-03",
+      "R-rqc-04",
+    ]);
+    for (const definition of REQUIREMENTS_CONDITION_RULE_DEFINITIONS) {
+      expect(definition.why.trim(), definition.id).not.toBe("");
+      expect(definition.since.trim(), definition.id).not.toBe("");
+      expect(definition.modes, definition.id).toContain("M-21");
+    }
+    expect(ruleDefinitionDefects(REQUIREMENTS_CONDITION_RULE_DEFINITIONS)).toEqual([]);
+  });
+
+  it("ID が既存の規則の ID と重ならない（台帳と、既存の 2 組の定義の両方に照らす）", async () => {
+    interface NodeFileSystem {
+      readFileSync(path: URL, encoding: "utf8"): string;
+    }
+    const fs = (await import(/* @vite-ignore */ "node:fs")) as NodeFileSystem;
+    const ledger = fs.readFileSync(
+      new URL("../../../../workspace/mvp/m1/agent/methodology/ledger/rules.md", import.meta.url),
+      "utf8",
+    );
+    const ours = new Set(REQUIREMENTS_CONDITION_RULE_DEFINITIONS.map((definition) => definition.id));
+    const existing = [
+      ...REQUIREMENT_QUOTE_REPAIR_RULE_DEFINITIONS,
+      ...REVERSE_CHECK_MEANING_RULE_DEFINITIONS,
+    ].map((definition) => definition.id);
+    for (const id of ours) expect(existing, id).not.toContain(id);
+    const ledgerIds = ledger
+      .split("\n")
+      .flatMap((line) => {
+        const match = /^\|\s*(R-[a-z0-9]+-\d+)\s*\|/.exec(line);
+        const id = match?.[1];
+        return id === undefined ? [] : [id];
+      })
+      // 自分の 4 つの行（窓口が後で足す）は除く——足した後も重なりを見ない
+      .filter((id) => !ours.has(id));
+    for (const id of ours) expect(ledgerIds, id).not.toContain(id);
+    // 照らした台帳に既存の行があること（空の台帳を相手に緑にしない）
+    expect(ledgerIds.length).toBeGreaterThan(0);
+  });
+
+  it("R-rqc-01 と R-rcm-01 の文が、種類の並びの同じ定数を含む", () => {
+    const rqc01 = REQUIREMENTS_CONDITION_RULE_DEFINITIONS.find((definition) => definition.id === "R-rqc-01");
+    const rcm01 = REVERSE_CHECK_MEANING_RULE_DEFINITIONS.find((definition) => definition.id === "R-rcm-01");
+    expect(rqc01?.text).toContain(CONDITION_KIND_ORDER);
+    expect(rcm01?.text).toContain(CONDITION_KIND_ORDER);
+  });
+
+  it("送る 4 文の並びの SHA-256 が、やること 3 の値と同じ", async () => {
+    expect(REQUIREMENTS_CONDITION_RULES).toEqual(CONDITION_TEXTS);
+    expect(await sha256Hex(JSON.stringify(REQUIREMENTS_CONDITION_RULES))).toBe(
+      "78fbcfd08ea3dc92a27827c95198bcd8ee995cdbc3eda3e59ce0b0b176fc75cd",
+    );
+  });
+
+  it("送る 4 文は、数字・鉤括弧の引用・「例えば」・「など」を含まない", () => {
+    for (const text of CONDITION_TEXTS) {
+      expect(text).not.toMatch(/[0-9０-９]/);
+      expect(text).not.toMatch(/[「」]/);
+      expect(text).not.toContain("例えば");
+      expect(text).not.toContain("など");
+    }
+  });
+
+  it("旗を渡すと P1 の 1 回の要求に 4 文が入り、渡さないと既存の 7 文だけになる", async () => {
+    const withRule = createRecordingClient([recordedStructured(REQUIREMENT_LIST_OUTPUT)]);
+    await runRequirements({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(withRule.client, { maxAttempts: 1 }),
+      conditionRule: true,
+    });
+    expect(withRule.structured[0]?.rules?.slice(0, REQUIREMENTS_RULES.length)).toEqual([...REQUIREMENTS_RULES]);
+    expect(withRule.structured[0]?.rules?.slice(REQUIREMENTS_RULES.length)).toEqual(CONDITION_TEXTS);
+
+    const withoutRule = createRecordingClient([recordedStructured(REQUIREMENT_LIST_OUTPUT)]);
+    await runRequirements({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(withoutRule.client, { maxAttempts: 1 }),
+    });
+    expect(withoutRule.structured[0]?.rules).toEqual([...REQUIREMENTS_RULES]);
+    expect(requirementsRulesOf()).toEqual(REQUIREMENTS_RULES);
+    expect(requirementsRulesOf(false)).toEqual(REQUIREMENTS_RULES);
+    expect(requirementsRulesOf(true)).toEqual([...REQUIREMENTS_RULES, ...CONDITION_TEXTS]);
   });
 });

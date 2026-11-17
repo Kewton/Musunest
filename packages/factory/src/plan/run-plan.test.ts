@@ -86,6 +86,12 @@ import {
   REVERSE_CHECK_SCHEMA_NAME,
   runReverseCheckLoop,
 } from "../stages/reverse-check.js";
+import {
+  REQUIREMENTS_CONDITION_RULE_DEFINITIONS,
+  REQUIREMENTS_RULES,
+  REQUIREMENTS_SCHEMA_NAME,
+  REQUIREMENT_QUOTE_REPAIR_SCHEMA_NAME,
+} from "../stages/requirements.js";
 import { USAGE, structured as rawStructured } from "../__tests__/run.js";
 
 /**
@@ -112,6 +118,20 @@ function withSurfaceRelations(output: unknown): unknown {
 
 function structured(output: unknown, usage: LlmUsage | undefined = USAGE): RecordedCall {
   return rawStructured(withSurfaceRelations(output), usage);
+}
+
+/** 条件を本文へ残す原則の 4 文（Issue #964。比較からだけ除くために使う） */
+const CONDITION_RULE_TEXTS: ReadonlySet<string> = new Set(
+  REQUIREMENTS_CONDITION_RULE_DEFINITIONS.map((definition) => definition.text),
+);
+
+/**
+ * 比較用の要求。**Plan の P1 の規則の並びから、Issue #964 の 4 文だけを取り除く**——この Issue が
+ * 意図して変える唯一の差であり、ほかの要求・ほかの差はそのまま比べる（既存の期待は変えない）。
+ */
+function withoutConditionRules(request: LlmStructuredRequest): LlmStructuredRequest {
+  if (request.schemaName !== REQUIREMENTS_SCHEMA_NAME || request.rules === undefined) return request;
+  return { ...request, rules: request.rules.filter((rule) => !CONDITION_RULE_TEXTS.has(rule)) };
 }
 
 /** 申告の独立点検の要求か（問いの名前の頭で見分ける。Issue #953） */
@@ -7597,9 +7617,10 @@ describe("申告の独立点検の材料（Issue #910）", () => {
 
     const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED));
 
-    // 生成の段の要求（P1・P2・初回と差分の洗い出し・問い）は、byte で変更前と同じ
+    // 生成の段の要求（P1・P2・初回と差分の洗い出し・問い）は、byte で変更前と同じ。
+    // P1 の規則の並びだけは、Issue #964 の 4 文を除いて比べる（この Issue が意図して変える唯一の差）
     const generationHashes = await Promise.all(
-      recording.structured.map((request) => sha256Hex(JSON.stringify(request))),
+      recording.structured.map((request) => sha256Hex(JSON.stringify(withoutConditionRules(request)))),
     );
     expect(generationHashes).toEqual(GENERATION_BASELINE_HASHES);
 
@@ -7953,6 +7974,88 @@ describe("Plan の経路の P2 の要求に、対応の意味の基準が入る�
     expect(isMeaningReverseCheck(request)).toBe(true);
     expect(meaningRulesOf(request)).toEqual([...REVERSE_CHECK_RULES]);
     expect(meaningRulesOf(request).some((rule) => MEANING_TEXTS.includes(rule))).toBe(false);
+  });
+});
+
+// ── Issue #964：Plan の P1 に、条件を本文へ残す原則を足す ─────────────────
+
+describe("Plan の経路の P1 の要求に、条件を本文へ残す原則が入る（Issue #964）", () => {
+  /** 条件の原則の 4 文（定義の `text`）。規則の ID は文に入れない */
+  const CONDITION_TEXTS = REQUIREMENTS_CONDITION_RULE_DEFINITIONS.map((definition) => definition.text);
+
+  it("(a) 初回と全体の作り直しの 2 つの P1 の要求に 4 文が既存の 7 文の後ろに入り、引用の修復には入らない", async () => {
+    // 初回が来歴だけ（引用が 2 か所）→ 修復 → 修復の後の P2 が覆いを含む → 作り直し → P2。
+    // 偽の応答で 2 つの P1（initial・whole-redo）と 1 つの引用の修復を通す
+    const source = "印を出す。印を出す。件数を合計する。";
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。", position: { start: 1, end: 6 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: meaningSpanOf(source, "件数を合計する。") },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const redone = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: "印を出す。印を出す。", position: { start: 0, end: 10 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: meaningSpanOf(source, "件数を合計する。") },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured({ repairs: [{ index: 0, quote: "印を出す。印を出す。", position: { start: 0, end: 10 } }] }),
+      structured({ uncovered: [{ start: 0, end: 3 }] }),
+      structured(redone),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE, { source }),
+    );
+
+    // 2 つの P1（初回・全体の作り直し）の要求に、4 文が既存の 7 文の後ろに入る
+    const requirementRequests = recording.structured.filter(
+      (request) => request.schemaName === REQUIREMENTS_SCHEMA_NAME,
+    );
+    expect(requirementRequests).toHaveLength(2);
+    for (const request of requirementRequests) {
+      expect(meaningRulesOf(request).slice(0, REQUIREMENTS_RULES.length)).toEqual([...REQUIREMENTS_RULES]);
+      expect(meaningRulesOf(request).slice(REQUIREMENTS_RULES.length)).toEqual(CONDITION_TEXTS);
+    }
+    // 引用の修復の要求には入らない（本文を変えない役のまま）
+    const repairRequests = recording.structured.filter(
+      (request) => request.schemaName === REQUIREMENT_QUOTE_REPAIR_SCHEMA_NAME,
+    );
+    expect(repairRequests).toHaveLength(1);
+    for (const request of repairRequests) {
+      expect(meaningRulesOf(request).some((rule) => CONDITION_TEXTS.includes(rule))).toBe(false);
+    }
+    expect(result.requirementsDiagnosis.rounds.map((round) => round.fix)).toEqual([
+      "initial",
+      "quote-repair",
+      "whole-redo",
+    ]);
+  });
+
+  it("(b) Build の経路（旗を渡さない）の P1 の要求は、既存の 7 文だけになる", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoop({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    const request = recording.structured[0];
+    expect(meaningRulesOf(request)).toEqual([...REQUIREMENTS_RULES]);
+    expect(meaningRulesOf(request).some((rule) => CONDITION_TEXTS.includes(rule))).toBe(false);
   });
 });
 
@@ -8485,7 +8588,10 @@ describe("Plan の要求は今までどおり（Issue #956）", () => {
       ),
     );
     expect(result.kind).toBe("cannot-confirm");
-    const hashes = await Promise.all(recording.structured.map((request) => sha256Hex(JSON.stringify(request))));
+    // P1 の規則の並びから Issue #964 の 4 文だけを除いて比べる（ほかの要求は byte で同じ）
+    const hashes = await Promise.all(
+      recording.structured.map((request) => sha256Hex(JSON.stringify(withoutConditionRules(request)))),
+    );
     expect(hashes).toEqual([
       "c5a76bd24dda3fddc117a9ae3f96ec72a0e46de80cf08a85c2e5cb42f1ee6a3f",
       "bf6918ddefa153205fce738f4701fe84777cb480b053b0c473ef846ee4dbcb59",
@@ -9386,9 +9492,10 @@ describe("行き先は今までどおり（Issue #957）", () => {
         },
       };
       const result = await runPlan(makePlanInput(recording.client, countingJudge, responder, overrides ?? {}));
-      // 偽の client が受け取った要求の列（形のやり直しの要求を含む）を、直列化して比べる
+      // 偽の client が受け取った要求の列（形のやり直しの要求を含む）を、直列化して比べる。
+      // P1 の規則の並びだけは、Issue #964 の 4 文を除いて比べる（この Issue が意図して変える唯一の差）
       const requests = await Promise.all(
-        recording.structured.map((request) => sha256Hex(JSON.stringify(request))),
+        recording.structured.map((request) => sha256Hex(JSON.stringify(withoutConditionRules(request)))),
       );
       expect(requests, c.name).toEqual(base.requests);
       expect(judgeRequests, c.name).toEqual(base.judgeRequests);

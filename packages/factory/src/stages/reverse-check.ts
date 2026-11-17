@@ -1309,6 +1309,12 @@ export interface ReverseCheckLoopInput {
    * 相乗りしない（別の記録）。
    */
   readonly observeConditionFindings?: boolean;
+  /**
+   * 条件を本文へ残す原則（`R-rqc-01`〜`04`）を、初回と全体の作り直しの **2 つの P1 の要求**に足すか
+   * （Issue #964）。**Plan の経路だけ**が明示の選択で有効にする。引用の修復には渡さない（本文を変えない役の
+   * まま）。省けば（Plan を経ない Build の経路）呼び出しの列・要求のバイト列・結果を変えない。
+   */
+  readonly conditionRule?: boolean;
 }
 
 /** ①' と ① のやり直しの結果 */
@@ -1512,6 +1518,7 @@ export async function runReverseCheckLoopWithOperation(
     source: input.source,
     documents: input.documents,
     gateway: input.gateway,
+    ...(input.conditionRule === true ? { conditionRule: true } : {}),
   });
   if (!first.ok) return stop(first.failure, "requirements");
   const initial = await runReverseCheckWithDiagnosis({
@@ -1599,6 +1606,7 @@ export async function runReverseCheckLoopWithOperation(
       documents: input.documents,
       gateway: input.gateway,
       redo: { previous: current, misses: currentReport.misses },
+      ...(input.conditionRule === true ? { conditionRule: true } : {}),
     });
     if (!redone.ok) return stop(redone.failure, "requirements-redo");
     // ここから先は、① のやり直しが成功している（2 回目の逆照合で止まっても `redone` を true にする）

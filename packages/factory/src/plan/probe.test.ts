@@ -530,6 +530,7 @@ describe("Plan の探針", () => {
       meaningRule: true,
       keepValidProvenance: true,
       observeConditionFindings: true,
+      conditionRule: true,
     });
   });
 });
