@@ -192,6 +192,13 @@ sdk・spec-engine・app-do・connector → appspec-schema
 - **`## 完了条件`**（機械で判定できる受入条件）を必ず書く
 - 人がやる Issue には `human-only` ラベルを付け、**dispatch の対象から外す**
 
+## 記憶の書き場所（2026-11-18。#968）
+
+- 許可・決定・作業の状態・次の一手・人への質問は **CommandMate の mem** に書く（Skill `cmate-handoff`。決定の行き先は該当する Issue）。委任の返答待ちは `cmate-delegate` の `send --note` が作る
+- 罠・教訓・手順は docs（運用は `docs/parallel-development.md`）に書き、全員が踏む規則だけをここに 1 行で足す
+- mem の mode は人が画面（Repositories → mem）で決める。mode が on でないブランチでは mem を使わず、正本（Issue・PR・git）から読む
+- Claude Code の auto memory には作業の状態を書かない
+
 ## コマンド
 
 ```bash

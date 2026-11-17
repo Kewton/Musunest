@@ -1,9 +1,12 @@
 ---
 name: musunest-handoff
-description: 窓口（main の Claude）の引き継ぎ（workspace/mem/README.md）を読む・書く。セッションの始め・PC やセッションが落ちたあと・会話の要約のあとに「読む」で途中の操作と返事待ちを取り戻す。長い操作の前・質問したとき・git の外の状態を変えたとき・セッションの終わりに「書く」で 1 行ずつ書き換える。引数は「読む」か「書く」。
+description: 【mem の mode が on のブランチでは使わない。cmate-handoff を使う】窓口（main の Claude）の引き継ぎ（workspace/mem/README.md）を読む・書く。セッションの始め・PC やセッションが落ちたあと・会話の要約のあとに「読む」で途中の操作と返事待ちを取り戻す。長い操作の前・質問したとき・git の外の状態を変えたとき・セッションの終わりに「書く」で 1 行ずつ書き換える。引数は「読む」か「書く」。
 ---
 
 # musunest-handoff
+
+> **mem へ移す（#968）。** `commandmate mem mode --json` が `"mode": "on"` を返すブランチでは、この Skill を使わず `cmate-handoff` で mem に書く。
+> 手元の README は、mem へ移し終えるまでの読み物として残す（移した行は README から消す）。mode が on でない間だけ、下の手順で書く。
 
 窓口の**進行中の状態**を、セッションをまたいで引き継ぐ。置き場所は `workspace/mem/`（この機械だけ。git で追跡しない）。
 
