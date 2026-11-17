@@ -681,6 +681,7 @@ async function runStage(
       source: probeCase.source,
       documents: input.documents,
       gateway,
+      conditionRule: PLAN_REVERSE_CHECK_SELECTIONS.conditionRule,
     });
     if (!outcome.ok) {
       return { list: null, p2: null, trace: undefined, diagnosis: null, failure: toFailureRecord(outcome.failure), stopReason: planProbeStopReasonOf(outcome.failure) };
