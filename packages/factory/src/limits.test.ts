@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_LIMITS,
   CALL_TIMEOUT_BY_EFFORT,
+  FINDING_CHECK_ATTEMPTS,
   LIMIT_GUARDS,
   OUTPUT_STAGES,
   PLAN_CHOICES_MIN,
@@ -120,6 +121,12 @@ describe("共通の上限（02 §1.5・§2.2）", () => {
     expect(() => checkLimit("callCount", 1.5)).toThrow();
     expect(() => checkLimit("callCount", Number.NaN)).toThrow();
   });
+
+  it("確かめの試行の枠は 12 で、時点ごとに 6 ずつ。v1 の上限の表には入れない（Issue #967）", () => {
+    expect(FINDING_CHECK_ATTEMPTS).toBe(12);
+    // v12 の 2 本が v1 の上限の表を固定しているので、欄は増やさない（Issue 本文からの読み替え）
+    expect(Object.keys(AGENT_LIMITS)).not.toContain("findingCheckAttempts");
+  });
 });
 
 // ── 段の出力の上限（effort ごと。§1.5・§2）──────────────────────
@@ -167,6 +174,7 @@ describe("段の出力の上限は effort ごとに、共通の置き場所が�
       correspondence: 16_384,
       repair: 32_768,
       arbitration: 16_384,
+      "finding-check": 8_192,
     };
     // 表は、段の一覧（OUTPUT_STAGES）を漏れなく覆う（足し忘れは型で見つかる）
     expect(Object.keys(table).sort()).toEqual([...OUTPUT_STAGES].sort());
@@ -274,7 +282,7 @@ describe("v1.1α の上限と段は、v1 の値を変えずに足す（07 §3・
     });
   });
 
-  it("新しい 4 段は OUTPUT_STAGES の末尾にあり、既存の段の並びは変わらない", () => {
+  it("新しい段は OUTPUT_STAGES の末尾にあり、既存の段の並びは変わらない", () => {
     expect(OUTPUT_STAGES.slice(0, 10)).toEqual([
       "surface",
       "questions",
@@ -287,7 +295,13 @@ describe("v1.1α の上限と段は、v1 の値を変えずに足す（07 §3・
       "repair",
       "arbitration",
     ]);
-    expect(OUTPUT_STAGES.slice(10)).toEqual(["name-table", "semantic-check", "test-spec", "decl-check"]);
+    expect(OUTPUT_STAGES.slice(10)).toEqual([
+      "name-table",
+      "semantic-check",
+      "test-spec",
+      "decl-check",
+      "finding-check",
+    ]);
   });
 
   it("新しい 4 段の上限は 3 つの effort で同じで、name-table・test-spec は 32,768、semantic-check・decl-check は 16,384", () => {

@@ -700,6 +700,15 @@ export interface PlanCliRequirementsDiagnosisRecord {
   readonly rounds: readonly PlanCliRoundDiagnosisRecord[];
   readonly redone: boolean;
   readonly unmet: PlanCliMissCountsRecord;
+  /** 確かめの件数（Issue #967。確かめた指摘があるときだけ） */
+  readonly finding_check?: PlanCliFindingCheckCountsRecord;
+}
+
+/** 確かめの件数（Issue #967。件数だけ） */
+export interface PlanCliFindingCheckCountsRecord {
+  readonly excluded: number;
+  readonly unchecked: number;
+  readonly attempts: number;
 }
 
 /**
@@ -1017,6 +1026,15 @@ function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCl
     })),
     redone: diagnosis.redone,
     unmet: toMissCountsRecord(diagnosis.unmet),
+    ...(diagnosis.findingCheck === undefined
+      ? {}
+      : {
+          finding_check: {
+            excluded: diagnosis.findingCheck.excluded,
+            unchecked: diagnosis.findingCheck.unchecked,
+            attempts: diagnosis.findingCheck.attempts,
+          },
+        }),
   };
 }
 
@@ -1147,6 +1165,26 @@ export interface PlanCliReverseCheckTraceDiagnostic {
   /** 原文の長さ（文字数） */
   readonly source_length: number;
   readonly rounds: readonly PlanCliReverseCheckTraceRound[];
+  /** P2 の会話の指摘を確かめた記録（Issue #967。確かめた指摘があるときだけ） */
+  readonly finding_checks?: readonly PlanCliFindingCheckEntry[];
+}
+
+/** 確かめ役の 1 回の判定（Issue #967） */
+export interface PlanCliFindingCheckTrial {
+  readonly verdict: string | null;
+  readonly requirement_ids: readonly string[];
+  readonly reason: string | null;
+  readonly failure: string | null;
+  readonly kept: boolean;
+}
+
+/** 指摘 1 件の確かめの記録（Issue #967） */
+export interface PlanCliFindingCheckEntry {
+  readonly phase: string;
+  readonly range: { readonly start: number; readonly end: number };
+  readonly trials: readonly PlanCliFindingCheckTrial[];
+  readonly excluded: boolean;
+  readonly unchecked_reason: string | null;
 }
 
 /** 1 往復の条件の指摘の記録を、別ファイルの形（snake_case）に写す（Issue #948） */
@@ -1220,6 +1258,23 @@ export function buildReverseCheckTraceDiagnostic(input: {
         ? {}
         : { condition_findings: toTraceConditionFindings(round.conditionFindings) }),
     })),
+    ...(trace.findingChecks === undefined
+      ? {}
+      : {
+          finding_checks: trace.findingChecks.map((entry) => ({
+            phase: entry.phase,
+            range: { start: entry.range.start, end: entry.range.end },
+            trials: entry.trials.map((trial) => ({
+              verdict: trial.verdict,
+              requirement_ids: trial.requirementIds.slice(),
+              reason: trial.reason,
+              failure: trial.failure,
+              kept: trial.kept,
+            })),
+            excluded: entry.excluded,
+            unchecked_reason: entry.uncheckedReason,
+          })),
+        }),
   };
 }
 

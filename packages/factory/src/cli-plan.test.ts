@@ -129,6 +129,9 @@ function structured(output: unknown, usage: LlmUsage | undefined = RECORDED_USAG
   return rawStructured(withSurfaceRelations(output), usage);
 }
 
+/** 確かめ役の「missing」の答え（指摘を保つ。Issue #967 の試験で使う） */
+const FINDING_MISSING = { verdict: "missing", requirement_ids: [], reason: "条件の欠落として保つ" };
+
 interface NodeFs {
   mkdtemp(prefix: string): Promise<string>;
   mkdir(path: string, options: { recursive: true }): Promise<string | undefined>;
@@ -518,6 +521,8 @@ interface PlanCliRecordShape {
       readonly position_mismatch: number;
       readonly uncovered_source: { readonly code: number; readonly conversation: number };
     };
+    /** 確かめの件数（確かめた指摘があるときだけ。Issue #967） */
+    readonly finding_check?: { readonly excluded: number; readonly unchecked: number; readonly attempts: number };
   };
   /** P3 の「書けない」の申告の点検（件数と判定の記録。Issue #432） */
   readonly surface_check: {
@@ -1608,6 +1613,8 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
     const recording = createRecordingClient([
       structured(list),
       structured(conversation),
+      // 確かめ役が保つので、指摘は残る（Issue #967）。コードの落ちが残るので停止の前は確かめない
+      structured(FINDING_MISSING),
       // 引用の不在のあとに覆いの落ちも残るので、Plan の経路は全体の作り直しへ進む（Issue #917）
       structured(list),
       structured(conversation),
@@ -1696,6 +1703,8 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
       ],
       redone: true,
       unmet: expected,
+      // 作り直しの前の確かめ 1 回。保ったので外した数は 0（Issue #967）
+      finding_check: { excluded: 0, unchecked: 0, attempts: 1 },
     });
     // 値（依頼文の目印・原文の断片・位置）は、内訳にも記録のどこにも出ない
     expect(JSON.stringify(record.requirements_diagnosis)).not.toContain(mark);
@@ -1808,8 +1817,11 @@ describe("止まったときの内訳も plan-record に写る（Issue #430 の�
       unresolved: [],
     };
     const conversation = { uncovered: [{ start: 0, end: 2 }] };
-    // 1: ①／2: ①'（落ちを作る）／3: ① のやり直し／4: ①' のやり直しで要求の誤り
-    const client = clientThrowingAt([structured(list), structured(conversation), structured(list)], 4);
+    // 1: ①／2: ①'（落ちを作る）／3: 確かめ（保つ）／4: ① のやり直し／5: ①' のやり直しで要求の誤り
+    const client = clientThrowingAt(
+      [structured(list), structured(conversation), structured(FINDING_MISSING), structured(list)],
+      5,
+    );
     const dir = `${directory}/stopped-diagnosis`;
     const answersPath = "stopped-diagnosis-answers.json";
     const lines: string[] = [];
@@ -4911,6 +4923,8 @@ describe("逆照合の往復ごとの診断を plan-reverse-check-trace.json に
       structured(PARTIAL_LIST),
       // 初回の会話は、覆われていない範囲を 2 回挙げる（残った・重複）
       structured({ uncovered: [{ start: 9, end: 12 }, { start: 9, end: 12 }] }),
+      // 確かめ役が保つので、指摘は残り、今までどおり作り直す（Issue #967）
+      structured(FINDING_MISSING),
       structured(PARTIAL_LIST),
       structured({ uncovered: [] }),
     ]);
@@ -5228,8 +5242,10 @@ describe("T2条件指摘の記録", () => {
     const recording = createRecordingClient([
       structured(list),
       structured(answer),
+      structured(FINDING_MISSING),
       structured(list),
       structured(answer),
+      structured(FINDING_MISSING),
     ]);
     const dir = `${directory}/condition-findings-record`;
     const answersPath = "condition-findings-answers.json";
@@ -5271,9 +5287,37 @@ describe("T2条件指摘の記録", () => {
     // 2 つの往復（初回・作り直し）のどちらにも記録がある
     expect(trace.rounds.map((round: { readonly fix: string }) => round.fix)).toEqual(["initial", "whole-redo"]);
     for (const round of trace.rounds) expect(round.condition_findings).toBeDefined();
+    // 確かめの記録（範囲・判定・外したか・確かめなかった理由・reason）も trace に残る（Issue #967）
+    expect(trace.finding_checks).toHaveLength(2);
+    expect(trace.finding_checks[0]).toMatchObject({
+      phase: "redo",
+      range: { start: 0, end: 3 },
+      excluded: false,
+      unchecked_reason: null,
+    });
+    expect(trace.finding_checks[0].trials).toEqual([
+      {
+        verdict: "missing",
+        requirement_ids: [],
+        reason: "条件の欠落として保つ",
+        failure: null,
+        kept: true,
+      },
+    ]);
+    // 作り直しの前に保った指摘が再び挙がるので、停止の前は確かめずに保つ（Issue #967）
+    expect(trace.finding_checks[1]).toEqual({
+      phase: "stop",
+      range: { start: 0, end: 3 },
+      trials: [],
+      excluded: false,
+      unchecked_reason: "kept-before-redo",
+    });
 
     // plan-record には件数だけが写り、ID・引用・本文・原文の目印は現れない
     const record = await readPlanRecord(dir);
+    // 外した数・確かめなかった数・試行の数は、生の落ちの数とは別の欄（Issue #967）
+    // 作り直しの前に保った指摘が再び挙がるので、停止の前は確かめずに保つ
+    expect(record.requirements_diagnosis.finding_check).toEqual({ excluded: 0, unchecked: 1, attempts: 1 });
     const counts = record.requirements_diagnosis.rounds[0]?.condition_findings;
     expect(counts).toBeDefined();
     expect(counts?.whole).toMatchObject({ raw_count: 1, matched: 1, unbound: 0, missing: 0, invalid: 0 });

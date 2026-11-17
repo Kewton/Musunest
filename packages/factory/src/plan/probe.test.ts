@@ -7,6 +7,7 @@ import { AGENT_LIMITS, type AgentLimits } from "../limits.js";
 import { createFakeJudge } from "../judge-fake.js";
 import { createRecordingClient, REQUIREMENT_LIST_OUTPUT, SAMPLE_DOCUMENTS, SOURCE_TEXT } from "../stages/__tests__/prompt.js";
 import { REVERSE_CHECK_SCHEMA_NAME } from "../stages/reverse-check.js";
+import { FINDING_CHECK_SCHEMA_NAME } from "../stages/finding-check.js";
 import { REQUIREMENTS_SCHEMA_NAME } from "../stages/requirements.js";
 import { structured } from "../__tests__/run.js";
 import { runPlan, type PlanResponder } from "./run-plan.js";
@@ -77,6 +78,34 @@ function quoteRepairScript() {
     structured({ uncovered: [] }),
     structured(BAD_QUOTE_REPAIR_OUTPUT),
     structured({ uncovered: [] }),
+  ];
+}
+
+/** 3 文すべてを覆う一覧（Issue #967 の確かめの台本で使う） */
+const FULL_LIST_OUTPUT = {
+  ...PLAN_LIST_OUTPUT,
+  requirements: [
+    ...REQUIREMENTS,
+    {
+      id: "R-3",
+      text: "色を選べる",
+      quote: "色を選ぶ。",
+      position: { start: PROBE_SOURCE.indexOf("色を選ぶ。"), end: PROBE_SOURCE.indexOf("色を選ぶ。") + "色を選ぶ。".length },
+    },
+  ],
+};
+
+/** 確かめ役の「missing」の答え（Issue #967） */
+const FINDING_MISSING = { verdict: "missing", requirement_ids: [], reason: "条件の欠落として保つ" };
+
+/** 会話の指摘と、確かめ役の要求を含む台本（Plan も探針も requirements の段で止まる） */
+function findingScript() {
+  return [
+    structured(PLAN_LIST_OUTPUT),
+    structured({ uncovered: [{ start: 0, end: 3 }] }),
+    structured(FINDING_MISSING),
+    structured(FULL_LIST_OUTPUT),
+    structured({ uncovered: [{ start: 0, end: 3 }] }),
   ];
 }
 
@@ -178,6 +207,14 @@ describe("Plan の探針", () => {
     expect(plan.result).toMatchObject({ kind: "cannot-confirm" });
     expect(JSON.stringify(probe.requests)).toBe(JSON.stringify(plan.requests));
     expect(probe.requests.some((request) => request.schemaName === "requirement-quote-repair")).toBe(true);
+  });
+
+  it("loop の確かめ役の要求も、本物の Plan の requirements の段と直列化して byte で同じ（Issue #967）", async () => {
+    const plan = await runPlanRequirements(PROBE_SOURCE, findingScript());
+    const probe = await runProbe("loop", PROBE_SOURCE, { calls: findingScript() });
+    expect(plan.result).toMatchObject({ kind: "cannot-confirm" });
+    expect(JSON.stringify(probe.requests)).toBe(JSON.stringify(plan.requests));
+    expect(probe.requests.filter((request) => request.schemaName === FINDING_CHECK_SCHEMA_NAME)).toHaveLength(1);
   });
 
   it("探針の側だけが選択を 1 つ欠いた写しを渡す変異で、p2 と loop の byte 比較が赤になる", async () => {
@@ -531,6 +568,7 @@ describe("Plan の探針", () => {
       keepValidProvenance: true,
       observeConditionFindings: true,
       conditionRule: true,
+      findingCheck: true,
     });
   });
 });
