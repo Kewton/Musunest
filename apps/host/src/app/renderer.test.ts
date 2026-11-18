@@ -248,9 +248,13 @@ describe("一覧の並べ方", () => {
     await screen.findByText("夕食");
     fireEvent.click(screen.getByRole("button", { name: "byPayer" }));
 
-    await screen.findByText("タクシー");
-    expect(container.querySelectorAll("tbody tr")).toHaveLength(1);
-    expect(screen.queryByText("夕食")).toBeNull();
+    // 前の view の行が消えるまで待ってから数える（Issue #731）。新しい view の文字（タクシー）は
+    // 前の view にも在るので、文字の出現を待っても切り替えは観測できない——行の数と、前の行の有無で待つ
+    await waitFor(() => {
+      expect(rowTexts(container)).toHaveLength(1);
+      expect(rowTexts(container)[0]?.[0]).toBe("タクシー");
+      expect(screen.queryByText("夕食")).toBeNull();
+    });
     expect(getView).toHaveBeenLastCalledWith("inst-1", "byPayer");
   });
 
