@@ -1722,3 +1722,30 @@ describe("C2'（checkMappedTable）の unresolved の根拠に台帳の未対応
     }
   });
 });
+
+describe("T1（ids off の名前の表）は、C2 の整える手（N-map-05・N-map-06）を掛けずに同じ形を今までどおり門で落とす（Issue #975）", () => {
+  it("同じ行の重複と、選択肢の集合の要件に足した dependency の操作は、T1 の門が落とす", () => {
+    const base = fixtureTable();
+    const duplicated: NameTable = {
+      ...base,
+      ownership: base.ownership.map((entry) =>
+        entry.requirementId === "R1" ? { ...entry, roles: [...entry.roles, { id: "f.item.title", basis: "stated", reason: null }] } : entry,
+      ),
+    };
+    expect(checkNameTable(fixtureList(), duplicated, FIXTURE_DOCUMENTS).map((problem) => problem.message)).toContain(
+      "同じ要件の中で所属が重なっている",
+    );
+    const defaultValue = fixtureDefaultValueTable();
+    const withOperation: NameTable = {
+      ...defaultValue,
+      ownership: defaultValue.ownership.map((entry) =>
+        entry.requirementId === "R6"
+          ? { ...entry, roles: [...entry.roles, { id: "o.addItem", basis: "dependency", reason: "実現に要る" }] }
+          : entry,
+      ),
+    };
+    expect(checkNameTable(fixtureDefaultValueList(), withOperation, FIXTURE_DOCUMENTS).map((problem) => problem.message)).toContain(
+      "既定値で確かめる要件は、選択肢の項目とその所属 entity のほかの行を所属させないこと",
+    );
+  });
+});

@@ -158,7 +158,13 @@ import { NAMED_FAILURE_MESSAGES } from "../v12/search-repair.js";
 import { GENERATED_TEST_ID_PREFIX, generateTests, isGeneratedTestId } from "../v12/generated-tests.js";
 import type { FixedTest } from "../fixed-test.js";
 import { constraintIdsIn, ruleTexts, SHAPE_PROBLEMS_DATA_NAME } from "../stages/prompt.js";
-import { MAPPING_ACCEPTED_DATA_NAMES, MAPPING_LEDGER_DATA_NAMES, MAPPING_REWRITE_MESSAGES, MAPPING_SCHEMA_NAME } from "../v12/stages/mapping.js";
+import {
+  MAPPING_ACCEPTED_DATA_NAMES,
+  MAPPING_LEDGER_DATA_NAMES,
+  MAPPING_REWRITE_MESSAGES,
+  MAPPING_SCHEMA_NAME,
+  mappingBundlesOf,
+} from "../v12/stages/mapping.js";
 import { VOCABULARY_SCHEMA_NAMES } from "../v12/stages/vocabulary.js";
 import { structuralReadingText } from "../v12/structural-meanings.js";
 import {
@@ -2107,6 +2113,59 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const records = outcome.stages.filter((record) => record.stage === "mapping");
     expect(records.map((record) => [record.status, record.retries.shape])).toEqual([["ok", 1]]);
     expect(schemaNames(recording.structured).at(-1)).toBe(SEMANTIC_CHECK_SCHEMA_NAME);
+  });
+
+  it("束の外の走り：1 つの束が束の外の要件を余計に書いても、持ち主の束の応答があれば N-map-04 が捨て、呼び出し列に全要件の作り直しの要求が無い（Issue #975）", async () => {
+    const list = fixtureDefaultValueList();
+    const table = withCodeIds(withAggregates(fixtureDefaultValueTable()));
+    const goodResponses = idsResponsesOf(list, table, PROPERTY_LEDGER_VIEW_IDS);
+    const entryOf = (id: string) => (goodResponses.mapping["requirements"] as readonly Record<string, unknown>[]).find((entry) => entry["requirementId"] === id) as Record<string, unknown>;
+    const bundles = mappingBundlesOf(list);
+    expect(bundles.map((ids) => ids.length)).toEqual([5, 1]);
+    // 先頭の束が、持ち主の束（末尾の 1 件）の要件を余計に書く。束の応答は残す（捨てるのはコードの手）
+    const firstBundle = {
+      requirements: [
+        ...(goodResponses.mapping["requirements"] as readonly Record<string, unknown>[]).filter((entry) => (bundles[0] ?? []).includes(entry["requirementId"] as string)),
+        entryOf("R6"),
+      ],
+    };
+    const lastBundle = { requirements: [entryOf("R6")] };
+    const mappingRequests: LlmStructuredRequest[] = [];
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        if (request.schemaName === MAPPING_SCHEMA_NAME) {
+          mappingRequests.push(request);
+          const ids = requestListedIds(request);
+          if (ids.length === bundles[0]?.length) return { output: firstBundle as T, usage: undefined };
+          if (ids.length === bundles[1]?.length) return { output: lastBundle as T, usage: undefined };
+          throw new Error("全要件の作り直しの要求を呼んだ");
+        }
+        const outputs: Readonly<Record<string, unknown>> = {
+          [VOCABULARY_SCHEMA_NAMES.entities]: goodResponses.entities,
+          [VOCABULARY_SCHEMA_NAMES.fields]: goodResponses.fields,
+          [VOCABULARY_SCHEMA_NAMES.behaviors]: goodResponses.behaviors,
+          [SEMANTIC_CHECK_SCHEMA_NAME]: acceptAll(["R1", "R2", "R3", "R4", "R6"]),
+        };
+        const output = outputs[request.schemaName];
+        if (output === undefined) throw new Error(`台本に無い要求: ${String(request.schemaName)}`);
+        return { output: output as T, usage: undefined };
+      },
+      async callWithTools(): Promise<LlmToolResponse> {
+        throw new Error("台本に無い道具の要求");
+      },
+    };
+    const outcome = await runStageRangeV11a({
+      ...inputOf(client, { plan: planOf(list) }),
+      flags: IDS_FLAGS,
+      range: { start: "name-table", end: "semantic-check" },
+    });
+    expect(outcome.stopped).toBeNull();
+    expect(mappingRequests).toHaveLength(2);
+    expect(new Set(mappingRequests.map((request) => requestListedIds(request).length))).toEqual(new Set([1, 5]));
+    // 記録：捨てた応答が回の normalized に載る
+    expect(outcome.tableRounds?.[0]?.normalized).toEqual([
+      { requirement_id: "R6", rule: "N-map-04", target_id: null, removed_row_ids: [], dropped_responses: 1 },
+    ]);
   });
 
   it("C2' の負例：要件の欠落が 2 回続けば段 mapping・unmet で止まる。C1 は 3 束 1 回ずつ", async () => {
