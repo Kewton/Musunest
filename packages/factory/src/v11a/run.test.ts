@@ -153,6 +153,10 @@ import {
   WRITE_V11A_REWRITE_DATA_NAME,
   WRITE_V11A_REWRITE_RULE_DEFINITIONS,
   WRITE_V11A_SCHEMA_NAME,
+  WRITE_V11A_UNWRITABLE_DATA_NAME,
+  WRITE_V11A_UNWRITABLE_RULE_DEFINITION,
+  withIdsValidationRule,
+  writeV11aRuleDefinitionsOf,
 } from "./stages/write.js";
 import { NAMED_FAILURE_MESSAGES } from "../v12/search-repair.js";
 import { GENERATED_TEST_ID_PREFIX, generateTests, isGeneratedTestId } from "../v12/generated-tests.js";
@@ -11501,6 +11505,239 @@ describe("(12) 了承済みの持ち越しを申告に写し、判定の材料�
     expect(restored.filter((file) => !RESTORED_PATHS.includes(file.path))).toEqual(
       files.filter((file) => !RESTORED_PATHS.includes(file.path)),
     );
+  });
+});
+
+// ── (13) 書けないと判断した要件を B1 に渡す（Issue #976）────────────────────────
+
+/**
+ * 変異の証跡（この describe と write.test.ts・carry-over.test.ts が赤になる）：
+ *   - 初回 B1 から `...unwritableForWriter(carry)` を外す → (1)(2)(6) が赤
+ *   - 作り直しの B1 から外す → (5) が赤
+ *   - `deriveUnwritableForWriter` の条件から name-table を外す → carry-over.test.ts の「出どころに name-table が無い…」が赤
+ *   - `rowIds` を共有する行まで広げる → carry-over.test.ts の「件は申告の了承済みでない側と同じ…」が赤
+ *   - `unwritable` を空でも渡す（0 件でも欄を出す）→ write.test.ts の「1 件も無ければ…」が赤
+ *   - off の要求は変わらない（(4)）
+ */
+describe("(13) 書けないと判断した要件と理由を B1 に渡し、置き換えて書くことを禁じる（旗 v12.ids の走り。Issue #976）", () => {
+  const IDS_FLAGS = { ledger: true, searchRepair: true, ids: true };
+  const baseResponses = () => idsResponsesOf(LIST, TABLE_IDS, PROPERTY_LEDGER_VIEW_IDS);
+  const c1Calls = () => {
+    const { entities, fields, behaviors } = baseResponses();
+    return [structured(entities), structured(fields), structured(behaviors)];
+  };
+  /** R3 の確かめ方を unresolved（根拠は渡した ID）にした C2 の応答 */
+  const withR3Unresolved = (constraintIds: readonly string[]) => ({
+    requirements: (baseResponses().mapping as { requirements: readonly Record<string, unknown>[] }).requirements.map((entry) =>
+      entry["requirementId"] === "R3"
+        ? {
+            ...entry,
+            verification: { ...(entry["verification"] as Record<string, unknown>), kind: "unresolved", value: null, reason: "宣言で書けない", checks: null, constraintIds },
+          }
+        : entry,
+    ),
+  });
+  const NO_CLOSE_YAML = fixtureYaml({ closeItem: false }).replace("show: [title, amount, kind]", "show: [title, owner, amount, day, kind]");
+  const REMAINING = ["R1", "R2", "R4"] as const;
+  const remainingT2 = () => renamed(idsT2Response([...r1Tests(), ...r4Tests()], REMAINING));
+  /** R3 が文書の制約 ID を根拠に持ち越す完走の台本（C1 3・C2・C3・T2・B1・B3'） */
+  const claimCalls = (constraintIds: readonly string[] = [FIXTURE_CONSTRAINT_ID]): RecordedCall[] => [
+    ...c1Calls(),
+    structured(withR3Unresolved(constraintIds)),
+    structured(acceptAll(REMAINING)),
+    structured(remainingT2()),
+    structured({ declaration: NO_CLOSE_YAML }),
+    structured(acceptAll(REMAINING)),
+  ];
+  const writeSchemaName = WRITE_V11A_SCHEMA_NAME;
+  const dataOpener = /<data name="([^"]+)">/g;
+  const writeOf = (requests: readonly LlmStructuredRequest[]) => requests.filter((request) => request.schemaName === writeSchemaName);
+  const dataNamesOf = (input: string) => [...input.matchAll(dataOpener)].map((match) => match[1]);
+  /** 今の規則（台帳の文・R-w11-07 の旗 ids の文を含む）。塊を渡さない要求と比べる */
+  const baseRuleTexts = ruleTexts(withIdsValidationRule(writeV11aRuleDefinitionsOf(PROPERTY_LEDGER_VIEW_IDS)));
+  /** R3 だけが所属させる行（持ち越しで除く行）の ID */
+  const R3_ONLY_ROW = TABLE_IDS.rows.find((row) => row.name === "closeItem")?.id;
+  /** R1 と共有する行（R3 も所属させるが、共有なので rowIds に入らない） */
+  const R3_SHARED_ROW = TABLE_IDS.rows.find((row) => row.name === "amount")?.id;
+
+  it("(1) 塊と規則：書けないと判断した要件が 1 件ある台本で、B1 の要求に塊と R-w11u-01 があり、位置は今の規則の後・作り直しの規則の前。0 件なら今とバイト列で同じ", async () => {
+    expect(R3_ONLY_ROW).toBeDefined();
+    expect(R3_SHARED_ROW).toBeDefined();
+    const { result, recording } = await runScenario(claimCalls(), { flags: IDS_FLAGS });
+    expect(result.stopped).toBeNull();
+    const [write] = writeOf(recording.structured);
+    if (write === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+    expect(dataNamesOf(write.input)).toEqual([...WRITE_V11A_DATA_NAMES, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, WRITE_V11A_UNWRITABLE_DATA_NAME]);
+    expect(write.rules).toEqual([...baseRuleTexts, WRITE_V11A_UNWRITABLE_RULE_DEFINITION.text]);
+    // 塊は骨組みの後（作り直しの塊は無い）
+    expect(write.input.indexOf(`<data name="${WRITE_V11A_UNWRITABLE_DATA_NAME}">`)).toBeGreaterThan(
+      write.input.indexOf(`<data name="${WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME}">`),
+    );
+    // 0 件（持ち越しなし）は塊も規則も無く、今の要求とバイト列で同じ
+    const plain = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS });
+    const [plainWrite] = writeOf(plain.recording.structured);
+    if (plainWrite === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+    expect(dataNamesOf(plainWrite.input)).toEqual([...WRITE_V11A_DATA_NAMES, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME]);
+    expect(plainWrite.rules).toEqual(baseRuleTexts);
+    expect(JSON.stringify(plainWrite)).not.toContain(WRITE_V11A_UNWRITABLE_DATA_NAME);
+    expect(JSON.stringify(plainWrite)).not.toContain(WRITE_V11A_UNWRITABLE_RULE_DEFINITION.text);
+    expectNoAcceptanceMaterial([write.input, ...(write.rules ?? [])]);
+  });
+
+  it("(2) 中身：4 欄が持ち越しと表から導いた値と一致し、rowIds はその要件だけが所属させる行（共有する行を含まない）。件の集合は申告から了承済みの持ち越しを除いた集合と同じ", async () => {
+    const { result, recording } = await runScenario(claimCalls(), { flags: IDS_FLAGS });
+    const [write] = writeOf(recording.structured);
+    if (write === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+    const block = dataBlockOf(write.input, WRITE_V11A_UNWRITABLE_DATA_NAME) as readonly Record<string, unknown>[];
+    expect(block).toEqual([
+      { requirementId: "R3", reason: "宣言で書けない", constraintIds: [FIXTURE_CONSTRAINT_ID], rowIds: [R3_ONLY_ROW] },
+    ]);
+    // 共有する行（R1 も所属させる項目）は入らない
+    expect(block[0]?.["rowIds"]).not.toContain(R3_SHARED_ROW);
+    // 試験の期待・点検の判定・分類は渡さない（4 欄だけ）
+    expect(Object.keys(block[0] ?? {})).toEqual(["requirementId", "reason", "constraintIds", "rowIds"]);
+    const blockText = write.input.split(`<data name="${WRITE_V11A_UNWRITABLE_DATA_NAME}">`)[1]?.split("</data>")[0] ?? "";
+    expect(blockText).not.toMatch(/expected|verdict|classification|裁定|合否|分類/);
+    // 件の集合は、納品物の申告から了承済みの持ち越しを除いた集合と同じ（ここでは了承済み 0 件）
+    const claims = artifactOf(result.bundle, UNWRITABLE_FILE)["unwritable"] as readonly { readonly requirementId: string }[];
+    expect(block.map((entry) => entry["requirementId"])).toEqual(claims.map((claim) => claim.requirementId));
+    expect(block.map((entry) => entry["requirementId"])).toEqual(["R3"]);
+  });
+
+  it("(3) 0 件：了承済みの持ち越しだけの台本は、B1 の要求に塊も規則も無く今とバイト列で同じ", async () => {
+    const acceptedPlan: ConfirmedPlan = {
+      ...PLAN,
+      requirements: PLAN.requirements.map((requirement) =>
+        requirement.id === "R3"
+          ? { ...requirement, parts: requirement.parts.map((part) => ({ ...part, disposition: "accepted_removal" as const })) }
+          : requirement,
+      ),
+      accepted_unwritable: [{ part_id: "R3-p1", alternative_id: "R3", basis: { doc_version: "v1", location: "1", constraint_id: "c" } }],
+    };
+    const { result, recording } = await runScenario(claimCalls(["R3-p1"]), { flags: IDS_FLAGS, plan: acceptedPlan });
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const [write] = writeOf(recording.structured);
+    if (write === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+    expect(dataNamesOf(write.input)).toEqual([...WRITE_V11A_DATA_NAMES, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME]);
+    expect(write.rules).toEqual(baseRuleTexts);
+  });
+
+  it("(4) off は今までどおり：ids off で書けない要件の持ち越しがある台本でも、B1 の要求に塊も規則も無い", async () => {
+    const documentTable: NameTable = {
+      ...TABLE,
+      verification: TABLE.verification.map((entry) =>
+        entry.requirementId === "R3" ? { requirementId: "R3", kind: "unresolved" as const, reason: "宣言で書けない", constraintIds: [FIXTURE_CONSTRAINT_ID] } : entry,
+      ),
+    };
+    const offCalls: RecordedCall[] = [
+      structured(t1Of(LIST, documentTable)),
+      structured(acceptAll(REMAINING)),
+      structured(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], REMAINING)),
+      structured({ declaration: NO_CLOSE_YAML }),
+      structured(acceptAll(REMAINING)),
+    ];
+    const { recording } = await runScenario(offCalls);
+    const [write] = writeOf(recording.structured);
+    if (write === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+    expect(dataNamesOf(write.input)).toEqual([...WRITE_V11A_DATA_NAMES]);
+    expect(write.rules).toEqual(ruleTexts(WRITE_V11A_RULE_DEFINITIONS));
+    expect(JSON.stringify(write)).not.toContain(WRITE_V11A_UNWRITABLE_DATA_NAME);
+  });
+
+  it("(5) 作り直し：空の文脈での作り直しの B1 にも、同じ塊と規則（塊は残った失敗の一覧の前、規則は作り直しの規則の前）がある", async () => {
+    // 検査の名前だけを表の項目の名前と別にした宣言（同じ式。結び付かない）→ 欄だけの直しが 2 回空振り → 作り直し
+    const renamedYaml = replaced(NO_CLOSE_YAML, "  - name: amount\n    entity: item", "  - name: positive\n    entity: item");
+    const { result, recording } = await runScenario(
+      [
+        ...c1Calls(),
+        structured(withR3Unresolved([FIXTURE_CONSTRAINT_ID])),
+        structured(acceptAll(REMAINING)),
+        structured(remainingT2()),
+        structured({ declaration: renamedYaml }),
+        structured(acceptAll(REMAINING)),
+        structured({ replacements: [], disputes: [] }),
+        structured(acceptAll(REMAINING)),
+        structured({ replacements: [], disputes: [] }),
+        structured(acceptAll(REMAINING)),
+        structured({ declaration: NO_CLOSE_YAML }),
+        structured(acceptAll(REMAINING)),
+      ],
+      { flags: IDS_FLAGS },
+    );
+    expect(result.stopped).toBeNull();
+    const writes = writeOf(recording.structured);
+    expect(writes).toHaveLength(2);
+    const rewrite = writes[1];
+    if (rewrite === undefined) throw new Error("前提が壊れた：作り直しの B1 の要求が無い");
+    expect(dataNamesOf(rewrite.input)).toEqual([
+      ...WRITE_V11A_DATA_NAMES,
+      WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME,
+      WRITE_V11A_UNWRITABLE_DATA_NAME,
+      WRITE_V11A_REWRITE_DATA_NAME,
+    ]);
+    expect(rewrite.rules).toEqual([
+      ...baseRuleTexts,
+      WRITE_V11A_UNWRITABLE_RULE_DEFINITION.text,
+      ...WRITE_V11A_REWRITE_RULE_DEFINITIONS.map((definition) => definition.text),
+    ]);
+    expect(dataBlockOf(rewrite.input, WRITE_V11A_UNWRITABLE_DATA_NAME)).toEqual(dataBlockOf(writes[0]?.input ?? "", WRITE_V11A_UNWRITABLE_DATA_NAME));
+    expect(rewrite.input.indexOf(`<data name="${WRITE_V11A_UNWRITABLE_DATA_NAME}">`)).toBeLessThan(
+      rewrite.input.indexOf(`<data name="${WRITE_V11A_REWRITE_DATA_NAME}">`),
+    );
+  });
+
+  it("(6) 段の走り：B1 から入る走りも、checkpoint の持ち越しと表から同じ塊と規則を導く", async () => {
+    const calls = claimCalls();
+    const full = await runStageScenario(calls, { flags: IDS_FLAGS });
+    const t2b1 = full.result.boundaries.find((entry) => entry.boundary === "t2-b1");
+    if (t2b1 === undefined) throw new Error("前提が壊れた：t2-b1 の境界が無い");
+    const versions = { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0" };
+    const checkpoint = buildStageCheckpoint({ materials: t2b1, versions, planSha256: "a".repeat(64), sourceSha256: "b".repeat(64) });
+    const record = {
+      schema_version: STAGE_RUN_RECORD_SCHEMA,
+      checkpoints: [{ boundary: t2b1.boundary, path: "cp.json", output_digest: await stageOutputDigest(checkpoint) }],
+    };
+    const verified = await verifyStageInput({
+      start: "write",
+      checkpointText: stageJsonText(checkpoint),
+      recordText: JSON.stringify(record),
+      checkpointFile: "cp.json",
+      plan: PLAN,
+      planSha256: "a".repeat(64),
+      sourceSha256: "b".repeat(64),
+      vocabularyVersion: "v1",
+      contractVersion: "v0.2",
+    });
+    if (!verified.ok) throw new Error(`前提が壊れた：checkpoint の照合が落ちた（${verified.code}）`);
+    const recording = createCheckedRecordingClient([structured({ declaration: NO_CLOSE_YAML }), structured(acceptAll(REMAINING))]);
+    const resumed = await runStageRangeV11a({
+      ...inputOf(recording.client),
+      flags: IDS_FLAGS,
+      plan: PLAN,
+      range: { start: "write", end: "judge" },
+      resume: verified.resume,
+    });
+    expect(resumed.stopped).toBeNull();
+    const [write] = writeOf(recording.structured);
+    if (write === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+    expect(dataBlockOf(write.input, WRITE_V11A_UNWRITABLE_DATA_NAME)).toEqual([
+      { requirementId: "R3", reason: "宣言で書けない", constraintIds: [FIXTURE_CONSTRAINT_ID], rowIds: [R3_ONLY_ROW] },
+    ]);
+    expect(write.rules).toEqual([...baseRuleTexts, WRITE_V11A_UNWRITABLE_RULE_DEFINITION.text]);
+  });
+
+  it("(7) 渡す件は、出どころに name-table があり確かめ方が unresolved で根拠が文書の制約 ID だけの持ち越しに限る（点検の拒否だけでは渡さない）", async () => {
+    // C2 は全要件を fixed-test にし、B3' が R3 を拒否する台本。B1 の時点の持ち越しは空なので塊は無い
+    const { recording } = await runScenario(
+      [...idsHead(), structured(judgments([...IDS], { R3: ["mismatch", "金額が 0 より大きい項目だけ"] })), repairDone(RUN_YAML), structured(acceptAll())],
+      { flags: IDS_FLAGS },
+    );
+    const writes = writeOf(recording.structured);
+    expect(writes.length).toBeGreaterThan(0);
+    for (const write of writes) {
+      expect(dataNamesOf(write.input)).toEqual([...WRITE_V11A_DATA_NAMES, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME]);
+      expect(write.rules).toEqual(baseRuleTexts);
+    }
   });
 });
 

@@ -169,12 +169,14 @@ import {
   danglingRowReferences,
   deriveCarryOver,
   deriveUnwritableClaims,
+  deriveUnwritableForWriter,
   pruneForCarryOver,
   type CarryOver,
   type CarryOverReason,
   type DeclJudgment,
   type PrunedForCarryOver,
   type SemanticJudgment,
+  type UnwritableForWriter,
 } from "./carry-over.js";
 import { identityMappings, toV1 } from "./convert.js";
 import { lostCoverage } from "./coverage.js";
@@ -1982,6 +1984,22 @@ async function runV11a(
      */
     const requiredValidationsFor = (suite: TestSuite): { readonly requiredValidations?: readonly RequiredValidation[] } =>
       flags.ids ? { requiredValidations: requiredValidationsOf(table, suite, testSpec.observes) } : {};
+    /**
+     * 旗 `v12.ids` の走りだけ、その時点の持ち越しと採用した表から「書けないと判断した要件」を導く（Issue #976）。
+     * 条件は申告の了承済みでない側と同じ。0 件なら欄を渡さない（今の要求とバイト列で同じ）。初回・作り直し・段の走りの
+     * B1 が同じ関数を使う
+     */
+    const unwritableForWriter = (current: CarryOver): { readonly unwritable?: readonly UnwritableForWriter[] } => {
+      if (!flags.ids) return {};
+      const found = deriveUnwritableForWriter({
+        table,
+        documents: input.documents,
+        entries: current.entries,
+        excludedRowIds: current.excludedRowIds,
+        acceptedParts,
+      });
+      return found.length === 0 ? {} : { unwritable: found };
+    };
     // 初回の B1 の時点の有効な組（残る要件の試験。棄却はまだ無い）
     const remainingNow = new Set(carry.remainingRequirementIds);
     const written = await runStageOk("write", () =>
@@ -1994,6 +2012,7 @@ async function runV11a(
         gateway: gateway.forStage("write"),
         ...withLedger,
         ...requiredValidationsFor({ tests: testSpec.suite.tests.filter((test) => remainingNow.has(test.target.requirementId)) }),
+        ...unwritableForWriter(carry),
       }),
     );
 
@@ -2540,6 +2559,7 @@ async function runV11a(
               ...withLedger,
               rewrite: { failures },
               ...requiredValidationsFor(contextNow().suite),
+              ...unwritableForWriter(carry),
             }),
           );
           await consider(

@@ -32,7 +32,7 @@ import { constraintIdsIn, isRecord, normalizeConstraintId, type PromptDocument }
 import type { AcceptedParts } from "../v12/accepted-parts.js";
 import type { CoverageLoss } from "./coverage.js";
 import { toV1, type V1Conversion } from "./convert.js";
-import { nameTableSha256, ownersByRowId, type NameTable } from "./names.js";
+import { nameTableSha256, ownersByRowId, type NameTable, type NameTableVerification } from "./names.js";
 import { PROPERTY_LEDGER_VIEW, type UpstreamLedgerView } from "../v12/ledger.js";
 
 /** 持ち越しの出どころ */
@@ -376,6 +376,26 @@ export interface UnwritableClaimsInput {
 }
 
 /**
+ * 根拠が文書の制約 ID だけの unresolved の持ち越し（了承済みでない側）の理由と根拠を返す（当たらなければ null）。
+ * 申告（`deriveUnwritableClaims` の了承済みでない側）と B1 に渡す塊（`deriveUnwritableForWriter`）が同じ条件を使う。
+ * 出どころに name-table があり、確かめ方が unresolved で、根拠が文書の制約 ID だけで、全部が了承済みでない（Issue #807・#847）。
+ */
+function documentUnwritableOf(
+  entry: CarryOverEntry,
+  verificationById: ReadonlyMap<string, NameTableVerification>,
+  documentConstraintIds: ReadonlySet<string>,
+  acceptedParts: AcceptedParts | undefined,
+): { readonly reason: string; readonly constraintIds: readonly string[] } | null {
+  if (!entry.reasons.some((reason) => reason.origin === "name-table")) return null;
+  if (acceptedParts?.basis.byRequirement.get(entry.requirementId)?.allAccepted === true) return null;
+  const verification = verificationById.get(entry.requirementId);
+  if (verification === undefined || verification.kind !== "unresolved") return null;
+  const constraintIds = documentBasisOf(verification.constraintIds, documentConstraintIds);
+  if (constraintIds === null) return null;
+  return { reason: verification.reason, constraintIds };
+}
+
+/**
  * 最終の持ち越しから、書けない要件の申告を導く（純粋。一覧の順）。次のどちらかに当たる要件を写す：
  *   - 了承済みの持ち越し（`acceptedCarried`。部分は了承済みの部分の文を `parts` の順に 1 部分 1 行）
  *   - 根拠が文書の制約 ID だけで、出どころに name-table があり、**全部が了承済みでない**持ち越し（部分は 1 件で、
@@ -404,20 +424,70 @@ export function deriveUnwritableClaims(input: UnwritableClaimsInput): readonly U
       });
       continue;
     }
-    if (!entry.reasons.some((reason) => reason.origin === "name-table")) continue;
-    if (input.acceptedParts?.basis.byRequirement.get(entry.requirementId)?.allAccepted === true) continue;
-    const verification = verificationById.get(entry.requirementId);
-    if (verification === undefined || verification.kind !== "unresolved") continue;
-    const basis = documentBasisOf(verification.constraintIds, documentConstraintIds);
-    if (basis === null) continue;
+    const found = documentUnwritableOf(entry, verificationById, documentConstraintIds, input.acceptedParts);
+    if (found === null) continue;
     const requirement = requirementById.get(entry.requirementId);
     if (requirement === undefined) continue;
     claims.push({
       requirementId: entry.requirementId,
       text: requirement.text,
       quote: requirement.quote,
-      unwritable: [`${verification.reason}（根拠: ${basis.join("・")}）`],
+      unwritable: [`${found.reason}（根拠: ${found.constraintIds.join("・")}）`],
     });
   }
   return claims;
+}
+
+// ── B1 に渡す「書けないと判断した要件」（旗 `v12.ids` の走りだけ。Issue #976）────────────────────
+//
+// B1 は要件の文と名前の表の全行だけを見て書くので、申告した決まりを違う決まり（逆の向き・別の条件・別の範囲など）に
+// 置き換えて宣言に書くことがある。**判断と理由を渡し、置き換えて書くことだけを禁じる**（同じ結果になる書き方は禁じない）。
+// 渡すのは 4 欄だけ——要件 ID・表の確かめ方の理由（そのまま）・根拠の制約 ID（申告と同じ並び）・その要件だけが所属させる行。
+// 試験の期待・点検の判定・分類は渡さない。条件は申告の了承済みでない側と同じ（`documentUnwritableOf`）。
+
+/** B1 に渡す「書けないと判断した要件」の 1 件（4 欄だけ） */
+export interface UnwritableForWriter {
+  readonly requirementId: string;
+  /** 表の確かめ方の理由の文（そのまま） */
+  readonly reason: string;
+  /** 根拠の制約 ID（申告と同じ並び。文書の集合の列挙順） */
+  readonly constraintIds: readonly string[];
+  /** その要件だけが所属させる行の ID（持ち越しで除いた行のうち。共有する行は入らない） */
+  readonly rowIds: readonly string[];
+}
+
+/** B1 に渡す「書けないと判断した要件」を導く入力 */
+export interface UnwritableForWriterInput {
+  /** 採用した表（持ち越しで除いた行も含む全行） */
+  readonly table: NameTable;
+  readonly documents: readonly PromptDocument[];
+  /** その時点の持ち越し（一覧の順） */
+  readonly entries: readonly CarryOverEntry[];
+  /** 持ち越しで除いた行（`CarryOver.excludedRowIds`） */
+  readonly excludedRowIds: readonly string[];
+  /** 計画で了承して除いた部分（全部が了承済みの要件は渡さない。Issue #841） */
+  readonly acceptedParts?: AcceptedParts;
+}
+
+/**
+ * その時点の持ち越しと採用した表から、B1 に渡す「書けないと判断した要件」を導く（純粋。持ち越しの順）。
+ * 条件は申告（`deriveUnwritableClaims`）の了承済みでない側と同じ。0 件なら空の並び。
+ */
+export function deriveUnwritableForWriter(input: UnwritableForWriterInput): readonly UnwritableForWriter[] {
+  const documentConstraintIds = constraintIdsIn(input.documents);
+  const verificationById = new Map(input.table.verification.map((entry) => [entry.requirementId, entry] as const));
+  const excluded = new Set(input.excludedRowIds);
+  const owners = ownersByRowId(input.table);
+  return input.entries.flatMap((entry) => {
+    const found = documentUnwritableOf(entry, verificationById, documentConstraintIds, input.acceptedParts);
+    if (found === null) return [];
+    const rowIds = input.table.rows
+      .filter((row) => {
+        if (!excluded.has(row.id)) return false;
+        const rowOwners = owners.get(row.id) ?? [];
+        return rowOwners.length === 1 && rowOwners[0] === entry.requirementId;
+      })
+      .map((row) => row.id);
+    return [{ requirementId: entry.requirementId, reason: found.reason, constraintIds: found.constraintIds, rowIds }];
+  });
 }

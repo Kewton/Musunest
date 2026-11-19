@@ -17,12 +17,15 @@ import type { FixedTest } from "../fixed-test.js";
 import {
   danglingRowReferences,
   deriveCarryOver,
+  deriveUnwritableClaims,
+  deriveUnwritableForWriter,
   pruneForCarryOver,
   type CarryOverInput,
   type DeclJudgment,
   type SemanticJudgment,
 } from "./carry-over.js";
-import { checkMappedTable, nameTableSha256, type NameTable } from "./names.js";
+import { checkMappedTable, nameTableSha256, type NameTable, type NameTableRow } from "./names.js";
+import type { AcceptedParts } from "../v12/accepted-parts.js";
 import { PROPERTY_LEDGER_VIEW, type UpstreamLedgerView } from "../v12/ledger.js";
 
 const accept = (requirementId: string) => ({ requirementId, verdict: "accept" as const });
@@ -324,6 +327,169 @@ describe("読み漏れの検出：持ち越しは台帳を上流の見方で受�
     expect(same).toBe(true);
     expect(ledger.excludedWhenAcceptedKinds).toEqual(PROPERTY_LEDGER_VIEW.excludedWhenAcceptedKinds);
   });
+});
+
+// ── B1 に渡す「書けないと判断した要件」（Issue #976）──────────────────────────────
+
+describe("B1 に渡す「書けないと判断した要件」：4 欄を、持ち越しと表から導く（Issue #976）", () => {
+  /** R5 だけが所属させる行（持ち越しで除かれる） */
+  const MEMO_ROW: NameTableRow = {
+    id: "f.item.memo",
+    kind: "field",
+    entity: "e.item",
+    name: "memo",
+    role: "要件 R5 が使う対象",
+    source: { requirementId: "R5", quote: "控え" },
+    type: "string",
+    options: null,
+    groupBy: null,
+    refEntity: null,
+  };
+  /** R5 と R4 が共有する行（どちらも持ち越すので除かれるが、rowIds には入らない） */
+  const NOTE_ROW: NameTableRow = {
+    ...MEMO_ROW,
+    id: "f.item.note",
+    name: "note",
+    source: { requirementId: "R5", quote: "覚え書き" },
+  };
+  /** R5 が、R5 だけが所属させる行と、R4・R1 と共有する行（覚え書き・金額）を持つ表 */
+  const tableWithR5Rows = (): NameTable => {
+    const base = fixtureTable();
+    return {
+      ...base,
+      rows: [...base.rows, MEMO_ROW, NOTE_ROW],
+      ownership: base.ownership.map((entry) => {
+        if (entry.requirementId === "R5") {
+          return {
+            requirementId: "R5",
+            roles: [
+              { id: "f.item.memo", basis: "stated" as const, reason: null },
+              { id: "f.item.note", basis: "stated" as const, reason: null },
+              { id: "f.item.amount", basis: "stated" as const, reason: null },
+            ],
+          };
+        }
+        if (entry.requirementId === "R4") {
+          return { ...entry, roles: [...entry.roles, { id: "f.item.note", basis: "stated" as const, reason: null }] };
+        }
+        return entry;
+      }),
+    };
+  };
+  const carryInput = async (table: NameTable): Promise<CarryOverInput> => ({
+    list: fixtureList(),
+    table,
+    semanticCheck: {
+      tableSha256: await nameTableSha256(table),
+      judgments: [accept("R1"), accept("R2"), accept("R3"), reject("R4", "missing-target")],
+    },
+  });
+
+  it("件は申告の了承済みでない側と同じで、rowIds はその要件だけが所属させる行（共有する行は入らない）。欄は 4 つだけ", async () => {
+    const table = tableWithR5Rows();
+    const carry = await deriveCarryOver(await carryInput(table));
+    const found = deriveUnwritableForWriter({
+      table,
+      documents: FIXTURE_DOCUMENTS,
+      entries: carry.entries,
+      excludedRowIds: carry.excludedRowIds,
+    });
+    expect(found).toEqual([
+      { requirementId: "R5", reason: "宣言で書けない", constraintIds: [FIXTURE_CONSTRAINT_ID], rowIds: ["f.item.memo"] },
+    ]);
+    // R4 と共有する行は除かれるが rowIds には入らず、R1 と共有する行は除かれないので rowIds にも入らない
+    expect(carry.excludedRowIds).toContain("f.item.note");
+    expect(carry.excludedRowIds).not.toContain("f.item.amount");
+    expect(found[0]?.["rowIds"]).not.toContain("f.item.note");
+    expect(found[0]?.["rowIds"]).not.toContain("f.item.amount");
+    expect(Object.keys(found[0] ?? {})).toEqual(["requirementId", "reason", "constraintIds", "rowIds"]);
+    // 件の集合は、納品物の申告から了承済みの持ち越しを除いた集合と同じ（ここでは了承済み 0 件）
+    const claims = deriveUnwritableClaims({ list: fixtureList(), table, documents: FIXTURE_DOCUMENTS, entries: carry.entries });
+    expect(found.map((entry) => entry.requirementId)).toEqual(claims.map((claim) => claim.requirementId));
+  });
+
+  it("出どころに name-table が無い持ち越し（意味の点検・宣言の点検・網羅の落ち）は渡さない", async () => {
+    const table = tableWithR5Rows();
+    const carry = await deriveCarryOver(await fullInputWith(table));
+    // R1（網羅）・R3（宣言の点検）・R4（意味の点検）は渡さず、name-table の R5 だけ
+    expect(carry.entries.map((entry) => entry.requirementId)).toEqual(["R1", "R3", "R4", "R5"]);
+    const found = deriveUnwritableForWriter({
+      table,
+      documents: FIXTURE_DOCUMENTS,
+      entries: carry.entries,
+      excludedRowIds: carry.excludedRowIds,
+    });
+    expect(found.map((entry) => entry.requirementId)).toEqual(["R5"]);
+    // 表が unresolved でも、出どころに name-table が無ければ渡さない（条件は出どころも見る）
+    expect(
+      deriveUnwritableForWriter({
+        table,
+        documents: FIXTURE_DOCUMENTS,
+        entries: [{ requirementId: "R5", reasons: [{ origin: "coverage", reason: "lost-coverage-units" }] }],
+        excludedRowIds: carry.excludedRowIds,
+      }),
+    ).toEqual([]);
+  });
+
+  it("根拠が文書の制約 ID だけでなければ渡さない（台帳の観測の ID を根拠にした unresolved）", async () => {
+    const base = tableWithR5Rows();
+    const table: NameTable = {
+      ...base,
+      verification: base.verification.map((entry) =>
+        entry.requirementId === "R5" ? { ...entry, constraintIds: ["state-after-set"] } : entry,
+      ),
+    };
+    const carry = await deriveCarryOver(await carryInput(table));
+    expect(carry.entries.map((entry) => entry.requirementId)).toEqual(["R4", "R5"]);
+    expect(
+      deriveUnwritableForWriter({ table, documents: FIXTURE_DOCUMENTS, entries: carry.entries, excludedRowIds: carry.excludedRowIds }),
+    ).toEqual([]);
+  });
+
+  it("全部が了承済みの要件は渡さず、了承していない部分を持つ要件は渡す", async () => {
+    const table = tableWithR5Rows();
+    const carry = await deriveCarryOver(await carryInput(table));
+    const acceptedParts: AcceptedParts = {
+      requirements: [],
+      allAcceptedRequirementIds: ["R5"],
+      basis: {
+        anyPartIds: new Set(["p1"]),
+        byRequirement: new Map([["R5", { allAccepted: true, acceptedPartIds: new Set(["p1"]), partIds: new Set(["p1"]) }]]),
+      },
+    };
+    expect(
+      deriveUnwritableForWriter({ table, documents: FIXTURE_DOCUMENTS, entries: carry.entries, excludedRowIds: carry.excludedRowIds, acceptedParts }),
+    ).toEqual([]);
+    const mixed: AcceptedParts = {
+      ...acceptedParts,
+      basis: {
+        anyPartIds: new Set(["p1", "p2"]),
+        byRequirement: new Map([["R5", { allAccepted: false, acceptedPartIds: new Set(["p1"]), partIds: new Set(["p1", "p2"]) }]]),
+      },
+    };
+    expect(
+      deriveUnwritableForWriter({ table, documents: FIXTURE_DOCUMENTS, entries: carry.entries, excludedRowIds: carry.excludedRowIds, acceptedParts: mixed }).map(
+        (entry) => entry.requirementId,
+      ),
+    ).toEqual(["R5"]);
+  });
+
+  /** 表を差し替えた 4 つの出どころの入力（R5＝name-table、R4＝semantic-check、R3＝decl-check、R1＝coverage） */
+  async function fullInputWith(table: NameTable): Promise<CarryOverInput> {
+    return {
+      list: fixtureList(),
+      table,
+      semanticCheck: {
+        tableSha256: await nameTableSha256(table),
+        judgments: [accept("R1"), accept("R2"), accept("R3"), reject("R4", "missing-target")],
+      },
+      declCheck: {
+        declarationSha256: DECL_SHA,
+        result: { declarationSha256: DECL_SHA, judgments: [accept("R1"), accept("R2"), reject("R3", "condition-mismatch")] },
+      },
+      coverage: [{ requirementId: "R1", units: [{ requirementId: "R1", targetId: "f.item.amount", key: "k" }] }],
+    };
+  }
 });
 
 describe("台帳の未対応の観測の ID を根拠にした unresolved（Issue #725）：持ち越しの本体は変えず、今の本体を例外なく通る", () => {

@@ -18,6 +18,7 @@ import {
   EMPTY_AGGREGATE_REQUEST_DIFF,
   ENUM_MEMBERSHIP_REQUEST_DIFF,
   FIXTURE_YAML,
+  FIXTURE_CONSTRAINT_ID,
   LEDGER_VIEW_2A,
   LEDGER_VIEW_2B,
   withAggregates,
@@ -39,6 +40,8 @@ import {
   WRITE_V11A_REWRITE_RULE_DEFINITIONS,
   WRITE_V11A_RULES,
   WRITE_V11A_SCHEMA_NAME,
+  WRITE_V11A_UNWRITABLE_DATA_NAME,
+  WRITE_V11A_UNWRITABLE_RULE_DEFINITION,
   checkWriteV11aOutput,
   runWriteV11a,
   withIdsValidationRule,
@@ -46,6 +49,7 @@ import {
   type WriteV11aInput,
 } from "./write.js";
 import { requiredValidationsOf, type RequiredValidation } from "../bind-by-id.js";
+import type { UnwritableForWriter } from "../carry-over.js";
 import type { TestObserves } from "./test-spec.js";
 import { NAMED_FAILURE_MESSAGES, type NamedFailure } from "../../v12/search-repair.js";
 
@@ -65,6 +69,10 @@ const SUITE = {
     },
   ],
 } as unknown as WriteV11aInput["suite"];
+
+/** 要求の input のデータの塊（JSON）を、塊の名前で読む */
+const dataBlockOf = (input: string, name: string): unknown =>
+  JSON.parse(input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "null");
 
 const inputWith = (
   client: ReturnType<typeof createCheckedRecordingClient>["client"],
@@ -529,6 +537,102 @@ describe("旗 v12.ids：要る検査の骨組みを渡したときだけ、「�
     expect(blockOf(request.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME)).toEqual(SKELETON);
     expect(request.rules).toEqual((base.rules ?? []).map((text) => (text === original?.text ? WRITE_V11A_IDS_R07_DEFINITION.text : text)));
     expect(request.rules?.slice(-1)).toEqual(ruleTexts(WRITE_V11A_REWRITE_RULE_DEFINITIONS));
+  });
+});
+
+describe("旗 v12.ids：書けないと判断した要件を渡したときだけ、塊と規則 R-w11u-01 を足す（Issue #976）", () => {
+  const ENTRY: UnwritableForWriter = {
+    requirementId: "R5",
+    reason: "宣言で書けない",
+    constraintIds: [FIXTURE_CONSTRAINT_ID],
+    rowIds: [],
+  };
+  const SAME = [ENTRY];
+  const baseRules = ruleTexts(withIdsValidationRule(writeV11aRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)));
+
+  it("規則の定義に why・since・modes があり、不備 0。ID は台帳の文の ID と重ならず、文は本文の全文とバイト列で同じ", () => {
+    const definition = WRITE_V11A_UNWRITABLE_RULE_DEFINITION;
+    expect(definition.id).toBe("R-w11u-01");
+    expect(definition.why.trim()).not.toBe("");
+    expect(definition.since).toBe("Issue #976");
+    expect(definition.modes).toEqual(["M-23"]);
+    // Issue #976 本文の「規則の全文（R-w11u-01）」の文とバイト列で同じ
+    expect(definition.text).toBe(
+      "データ「書けないと判断した要件」の各件は、その要件の決まりのうち reason に書かれた部分を、文書の語彙では表せないと判断済みである。その部分を、違う決まり（逆の向き・別の条件・別の範囲など）に置き換えて書かない。その要件の残りの部分と rowIds の行は、置き換えにならない形で書く。",
+    );
+    const ledger = writeV11aRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    expect(ledger.map((entry) => entry.id)).not.toContain(definition.id);
+    expect(new Set(ledger.map((entry) => entry.id)).size).toBe(ledger.length);
+    expect(ruleDefinitionDefects([...ledger, definition])).toEqual([]);
+    expectNoAcceptanceMaterial([definition.text, definition.why]);
+  });
+
+  it("渡したときだけ、塊を固定した試験・骨組みの後（作り直しの塊の前）に足し、規則を今の規則の後・作り直しの規則の前に足す", async () => {
+    const before = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const after = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(inputWith(before.client, { ledger: PROPERTY_LEDGER_VIEW, requiredValidations: [] }));
+    await runWriteV11a(inputWith(after.client, { ledger: PROPERTY_LEDGER_VIEW, requiredValidations: [], unwritable: SAME }));
+    const [plain, withBlock] = [before.structured[0], after.structured[0]];
+    if (plain === undefined || withBlock === undefined) throw new Error("要求が無い");
+    const names = [...withBlock.input.matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
+    expect(names).toEqual([...WRITE_V11A_DATA_NAMES, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, WRITE_V11A_UNWRITABLE_DATA_NAME]);
+    expect(withBlock.input.startsWith(plain.input)).toBe(true);
+    expect(dataBlockOf(withBlock.input, WRITE_V11A_UNWRITABLE_DATA_NAME)).toEqual(SAME);
+    expect(plain.rules).toEqual(baseRules);
+    expect(withBlock.rules).toEqual([...baseRules, WRITE_V11A_UNWRITABLE_RULE_DEFINITION.text]);
+    expect(withBlock.schema).toBe(plain.schema);
+    expect(withBlock.instructions).toBe(plain.instructions);
+    expect(withBlock.documents).toEqual(plain.documents);
+  });
+
+  it("空の文脈での作り直しも、塊を残った失敗の一覧の前に、規則を作り直しの規則の前に持つ", async () => {
+    const failures: readonly NamedFailure[] = [
+      { testId: "t1", requirementId: "R1", kind: "test-mismatch", message: NAMED_FAILURE_MESSAGES["test-mismatch"] },
+    ];
+    const recording = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(
+      inputWith(recording.client, { ledger: PROPERTY_LEDGER_VIEW, requiredValidations: [], rewrite: { failures }, unwritable: SAME }),
+    );
+    const request = recording.structured[0];
+    if (request === undefined) throw new Error("要求が無い");
+    const names = [...request.input.matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
+    expect(names).toEqual([
+      ...WRITE_V11A_DATA_NAMES,
+      WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME,
+      WRITE_V11A_UNWRITABLE_DATA_NAME,
+      WRITE_V11A_REWRITE_DATA_NAME,
+    ]);
+    expect(request.rules).toEqual([
+      ...baseRules,
+      WRITE_V11A_UNWRITABLE_RULE_DEFINITION.text,
+      ...WRITE_V11A_REWRITE_RULE_DEFINITIONS.map((rule) => rule.text),
+    ]);
+    expect(request.input.indexOf(`<data name="${WRITE_V11A_UNWRITABLE_DATA_NAME}">`)).toBeLessThan(
+      request.input.indexOf(`<data name="${WRITE_V11A_REWRITE_DATA_NAME}">`),
+    );
+  });
+
+  it("1 件も無ければ（省く・空の並び）塊も規則も足さず、要求は今とバイト列で同じ", async () => {
+    const omitted = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const empty = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(inputWith(omitted.client, { ledger: PROPERTY_LEDGER_VIEW, requiredValidations: [] }));
+    await runWriteV11a(inputWith(empty.client, { ledger: PROPERTY_LEDGER_VIEW, requiredValidations: [], unwritable: [] }));
+    const [a, b] = [omitted.structured[0], empty.structured[0]];
+    if (a === undefined || b === undefined) throw new Error("要求が無い");
+    expect(JSON.stringify(b)).toBe(JSON.stringify(a));
+    expect(a.input).not.toContain(WRITE_V11A_UNWRITABLE_DATA_NAME);
+    expect(a.rules).not.toContain(WRITE_V11A_UNWRITABLE_RULE_DEFINITION.text);
+  });
+
+  it("塊の 1 件は 4 欄だけ（試験の期待・点検の判定・分類を渡さない）", async () => {
+    const recording = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(inputWith(recording.client, { ledger: PROPERTY_LEDGER_VIEW, requiredValidations: [], unwritable: SAME }));
+    const request = recording.structured[0];
+    if (request === undefined) throw new Error("要求が無い");
+    const [entry] = dataBlockOf(request.input, WRITE_V11A_UNWRITABLE_DATA_NAME) as Record<string, unknown>[];
+    expect(Object.keys(entry ?? {})).toEqual(["requirementId", "reason", "constraintIds", "rowIds"]);
+    const blockText = request.input.split(`<data name="${WRITE_V11A_UNWRITABLE_DATA_NAME}">`)[1]?.split("</data>")[0] ?? "";
+    expect(blockText).not.toMatch(/expected|verdict|classification|observes|裁定|合否|分類/);
   });
 });
 
