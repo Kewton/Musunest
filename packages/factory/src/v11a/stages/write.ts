@@ -42,6 +42,7 @@ import {
 import { utf8ByteLength } from "../../stages/write.js";
 import { sha256Hex } from "@musunest/spec-engine";
 import type { NameTable } from "../names.js";
+import type { UnwritableForWriter } from "../carry-over.js";
 import type { RequiredValidation } from "../bind-by-id.js";
 import type { TestObserves } from "./test-spec.js";
 import type { LedgerView } from "../../v12/ledger.js";
@@ -121,6 +122,24 @@ export const WRITE_V11A_RULE_DEFINITIONS: readonly RuleDefinition[] = [
 
 /** 要る検査の骨組みのデータの名前（`requiredValidations` を渡したときだけ、「固定した試験」の後に足す。旗 `v12.ids`。Issue #666） */
 export const WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME = "要る検査の骨組み";
+
+/**
+ * 書けないと判断した要件のデータの名前（`unwritable` を渡したときだけ、「固定した試験」「要る検査の骨組み」の後・
+ * 作り直しの塊の前に足す。旗 `v12.ids` の走りだけ。Issue #976）
+ */
+export const WRITE_V11A_UNWRITABLE_DATA_NAME = "書けないと判断した要件";
+
+/**
+ * 書けないと判断した決まりを、違う決まりに置き換えて書くことを禁じる規則（`unwritable` を渡した要求にだけ足す。
+ * 位置は今の規則（台帳の文を含む）の後・作り直しの規則の前。Issue #976）。文は本文の全文とバイト列で同じ。
+ */
+export const WRITE_V11A_UNWRITABLE_RULE_DEFINITION: RuleDefinition = {
+  id: "R-w11u-01",
+  text: "データ「書けないと判断した要件」の各件は、その要件の決まりのうち reason に書かれた部分を、文書の語彙では表せないと判断済みである。その部分を、違う決まり（逆の向き・別の条件・別の範囲など）に置き換えて書かない。その要件の残りの部分と rowIds の行は、置き換えにならない形で書く。",
+  why: "持ち越した要件には試験も宣言の点検も掛からず、builder は判断の理由を知らないまま全行を書くので、申告した決まりを違う決まりに置き換えて宣言に書きうる（申告と宣言の食い違い）。判断と理由を渡し、置き換えだけを禁じる（方法の 03 の H3。書ける部分は書かせる）",
+  since: "Issue #976",
+  modes: ["M-23"],
+};
 
 /**
  * R-w11-07 の旗 ids の文（`requiredValidations` を渡した走りだけ差し替える。ID・why は変えず since に履歴。Issue #666）。
@@ -211,6 +230,12 @@ export interface WriteV11aInput {
    * R-w11-07 を旗 ids の文にする。省けば今の要求のまま
    */
   readonly requiredValidations?: readonly RequiredValidation[];
+  /**
+   * 書けないと判断した要件（旗 `v12.ids` の走りだけが渡す。Issue #976）。1 件以上のときだけ、データ「書けないと判断した要件」を
+   * 「固定した試験」「要る検査の骨組み」の後・作り直しの塊の前に足し、R-w11u-01 を今の規則の後・作り直しの規則の前に足す。
+   * 省く・空なら今の要求のまま
+   */
+  readonly unwritable?: readonly UnwritableForWriter[];
 }
 
 /** B1 の出力 */
@@ -268,6 +293,9 @@ function buildData(input: WriteV11aInput): readonly PromptData[] {
     ...(input.requiredValidations === undefined
       ? []
       : [{ name: WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, text: serializeJson(input.requiredValidations) }]),
+    ...(input.unwritable === undefined || input.unwritable.length === 0
+      ? []
+      : [{ name: WRITE_V11A_UNWRITABLE_DATA_NAME, text: serializeJson(input.unwritable) }]),
     ...(input.rewrite === undefined
       ? []
       : [
@@ -293,7 +321,7 @@ export function withIdsValidationRule(definitions: readonly RuleDefinition[]): r
   return definitions.map((definition) => (definition.id === WRITE_V11A_IDS_R07_DEFINITION.id ? WRITE_V11A_IDS_R07_DEFINITION : definition));
 }
 
-/** B1 の規則の文（台帳・骨組み・作り直しの有無で組む。どれも省けば今の定数） */
+/** B1 の規則の文（台帳・骨組み・書けない要件・作り直しの有無で組む。どれも省けば今の定数） */
 function rulesOf(input: WriteV11aInput): readonly string[] {
   const definitions = writeV11aRuleDefinitionsOf(input.ledger);
   const base =
@@ -302,7 +330,11 @@ function rulesOf(input: WriteV11aInput): readonly string[] {
       : input.ledger === undefined
         ? WRITE_V11A_RULES
         : ruleTexts(definitions);
-  return input.rewrite === undefined ? base : [...base, ...ruleTexts(WRITE_V11A_REWRITE_RULE_DEFINITIONS)];
+  const withUnwritable =
+    input.unwritable === undefined || input.unwritable.length === 0
+      ? base
+      : [...base, WRITE_V11A_UNWRITABLE_RULE_DEFINITION.text];
+  return input.rewrite === undefined ? withUnwritable : [...withUnwritable, ...ruleTexts(WRITE_V11A_REWRITE_RULE_DEFINITIONS)];
 }
 
 /**
