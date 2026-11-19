@@ -360,15 +360,18 @@ export interface TableRoundRewrite {
 }
 
 /**
- * 回ごとの行の、C2 が整えた中身の 1 件（要件ごと。整える前の表との最終の差分。Issue #723）。`rule` は整える手の ID
- * （`N-map-01`・`N-map-02`）、`target_id` は手 1 の対象の項目の ID（手 2 は null）、`removed_row_ids` は手 2 で外した行 ID
- * （所属の順。手 1 は空）
+ * 回ごとの行の、C2 が整えた中身の 1 件（当たった手と要件ごと。同じ要件に複数の手が当たれば手ごとに 1 件。Issue #723）。
+ * `rule` は整える手の ID（`N-map-01`〜`N-map-06`）、`target_id` は手 1 の対象の項目の ID（ほかの手は null）、
+ * `removed_row_ids` は外した行 ID（所属の順。外さない手は空）。`removed_reasons` は N-map-05 で外した dependency の理由、
+ * `dropped_responses` は N-map-04 で捨てた束の応答の数（欄の無い回は今までと同じ。Issue #975）
  */
 export interface TableRoundNormalization {
   readonly requirement_id: string;
   readonly rule: string;
   readonly target_id: string | null;
   readonly removed_row_ids: readonly string[];
+  readonly removed_reasons?: readonly string[];
+  readonly dropped_responses?: number;
 }
 
 /** 回ごとの行の、C3 の判定（一気通貫の C3 の記録の `rounds` と同じ形） */

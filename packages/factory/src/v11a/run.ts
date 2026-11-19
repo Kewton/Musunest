@@ -1705,6 +1705,8 @@ async function runV11a(
           rule: entry.rule,
           target_id: entry.targetId,
           removed_row_ids: entry.removedRowIds,
+          ...(entry.removedReasons === undefined ? {} : { removed_reasons: entry.removedReasons }),
+          ...(entry.droppedResponses === undefined ? {} : { dropped_responses: entry.droppedResponses }),
         }));
         // 旗 `v12.ids` の C3 の 2 回目は、1 回目の表と 2 回目の表・C2 が書き直した要件から再点検の部分を導き、
         // 部分の外の要件は 1 回目の判定を保つ（Issue #805）。部分が 0 件でも合成は完全になる

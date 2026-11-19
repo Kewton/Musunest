@@ -1353,10 +1353,8 @@ function checkNameTableSourced(
       problems.push({ field, message: t1.messages.count });
       return;
     }
-    const allowed = new Set(
-      targets.flatMap((row) => [row.id, ...(t1.ownership.entityAddedByCode && row.entity !== null ? [row.entity] : [])]),
-    );
-    if (owned.some((row) => !allowed.has(row.id))) problems.push({ field, message: t1.messages.others });
+    const allowed = ledgerOwnershipAllowed(t1, roles, rowById);
+    if (allowed !== undefined && owned.some((row) => !allowed.has(row.id))) problems.push({ field, message: t1.messages.others });
     if (t1.ownership.optionsNonEmpty && targets.some((row) => (row.options ?? []).length === 0)) {
       problems.push({ field, message: t1.messages.optionsEmpty ?? t1.messages.count });
     }
@@ -1923,6 +1921,58 @@ function validationExpressionOwnershipAllowed(
     if (isValidationExpressionGuardedOperation(row, entity)) extended.add(row.id);
   }
   return extended;
+}
+
+/**
+ * 台帳の記述子が決める所属の形が許す行 ID（`row` の種類・型の行を `count` 件と、`entityAddedByCode` の entity。Issue #975）。
+ * 前提（表に無い ID・`count` の不一致・所属 0 行の記述子）が崩れているときは undefined——門はその場合に
+ * `count` の固定文で落とし、所属の形（`others`）を判定しない。門（`checkLedgerVerification`）と C2 の整える手 N-map-06 が
+ * **同じ関数**から引く
+ */
+export function ledgerOwnershipAllowed(
+  t1: PropertyT1,
+  roles: readonly NameTableRoleOwnership[],
+  rowById: ReadonlyMap<string, NameTableRow>,
+): ReadonlySet<string> | undefined {
+  if (t1.ownership.row === null) return roles.length === 0 ? new Set() : undefined;
+  if (roles.some((role) => !rowById.has(role.id))) return undefined;
+  const owned = roles.map((role) => rowById.get(role.id) as NameTableRow);
+  const want = t1.ownership.row;
+  const targets = owned.filter((row) => row.kind === want.kind && (row.type as unknown) === want.type);
+  if (targets.length !== t1.ownership.count) return undefined;
+  return new Set(targets.flatMap((row) => [row.id, ...(t1.ownership.entityAddedByCode && row.entity !== null ? [row.entity] : [])]));
+}
+
+/**
+ * 確かめ方が所属の形を決める種類（台帳の記述子が所属の形を持つか、`targets` で受ける種類。選択肢の集合・既定値・検査の式。
+ * Issue #975）か。形を決めない種類・台帳に無い種類は偽
+ */
+export function verificationDeterminesOwnership(kind: string, ledger: UpstreamLedgerView | undefined): boolean {
+  if (ledger === undefined || isOneOf(BASE_VERIFICATION_KINDS, kind)) return false;
+  const t1 = ledger.rowByVerificationKind.get(kind)?.t1;
+  return t1 !== undefined && t1 !== null && (t1.targets === true || t1.ownership.row !== null);
+}
+
+/**
+ * 確かめ方が所属の形を決めるとき、門が所属として許す行 ID（Issue #975）。前提が崩れて門が所属の形を判定しないときは
+ * undefined。門（`checkNameTableSourced`）と C2 の整える手 N-map-06 が同じ判定を引く（門は記述子の
+ * `ledgerOwnershipAllowed` と `validationExpressionOwnershipAllowed` をそのまま使う）
+ */
+export function ownershipAllowedByVerification(
+  verification: NameTableVerification,
+  roles: readonly NameTableRoleOwnership[],
+  rows: readonly NameTableRow[],
+  ledger: UpstreamLedgerView | undefined,
+): ReadonlySet<string> | undefined {
+  if (!verificationDeterminesOwnership(verification.kind, ledger)) return undefined;
+  const t1 = ledger?.rowByVerificationKind.get(verification.kind)?.t1;
+  if (t1 === undefined || t1 === null) return undefined;
+  if (t1.targets === true) {
+    if (verification.kind !== "validation-expression") return undefined;
+    const { valid, allowed } = checkValidationExpressionTargets(rows, verification.targets, "", undefined, []);
+    return valid ? validationExpressionOwnershipAllowed(rows, verification.targets, allowed) : undefined;
+  }
+  return ledgerOwnershipAllowed(t1, roles, new Map(rows.map((row) => [row.id, row] as const)));
 }
 
 /**

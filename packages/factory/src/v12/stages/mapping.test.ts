@@ -52,7 +52,15 @@ import { generateTests } from "../generated-tests.js";
 import type { RequirementList } from "../../pipeline.js";
 import { nameTableRuleDefinitionsOf } from "../../v11a/stages/name-table.js";
 import { semanticCheckTargets } from "../../v11a/stages/semantic-check.js";
-import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, PROPERTY_LEDGER_VIEW_IDS, type LedgerView, type UpstreamLedgerView } from "../ledger.js";
+import {
+  PROPERTY_LEDGER,
+  PROPERTY_LEDGER_VIEW,
+  PROPERTY_LEDGER_VIEW_IDS,
+  ledgerViewOf,
+  resolveV12Flags,
+  type LedgerView,
+  type UpstreamLedgerView,
+} from "../ledger.js";
 import { buildStopDiagnosticsFile, type C2StopDiagnostic, type StopDiagnostic } from "../stop-diagnostics.js";
 import type { ReferenceCounts } from "../ids.js";
 import {
@@ -88,6 +96,9 @@ import {
   type MappingPrevious,
   type MappingRejectedCandidate,
 } from "./mapping.js";
+
+/** 台帳を渡して表を整える（N-map-05・N-map-06 は旗 v12.ids の見方のときだけ当たる。Issue #975） */
+const normalizedWithLedgerOf = (raw: NameTable, ledger: LedgerView = PROPERTY_LEDGER_VIEW_IDS) => normalizeMappedTable(raw, { ledger });
 
 const LIST = fixtureList();
 const TABLE = withCodeIds(fixtureTable());
@@ -434,10 +445,10 @@ describe("初回の束（要件 5 件ごと。#627 で戻した束を、束の�
         return output;
       });
     };
-    const runScripted = async (bundle: (ids: readonly string[]) => unknown, whole: readonly unknown[]) => {
+    const runScripted = async (bundle: (ids: readonly string[]) => unknown, whole: readonly unknown[], ledger?: LedgerView) => {
       const { client, requests } = scripted(bundle, whole);
       const rejected: MappingRejectedCandidate[] = [];
-      const input = inputOf(sized, client, { onRejected: (candidate) => rejected.push(candidate) });
+      const input = inputOf(sized, client, { onRejected: (candidate) => rejected.push(candidate), ...(ledger === undefined ? {} : { ledger }) });
       const outcome = await runMapping(input);
       return { outcome, requests, rejected, gateway: input.gateway, whole: mappingWholeRequestOf(input) };
     };
@@ -474,14 +485,32 @@ describe("初回の束（要件 5 件ごと。#627 で戻した束を、束の�
     /** 帰属できない混ざり物ごとの束の応答（X の束に混ぜる。束のほかの要件はそのまま） */
     const mixtures: readonly { readonly label: string; readonly bundle: (ids: readonly string[]) => unknown; readonly message: string | null }[] = [
       { label: "一覧に無い要件 ID", bundle: (ids) => (ids.includes(X) ? withEntries([...(ofBundle(good, ids)["requirements"] as Entry[]), { ...(goodEntries()[0] as Entry), requirementId: "R99" }]) : ofBundle(good, ids)), message: "一覧に無い要件 ID である" },
-      { label: "要件 ID の重複（別の束の要件を書き、その束も書く）", bundle: (ids) => (ids.includes(X) ? withEntries([...(ofBundle(good, ids)["requirements"] as Entry[]), goodEntries()[sized.ids.indexOf(Y)] as Entry]) : ofBundle(good, ids)), message: "同じ要件の項目が重なっている" },
       {
         label: "束のほかの要件を書き、その束が欠いた（合併では揃う）",
         bundle: (ids) => (ids.includes(X) ? withEntries([...(ofBundle(good, ids)["requirements"] as Entry[]), goodEntries()[sized.ids.indexOf(Y)] as Entry]) : ofBundle(good, ids.filter((id) => id !== Y))),
         message: MAPPING_BUNDLE_MESSAGES.outside,
       },
+      {
+        label: "束の外の要件の持ち主の束で重なる（持ち主が 2 件書く）",
+        bundle: (ids) =>
+          ids.includes(X)
+            ? withEntries([...(ofBundle(good, ids)["requirements"] as Entry[]), goodEntries()[sized.ids.indexOf(Y)] as Entry])
+            : withEntries([...(ofBundle(good, ids)["requirements"] as Entry[]), goodEntries()[sized.ids.indexOf(Y)] as Entry]),
+        message: "同じ要件の項目が重なっている",
+      },
+      {
+        label: "束の外の要件を同じ束で重ねて書く",
+        bundle: (ids) =>
+          ids.includes(X)
+            ? withEntries([...(ofBundle(good, ids)["requirements"] as Entry[]), goodEntries()[sized.ids.indexOf(Y)] as Entry, goodEntries()[sized.ids.indexOf(Y)] as Entry])
+            : ofBundle(good, ids),
+        message: "同じ要件の項目が重なっている",
+      },
       { label: "骨組みの不正（束の応答の requirements が並びでない）", bundle: (ids) => (ids.includes(Y) ? negative({ requirements: "x" }, "骨組みの負例") : ofBundle(good, ids)), message: "並び（array）であること" },
     ];
+    /** 束の外の要件を余計に書いた束（持ち主の束もその要件を 1 件書く。N-map-04 が余分な応答を捨てる。Issue #975） */
+    const extraOutside = (ids: readonly string[]) =>
+      ids.includes(X) ? withEntries([...(ofBundle(good, ids)["requirements"] as Entry[]), goodEntries()[sized.ids.indexOf(Y)] as Entry]) : ofBundle(good, ids);
 
     it.each(mixtures)("(4) 帰属しない問題（$label）が 1 つでも混ざると、全要件を今の規則で 1 要求で作り直す（前回の応答＝合併した候補・前回の形の問題）。通れば表", async ({ bundle, message }) => {
       const raw = (ids: readonly string[]) => {
@@ -500,6 +529,60 @@ describe("初回の束（要件 5 件ごと。#627 で戻した束を、束の�
       expect(outcome.ok).toBe(true);
       expect(rejected).toHaveLength(1);
       expect(rejected[0]).not.toHaveProperty("rewrite");
+    });
+
+    it("(4) 束の外：1 つの束が束の外の要件を余計に書き、持ち主の束にも応答がある台本は、余分な応答を捨てて門を通り、全要件の作り直しの要求が無い（N-map-04。前は落ちた）", async () => {
+      // 前：N-map-04 を当てない生の合併は C2' か束の外で落ちる
+      const bundleList = mappingBundlesOf(sized.list);
+      const rawMerged = mergeMappingBundles(bundleList.map((ids) => extraOutside(ids)));
+      const beforeOutside = outsideBundleProblems(sized.list, bundleList, rawMerged.candidate, rawMerged.origins);
+      const beforeInspected = inspectMappingSourced(sized.list, sized.table.rows, rawMerged.candidate as Entry, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW_IDS);
+      expect(beforeInspected.ok && beforeOutside.length === 0).toBe(false);
+      // 後：余分な応答が候補から外れ、初回の束だけで門を通る（全要件の作り直しの要求は無い）
+      const { outcome, requests, rejected } = await runScripted(extraOutside, [good], PROPERTY_LEDGER_VIEW_IDS);
+      expect(requests).toHaveLength(k);
+      expect(rejected).toEqual([]);
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.value.normalized).toEqual([
+        { requirementId: Y, rule: "N-map-04", targetId: null, removedRowIds: [], droppedResponses: 1 },
+      ]);
+      const keptEntries = (outcome.value.response as Entry)["requirements"] as Entry[];
+      expect(keptEntries.filter((entry) => entry["requirementId"] === Y)).toHaveLength(1);
+      expect(keptEntries.filter((entry) => entry["requirementId"] === Y)[0]).toEqual(goodEntries()[sized.ids.indexOf(Y)]);
+    });
+
+    it("(4) 束の外の応答は ids off の合併では捨てず、全要件の作り直しへ進む。ids on では捨てて通る（N-map-04 は ids on だけ。Issue #975）", async () => {
+      // ids off の見方（PROPERTY_LEDGER_VIEW）: 候補の重なり・束の外の問題が残り、作り直しの要求が 1 本増える
+      const off = await runScripted(extraOutside, [good], PROPERTY_LEDGER_VIEW);
+      expect(off.requests).toHaveLength(k + 1);
+      expect(off.rejected).toHaveLength(1);
+      expect(off.outcome.ok).toBe(true);
+      if (off.outcome.ok) expect(off.outcome.value.normalized.filter((entry) => entry.rule === "N-map-04")).toEqual([]);
+      // ids on の見方（PROPERTY_LEDGER_VIEW_IDS）: 余分な応答を捨て、初回の束だけで通る
+      const on = await runScripted(extraOutside, [good], PROPERTY_LEDGER_VIEW_IDS);
+      expect(on.requests).toHaveLength(k);
+      expect(on.rejected).toEqual([]);
+      expect(on.outcome.ok).toBe(true);
+      if (on.outcome.ok) expect(on.outcome.value.normalized.some((entry) => entry.rule === "N-map-04")).toBe(true);
+    });
+
+    it("(4) 全要件の作り直しの応答にも N-map-05 が当たる（Issue #975）", async () => {
+      // 初回は束の外＋持ち主が欠けて帰属できない → 全要件の作り直し。作り直しの応答の先頭の要件は同じ所属を 2 回持つ
+      const rebuildWithDuplicate = withEntries(
+        goodEntries().map((entry, index) =>
+          index === 0 ? { ...entry, roles: [...(entry["roles"] as Entry[]), (entry["roles"] as Entry[])[0] as Entry] } : entry,
+        ),
+      );
+      const missingOwner = (ids: readonly string[]) =>
+        ids.includes(X) ? withEntries([...(ofBundle(good, ids)["requirements"] as Entry[]), goodEntries()[sized.ids.indexOf(Y)] as Entry]) : ofBundle(good, ids.filter((id) => id !== Y));
+      const { outcome, requests, rejected } = await runScripted(missingOwner, [rebuildWithDuplicate], PROPERTY_LEDGER_VIEW_IDS);
+      expect(requests).toHaveLength(k + 1);
+      expect(rejected).toHaveLength(1);
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.value.normalized.some((entry) => entry.rule === "N-map-05")).toBe(true);
+      }
     });
 
     it("(4) 全体の作り直しの要求は、共通の窓口の形のやり直し（公開の callStructuredChecked が組む 2 本目）と、同じ前回の応答・同じ問題でバイト列が同じ（判断 3 の複製の照合）", async () => {
@@ -1785,13 +1868,40 @@ describe("C2 が組んだ表を整える手（N-map-01・N-map-02。Issue #723�
     return value;
   };
 
-  it("手の定義に why・since があり不備 0。ID は N-map-01・N-map-02・N-map-03 の 3 つ（規則の文の定義とは別。LLM に送らない）", () => {
+  it("手の定義に why・since があり不備 0。ID は N-map-01〜N-map-06（規則の文の定義とは別。LLM に送らない）。N-map-04〜06 は本文の全文・modes【M-22】", () => {
     expect(ruleDefinitionDefects(MAPPING_NORMALIZATION_DEFINITIONS)).toEqual([]);
-    expect(MAPPING_NORMALIZATION_DEFINITIONS.map((definition) => definition.id)).toEqual(["N-map-01", "N-map-02", "N-map-03"]);
+    expect(MAPPING_NORMALIZATION_DEFINITIONS.map((definition) => definition.id)).toEqual([
+      "N-map-01",
+      "N-map-02",
+      "N-map-03",
+      "N-map-04",
+      "N-map-05",
+      "N-map-06",
+    ]);
     for (const definition of MAPPING_NORMALIZATION_DEFINITIONS) {
       expect(definition.why.trim()).not.toBe("");
     }
-    expect(MAPPING_NORMALIZATION_DEFINITIONS.map((definition) => definition.since)).toEqual(["Issue #723", "Issue #723", "Issue #826"]);
+    expect(MAPPING_NORMALIZATION_DEFINITIONS.map((definition) => definition.since)).toEqual([
+      "Issue #723",
+      "Issue #723（同じ行の重複を先に 1 件にする N-map-05 を Issue #975 で足した）",
+      "Issue #826",
+      "Issue #975",
+      "Issue #975",
+      "Issue #975",
+    ]);
+    const texts: Readonly<Record<string, string>> = {
+      "N-map-04":
+        "束に分けた初回の合併の前に、束の応答のうち、一覧にあり、その束の要件でない要件の応答を、持ち主の束の応答にその要件がちょうど 1 件あるときだけ候補から外す。持ち主の束に無い・持ち主の束で重なる・一覧に無い ID・同じ束の中の重なりは外さない。",
+      "N-map-05":
+        "同じ要件の所属に同じ行 ID が 2 回以上あるとき、1 件にする。basis と reason が同じ重なりは最初の 1 件を残す。stated と dependency が混じる重なりは stated の 1 件を残し、外した dependency の理由を記録に残す。dependency どうしの重なりは最初の 1 件を残す。表に無い ID の重なりには当てない。",
+      "N-map-06":
+        "確かめ方が所属の形を決める種類（選択肢の集合・既定値・検査の式）の要件から、門が形の外として断る行のうち、basis が dependency で kind が operation の行を外す。検査の式が守る操作（対象の entity の条件の無い作成・更新）は外さない。外すとどの要件にも所属しなくなる行は外さない。stated の行・操作でない行は外さない。",
+    };
+    for (const [id, text] of Object.entries(texts)) {
+      const definition = MAPPING_NORMALIZATION_DEFINITIONS.find((entry) => entry.id === id);
+      expect(definition?.text).toBe(text);
+      expect(definition?.modes).toEqual(["M-22"]);
+    }
     const sent = ruleTexts(mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)).join("\n");
     for (const definition of MAPPING_NORMALIZATION_DEFINITIONS) expect(sent.includes(definition.text)).toBe(false);
     expectNoAcceptanceMaterial([...MAPPING_NORMALIZATION_DEFINITIONS.flatMap((definition) => [definition.text, definition.why]), MAPPING_NORMALIZATION_REASON]);
@@ -1981,7 +2091,15 @@ describe("C2 が組んだ表を整える手（N-map-01・N-map-02。Issue #723�
     const dupResponse = responseOf(tableOf(dupSpecs));
     const goodResponse = responseOf(tableOf([{ id: "R1", roles: ["s:E1.F1", "d:OP1"] }, ...dupSpecs.slice(1)]));
     const r1Of = (output: Entry) => withEntries((output["requirements"] as Entry[]).filter((entry) => entry["requirementId"] === "R1"));
-    const runCustom = async (outputs: readonly unknown[], previous?: MappingPrevious) => {
+    /** 旗 ids の schema は verification.targets を必須に含む（使わない種類は null） */
+    const withIdsTargets = (output: Entry): Entry =>
+      withEntries(
+        (output["requirements"] as Entry[]).map((entry) => ({
+          ...entry,
+          verification: { targets: null, ...(entry["verification"] as Entry) },
+        })),
+      );
+    const runCustom = async (outputs: readonly unknown[], previous?: MappingPrevious, ledger: LedgerView = PROPERTY_LEDGER_VIEW) => {
       const recording = createCheckedRecordingClient(outputs.map(recordedStructured));
       const outcome = await runMapping({
         plan: planOf(dupList),
@@ -1989,30 +2107,39 @@ describe("C2 が組んだ表を整える手（N-map-01・N-map-02。Issue #723�
         documents: FIXTURE_DOCUMENTS,
         gateway: makeGateway(recording.client),
         rows: ROWS,
-        ledger: PROPERTY_LEDGER_VIEW,
+        ledger,
         ...(previous === undefined ? {} : { previous }),
       });
       return { outcome, recording };
     };
 
-    it("stated の項目と同じ when 無しの操作を dependency で 2 回持つ要件（その操作をほかの要件が stated で持つ）は、初回・書き直しの合併・2 回目の合併のどれでも重なりの固定文で落ちる", async () => {
-      const first = inspectMappingSourced(dupList, ROWS, dupResponse, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW);
-      expect(first.ok).toBe(false);
-      if (!first.ok) expect(first.problems.map((problem) => problem.message)).toEqual(["同じ要件の中で所属が重なっている"]);
-      // 初回の落ちは R1 に帰属するので R1 だけを書き直させ、書き直しも重なれば合併後の C2' が同じ文で落とす
-      const rewritten = await runCustom([dupResponse, r1Of(dupResponse)]);
-      expect(rewritten.recording.structured).toHaveLength(2);
-      expect(rewritten.outcome.ok).toBe(false);
-      expect(messagesOf(rewritten.outcome)).toEqual(["同じ要件の中で所属が重なっている"]);
-      // C3 の拒否のあとの 2 回目（R1 を拒否）も同じ
+    it("重複：同じ行を stated と dependency で 2 回持つ要件は N-map-05 が 1 件にし、その後 N-map-02 が当たって門を通る（前は重なりで落ちた）。初回と C3 の拒否のあとの合併のどちらでも同じ", async () => {
+      // 前：N-map-05 を当てない生の表は重なりで落ちる
+      const rawMessages = checkMappedTable(dupList, tableOf(dupSpecs), FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW_IDS }).map((problem) => problem.message);
+      expect(rawMessages).toContain("同じ要件の中で所属が重なっている");
+      const first = inspectMappingSourced(dupList, ROWS, dupResponse, FIXTURE_DOCUMENTS, PROPERTY_LEDGER_VIEW_IDS);
+      expect(first.ok).toBe(true);
+      if (first.ok) {
+        expect(first.table.ownership[0]?.roles.map((role) => role.id)).toEqual(["E1.F1"]);
+        expect(first.normalized).toEqual([
+          { requirementId: "R1", rule: "N-map-05", targetId: null, removedRowIds: ["OP1"], removedReasons: ["実現に要る"] },
+          { requirementId: "R1", rule: "N-map-02", targetId: null, removedRowIds: ["OP1"] },
+        ]);
+      }
+      const initial = await runCustom([withIdsTargets(dupResponse)], undefined, PROPERTY_LEDGER_VIEW_IDS);
+      expect(initial.recording.structured).toHaveLength(1);
+      expect(initial.outcome.ok).toBe(true);
+      const initialNormalized = initial.outcome.ok ? initial.outcome.value.normalized : [];
+      // C3 の拒否のあとの 2 回目（R1 を拒否）も、合併した表に同じ手が当たる
       const previous: MappingPrevious = {
         response: goodResponse,
         rejections: [{ requirementId: "R1", kind: "unnecessary-ownership", quote: "要件 R1 の文" }] as unknown as MappingPrevious["rejections"],
         advice: [],
       };
-      const second = await runCustom([r1Of(dupResponse)], previous);
+      const second = await runCustom([r1Of(withIdsTargets(dupResponse))], previous, PROPERTY_LEDGER_VIEW_IDS);
       expect(second.recording.structured).toHaveLength(1);
-      expect(messagesOf(second.outcome)).toEqual(["同じ要件の中で所属が重なっている"]);
+      expect(second.outcome.ok).toBe(true);
+      if (second.outcome.ok) expect(second.outcome.value.normalized).toEqual(initialNormalized);
     });
 
     it("(6) 落ちた要件だけの書き直しの合併と、C3 の拒否のあとの 2 回目の合併にも同じ手が当たる。結果の response は整える前の raw で、2 回目の要求の「前回の写像」も raw。初回の要求は手の当たり方に依らない", async () => {
@@ -2063,6 +2190,187 @@ describe("C2 が組んだ表を整える手（N-map-01・N-map-02。Issue #723�
       if (second.outcome.ok) {
         expect(second.outcome.value.normalized).toEqual([{ requirementId: "R1", rule: "N-map-02", targetId: null, removedRowIds: ["OP1"] }]);
         expect(second.outcome.value.table.ownership[0]?.roles.map((role) => role.id)).toEqual(["E1.F1"]);
+      }
+    });
+
+    it("落ちた要件だけの書き直しの合併でも、保持した要件の重複は N-map-05 が整える（Issue #975）", async () => {
+      // 初回：R1 の重複は N-map-05 が整え、R2 の表に無い ID だけが帰属する → R2 を書き直す
+      const r2Bad = withEntries(
+        (dupResponse["requirements"] as Entry[]).map((entry) =>
+          entry["requirementId"] === "R2" ? { ...entry, roles: [...(entry["roles"] as Entry[]), { id: "E9", basis: "stated", reason: null }] } : entry,
+        ),
+      );
+      const r2Only = withEntries((goodResponse["requirements"] as Entry[]).filter((entry) => entry["requirementId"] === "R2"));
+      const partial = await runCustom([withIdsTargets(r2Bad), withIdsTargets(r2Only)], undefined, PROPERTY_LEDGER_VIEW_IDS);
+      expect(partial.recording.structured).toHaveLength(2);
+      expect(partial.outcome.ok).toBe(true);
+      if (partial.outcome.ok) {
+        expect(partial.outcome.value.normalized.some((entry) => entry.rule === "N-map-05" && entry.requirementId === "R1")).toBe(true);
+        expect(partial.outcome.value.table.ownership[0]?.roles.map((role) => role.id)).toEqual(["E1.F1"]);
+      }
+    });
+  });
+
+  describe("手 5・6（N-map-05・N-map-06。Issue #975）", () => {
+    const messagesOfTable = (specs: readonly Spec[], table: NameTable, ledger: LedgerView = PROPERTY_LEDGER_VIEW_IDS) =>
+      checkMappedTable(listOf(specs), table, FIXTURE_DOCUMENTS, { ledger }).map((problem) => problem.message);
+
+    it("重複：basis と reason が同じ重なり・stated と dependency の混じる重なり・dependency どうしの重なりが 1 件になり、門を通る（前で赤）。混じる重なりは stated が残り、外した理由が記録にある", () => {
+      const cases: readonly {
+        readonly roles: readonly string[];
+        readonly kept: readonly string[];
+        readonly basis: "stated" | "dependency";
+        readonly removedReasons: readonly string[];
+      }[] = [
+        { roles: ["s:E1.F1", "d:E1.F2", "d:E1.F2"], kept: ["E1.F1", "E1.F2"], basis: "dependency", removedReasons: ["実現に要る"] },
+        { roles: ["s:E1.F1", "d:OP1", "s:OP1"], kept: ["E1.F1", "OP1"], basis: "stated", removedReasons: ["実現に要る"] },
+        { roles: ["s:E1.F1", "d:OP2", "d:OP2"], kept: ["E1.F1", "OP2"], basis: "dependency", removedReasons: ["実現に要る"] },
+      ];
+      for (const item of cases) {
+        const specs: readonly Spec[] = [{ id: "R1", roles: item.roles }, cover()];
+        const raw = tableOf(specs);
+        // 前：重なりで落ちる
+        expect(messagesOfTable(specs, raw), item.roles.join(",")).toContain("同じ要件の中で所属が重なっている");
+        const { table, normalized } = normalizedWithLedgerOf(raw);
+        const hits = normalized.filter((entry) => entry.rule === "N-map-05");
+        expect(hits).toHaveLength(1);
+        expect(hits[0]?.removedRowIds).toHaveLength(1);
+        expect(hits[0]?.removedReasons).toEqual(item.removedReasons);
+        expect(table.ownership[0]?.roles.map((role) => role.id)).toEqual(item.kept);
+        expect(table.ownership[0]?.roles.find((role) => role.id === item.kept[1])?.basis).toBe(item.basis);
+        // 後：門を通る
+        expect(messagesOfTable(specs, table), item.roles.join(",")).toEqual([]);
+      }
+    });
+
+    it("表に無い ID の重なりは今までどおり落ちる（N-map-05 を当てない）", () => {
+      const specs: readonly Spec[] = [{ id: "R1", roles: ["s:E1.F1", "s:E9", "s:E9"] }, cover()];
+      const { table, normalized } = normalizedWithLedgerOf(tableOf(specs));
+      expect(normalized.filter((entry) => entry.rule === "N-map-05")).toEqual([]);
+      expect(messagesOfTable(specs, table)).toContain("所属の表の ID が表に無い");
+    });
+
+    it("重複のあとの今の手：重複を 1 つにすると N-map-01 と N-map-03 の条件に当たる（N-map-03 は重複があると当たらない）", () => {
+      const refSpecs: readonly Spec[] = [{ id: "R1", roles: ["s:E1.F2", "d:E1.F2"] }, cover()];
+      const refRaw = tableOf(refSpecs);
+      const ref = normalizedWithLedgerOf(refRaw);
+      expect(ref.normalized.some((entry) => entry.rule === "N-map-05")).toBe(true);
+      expect(ref.normalized.some((entry) => entry.rule === "N-map-01" && entry.targetId === "E1.F2")).toBe(true);
+      expect(messagesOfTable(refSpecs, ref.table)).toEqual([]);
+      const opSpecs: readonly Spec[] = [{ id: "R1", roles: ["s:OP3", "s:OP3"] }, cover()];
+      const opRaw = tableOf(opSpecs);
+      expect(normalizeMappedTable(opRaw).normalized).toEqual([]);
+      const op = normalizedWithLedgerOf(opRaw);
+      expect(op.normalized.some((entry) => entry.rule === "N-map-05")).toBe(true);
+      expect(op.normalized.some((entry) => entry.rule === "N-map-03")).toBe(true);
+      expect(messagesOfTable(opSpecs, op.table)).toEqual([]);
+    });
+
+    it("形の外：選択肢の集合・既定値・検査の式の要件から dependency の操作の行を外し、門を通る（前で赤）", () => {
+      const cases: readonly {
+        readonly verification: NameTableDraftVerification;
+        readonly roles: readonly string[];
+        readonly ledger: LedgerView;
+        readonly before: string;
+        readonly removed: string;
+      }[] = [
+        {
+          verification: { kind: "default-value", value: "a" },
+          roles: ["s:E2.F2", "d:OP3"],
+          ledger: PROPERTY_LEDGER_VIEW_IDS,
+          before: "既定値で確かめる要件は、選択肢の項目とその所属 entity のほかの行を所属させないこと",
+          removed: "OP3",
+        },
+        {
+          verification: { kind: "enum-membership" },
+          roles: ["s:E2.F2", "d:OP3"],
+          ledger: PROPERTY_LEDGER_VIEW_IDS,
+          before: "選択肢の集合で確かめる要件は、選択肢の項目とその所属 entity のほかの行を所属させないこと",
+          removed: "OP3",
+        },
+        {
+          verification: { kind: "validation-expression", targets: ["E1.F1"] },
+          roles: ["s:E1.F1", "d:E1", "d:OP2"],
+          ledger: PROPERTY_LEDGER_VIEW_IDS,
+          before: "検査の式で確かめる要件は、targets の項目とその所属 entity のほかの行を所属させないこと",
+          removed: "OP2",
+        },
+      ];
+      for (const item of cases) {
+        const specs: readonly Spec[] = [{ id: "R1", roles: item.roles, verification: item.verification }, cover()];
+        const raw = tableOf(specs);
+        expect(messagesOfTable(specs, raw, item.ledger)).toContain(item.before);
+        const { table, normalized } = normalizedWithLedgerOf(raw, item.ledger);
+        const hit = normalized.find((entry) => entry.rule === "N-map-06");
+        expect(hit?.removedRowIds).toEqual([item.removed]);
+        expect(table.ownership[0]?.roles.map((role) => role.id)).not.toContain(item.removed);
+        expect(checkMappedTable(listOf(specs), table, FIXTURE_DOCUMENTS, { ledger: item.ledger })).toEqual([]);
+      }
+    });
+
+    it("形の外：stated の操作・操作でない dependency は外さず門が落とす。検査の式が守る操作と、外すと所属が無くなる操作は残る", () => {
+      // stated の操作
+      const statedSpecs: readonly Spec[] = [{ id: "R1", roles: ["s:E2.F2", "s:OP1"], verification: { kind: "default-value", value: "a" } }, cover()];
+      const stated = normalizedWithLedgerOf(tableOf(statedSpecs));
+      expect(stated.normalized.filter((entry) => entry.rule === "N-map-06")).toEqual([]);
+      expect(messagesOfTable(statedSpecs, stated.table)).toContain("既定値で確かめる要件は、選択肢の項目とその所属 entity のほかの行を所属させないこと");
+      // dependency の画面（操作でない）
+      const screenSpecs: readonly Spec[] = [{ id: "R1", roles: ["s:E2.F2", "d:V1"], verification: { kind: "default-value", value: "a" } }, cover()];
+      const screen = normalizedWithLedgerOf(tableOf(screenSpecs));
+      expect(screen.normalized.filter((entry) => entry.rule === "N-map-06")).toEqual([]);
+      expect(messagesOfTable(screenSpecs, screen.table)).toContain("既定値で確かめる要件は、選択肢の項目とその所属 entity のほかの行を所属させないこと");
+      // 外すと所属が無くなる操作（cover が OP3 を持たない）
+      const orphanSpecs: readonly Spec[] = [{ id: "R1", roles: ["s:E2.F2", "d:OP3"], verification: { kind: "default-value", value: "a" } }, cover(["OP3"])];
+      const orphan = normalizedWithLedgerOf(tableOf(orphanSpecs));
+      expect(orphan.normalized.filter((entry) => entry.rule === "N-map-06")).toEqual([]);
+      expect(orphan.table.ownership[0]?.roles.map((role) => role.id)).toContain("OP3");
+      expect(messagesOfTable(orphanSpecs, orphan.table)).toContain("既定値で確かめる要件は、選択肢の項目とその所属 entity のほかの行を所属させないこと");
+      // 検査の式が守る操作（targets の entity の条件の無い作成）
+      const guardedSpecs: readonly Spec[] = [
+        { id: "R1", roles: ["s:E1.F1", "d:E1", "d:OP1"], verification: { kind: "validation-expression", targets: ["E1.F1"] } },
+        cover(),
+      ];
+      const guarded = normalizedWithLedgerOf(tableOf(guardedSpecs), PROPERTY_LEDGER_VIEW_IDS);
+      expect(guarded.normalized.filter((entry) => entry.rule === "N-map-06")).toEqual([]);
+      expect(guarded.table.ownership[0]?.roles.map((role) => role.id)).toContain("OP1");
+      expect(checkMappedTable(listOf(guardedSpecs), guarded.table, FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW_IDS })).toEqual([]);
+    });
+
+    it("旗 v12.ids の見方のときだけ当たる：ids off の台帳では重複・形の外を整えず門が落とし、ids on では当たって門を通る", () => {
+      // 旗の組から導いた見方そのもので判別する（ids off も台帳は定義済み）
+      const OFF = ledgerViewOf(resolveV12Flags({ ledger: true, searchRepair: true, ids: false }));
+      const ON = ledgerViewOf(resolveV12Flags({ ledger: true, searchRepair: true, ids: true }));
+      expect(OFF).toBe(PROPERTY_LEDGER_VIEW);
+      expect(ON).toBe(PROPERTY_LEDGER_VIEW_IDS);
+      if (OFF === undefined || ON === undefined) throw new Error("前提が壊れた：台帳の定義があること");
+      expect(OFF.t1IdsRuleTexts).toBeUndefined();
+      expect(ON.t1IdsRuleTexts).not.toBeUndefined();
+      // 同じ行の重複
+      const dupSpecs: readonly Spec[] = [{ id: "R1", roles: ["s:E1.F1", "d:E1.F2", "d:E1.F2"] }, cover()];
+      const dupRaw = tableOf(dupSpecs);
+      const offDup = normalizeMappedTable(dupRaw, { ledger: OFF });
+      expect(offDup.normalized).toEqual([]);
+      expect(offDup.table).toBe(dupRaw);
+      expect(messagesOfTable(dupSpecs, offDup.table, OFF)).toContain("同じ要件の中で所属が重なっている");
+      const onDup = normalizeMappedTable(dupRaw, { ledger: ON });
+      expect(onDup.normalized.some((entry) => entry.rule === "N-map-05")).toBe(true);
+      expect(messagesOfTable(dupSpecs, onDup.table, ON)).toEqual([]);
+      // 形の外の dependency の操作（選択肢の集合・既定値・検査の式）
+      const shapes: readonly { readonly verification: NameTableDraftVerification; readonly roles: readonly string[] }[] = [
+        { verification: { kind: "default-value", value: "a" }, roles: ["s:E2.F2", "d:OP3"] },
+        { verification: { kind: "enum-membership" }, roles: ["s:E2.F2", "d:OP3"] },
+        { verification: { kind: "validation-expression", targets: ["E1.F1"] }, roles: ["s:E1.F1", "d:E1", "d:OP2"] },
+      ];
+      for (const shape of shapes) {
+        const specs: readonly Spec[] = [{ id: "R1", roles: shape.roles, verification: shape.verification }, cover()];
+        const raw = tableOf(specs);
+        const off = normalizeMappedTable(raw, { ledger: OFF });
+        expect(off.normalized.filter((entry) => entry.rule === "N-map-06")).toEqual([]);
+        expect(off.table).toBe(raw);
+        expect(messagesOfTable(specs, off.table, OFF).length).toBeGreaterThan(0);
+        const on = normalizeMappedTable(raw, { ledger: ON });
+        expect(on.normalized.some((entry) => entry.rule === "N-map-06")).toBe(true);
+        expect(messagesOfTable(specs, on.table, ON)).toEqual([]);
       }
     });
   });
