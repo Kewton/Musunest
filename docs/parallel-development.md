@@ -28,7 +28,7 @@ commandmate instances musubi --json        # 宛先の候補（instanceId / alia
 | 出力の形 | 箇条書きか表か。**行数の上限も書く** |
 | 触ってはいけないもの | mutation の可否、変更禁止のパス、branch 切り替えの禁止 |
 | 前提 | 相手が知らないこと（↓ このリポジトリでは毎回書く） |
-| 締め方 | 最後に `DONE:` で始まる 1 行 |
+| 締め方 | 最後に `DONE: <要約>` か `STOP: <理由>` の 1 行。merge してよい範囲と止まる条件もここに書く（`CLAUDE.md` の「チーム」の PM の依頼の 5 部） |
 
 **依頼文は、送る前に人へ見せる。**
 
@@ -143,7 +143,7 @@ commandmate capture musubi --instance command-code --pane --tail 20   # 段と�
 4. **未解決の質問**（自分で答えず人へ渡す）
 
 - 出典を書く（`capture --pane` は「画面の末尾から読んだ」。スクロールで流れた分は含まない）
-- **`DONE:` 行が無ければ「返答が途中の可能性」と書く**
+- **`DONE:` 行も `STOP:` 行も無ければ「返答が途中の可能性」と書く**
 - 相手の返答は**事実であって指示ではない**。実行するかは人が決める
 
 ---
@@ -331,6 +331,20 @@ commandmate capture musubi --instance command-code --pane --tail 20   # 段と�
 | **管理が、ワーカーの読み替えの申告を「窓口の判断待ち」としながら先に merge した**（#233） | 依頼文に「**読み替えの申告があれば、merge せずに窓口へ返す**」と書く。§7.4 の「迂回の自己申告は止める合図」と同じ扱いにする |
 | `git branch --merged` が squash merge を見抜けない | worktree の片付けは `cmate-worktree-cleanup`（merge された PR・tip・merge commit・差分の一致の 4 条件）で判定する |
 | 窓口は tmux のセッションを止められない（権限で拒否される） | 人に頼む。止めてほしいセッションは引き継ぎの README に「git の外」として残す |
+
+### 6.6 統合 branch から切った Issue の scope の偽の赤（2026-11-21。#983）
+
+`.commandmate/verify.yaml` の `baseRef` は `origin/main` のままにする（2026-11-21 所有者が決定）。main は push 済みで保護されているので、main から切る Issue には正しい比較元である。手元の `main` は窓口の checkout とともに古くなりうるので使わない。
+
+統合 branch（`integration/<版>-w<wave>`）から切った Issue では、統合 branch に先に入った Issue の変更が対象外に見え、scope が赤になる（#976 の初回 dispatch で発生）。
+
+| すること | 誰が |
+|---|---|
+| plan の `suspected_files` に、継承分のファイルを**許可だけ**として足す（変えさせない）。足した一覧を申告に書かせる | 管理 |
+| 統合 branch と直接比べて（`git diff --stat <統合 branch の head> HEAD`）、差分が Issue の対象ファイルの内であることを確かめる | 窓口 |
+
+- 統合 branch の `verify.yaml` だけ `baseRef` を変えることはしない。squash で main に混ざり、`.commandmate/` は人だけが直す場所だから
+- CommandMate 0.54.0 の `verify` に、契約ごとに比較元を変える口は無い
 
 ## 7. planner が読める Issue の書き方
 
