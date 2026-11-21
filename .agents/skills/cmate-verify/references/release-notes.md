@@ -12,6 +12,40 @@ SKILL.md が正しい。
 
 ## Changelog
 
+### 0.8.0 — verify-run.sh の本体だけが死んでも、走っているゲートのロックを他者に奪わせない（CommandMate#4288）
+
+- ゲートは `set -m` で本体とは別のプロセスグループに起こされるが、`owner` には本体の pid しか無かった。本体だけが
+  SIGKILL で死ぬと、ゲートが走っているのに「保有者は死んだ」と読まれ、ロックが 2 者に取られた。本体だけへの TERM で
+  EXIT trap がゲートの生存を見ずに解放する経路も同じ理由で直した。
+- mutex 付きのゲートは起動の前に `owner` を `pgid`（ゲートのグループ G）と新しい token へ tmp＋`mv` で書き直し、
+  読み直して確かめてから合図を出す。書き直しに失敗したらゲートを始めない（exit 125、`machine-lock-handoff-failed`）。
+  解放はグループ G が空になってからで、人が居る間は消さない（`machine-lock-release-deferred`）。
+- 取得・回収・解放の判断に使う観測は「生きている／いない／不明」の 3 値とし、不明（EPERM・EACCES・EIO・一覧の失敗）は
+  取らない・消さない・解放しない（`machine-lock-unknown`）。戻せずに残った `<name>.lock.gone-<token>-<serial>` は保有中と読む。
+  札の形・待ちの規約は変えない。詳細は SKILL.md の規約表を正とする。
+- stdout の書式・通常の exit code の意味は変わらない。`verify-run.sh` は上流（CommandMate PR #4295）と byte 一致。
+
+### 0.7.0 — machine-lock の待ちを先着順の札にし、死んだ保有者の回収を列の先頭だけに限った（CommandMate#4277）
+
+- 空いた瞬間に先にポーリングした者がロックを取っていたので、長く待っている run が後から来たゲートに何度も
+  追い越された。また札を知らない素の `mkdir` は、別の runner が死んだ保有者のロックを退かして確かめている間の
+  空きに入り込めるため、2 ランが同時に保有しえた。
+- 待つ側はまず `<name>.queue/<12 桁>` に札を取り（中身を書いた一時ファイルを `ln` で公開）、`mkdir` を試すのは
+  生きている最小の札の持ち主だけにした。死んだ保有者の回収も先頭の札の持ち主だけが行い、`<name>.lock.gone-<token>`
+  へ退かしてから `owner` を読み、判定した token と同じときだけ消す。札を外してよい条件と形は SKILL.md の規約表を正とする。
+- stdout の書式・exit code の意味は変わらない。`verify-run.sh` は上流（CommandMate PR #4283）と byte 一致。
+
+### 0.6.2 — ゲート起動のジョブ制御が呼び出し元の stderr に `child setpgid` 行を出さなくなった（CommandMate#3944）
+
+- `set -m` を有効にすると bash は親と fork した子の両方で setpgid を呼ぶ。親の呼び出しが先に通ると子の呼び出しが
+  EPERM で失敗し、bash はサブシェル自身のリダイレクトが効く前に `child setpgid (N to N): Operation not permitted`
+  を子がまだ持っている stderr、つまりランナーの stderr へ書く。プロセスグループ自体は正しいので、誤っているのは
+  この 1 行だけである。
+- `set -m` … `set +m` を `{ … } 2>>"$rga_log.jobctl"` で囲み、ジョブ制御中に bash が書く stderr をゲートのログの
+  隣の別ファイルへ送る。ゲートのログ（`$rga_log`）へ送らないのは、`emit_log_tail` の「no output captured」判定が
+  そのファイルのサイズを読むため。`/dev/null` へは捨てない。別ファイルは `$WORKDIR` 内にあり、各試行の終わりに消す。
+- ゲートの PGID・watchdog の対象・stdout の書式・exit code は変わらない。`verify-run.sh` は上流（CommandMate PR #3949）と byte 一致。
+
 ### 0.6.0 — env-clean から外す `$HOME` 直下のエントリを受理し、実行例のパスを install 先に合わせた（#270 / CommandMate#3012）
 
 - **#270**: 上流 CommandMate#2901 で `verify-run.sh` に入った `options.envCleanIgnoreHomeEntries`（`$HOME` 直下の

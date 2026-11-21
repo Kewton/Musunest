@@ -1,0 +1,100 @@
+schema_version: 1
+id: cmate-repository-analysis
+name: cmate-repository-analysis
+version: 0.2.2
+summary: リポジトリをread-onlyで走査し、構造・既存実装・再利用候補・変更risk・推奨verificationをfile/line evidence付きで返す。
+description: >-
+  変更に着手する前の現状把握を、再現可能な標準手順にしたものである。対象リポジトリを
+  read-only で走査し、構成と規約、目的に関係する既存実装、再利用できる資産、変更した
+  ときに壊れうる箇所、そしてリポジトリに実在する検証手段を、すべて file と行番号の
+  evidence に結び付けて返す。secret らしき値は位置と分類だけを報告し、値は要約にも
+  result にも含めない。主成果物は人が読む要約で、5つの evidence 規律の check の合否を
+  自身で申告するので、どこまで確かめた分析なのかを受け取った側が検証できる。構造化した
+  result JSON は任意の副産物であり、その schema は advisory である。
+  書き込み、command 実行、network access のいずれも行わない。
+capabilities:
+  - 対象リポジトリの構成・言語・entry point・build と CI 経路を evidence 付きで把握する
+  - AGENTS や CLAUDE や README や CONTRIBUTING から従うべき規約を抽出する
+  - 目的に関係する既存実装と再利用候補を、そのまま使えるか拡張が要るかまで含めて特定する
+  - 変更したときに壊れうる箇所を severity と緩和手段付きで列挙する
+  - リポジトリに実在する検証手段だけを、出典 evidence 付きで推奨する
+  - secret らしき値の位置と分類を、値を持ち出さずに報告する
+expected_outcomes:
+  - 実装に着手する前に、影響範囲と再利用候補が file と行番号で確認できる
+  - 推奨された検証手段が実在するので、そのまま実行して変更を確かめられる
+  - 走査の打ち切りや未解決点が明示されるので、分析の網羅性を鵜呑みにせず判断できる
+  - evidence の path と行が実在するかを機械で検査できるので、報告の妥当性を読み合わせに頼らず確かめられる
+provider:
+  name: CommandMate
+  url: https://github.com/Kewton/CommandMate
+license: MIT
+homepage: https://github.com/Kewton/commandmate-skills
+keywords:
+  - repository-analysis
+  - codebase
+  - read-only
+  - evidence
+  - risk
+  - onboarding
+compatibility:
+  commandmate: '>=0.11.0 <1.0.0'
+  agents:
+    - agent: claude
+      support: native
+      evidence: Measured 2026-07-26 on Claude Code 2.1.220 with CommandMate 0.15.0: an installed skill is discovered from .claude/skills and matches in the slash palette. The installer writes .agents/skills and .claude/skills byte-identically, so the path is package-independent.
+    - agent: codex
+      support: native
+      evidence: Measured 2026-07-26 on Codex CLI 0.145.0: SKILL.md is read from .agents/skills (model self-report, not a mechanical trace). This version does not expose skills as slash commands, so invoke it by name.
+    - agent: gemini
+      support: unknown
+      evidence: Discovery path not verified for this version
+    - agent: opencode
+      support: native
+      evidence: 'Measured 2026-08-25 on opencode 1.18.22 (CommandMate#2037) and re-checked 2026-09-04 on 1.18.27: GET /skill lists SKILL.md from .agents/skills and .claude/skills; submitting /<name> loads the skill. Scanned at boot, restart after install. Not in opencode''s own slash palette.'
+    - agent: command-code
+      support: native
+      evidence: 'Measured 2026-09-04 on Command Code 1.47.0 (CommandMate#2322): discovered from .agents/skills (cmd skills list, /skills picker); /<name> emits skill_loaded and runs. .claude/skills is not read; the installer''s .agents/skills copy suffices. No restart needed.'
+    - agent: opencode-v2
+      support: native
+      evidence: 'Measured 2026-09-29 on opencode2 2.0.18 (CommandMate#2975): GET /api/skill lists SKILL.md from .agents/skills and .claude/skills; /<name> makes the model call the skill tool. No restart needed. Not in v2''s / palette (@ and /skills only). This package was NOT separately measured.'
+requirements:
+  commands: []
+  network_hosts: []
+declared_permissions:
+  - filesystem_read
+declared_risk: low
+risk_rationale: >-
+  指示文と JSON schema だけで構成され、script も実行可能 file も含まない。手順が要求する
+  権限は対象リポジトリの読み取りのみで、書き込み、command 実行、network access、
+  環境変数や credential の読み取りは手順として禁止している。
+files:
+  - path: SKILL.md
+    sha256: 7ef1b2125efb995991ef01814673e2c2dd421ff380ca0717a7395063300c1571
+    size: 10880
+    kind: skill_md
+    executable: false
+    script: false
+  - path: references/agent-compatibility.md
+    sha256: c6ccf937076684154e4a3b53f893a516e5e62f716625182931f9d9992b96d25e
+    size: 3994
+    kind: instruction
+    executable: false
+    script: false
+  - path: references/result-contract.md
+    sha256: 9680f6ceed54bff71d013738564608bff7dd09082bbbb2ebca2d216e2e97b342
+    size: 13933
+    kind: instruction
+    executable: false
+    script: false
+  - path: references/scan-policy.md
+    sha256: 3595946e6de7919fc3e620e02aed59984be42c993928532912627ef31c29b483
+    size: 6483
+    kind: instruction
+    executable: false
+    script: false
+  - path: schemas/repository-analysis.result.v1.json
+    sha256: 46caf80104164c6ddaaf82b9c20bcc6c8df5a0c23c0e337ac0f69a2c4bd0a24b
+    size: 11352
+    kind: asset
+    executable: false
+    script: false
