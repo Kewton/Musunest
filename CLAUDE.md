@@ -107,11 +107,11 @@ sdk・spec-engine・app-do・connector → appspec-schema
 ## 開発の進め方（Issue ごとの並列開発。2026-09-16 所有者が決定）
 
 - **1 Issue = 1 worker。Issue ごとに並列で進める。**
-- 体制は次の 4 層である。**窓口は main の Claude、ワーカーの管理は main の Command Code** と分ける。
+- 体制は次の 4 層である。**窓口は main の Claude（instance `claude-4`）、ワーカーの管理は main の Command Code** と分ける（CommandMate の役割は下の「チーム」の節）。
 
 ```
 人
-└─ main の Claude（worktree musubi / instance claude）      ← 窓口。開発を推進する
+└─ main の Claude（worktree musubi / instance claude-4）    ← 窓口。開発を推進する
    └─ main の Command Code（worktree musubi / instance command-code）  ← ワーカーの管理（cmate-orchestrate）
       ├─ feat/<issue> の Command Code   ← ワーカー（1 Issue に 1 人）
       ├─ feat/<issue> の Command Code
@@ -167,7 +167,7 @@ sdk・spec-engine・app-do・connector → appspec-schema
     commandmate auto-yes <worktree-id> --enable --instance command-code --duration 8h
     ```
 
-    **`--instance` も必ず付ける**（付けないと worktree の既定インスタンス＝窓口自身に効く）
+    **`--instance` も必ず付ける**（付けないと worktree の既定インスタンス `claude` に効く）
   - **`--duration` を付けても、送る前の確認はやめない。** `commandmate sync` が worktree ごとの設定を
     初期化する（2026-09-20 に `cliToolId` で実証。#118）。**期限とは別の経路なので、`--duration` では防げない**
   - auto-yes が効くのは**ワーカーのプロンプトだけ**である。**merge は別のゲート**で、auto-yes では決まらない（merge runner を使うときは `--approve` が無ければ何も mutate しない）
@@ -191,6 +191,25 @@ sdk・spec-engine・app-do・connector → appspec-schema
   推論された依存が宣言依存と閉路を作って plan 自体が出なくなる
 - **`## 完了条件`**（機械で判定できる受入条件）を必ず書く
 - 人がやる Issue には `human-only` ラベルを付け、**dispatch の対象から外す**
+
+## チーム（CommandMate の役割。2026-11-21 所有者が決定。#981）
+
+上の 4 層の体制を、CommandMate の役割（`commandmate roles`）で次のように割り当てる。役割は起動したときに渡る文で、権限ではない。役割の文は CommandMate のサーバにあり（`commandmate roles show <名前>`）、直すのは人である。
+
+| 役割 | instance（worktree `musubi`） | CLI | 話す相手 | 4 層での名前 |
+|---|---|---|---|---|
+| PM | `claude-4` | Claude Code | 人・開発リーダー | 窓口 |
+| 開発リーダー | `command-code` | Command Code | PM・ワーカー・レビュー役 | 管理 |
+| ワーカー | Issue ごとの worktree の `command-code`（このリポジトリの既定の役割 `worker`） | Command Code | 開発リーダー | ワーカー |
+| レビュー役 | `codex` | Codex | 開発リーダー | ワーカーの差分を読む |
+| 審判 | `claude-2` | Claude Code | PM | wave の統合候補の独立レビュー |
+
+- 起動したら `commandmate whoami` を流し、表で自分の役割を 1 行で言う。表に無ければそう言って止まる（`claude`・`claude-3` は役割を持たない）
+- 人は PM とだけ話す。PM はワーカーへ送らない。開発リーダーは人に直接聞かない。質問と了承は PM を通す
+- チームのセッションへ送るときは `--role` を付ける（例 `commandmate send musubi "…" --instance command-code --role dev-lead`）。exit 32 は違う役割で起動しているという意味で、送られていない。止めて人に返す
+- Auto Yes・merge・scope の扱いは上の「開発の進め方」に従う。CommandMate の手引き team-setup の「Auto Yes を使わない」「merge は人だけ」は、このリポジトリでは採らない
+- auto-yes が答えない質問で止まったセッションには、人が画面で答える。開発リーダーが `respond` で答えられない質問は、`tmux send-keys` で答えず、止めて PM へ返す
+- Antigravity（agy）には、どのエージェントも送らない。auto-yes も入れない
 
 ## 記憶の書き場所（2026-11-18。#968）
 
