@@ -202,7 +202,7 @@ sdk・spec-engine・app-do・connector → appspec-schema
 | 開発リーダー | `command-code` | Command Code | PM・ワーカー・レビュー役 | 管理 |
 | ワーカー | Issue ごとの worktree の `command-code`（このリポジトリの既定の役割 `worker`） | Command Code | 開発リーダー | ワーカー |
 | レビュー役 | `codex` | Codex | 開発リーダー | ワーカーの差分を読む |
-| 審判 | `claude-2` | Claude Code | PM | wave の統合候補の独立レビュー |
+| 審判 | `claude-2` | Claude Code | PM | wave の統合候補の独立レビューと、Issue ごとの GO/NO-GO |
 
 - 起動したら `commandmate whoami` を流し、表で自分の役割を 1 行で言う。表に無ければそう言って止まる（`claude`・`claude-3` は役割を持たない）
 - 人は PM とだけ話す。PM はワーカーへ送らない。開発リーダーは人に直接聞かない。質問と了承は PM を通す
@@ -210,6 +210,10 @@ sdk・spec-engine・app-do・connector → appspec-schema
 - Auto Yes・merge・scope の扱いは上の「開発の進め方」に従う。CommandMate の手引き team-setup の「Auto Yes を使わない」「merge は人だけ」は、このリポジトリでは採らない
 - auto-yes が答えない質問で止まったセッションには、人が画面で答える。開発リーダーが `respond` で答えられない質問は、`tmux send-keys` で答えず、止めて PM へ返す
 - Antigravity（agy）には、どのエージェントも送らない。auto-yes も入れない
+- PM の依頼には 5 つを必ず書く：Issue／人が了承したこと（変えてよいファイル・commit してよいか）／merge してよい範囲（「統合 branch まで・main は人」のように毎回書く）／止まる条件／最後の行（`DONE: <要約>` か `STOP: <理由>`）。6 欄（`docs/parallel-development.md` §1）の中に書く
+- 開発リーダーの報告の最後の行は `DONE:` か `STOP:`。どちらも無ければ途中かもしれないとして扱う
+- PM が人へ出す報告の 1 行目は、人がすることがあるかどうか（「今お願いすることはありません」か「判断が N 件待っています」）。続けて判断ごとに選択肢を書き、推奨を先に置く
+- 1 つの wave（統合 branch）は 1 つの Milestone の中に収める。審判は wave ごとに統合候補を、Milestone の終わりに main を、Issue ごとの完了条件と照らして GO/NO-GO を出す。Milestone を閉じるのは人で、閉じたら PM が tag `milestone/<番号>` を打つ（`v*` は使わない。`workspace/mvp/roadmap.md` §8.3）
 
 ## 記憶の書き場所（2026-11-18。#968）
 
