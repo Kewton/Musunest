@@ -8,6 +8,9 @@
 - リクエスト経路は **TypeScript のみ**
 - Cloudflare 固有APIは adapter 層に閉じ込める（`packages/app-do` を除く）
 - **CommandAgent のコードをこのリポジトリに持ち込まない。** CommandAgent との接点は headless契約 と `pins/` のみ
+  - 例外の 1 本（2026-11-23 所有者が決定。#987）：手元の工房（`studio/`）は、所有者の手元にある musubi-ca-pack の CLI
+    （`bin/build.mjs`・`bin/verify-install.mjs`・`bin/run.mjs`・`bin/check-result.mjs`。出力 `musubi-ca-pack/result/v3`）を
+    子プロセスとして呼んでよい。pack のコードは持ち込まず、場所は環境変数で受ける。配らない
 - **プロダクト内の工場（宣言だけを作る）は持ってよい**（2026-10-09 所有者が決定。工場は 2 つ・契約は 1 つ。#273）。ただし次の 3 つを守る
   1. CommandAgent と同じ納品物の形で出し、門（照合・受け入れ・静的チェック。`packages/control-plane` の bundle-publish）を必ず通す。**工場どうしの近道を作らない**
   2. LLM の呼び出しは adapter 層に閉じ込める（モデルを入れ替えられるようにする）
