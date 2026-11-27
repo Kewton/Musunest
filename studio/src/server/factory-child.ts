@@ -32,6 +32,7 @@ import {
   type PromptDocument,
 } from "@musunest/factory";
 import { remainingBuildBudgetUsd, buildFactoryBuildArgs } from "./build-args.js";
+import { PACK_ARM, runPackBuild, type PackBuildInput, type PackBuildOutcome } from "./pack-build.js";
 import { buildPlanEnvelope, defaultPlanEnvelopeConditions } from "./plan-envelope.js";
 import { createPlanResponder, type PlanResponderChannel } from "./plan-responder.js";
 import { createProgressTracker } from "./progress.js";
@@ -76,6 +77,7 @@ export interface FactoryChildChannel extends PlanResponderChannel {
 export interface FactoryChildDeps {
   readonly runPlan: (input: PlanRunInput) => Promise<PlanResult>;
   readonly runCli: (deps: CliDeps) => Promise<number>;
+  readonly runPackBuild?: (input: PackBuildInput) => Promise<PackBuildOutcome>;
   readonly loadDocuments: () => Promise<readonly PromptDocument[]>;
   readonly makeClient: CliDeps["makeClient"];
   readonly makeJevJudge?: NonNullable<CliDeps["makeJevJudge"]>;
@@ -109,7 +111,7 @@ export type FactoryChildOutcome =
       readonly spentUsd: number;
       readonly codes: readonly string[];
     }
-  | { readonly kind: "failed"; readonly reason: string; readonly spentUsd: number };
+  | { readonly kind: "failed"; readonly reason: string; readonly spentUsd: number; readonly codes?: readonly string[] };
 
 /** 1 行が写像（object）の JSON か */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -278,6 +280,29 @@ export async function runFactoryChild(
   const buildBudgetUsd = remainingBuildBudgetUsd(result.spentUsd, request.budgetUsd);
   if (buildBudgetUsd <= 0) {
     return { kind: "stopped", reason: "budget", spentUsd: result.spentUsd, codes: ["build-budget"] };
+  }
+
+  // `STUDIO_BUILD_ARM=ca-pack` のときだけ、Build を pack に替える（Issue #989）。値が無いか
+  // `factory` なら、ここから先は今までどおり工場の Build を流す。
+  if (deps.env["STUDIO_BUILD_ARM"] === PACK_ARM) {
+    const runPack = deps.runPackBuild ?? runPackBuild;
+    let packOutcome: PackBuildOutcome;
+    try {
+      packOutcome = await runPack({
+        env: deps.env,
+        outDir: request.outDir,
+        envelopeFile: planFile,
+        requestFile,
+        summaryFile: join(request.outDir, FACTORY_SUMMARY_FILE),
+      });
+    } catch {
+      return { kind: "failed", reason: "pack-failure", spentUsd: result.spentUsd };
+    }
+    const spentUsd = result.spentUsd + packOutcome.costUsd;
+    if (packOutcome.kind === "finished") {
+      return { kind: "finished", verdict: "full", spentUsd, outDir: request.outDir };
+    }
+    return { kind: "failed", reason: packOutcome.reason, codes: packOutcome.codes, spentUsd };
   }
 
   const argv = buildFactoryBuildArgs({
