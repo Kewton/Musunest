@@ -109,21 +109,24 @@ function stringEnv(env: Readonly<Record<string, string | undefined>>): Record<st
   return result;
 }
 
-/** stderr の 1 行目から理由のコードを読む（読めなければ終了コードで代える） */
-function codeFrom(stderr: string, pattern: RegExp, command: string, exitCode: number): string {
-  const match = pattern.exec(stderr);
-  return match?.[1] ?? `${command}-exit-${String(exitCode)}`;
+/** stderr の先頭行から `<名>.error <code>` を読む（読めなければ終了コードで代える） */
+function codeFrom(stderr: string, name: string, exitCode: number): string {
+  const line = stderr.split("\n", 1)[0] ?? "";
+  const pattern = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.error (\\S+)`);
+  const match = pattern.exec(line);
+  return match?.[1] ?? `${name}-exit-${String(exitCode)}`;
 }
 
-/** result.json の費用（`cost.usd_total`）。読めなければ 0 */
+/** result.json の費用（`cost.usd_total`）。読めない値・負の値は 0（Plan の費用に足さない） */
 function costOf(result: Record<string, unknown>): number {
   const cost = result["cost"];
   if (!isRecord(cost)) return 0;
   const raw = cost["usd_total"];
-  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "number") return Number.isFinite(raw) && raw >= 0 ? raw : 0;
   if (typeof raw === "string") {
     const parsed = Number(raw);
-    if (Number.isFinite(parsed)) return parsed;
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+    return 0;
   }
   return 0;
 }
@@ -249,7 +252,7 @@ export async function runPackBuild(
     return {
       kind: "failed",
       reason: "build-error",
-      codes: [codeFrom(build.stderr, /^build\.error (\S+)/m, "build", build.code)],
+      codes: [codeFrom(build.stderr, "build", build.code)],
       costUsd: 0,
     };
   }
@@ -263,7 +266,7 @@ export async function runPackBuild(
     return {
       kind: "failed",
       reason: "verify-install-error",
-      codes: [codeFrom(install.stderr, /^install\.([a-z0-9.-]+)/m, "verify-install", install.code)],
+      codes: [codeFrom(install.stderr, "verify-install", install.code)],
       costUsd: 0,
     };
   }
@@ -283,12 +286,11 @@ export async function runPackBuild(
     ],
     options,
   );
-  // run の 0 は完了、1 は check-result の判定（internal_fail・unknown）。2 以上は run の拒否。
-  if (run.code !== 0 && run.code !== 1) {
+  if (run.code !== 0) {
     return {
       kind: "failed",
       reason: "run-error",
-      codes: [codeFrom(run.stderr, /^run\.error (\S+)/m, "run", run.code)],
+      codes: [codeFrom(run.stderr, "run", run.code)],
       costUsd: 0,
     };
   }
@@ -301,11 +303,11 @@ export async function runPackBuild(
     [join(config.packRoot, PACK_COMMANDS.checkResult), workdir],
     options,
   );
-  if (check.code !== 0 && check.code !== 1) {
+  if (check.code !== 0) {
     return {
       kind: "failed",
       reason: "check-result-error",
-      codes: [codeFrom(check.stderr, /^result\.([a-z0-9.-]+)/m, "check-result", check.code)],
+      codes: [codeFrom(check.stderr, "check-result", check.code)],
       costUsd: 0,
     };
   }

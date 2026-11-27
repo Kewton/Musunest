@@ -184,7 +184,7 @@ describe("pack の Build", () => {
   it("verify-install の失敗はそのコードで止まり、run を起こさない", async () => {
     writeScenario({
       build: {},
-      "verify-install": { exit: 1, stderr: "install.hash-mismatch operator-index.json\n" },
+      "verify-install": { exit: 1, stderr: "verify-install.error hash-mismatch\n" },
     });
 
     const outcome = await runPackBuild(input());
@@ -217,7 +217,6 @@ describe("pack の Build", () => {
       "verify-install": {},
       run: { stdout: `${JSON.stringify({ verdict: "internal_fail", cost: { usd_total: "0.1" } })}\n` },
       "check-result": {
-        exit: 1,
         files: [
           {
             path: resultPath(),
@@ -263,5 +262,184 @@ describe("pack の Build", () => {
     const outcome = await runPackBuild(input());
 
     expect(outcome).toEqual({ kind: "failed", reason: "check-result-error", codes: ["result-unreadable"], costUsd: 0 });
+  });
+
+  it.each([
+    ["build", "build-error", ["build"]],
+    ["verify-install", "verify-install-error", ["build", "verify-install"]],
+    ["run", "run-error", ["build", "verify-install", "run"]],
+    ["check-result", "check-result-error", ["build", "verify-install", "run", "check-result"]],
+  ] as const)("%s は stderr の先頭行の `<名>.error <code>` を拾う", async (name, reason, called) => {
+    writeScenario({
+      build: name === "build" ? { exit: 1, stderr: "build.error first-code\n" } : {},
+      "verify-install": name === "verify-install" ? { exit: 1, stderr: "verify-install.error first-code\n" } : {},
+      run: name === "run" ? { exit: 1, stderr: "run.error first-code\n" } : {},
+      "check-result": name === "check-result" ? { exit: 1, stderr: "check-result.error first-code\n" } : {},
+    });
+
+    const outcome = await runPackBuild(input());
+
+    expect(outcome).toMatchObject({ kind: "failed", reason, codes: ["first-code"] });
+    expect(calls().map((call) => call.name)).toEqual(called);
+  });
+
+  it("stderr の 2 行目以降のコードは拾わない（先頭行だけを見る）", async () => {
+    writeScenario({ build: { exit: 1, stderr: "note\nbuild.error second-code\n" } });
+
+    const outcome = await runPackBuild(input());
+
+    expect(outcome).toEqual({ kind: "failed", reason: "build-error", codes: ["build-exit-1"], costUsd: 0 });
+  });
+
+  it("run が 0 以外なら run で止まり、check-result を起こさない（exit 1 も失敗）", async () => {
+    writeScenario({ build: {}, "verify-install": {}, run: { exit: 1 } });
+
+    const outcome = await runPackBuild(input());
+
+    expect(outcome).toEqual({ kind: "failed", reason: "run-error", codes: ["run-exit-1"], costUsd: 0 });
+    expect(calls().map((call) => call.name)).toEqual(["build", "verify-install", "run"]);
+  });
+
+  it("check-result が 0 以外なら失敗し、result.json があっても完了にしない", async () => {
+    writeScenario({
+      build: {},
+      "verify-install": {},
+      run: {},
+      "check-result": {
+        exit: 1,
+        files: [
+          {
+            path: resultPath(),
+            text: JSON.stringify({
+              schema: "musubi-ca-pack/result/v3",
+              verdict: "internal_pass",
+              reason: { code: null },
+              cost: { usd_total: "0.1" },
+            }),
+          },
+        ],
+      },
+    });
+
+    const outcome = await runPackBuild(input());
+
+    expect(outcome).toEqual({
+      kind: "failed",
+      reason: "check-result-error",
+      codes: ["check-result-exit-1"],
+      costUsd: 0,
+    });
+  });
+
+  it("internal_pass でも宣言が無ければ完了にしない", async () => {
+    writeScenario({
+      build: {},
+      "verify-install": {},
+      run: { stdout: `${JSON.stringify({ verdict: "internal_pass", cost: { usd_total: "0.2" } })}\n` },
+      "check-result": {
+        files: [
+          {
+            path: resultPath(),
+            text: JSON.stringify({
+              schema: "musubi-ca-pack/result/v3",
+              verdict: "internal_pass",
+              reason: { code: null },
+              cost: { usd_total: "0.2" },
+            }),
+          },
+        ],
+      },
+    });
+
+    const outcome = await runPackBuild(input());
+
+    expect(outcome).toEqual({
+      kind: "failed",
+      reason: "declaration-error",
+      codes: ["declaration-missing"],
+      costUsd: 0.2,
+    });
+  });
+
+  it("verdict が unknown なら理由のコードで失敗する", async () => {
+    writeScenario({
+      build: {},
+      "verify-install": {},
+      run: {},
+      "check-result": {
+        files: [
+          {
+            path: resultPath(),
+            text: JSON.stringify({
+              schema: "musubi-ca-pack/result/v3",
+              verdict: "unknown",
+              reason: { code: "evidence.unreadable" },
+              cost: { usd_total: "0.1" },
+            }),
+          },
+        ],
+      },
+    });
+
+    const outcome = await runPackBuild(input());
+
+    expect(outcome).toEqual({ kind: "failed", reason: "unknown", codes: ["evidence.unreadable"], costUsd: 0.1 });
+  });
+
+  it("要約が無ければ空の要約を書き、完了は変えない", async () => {
+    writeScenario({
+      build: {},
+      "verify-install": {},
+      run: {
+        stdout: "",
+        files: [{ path: declarationPath(), text: "schema: musunest.app-spec/v1\n" }],
+      },
+      "check-result": {
+        files: [
+          {
+            path: resultPath(),
+            text: JSON.stringify({
+              schema: "musubi-ca-pack/result/v3",
+              verdict: "internal_pass",
+              reason: { code: null },
+              cost: { usd_total: "0.05" },
+            }),
+          },
+        ],
+      },
+    });
+
+    const outcome = await runPackBuild(input());
+
+    expect(outcome).toEqual({ kind: "finished", costUsd: 0.05 });
+    expect(readFileSync(summaryPath(), "utf8")).toBe("");
+  });
+
+  it.each(["-1", "not-a-number", ""])("費用が %s なら 0 として扱う（Plan の費用に足さない）", async (raw) => {
+    writeScenario({
+      build: {},
+      "verify-install": {},
+      run: {
+        stdout: `${JSON.stringify({ verdict: "internal_pass" })}\n`,
+        files: [{ path: declarationPath(), text: "schema: musunest.app-spec/v1\n" }],
+      },
+      "check-result": {
+        files: [
+          {
+            path: resultPath(),
+            text: JSON.stringify({
+              schema: "musubi-ca-pack/result/v3",
+              verdict: "internal_pass",
+              reason: { code: null },
+              cost: { usd_total: raw },
+            }),
+          },
+        ],
+      },
+    });
+
+    const outcome = await runPackBuild(input());
+
+    expect(outcome).toEqual({ kind: "finished", costUsd: 0 });
   });
 });
