@@ -20,6 +20,7 @@ import {
   type FactoryChildDeps,
   type FactoryChildRequest,
 } from "./factory-child.js";
+import type { PackBuildInput } from "./pack-build.js";
 import type {
   ConfirmOutcome,
   RunnerAnswers,
@@ -231,6 +232,7 @@ const noopClient: LlmClient = {
 interface DepsParts {
   readonly runPlan: FactoryChildDeps["runPlan"];
   readonly runCli: FactoryChildDeps["runCli"];
+  readonly runPackBuild?: FactoryChildDeps["runPackBuild"];
   readonly writeFile?: FactoryChildDeps["writeFile"];
   readonly now?: FactoryChildDeps["now"];
   readonly env?: FactoryChildDeps["env"];
@@ -239,6 +241,7 @@ interface DepsParts {
 const makeDeps = (parts: DepsParts): FactoryChildDeps => ({
   runPlan: parts.runPlan,
   runCli: parts.runCli,
+  ...(parts.runPackBuild === undefined ? {} : { runPackBuild: parts.runPackBuild }),
   loadDocuments: async () => [],
   makeClient: () => noopClient,
   readFile: async () => "",
@@ -574,5 +577,117 @@ describe("工場の子", () => {
     });
     expect(written).not.toContain(join(OUT_DIR, PLAN_CLI_RECORD_FILE));
     expect(written).not.toContain(join(OUT_DIR, PLAN_SURFACE_CHECK_FILE));
+  });
+});
+
+describe("pack の Build（STUDIO_BUILD_ARM=ca-pack）", () => {
+  it("確定した包み・依頼文・ジョブの置き場を pack に渡し、費用は Plan と pack の合計になる", async () => {
+    const inputs: PackBuildInput[] = [];
+    let factoryCalled = false;
+    const deps = makeDeps({
+      env: { OPENAI_API_KEY: "sk-FAKE", STUDIO_BUILD_ARM: "ca-pack" },
+      runPlan: async () => confirmedResult(0.4),
+      runCli: async () => {
+        factoryCalled = true;
+        return 0;
+      },
+      runPackBuild: async (packInput) => {
+        inputs.push(packInput);
+        return { kind: "finished", costUsd: 0.42 };
+      },
+    });
+
+    const outcome = await runFactoryChild(request(), new TestChannel(), deps);
+
+    expect(outcome.kind).toBe("finished");
+    if (outcome.kind === "finished") {
+      expect(outcome.verdict).toBe("full");
+      expect(outcome.spentUsd).toBeCloseTo(0.82, 10);
+      expect(outcome.outDir).toBe(OUT_DIR);
+    }
+    expect(factoryCalled).toBe(false);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toMatchObject({
+      outDir: OUT_DIR,
+      envelopeFile: join(OUT_DIR, "plan-result.json"),
+      requestFile: join(OUT_DIR, "request.txt"),
+      summaryFile: join(OUT_DIR, "summary.json"),
+    });
+    expect(inputs[0]?.env["STUDIO_BUILD_ARM"]).toBe("ca-pack");
+  });
+
+  it("pack の Build が失敗したら理由のコードで止まり、工場の Build を起こさない", async () => {
+    let factoryCalled = false;
+    const deps = makeDeps({
+      env: { OPENAI_API_KEY: "sk-FAKE", STUDIO_BUILD_ARM: "ca-pack" },
+      runPlan: async () => confirmedResult(0.4),
+      runCli: async () => {
+        factoryCalled = true;
+        return 0;
+      },
+      runPackBuild: async () => ({
+        kind: "failed",
+        reason: "run-error",
+        codes: ["budget.ledger-exists"],
+        costUsd: 0,
+      }),
+    });
+
+    const outcome = await runFactoryChild(request(), new TestChannel(), deps);
+
+    expect(outcome).toEqual({
+      kind: "failed",
+      reason: "run-error",
+      codes: ["budget.ledger-exists"],
+      spentUsd: 0.4,
+    });
+    expect(factoryCalled).toBe(false);
+  });
+
+  it("pack が内部の不合格でも、結果の費用を Plan の費用に足す", async () => {
+    const deps = makeDeps({
+      env: { OPENAI_API_KEY: "sk-FAKE", STUDIO_BUILD_ARM: "ca-pack" },
+      runPlan: async () => confirmedResult(0.4),
+      runCli: async () => {
+        throw new Error("工場の Build を起こさない");
+      },
+      runPackBuild: async () => ({
+        kind: "failed",
+        reason: "internal-fail",
+        codes: ["stage.not-sealed"],
+        costUsd: 0.1,
+      }),
+    });
+
+    const outcome = await runFactoryChild(request(), new TestChannel(), deps);
+
+    expect(outcome.kind).toBe("failed");
+    if (outcome.kind === "failed") {
+      expect(outcome.reason).toBe("internal-fail");
+      expect(outcome.codes).toEqual(["stage.not-sealed"]);
+      expect(outcome.spentUsd).toBeCloseTo(0.5, 10);
+    }
+  });
+
+  it("STUDIO_BUILD_ARM が factory なら今までどおり工場の Build を流す", async () => {
+    let factoryCalled = false;
+    let packCalled = false;
+    const deps = makeDeps({
+      env: { OPENAI_API_KEY: "sk-FAKE", STUDIO_BUILD_ARM: "factory" },
+      runPlan: async () => confirmedResult(0.4),
+      runCli: async () => {
+        factoryCalled = true;
+        return 0;
+      },
+      runPackBuild: async () => {
+        packCalled = true;
+        return { kind: "finished", costUsd: 0 };
+      },
+    });
+
+    await runFactoryChild(request(), new TestChannel(), deps);
+
+    expect(factoryCalled).toBe(true);
+    expect(packCalled).toBe(false);
   });
 });

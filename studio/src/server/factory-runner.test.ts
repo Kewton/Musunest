@@ -84,6 +84,31 @@ describe("子に渡す環境", () => {
     expect(env["CLOUDFLARE_API_TOKEN"]).toBeUndefined();
     expect(env["CLOUDFLARE_ACCOUNT_ID"]).toBeUndefined();
   });
+
+  it("pack の接点の 5 つだけを足し、Cloudflare の変数は渡さない", () => {
+    const env = factoryChildEnv({
+      STUDIO_BUILD_ARM: "ca-pack",
+      MUSUBI_PACK_ROOT: "/pack",
+      MUSUBI_PACK_NODE: "/node",
+      MUSUBI_PACK_COMMANDAGENT: "/commandagent",
+      MUSUBI_PACK_MUSUNEST: "/musunest",
+      CLOUDFLARE_API_TOKEN: "cf-token",
+      CF_ACCOUNT_ID: "cf-account",
+    });
+
+    for (const key of [
+      "STUDIO_BUILD_ARM",
+      "MUSUBI_PACK_ROOT",
+      "MUSUBI_PACK_NODE",
+      "MUSUBI_PACK_COMMANDAGENT",
+      "MUSUBI_PACK_MUSUNEST",
+    ]) {
+      expect(env[key]).toBeDefined();
+      expect(FACTORY_CHILD_ENV_KEYS).toContain(key);
+    }
+    expect(env["CLOUDFLARE_API_TOKEN"]).toBeUndefined();
+    expect(env["CF_ACCOUNT_ID"]).toBeUndefined();
+  });
 });
 
 describe("工場の走らせる役", () => {

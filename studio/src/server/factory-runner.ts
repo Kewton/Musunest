@@ -42,6 +42,11 @@ export const FACTORY_CHILD_ENV_KEYS = [
   "WINDIR",
   "USERPROFILE",
   "APPDATA",
+  "STUDIO_BUILD_ARM",
+  "MUSUBI_PACK_ROOT",
+  "MUSUBI_PACK_NODE",
+  "MUSUBI_PACK_COMMANDAGENT",
+  "MUSUBI_PACK_MUSUNEST",
 ] as const;
 
 /** 子へ渡す環境を作る（定義されている鍵だけを写す） */
@@ -112,7 +117,13 @@ function outcomeEvent(outcome: FactoryChildOutcome): RunnerEvent {
     return { kind: "sent-back", reason: "仕様を決め直してください", spentUsd: outcome.spentUsd };
   }
   if (outcome.kind === "failed") {
-    return { kind: "failed", reason: outcome.reason, spentUsd: outcome.spentUsd };
+    const codes = outcome.codes ?? [];
+    const rest = codes.filter((code) => code !== outcome.reason);
+    return {
+      kind: "failed",
+      reason: rest.length === 0 ? outcome.reason : `${outcome.reason}: ${rest.join(", ")}`,
+      spentUsd: outcome.spentUsd,
+    };
   }
   // ここからは `stopped`。工場の失敗（Plan の段の失敗）だけを `failed` に残し、
   // 費用の上限・時間切れ・要件を固めきれなかった、は「止めた」にする（Issue #886 の目的・4）。
