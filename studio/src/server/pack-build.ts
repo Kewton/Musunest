@@ -85,6 +85,13 @@ export type PackBuildOutcome =
   | { readonly kind: "finished"; readonly costUsd: number }
   | { readonly kind: "failed"; readonly reason: string; readonly codes: readonly string[]; readonly costUsd: number };
 
+/** result.json の受け入れる schema（pack 52bb67a は v5 を出す） */
+export const PACK_RESULT_SCHEMAS = [
+  "musubi-ca-pack/result/v3",
+  "musubi-ca-pack/result/v4",
+  "musubi-ca-pack/result/v5",
+] as const;
+
 /** 1 行が写像（object）の JSON か */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -109,12 +116,15 @@ function stringEnv(env: Readonly<Record<string, string | undefined>>): Record<st
   return result;
 }
 
-/** stderr の先頭行から `<名>.error <code>` を読む（読めなければ終了コードで代える） */
-function codeFrom(stderr: string, name: string, exitCode: number): string {
-  const line = stderr.split("\n", 1)[0] ?? "";
-  const pattern = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.error (\\S+)`);
-  const match = pattern.exec(line);
-  return match?.[1] ?? `${name}-exit-${String(exitCode)}`;
+/** stderr の先頭行だけを取り出す（2 行目以降は読まない） */
+function firstLine(stderr: string): string {
+  return stderr.split("\n", 1)[0] ?? "";
+}
+
+/** stderr の先頭行からコードを読む（読めなければ fallback） */
+function codeFrom(stderr: string, pattern: RegExp, fallback: string): string {
+  const match = pattern.exec(firstLine(stderr));
+  return match?.[1] ?? fallback;
 }
 
 /** result.json の費用（`cost.usd_total`）。読めない値・負の値は 0（Plan の費用に足さない） */
@@ -131,10 +141,21 @@ function costOf(result: Record<string, unknown>): number {
   return 0;
 }
 
-/** result.json の判定（知らない値・無い欄は `unknown`） */
+/** result.json の判定（知らない値は `unknown`） */
 function verdictOf(result: Record<string, unknown>): "internal_pass" | "internal_fail" | "unknown" {
   const raw = result["verdict"];
   return raw === "internal_pass" || raw === "internal_fail" ? raw : "unknown";
+}
+
+/** schema が既知で、verdict があるか（無ければ result-schema） */
+function isAcceptedResult(result: Record<string, unknown>): boolean {
+  const schema = result["schema"];
+  const verdict = result["verdict"];
+  return (
+    typeof schema === "string" &&
+    (PACK_RESULT_SCHEMAS as readonly string[]).includes(schema) &&
+    typeof verdict === "string"
+  );
 }
 
 /** result.json の理由のコード（`reason.code`） */
@@ -252,7 +273,7 @@ export async function runPackBuild(
     return {
       kind: "failed",
       reason: "build-error",
-      codes: [codeFrom(build.stderr, "build", build.code)],
+      codes: [codeFrom(build.stderr, /^build\.error (\S+)/, `build-exit-${String(build.code)}`)],
       costUsd: 0,
     };
   }
@@ -263,10 +284,11 @@ export async function runPackBuild(
     options,
   );
   if (install.code !== 0) {
+    // verify-install の理由は `install.<code> <詳細>`（`.error` は付かない）。
     return {
       kind: "failed",
       reason: "verify-install-error",
-      codes: [codeFrom(install.stderr, "verify-install", install.code)],
+      codes: [codeFrom(install.stderr, /^install\.([a-z0-9.-]+)/, `verify-install-exit-${String(install.code)}`)],
       costUsd: 0,
     };
   }
@@ -286,13 +308,14 @@ export async function runPackBuild(
     ],
     options,
   );
-  if (run.code !== 0) {
-    return {
-      kind: "failed",
-      reason: "run-error",
-      codes: [codeFrom(run.stderr, "run", run.code)],
-      costUsd: 0,
-    };
+  // 0 は完了、1 は CommandAgent が走って内部で不合格（check-result へ進む）。
+  // 2 は起こす前の拒否、それ以外は想定外として止まる。
+  if (run.code !== 0 && run.code !== 1) {
+    const codes =
+      run.code === 2
+        ? [codeFrom(run.stderr, /^run\.error (\S+)/, "run-exit-2")]
+        : [`run-exit-${String(run.code)}`];
+    return { kind: "failed", reason: "run-error", codes, costUsd: 0 };
   }
 
   const summary = lastJsonOf(run.stdout);
@@ -303,18 +326,24 @@ export async function runPackBuild(
     [join(config.packRoot, PACK_COMMANDS.checkResult), workdir],
     options,
   );
-  if (check.code !== 0) {
-    return {
-      kind: "failed",
-      reason: "check-result-error",
-      codes: [codeFrom(check.stderr, "check-result", check.code)],
-      costUsd: 0,
-    };
+  // check-result の 0 と 1 はどちらも正常（1 は internal_fail・unknown）。2 は引数の誤り。
+  if (check.code !== 0 && check.code !== 1) {
+    const codes =
+      check.code === 2
+        ? [codeFrom(check.stderr, /^result\.([a-z0-9.-]+)/, "check-result-exit-2")]
+        : [`check-result-exit-${String(check.code)}`];
+    return { kind: "failed", reason: "check-result-error", codes, costUsd: 0 };
   }
 
   const result = await readResult(join(workdir, PACK_RESULT_FILE));
-  if (result === undefined) {
-    return { kind: "failed", reason: "check-result-error", codes: ["result-unreadable"], costUsd: 0 };
+  if (result === undefined || !isAcceptedResult(result)) {
+    // 読めたなら、schema が受け入れられなくても費用は数える。
+    return {
+      kind: "failed",
+      reason: "result-schema",
+      codes: ["result-schema"],
+      costUsd: result === undefined ? 0 : costOf(result),
+    };
   }
 
   const costUsd = costOf(result);

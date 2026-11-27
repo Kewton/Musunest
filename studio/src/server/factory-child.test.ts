@@ -644,6 +644,31 @@ describe("pack の Build（STUDIO_BUILD_ARM=ca-pack）", () => {
     expect(factoryCalled).toBe(false);
   });
 
+  it("pack が内部の不合格でも、結果の費用を Plan の費用に足す", async () => {
+    const deps = makeDeps({
+      env: { OPENAI_API_KEY: "sk-FAKE", STUDIO_BUILD_ARM: "ca-pack" },
+      runPlan: async () => confirmedResult(0.4),
+      runCli: async () => {
+        throw new Error("工場の Build を起こさない");
+      },
+      runPackBuild: async () => ({
+        kind: "failed",
+        reason: "internal-fail",
+        codes: ["stage.not-sealed"],
+        costUsd: 0.1,
+      }),
+    });
+
+    const outcome = await runFactoryChild(request(), new TestChannel(), deps);
+
+    expect(outcome.kind).toBe("failed");
+    if (outcome.kind === "failed") {
+      expect(outcome.reason).toBe("internal-fail");
+      expect(outcome.codes).toEqual(["stage.not-sealed"]);
+      expect(outcome.spentUsd).toBeCloseTo(0.5, 10);
+    }
+  });
+
   it("STUDIO_BUILD_ARM が factory なら今までどおり工場の Build を流す", async () => {
     let factoryCalled = false;
     let packCalled = false;
