@@ -187,6 +187,7 @@ export async function runFactoryChild(
   request: FactoryChildRequest,
   channel: FactoryChildChannel,
   deps: FactoryChildDeps,
+  signal?: AbortSignal,
 ): Promise<FactoryChildOutcome> {
   await deps.makeDirectory(request.outDir);
   const requestFile = join(request.outDir, FACTORY_REQUEST_FILE);
@@ -294,6 +295,7 @@ export async function runFactoryChild(
         envelopeFile: planFile,
         requestFile,
         summaryFile: join(request.outDir, FACTORY_SUMMARY_FILE),
+        ...(signal === undefined ? {} : { signal }),
       });
     } catch {
       return { kind: "failed", reason: "pack-failure", spentUsd: result.spentUsd };
@@ -413,6 +415,36 @@ function createIpcChannel(proc: IpcProcess): FactoryChildChannel {
   };
 }
 
+/** SIGTERM を受ける口（本物は `process`、試験は偽物） */
+export interface SigtermSource {
+  on(event: "SIGTERM", listener: () => void): unknown;
+}
+
+/**
+ * SIGTERM を受けたら止まる合図。工房が取り消すと、親はこの子へ SIGTERM を送る。
+ * その合図を、走っている pack のコマンドへ伝えるために使う（Issue #992）。
+ */
+export function abortSignalOnSigterm(source: SigtermSource): AbortSignal {
+  const controller = new AbortController();
+  source.on("SIGTERM", () => controller.abort());
+  return controller.signal;
+}
+
+/**
+ * pack の Build を走らせるときだけ、SIGTERM を止める合図に写す。
+ * **工場の Build では listener を付けない**——Node の既定の終了（SIGTERM で子が止まる）を変えないため。
+ */
+export function abortSignalForPack(
+  env: Readonly<Record<string, string | undefined>>,
+  source: SigtermSource,
+): AbortSignal | undefined {
+  if (env["STUDIO_BUILD_ARM"] !== PACK_ARM) return undefined;
+  return abortSignalOnSigterm(source);
+}
+
+/** pack の取り消しで子が終わらないときに、結果を送る猶予のあとでプロセスを終える（保険） */
+export const PACK_ABORT_EXIT_GRACE_MS = 5_000;
+
 /** この file が入口として起動されたときだけ動く（import したときは動かさない） */
 function isEntryPoint(): boolean {
   const entry = process.argv[1];
@@ -423,15 +455,29 @@ function isEntryPoint(): boolean {
 /** 子プロセスの入口。親から開始の依頼を受けたら 1 回だけ走る */
 export async function main(): Promise<void> {
   if (!isEntryPoint()) return;
-  const proc = process as unknown as IpcProcess & { on(event: "message", listener: (message: unknown) => void): unknown };
+  const proc = process as unknown as IpcProcess & {
+    on(event: "message", listener: (message: unknown) => void): unknown;
+    on(event: "SIGTERM", listener: () => void): unknown;
+  };
   let started = false;
   proc.on("message", (message) => {
     if (started || !isStartMessage(message)) return;
     started = true;
     void (async () => {
       const deps = await createNodeFactoryChildDeps();
-      const outcome = await runFactoryChild(message.request, createIpcChannel(proc), deps);
+      const signal = abortSignalForPack(deps.env, proc);
+      if (signal !== undefined) {
+        signal.addEventListener(
+          "abort",
+          () => {
+            setTimeout(() => process.exit(0), PACK_ABORT_EXIT_GRACE_MS).unref();
+          },
+          { once: true },
+        );
+      }
+      const outcome = await runFactoryChild(message.request, createIpcChannel(proc), deps, signal);
       proc.send({ type: "result", outcome });
+      if (signal?.aborted === true) process.exit(0);
     })();
   });
 }

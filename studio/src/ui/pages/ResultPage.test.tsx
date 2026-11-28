@@ -66,6 +66,23 @@ describe("ResultPage（full）", () => {
     expect(screen.getByRole("button", { name: "公開する" })).toBeTruthy();
   });
 
+  it("SHA のある full は今までどおり「公開する」を出す", () => {
+    renderResult({ job: { ...fullJob, manifestSha256: SHA, publishable: true } });
+    expect(screen.getByRole("button", { name: "公開する" })).toBeTruthy();
+  });
+
+  it("公開できない full では「公開する」を出さず、その旨の 1 行を出す", () => {
+    const notPublishable: JobView = {
+      ...fullJob,
+      manifestSha256: null,
+      publishable: false,
+    };
+    renderResult({ job: notPublishable });
+
+    expect(screen.queryByRole("button", { name: "公開する" })).toBeNull();
+    expect(screen.getByText("この結果は公開の対象ではありません")).toBeTruthy();
+  });
+
   it("公開済みならインスタンス ID と「開いて試す」を出す", () => {
     renderResult({ publish: published, origin: "https://staging.example" });
     expect(screen.getByText("studio-20261111123456")).toBeTruthy();

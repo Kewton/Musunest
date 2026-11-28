@@ -11,16 +11,18 @@ import type {
   PlanResult,
 } from "@musunest/factory";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildFactoryBuildArgs } from "./build-args.js";
 import {
   FACTORY_PLAN_DEADLINE_MS,
+  abortSignalForPack,
+  abortSignalOnSigterm,
   runFactoryChild,
   type FactoryChildChannel,
   type FactoryChildDeps,
   type FactoryChildRequest,
 } from "./factory-child.js";
-import type { PackBuildInput } from "./pack-build.js";
+import type { PackBuildInput, PackBuildOutcome } from "./pack-build.js";
 import type {
   ConfirmOutcome,
   RunnerAnswers,
@@ -689,5 +691,79 @@ describe("pack の Build（STUDIO_BUILD_ARM=ca-pack）", () => {
 
     expect(factoryCalled).toBe(true);
     expect(packCalled).toBe(false);
+  });
+
+  it("SIGTERM を受けると、走っている pack の build へ止める合図が届く", async () => {
+    const sigtermListeners: (() => void)[] = [];
+    const source = {
+      on(_event: "SIGTERM", listener: () => void): unknown {
+        sigtermListeners.push(listener);
+        return source;
+      },
+    };
+    const signal = abortSignalOnSigterm(source);
+    let seen: AbortSignal | undefined;
+    let release: ((outcome: PackBuildOutcome) => void) | undefined;
+
+    const deps = makeDeps({
+      env: { OPENAI_API_KEY: "sk-FAKE", STUDIO_BUILD_ARM: "ca-pack" },
+      runPlan: async () => confirmedResult(0.4),
+      runCli: async () => {
+        throw new Error("工場の Build を起こさない");
+      },
+      runPackBuild: async (packInput) => {
+        seen = packInput.signal;
+        return new Promise<PackBuildOutcome>((resolve) => {
+          release = resolve;
+        });
+      },
+    });
+
+    const pending = runFactoryChild(request(), new TestChannel(), deps, signal);
+    await vi.waitFor(() => {
+      expect(seen).toBe(signal);
+    });
+
+    for (const listener of sigtermListeners) listener();
+    expect(seen?.aborted).toBe(true);
+
+    release?.({ kind: "failed", reason: "cancelled", codes: ["cancelled"], costUsd: 0.1 });
+    await expect(pending).resolves.toEqual({
+      kind: "failed",
+      reason: "cancelled",
+      codes: ["cancelled"],
+      spentUsd: 0.5,
+    });
+  });
+});
+
+const signalSource = () => {
+  const listeners: (() => void)[] = [];
+  const source = {
+    on(_event: "SIGTERM", listener: () => void): unknown {
+      listeners.push(listener);
+      return source;
+    },
+  };
+  return { listeners, source };
+};
+
+describe("SIGTERM の listener を付ける範囲", () => {
+  it("pack の Build のときは合図を作り、listener を 1 つ付ける", () => {
+    const { listeners, source } = signalSource();
+    const signal = abortSignalForPack({ STUDIO_BUILD_ARM: "ca-pack" }, source);
+
+    expect(signal).toBeDefined();
+    expect(listeners).toHaveLength(1);
+    listeners[0]?.();
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("工場の Build（STUDIO_BUILD_ARM 無し・factory）では合図を作らず、listener を付けない", () => {
+    for (const env of [{}, { STUDIO_BUILD_ARM: "factory" }]) {
+      const { listeners, source } = signalSource();
+      expect(abortSignalForPack(env, source)).toBeUndefined();
+      expect(listeners).toEqual([]);
+    }
   });
 });

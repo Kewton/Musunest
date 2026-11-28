@@ -4,13 +4,51 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ApiError, Jobs } from "./jobs.js";
 import { Ledger } from "./ledger.js";
+import type {
+  ConfirmOutcome,
+  Runner,
+  RunnerAnswers,
+  RunnerEvent,
+  RunnerNotify,
+  RunnerStartInput,
+  StopReason,
+} from "./runner.js";
 import { DEFAULT_FAKE_CONFIRMATION, FakeRunner } from "./runner-fake.js";
 import { JobStore } from "./store.js";
 
 let home: string;
 let now: number;
 
-const makeJobs = (runner: FakeRunner): Jobs => new Jobs({ home, runner, now: () => now });
+const makeJobs = (runner: Runner): Jobs => new Jobs({ home, runner, now: () => now });
+
+/** 通知をあとから送れる偽の走らせる役（取り消しの順序を試験する） */
+class ControlledRunner implements Runner {
+  readonly answers: { readonly jobId: string; readonly answers: RunnerAnswers }[] = [];
+  readonly confirms: { readonly jobId: string; readonly outcome: ConfirmOutcome }[] = [];
+  readonly cancels: { readonly jobId: string; readonly reason: StopReason }[] = [];
+  private notify: RunnerNotify | undefined;
+
+  start(input: RunnerStartInput): void {
+    this.notify = input.notify;
+    input.notify({ kind: "progress", progress: { stage: "試験", estimatedUsd: 0.1 } });
+  }
+
+  answer(jobId: string, answers: RunnerAnswers): void {
+    this.answers.push({ jobId, answers });
+  }
+
+  confirm(jobId: string, outcome: ConfirmOutcome): void {
+    this.confirms.push({ jobId, outcome });
+  }
+
+  cancel(jobId: string, reason: StopReason): void {
+    this.cancels.push({ jobId, reason });
+  }
+
+  emit(event: RunnerEvent): void {
+    this.notify?.(event);
+  }
+}
 
 const apiError = (call: () => unknown): ApiError => {
   try {
@@ -209,6 +247,25 @@ describe("取り消し", () => {
     expect(runner.cancels).toEqual([{ jobId: started.id, reason: "cancel" }]);
 
     expect(() => jobs.start("次の依頼")).not.toThrow();
+  });
+
+  it("取り消しの後に遅れて failed が届いても、止めたままで符号は空のまま", () => {
+    const runner = new ControlledRunner();
+    const jobs = makeJobs(runner);
+    const started = jobs.start("日付順の一覧を作って");
+
+    const cancelled = jobs.cancel(started.id);
+    expect(cancelled.state).toBe("stopped");
+    expect(cancelled.stopReason).toBe("cancel");
+    expect(runner.cancels).toEqual([{ jobId: started.id, reason: "cancel" }]);
+
+    runner.emit({ kind: "failed", reason: "cancelled", codes: ["cancelled"], spentUsd: 0.1 });
+
+    const view = jobs.get(started.id);
+    expect(view?.state).toBe("stopped");
+    expect(view?.stopReason).toBe("cancel");
+    const stored = new JobStore(home).load(started.id);
+    expect(stored?.stopReasonCodes).toEqual([]);
   });
 });
 

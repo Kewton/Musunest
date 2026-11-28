@@ -123,12 +123,18 @@ function outcomeEvent(outcome: FactoryChildOutcome): RunnerEvent {
       kind: "failed",
       reason: rest.length === 0 ? outcome.reason : `${outcome.reason}: ${rest.join(", ")}`,
       spentUsd: outcome.spentUsd,
+      codes,
     };
   }
   // ここからは `stopped`。工場の失敗（Plan の段の失敗）だけを `failed` に残し、
   // 費用の上限・時間切れ・要件を固めきれなかった、は「止めた」にする（Issue #886 の目的・4）。
   if (outcome.reason === "factory-failure") {
-    return { kind: "failed", reason: "Plan を確定できませんでした", spentUsd: outcome.spentUsd };
+    return {
+      kind: "failed",
+      reason: "Plan を確定できませんでした",
+      spentUsd: outcome.spentUsd,
+      codes: outcome.codes,
+    };
   }
   if (outcome.reason === "timeout" || outcome.reason === "deadline") {
     return { kind: "stopped", reason: "timeout", note: "時間切れ", codes: outcome.codes, spentUsd: outcome.spentUsd };

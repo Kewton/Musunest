@@ -105,13 +105,19 @@ export function ResultPage({
     );
   }
 
+  // manifest の無い結果（pack の Build）は門の束ではないので公開できない（Issue #992）。
+  // 欄の無い古い記録は、今までどおり公開できるものとして扱う。
+  const publishable = job.publishable ?? true;
+
   return (
     <section className="page" aria-labelledby="result-title">
       <div className="page__head">
         <h2 className="page__title" id="result-title">
           {result.verdictLabel}
         </h2>
-        <p className="page__lead">作ったものを staging へ公開できます。</p>
+        <p className="page__lead">
+          {publishable ? "作ったものを staging へ公開できます。" : "この結果は公開の対象ではありません"}
+        </p>
       </div>
 
       {result.content.length === 0 ? null : (
@@ -122,14 +128,16 @@ export function ResultPage({
         </ul>
       )}
 
-      <PublishPanel
-        publish={publish}
-        publishing={publishing}
-        error={error}
-        origin={origin}
-        onPublish={onPublish}
-        label="公開する"
-      />
+      {publishable ? (
+        <PublishPanel
+          publish={publish}
+          publishing={publishing}
+          error={error}
+          origin={origin}
+          onPublish={onPublish}
+          label="公開する"
+        />
+      ) : null}
     </section>
   );
 }

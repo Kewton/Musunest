@@ -316,4 +316,41 @@ describe("子の止まり方をジョブに写す（Issue #886）", () => {
     expect(planFailure.view?.stopReason).toBe("factory-failure");
     expect(planFailure.view?.stopReasonLabel).toBe("工場の失敗");
   });
+
+  it("Plan の段の失敗も、理由のコードを記録に残す", () => {
+    const { stored } = runOutcome({
+      kind: "stopped",
+      reason: "factory-failure",
+      spentUsd: 0.6,
+      codes: ["open_critical"],
+    });
+
+    expect(stored?.stopReasonCodes).toEqual(["open_critical"]);
+  });
+
+  it("pack の失敗の理由のコードを、ジョブの記録に残す（理由の文字列は今のまま）", () => {
+    const { view, stored } = runOutcome({
+      kind: "failed",
+      reason: "internal-fail",
+      codes: ["stage.not-sealed"],
+      spentUsd: 0.6,
+    });
+
+    expect(view?.state).toBe("failed");
+    expect(view?.stopReason).toBe("factory-failure");
+    expect(view?.note).toBe("internal-fail: stage.not-sealed");
+    expect(stored?.stopReasonCodes).toEqual(["stage.not-sealed"]);
+  });
+
+  it("pack の取り消しは、理由のコード cancelled を記録に残す", () => {
+    const { view, stored } = runOutcome({
+      kind: "failed",
+      reason: "cancelled",
+      codes: ["cancelled"],
+      spentUsd: 0.4,
+    });
+
+    expect(view?.state).toBe("failed");
+    expect(stored?.stopReasonCodes).toEqual(["cancelled"]);
+  });
 });

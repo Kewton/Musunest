@@ -353,7 +353,7 @@ export class Jobs {
       case "failed":
         job.state = "failed";
         job.stopReason = "factory-failure";
-        job.stopReasonCodes = [];
+        job.stopReasonCodes = event.codes ?? [];
         job.note = event.reason;
         job.result = null;
         this.clearWait(job);

@@ -203,6 +203,11 @@ export interface JobView {
   readonly result: ApiResult | null;
   /** 了承の要求にそのまま送る、納品物の manifest の SHA-256（無ければ null） */
   readonly manifestSha256?: string | null;
+  /**
+   * 結果を公開できるか（Issue #992）。`manifestSha256` が null の結果は公開の対象ではない。
+   * 欄の無い古い記録は「公開できる」として読む（工場の Build の結果の見え方を変えない）。
+   */
+  readonly publishable?: boolean;
   /** partial の 3 つ（partial でなければ null） */
   readonly partial?: ApiPartialDetails | null;
   /** 実際に使った額（USD。終わっていなければ null） */
@@ -317,7 +322,16 @@ export type RunnerEvent =
       readonly codes: readonly string[];
       readonly spentUsd: number;
     }
-  | { readonly kind: "failed"; readonly reason: string; readonly spentUsd: number };
+  | {
+      /**
+       * 走りが失敗した。`codes` は理由の符号の並びで、ジョブの記録にだけ残す（画面へは出さない）。
+       * 止まったときの通知（`stopped`）と同じ扱いである（Issue #992）。
+       */
+      readonly kind: "failed";
+      readonly reason: string;
+      readonly spentUsd: number;
+      readonly codes?: readonly string[];
+    };
 
 /** 通知の受け口 */
 export type RunnerNotify = (event: RunnerEvent) => void;

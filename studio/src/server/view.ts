@@ -39,13 +39,15 @@ const JOB_ID_PATTERN = /^[A-Za-z0-9-]+$/u;
 /**
  * partial の結果に添える、納品物の manifest の SHA-256。
  * 走らせる役が返していればそれを使い、無ければジョブの置き場所の manifest のバイト列から求める
- * （`publish.ts` の門の照合と同じ値になる）。読めない・partial でないときは null。
+ * （`publish.ts` の門の照合と同じ値になる）。読めない・`none` のときは null。
+ * pack の Build のように manifest の無い結果は null になり、公開の対象にならない（Issue #992）。
  */
 function manifestSha256Of(job: StoredJob): string | null {
-  if (job.result?.manifestSha256 !== undefined && job.result.manifestSha256 !== null) {
+  if (job.result === null || job.result.verdict === "none") return null;
+  if (job.result.manifestSha256 !== undefined && job.result.manifestSha256 !== null) {
     return job.result.manifestSha256;
   }
-  if (job.result?.verdict !== "partial" || !JOB_ID_PATTERN.test(job.id)) return null;
+  if (!JOB_ID_PATTERN.test(job.id)) return null;
   try {
     const bytes = readFileSync(join(resolveStudioHome(), "jobs", job.id, BUNDLE_MANIFEST_FILE));
     return createHash("sha256").update(bytes).digest("hex");
@@ -261,6 +263,7 @@ const buildProgress = (job: StoredJob, now: number): ApiProgress | null => {
 
 /** ジョブの状態を、画面に返す形に写す */
 export function buildJobView(job: StoredJob, now: number): JobView {
+  const manifestSha256 = manifestSha256Of(job);
   return {
     id: job.id,
     request: job.request,
@@ -273,7 +276,8 @@ export function buildJobView(job: StoredJob, now: number): JobView {
     confirmation: job.confirmation === null ? null : buildConfirmation(job.confirmation),
     progress: buildProgress(job, now),
     result: job.result === null ? null : buildResult(job.result),
-    manifestSha256: manifestSha256Of(job),
+    manifestSha256,
+    publishable: manifestSha256 !== null,
     partial: buildPartial(job.result),
     spentUsd: job.spentUsd,
     note: job.note,
