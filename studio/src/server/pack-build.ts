@@ -58,6 +58,8 @@ export interface PackConfig {
 export interface PackCommandOptions {
   readonly cwd: string;
   readonly env: Record<string, string>;
+  /** 取り消しの合図（渡されたら、走っているコマンドへ SIGTERM を送る） */
+  readonly signal?: AbortSignal;
 }
 
 export interface PackCommandResult {
@@ -79,6 +81,8 @@ export interface PackBuildInput {
   readonly envelopeFile: string;
   readonly requestFile: string;
   readonly summaryFile: string;
+  /** 取り消しの合図（渡されたら、後のコマンドを起こさず `cancelled` で止まる） */
+  readonly signal?: AbortSignal;
 }
 
 export type PackBuildOutcome =
@@ -207,10 +211,17 @@ function spawnPackCommand(
   options: PackCommandOptions,
 ): Promise<PackCommandResult> {
   return new Promise((resolve) => {
+    if (options.signal?.aborted === true) {
+      resolve({ code: 143, stdout: "", stderr: "" });
+      return;
+    }
+
     let settled = false;
+    let onAbort: (() => void) | undefined;
     const finish = (code: number, stdout: string, stderr: string): void => {
       if (settled) return;
       settled = true;
+      if (onAbort !== undefined) options.signal?.removeEventListener("abort", onAbort);
       resolve({ code, stdout, stderr });
     };
 
@@ -225,6 +236,12 @@ function spawnPackCommand(
       finish(127, "", "");
       return;
     }
+
+    // 取り消しの合図が来たら、走っているコマンドを止める（pack の run が最後まで走り続けない）。
+    onAbort = (): void => {
+      child.kill("SIGTERM");
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
 
     const out: Buffer[] = [];
     const err: Buffer[] = [];
@@ -252,7 +269,20 @@ export async function runPackBuild(
 
   const operatorRoot = join(input.outDir, PACK_OPERATOR_DIR);
   const workdir = join(input.outDir, PACK_RUN_DIR);
-  const options: PackCommandOptions = { cwd: input.outDir, env: stringEnv(input.env) };
+  const options: PackCommandOptions = {
+    cwd: input.outDir,
+    env: stringEnv(input.env),
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
+  };
+  const aborted = (): boolean => input.signal?.aborted === true;
+  const cancelled = (): PackBuildOutcome => ({
+    kind: "failed",
+    reason: "cancelled",
+    codes: ["cancelled"],
+    costUsd: 0,
+  });
+
+  if (aborted()) return cancelled();
 
   const build = await exec(
     config.node,
@@ -269,6 +299,7 @@ export async function runPackBuild(
     ],
     options,
   );
+  if (aborted()) return cancelled();
   if (build.code !== 0) {
     return {
       kind: "failed",
@@ -283,6 +314,7 @@ export async function runPackBuild(
     [join(config.packRoot, PACK_COMMANDS.verifyInstall), operatorRoot],
     options,
   );
+  if (aborted()) return cancelled();
   if (install.code !== 0) {
     // verify-install の理由は `install.<code> <詳細>`（`.error` は付かない）。
     return {
@@ -308,6 +340,7 @@ export async function runPackBuild(
     ],
     options,
   );
+  if (aborted()) return cancelled();
   // 0 は完了、1 は CommandAgent が走って内部で不合格（check-result へ進む）。
   // 2 は起こす前の拒否、それ以外は想定外として止まる。
   if (run.code !== 0 && run.code !== 1) {
@@ -326,6 +359,7 @@ export async function runPackBuild(
     [join(config.packRoot, PACK_COMMANDS.checkResult), workdir],
     options,
   );
+  if (aborted()) return cancelled();
   // check-result の 0 と 1 はどちらも正常（1 は internal_fail・unknown）。2 は引数の誤り。
   if (check.code !== 0 && check.code !== 1) {
     const codes =

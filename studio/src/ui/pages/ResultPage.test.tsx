@@ -25,6 +25,8 @@ const baseJob: JobView = {
 
 const fullJob: JobView = {
   ...baseJob,
+  manifestSha256: SHA,
+  publishable: true,
   result: { verdict: "full", verdictLabel: "すべて満たしました", content: ["依頼どおりに作りました。"] },
 };
 
@@ -64,6 +66,18 @@ describe("ResultPage（full）", () => {
     expect(screen.getByText("すべて満たしました")).toBeTruthy();
     expect(screen.getByText("依頼どおりに作りました。")).toBeTruthy();
     expect(screen.getByRole("button", { name: "公開する" })).toBeTruthy();
+  });
+
+  it("公開できない full では「公開する」を出さず、その旨の 1 行を出す", () => {
+    const notPublishable: JobView = {
+      ...fullJob,
+      manifestSha256: null,
+      publishable: false,
+    };
+    renderResult({ job: notPublishable });
+
+    expect(screen.queryByRole("button", { name: "公開する" })).toBeNull();
+    expect(screen.getByText("この結果は公開の対象ではありません")).toBeTruthy();
   });
 
   it("公開済みならインスタンス ID と「開いて試す」を出す", () => {

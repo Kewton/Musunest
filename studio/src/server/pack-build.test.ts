@@ -1,16 +1,18 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PACK_CONFIG_CODE,
   PACK_ENV_KEYS,
   PACK_ENV_KEY_NAMES,
   runPackBuild,
   type PackBuildInput,
+  type PackExec,
 } from "./pack-build.js";
 
 // 台本どおりにファイル・標準出力・標準エラーを書く偽物の pack。呼ばれた名と引数を calls.jsonl に残す。
+// `holdMs` で終了を遅らせ、`onSigterm` で SIGTERM を受けた証跡を書き、`ready` で受付の準備を残す。
 const FAKE_PACK_SCRIPT = `import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,18 +20,29 @@ import { fileURLToPath } from 'node:url';
 const name = path.basename(fileURLToPath(import.meta.url), '.mjs');
 const dir = process.env.FAKE_PACK_SCENARIO;
 const scenario = JSON.parse(fs.readFileSync(path.join(dir, 'scenario.json'), 'utf8'));
+const step = scenario[name] ?? {};
+if (step.onSigterm) {
+  process.on('SIGTERM', () => {
+    fs.writeFileSync(path.join(dir, step.onSigterm), 'SIGTERM');
+    process.exit(143);
+  });
+}
 fs.appendFileSync(
   path.join(dir, 'calls.jsonl'),
   JSON.stringify({ name, execPath: process.execPath, argv: process.argv.slice(2), cwd: process.cwd() }) + '\\n',
 );
-const step = scenario[name] ?? {};
+if (step.ready) fs.writeFileSync(path.join(dir, step.ready), 'ready');
 for (const file of step.files ?? []) {
   fs.mkdirSync(path.dirname(file.path), { recursive: true });
   fs.writeFileSync(file.path, file.text);
 }
 if (step.stdout) process.stdout.write(step.stdout);
 if (step.stderr) process.stderr.write(step.stderr);
-process.exit(step.exit ?? 0);
+if (step.holdMs) {
+  setTimeout(() => process.exit(step.exit ?? 0), step.holdMs);
+} else {
+  process.exit(step.exit ?? 0);
+}
 `;
 
 const PACK_COMMAND_NAMES = ["build", "verify-install", "run", "check-result"] as const;
@@ -473,5 +486,42 @@ describe("pack の Build", () => {
     const outcome = await runPackBuild(input());
 
     expect(outcome).toEqual({ kind: "finished", costUsd: 0 });
+  });
+
+  it("「取り消し」run の途中で止める合図を出すと、run の子が SIGTERM を受け、check-result を起こさず cancelled で止まる", async () => {
+    const controller = new AbortController();
+    writeScenario(
+      scenario({
+        run: { stdout: "starting\n", ready: "run-ready.txt", onSigterm: "sigterm.txt", holdMs: 10_000 },
+      }),
+    );
+
+    const pending = runPackBuild(input({ signal: controller.signal }));
+    await vi.waitFor(() => {
+      expect(existsSync(join(scenarioDir, "run-ready.txt"))).toBe(true);
+    });
+
+    controller.abort();
+    const outcome = await pending;
+
+    expect(outcome).toEqual({ kind: "failed", reason: "cancelled", codes: ["cancelled"], costUsd: 0 });
+    await vi.waitFor(() => {
+      expect(existsSync(join(scenarioDir, "sigterm.txt"))).toBe(true);
+    });
+    expect(calls().map((call) => call.name)).toEqual(["build", "verify-install", "run"]);
+  });
+
+  it("止める合図は、差し込んだ偽物の exec にも渡る", async () => {
+    const controller = new AbortController();
+    const signals: (AbortSignal | undefined)[] = [];
+    const exec: PackExec = async (_command, _args, options) => {
+      signals.push(options.signal);
+      return { code: 1, stdout: "", stderr: "build.error fake\n" };
+    };
+
+    const outcome = await runPackBuild(input({ signal: controller.signal }), exec);
+
+    expect(signals).toEqual([controller.signal]);
+    expect(outcome).toMatchObject({ kind: "failed", reason: "build-error" });
   });
 });

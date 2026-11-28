@@ -174,6 +174,62 @@ describe("buildJobView の manifest の SHA", () => {
     }
   });
 
+  it("manifest のある full は SHA を求め、公開できる", () => {
+    const home = mkdtempSync(join(tmpdir(), "musunest-view-"));
+    const previous = process.env.STUDIO_HOME;
+    process.env.STUDIO_HOME = home;
+    try {
+      const id = "job-full";
+      mkdirSync(join(home, "jobs", id), { recursive: true });
+      const text = '{"schema_version":"test"}';
+      writeFileSync(join(home, "jobs", id, "bundle-manifest.json"), text, "utf8");
+
+      const view = buildJobView(
+        makeJob({
+          id,
+          state: "result",
+          question: null,
+          result: { verdict: "full", content: ["依頼どおりに作りました。"] },
+        }),
+        20_000,
+      );
+
+      expect(view.manifestSha256).toBe(createHash("sha256").update(text).digest("hex"));
+      expect(view.publishable).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.STUDIO_HOME;
+      else process.env.STUDIO_HOME = previous;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("manifest の無い full（pack の Build）は SHA が null で、公開できない", () => {
+    const home = mkdtempSync(join(tmpdir(), "musunest-view-"));
+    const previous = process.env.STUDIO_HOME;
+    process.env.STUDIO_HOME = home;
+    try {
+      const id = "job-pack";
+      mkdirSync(join(home, "jobs", id), { recursive: true });
+
+      const view = buildJobView(
+        makeJob({
+          id,
+          state: "result",
+          question: null,
+          result: { verdict: "full", content: ["納品物の置き場所: /tmp/job-pack"] },
+        }),
+        20_000,
+      );
+
+      expect(view.manifestSha256).toBeNull();
+      expect(view.publishable).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.STUDIO_HOME;
+      else process.env.STUDIO_HOME = previous;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("保存した公開の結果を返す（履歴のインスタンス ID）", () => {
     const home = mkdtempSync(join(tmpdir(), "musunest-view-"));
     const previous = process.env.STUDIO_HOME;
