@@ -524,4 +524,30 @@ describe("pack の Build", () => {
     expect(signals).toEqual([controller.signal]);
     expect(outcome).toMatchObject({ kind: "failed", reason: "build-error" });
   });
+
+  it("「取り消し」check-result の後で止める合図を出すと、finished にしない", async () => {
+    const controller = new AbortController();
+    const exec: PackExec = async (_command, args) => {
+      const script = args[0] ?? "";
+      if (script.endsWith("run.mjs")) {
+        return {
+          code: 0,
+          stdout: `${JSON.stringify({ verdict: "internal_pass" })}\n`,
+          stderr: "",
+        };
+      }
+      if (script.endsWith("check-result.mjs")) {
+        mkdirSync(join(workdir(), "workspace", "artifacts"), { recursive: true });
+        writeFileSync(resultPath(), resultText({ schema: RESULT_V3, verdict: "internal_pass", cost: "0.42" }));
+        writeFileSync(declarationPath(), "schema: musunest.app-spec/v1\n");
+        controller.abort();
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+
+    const outcome = await runPackBuild(input({ signal: controller.signal }), exec);
+
+    expect(outcome).toEqual({ kind: "failed", reason: "cancelled", codes: ["cancelled"], costUsd: 0 });
+  });
 });

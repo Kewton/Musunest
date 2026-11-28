@@ -311,16 +311,21 @@ describe("子の止まり方をジョブに写す（Issue #886）", () => {
     expect(failed.view?.state).toBe("failed");
     expect(failed.view?.stopReason).toBe("factory-failure");
 
-    const planFailure = runOutcome({
+    const planFailure = runOutcome({ kind: "stopped", reason: "factory-failure", spentUsd: 0.6, codes: [] });
+    expect(planFailure.view?.state).toBe("failed");
+    expect(planFailure.view?.stopReason).toBe("factory-failure");
+    expect(planFailure.view?.stopReasonLabel).toBe("工場の失敗");
+  });
+
+  it("Plan の段の失敗も、理由のコードを記録に残す", () => {
+    const { stored } = runOutcome({
       kind: "stopped",
       reason: "factory-failure",
       spentUsd: 0.6,
       codes: ["open_critical"],
     });
-    expect(planFailure.view?.state).toBe("failed");
-    expect(planFailure.view?.stopReason).toBe("factory-failure");
-    expect(planFailure.view?.stopReasonLabel).toBe("工場の失敗");
-    expect(planFailure.stored?.stopReasonCodes).toEqual(["open_critical"]);
+
+    expect(stored?.stopReasonCodes).toEqual(["open_critical"]);
   });
 
   it("pack の失敗の理由のコードを、ジョブの記録に残す（理由の文字列は今のまま）", () => {

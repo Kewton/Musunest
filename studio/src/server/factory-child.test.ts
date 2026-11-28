@@ -15,6 +15,7 @@ import { describe, expect, it, vi } from "vitest";
 import { buildFactoryBuildArgs } from "./build-args.js";
 import {
   FACTORY_PLAN_DEADLINE_MS,
+  abortSignalForPack,
   abortSignalOnSigterm,
   runFactoryChild,
   type FactoryChildChannel,
@@ -702,7 +703,7 @@ describe("pack の Build（STUDIO_BUILD_ARM=ca-pack）", () => {
     };
     const signal = abortSignalOnSigterm(source);
     let seen: AbortSignal | undefined;
-    let release: (outcome: PackBuildOutcome) => void = () => {};
+    let release: ((outcome: PackBuildOutcome) => void) | undefined;
 
     const deps = makeDeps({
       env: { OPENAI_API_KEY: "sk-FAKE", STUDIO_BUILD_ARM: "ca-pack" },
@@ -726,12 +727,43 @@ describe("pack の Build（STUDIO_BUILD_ARM=ca-pack）", () => {
     for (const listener of sigtermListeners) listener();
     expect(seen?.aborted).toBe(true);
 
-    release({ kind: "failed", reason: "cancelled", codes: ["cancelled"], costUsd: 0.1 });
+    release?.({ kind: "failed", reason: "cancelled", codes: ["cancelled"], costUsd: 0.1 });
     await expect(pending).resolves.toEqual({
       kind: "failed",
       reason: "cancelled",
       codes: ["cancelled"],
       spentUsd: 0.5,
     });
+  });
+});
+
+const signalSource = () => {
+  const listeners: (() => void)[] = [];
+  const source = {
+    on(_event: "SIGTERM", listener: () => void): unknown {
+      listeners.push(listener);
+      return source;
+    },
+  };
+  return { listeners, source };
+};
+
+describe("SIGTERM の listener を付ける範囲", () => {
+  it("pack の Build のときは合図を作り、listener を 1 つ付ける", () => {
+    const { listeners, source } = signalSource();
+    const signal = abortSignalForPack({ STUDIO_BUILD_ARM: "ca-pack" }, source);
+
+    expect(signal).toBeDefined();
+    expect(listeners).toHaveLength(1);
+    listeners[0]?.();
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("工場の Build（STUDIO_BUILD_ARM 無し・factory）では合図を作らず、listener を付けない", () => {
+    for (const env of [{}, { STUDIO_BUILD_ARM: "factory" }]) {
+      const { listeners, source } = signalSource();
+      expect(abortSignalForPack(env, source)).toBeUndefined();
+      expect(listeners).toEqual([]);
+    }
   });
 });

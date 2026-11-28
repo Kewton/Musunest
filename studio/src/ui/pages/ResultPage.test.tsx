@@ -25,8 +25,6 @@ const baseJob: JobView = {
 
 const fullJob: JobView = {
   ...baseJob,
-  manifestSha256: SHA,
-  publishable: true,
   result: { verdict: "full", verdictLabel: "すべて満たしました", content: ["依頼どおりに作りました。"] },
 };
 
@@ -65,6 +63,11 @@ describe("ResultPage（full）", () => {
     renderResult();
     expect(screen.getByText("すべて満たしました")).toBeTruthy();
     expect(screen.getByText("依頼どおりに作りました。")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "公開する" })).toBeTruthy();
+  });
+
+  it("SHA のある full は今までどおり「公開する」を出す", () => {
+    renderResult({ job: { ...fullJob, manifestSha256: SHA, publishable: true } });
     expect(screen.getByRole("button", { name: "公開する" })).toBeTruthy();
   });
 

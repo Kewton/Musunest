@@ -430,6 +430,21 @@ export function abortSignalOnSigterm(source: SigtermSource): AbortSignal {
   return controller.signal;
 }
 
+/**
+ * pack の Build を走らせるときだけ、SIGTERM を止める合図に写す。
+ * **工場の Build では listener を付けない**——Node の既定の終了（SIGTERM で子が止まる）を変えないため。
+ */
+export function abortSignalForPack(
+  env: Readonly<Record<string, string | undefined>>,
+  source: SigtermSource,
+): AbortSignal | undefined {
+  if (env["STUDIO_BUILD_ARM"] !== PACK_ARM) return undefined;
+  return abortSignalOnSigterm(source);
+}
+
+/** pack の取り消しで子が終わらないときに、結果を送る猶予のあとでプロセスを終える（保険） */
+export const PACK_ABORT_EXIT_GRACE_MS = 5_000;
+
 /** この file が入口として起動されたときだけ動く（import したときは動かさない） */
 function isEntryPoint(): boolean {
   const entry = process.argv[1];
@@ -444,16 +459,25 @@ export async function main(): Promise<void> {
     on(event: "message", listener: (message: unknown) => void): unknown;
     on(event: "SIGTERM", listener: () => void): unknown;
   };
-  const signal = abortSignalOnSigterm(proc);
   let started = false;
   proc.on("message", (message) => {
     if (started || !isStartMessage(message)) return;
     started = true;
     void (async () => {
       const deps = await createNodeFactoryChildDeps();
+      const signal = abortSignalForPack(deps.env, proc);
+      if (signal !== undefined) {
+        signal.addEventListener(
+          "abort",
+          () => {
+            setTimeout(() => process.exit(0), PACK_ABORT_EXIT_GRACE_MS).unref();
+          },
+          { once: true },
+        );
+      }
       const outcome = await runFactoryChild(message.request, createIpcChannel(proc), deps, signal);
       proc.send({ type: "result", outcome });
-      if (signal.aborted) process.exit(0);
+      if (signal?.aborted === true) process.exit(0);
     })();
   });
 }
